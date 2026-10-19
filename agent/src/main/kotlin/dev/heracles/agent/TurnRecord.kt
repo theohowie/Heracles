@@ -109,11 +109,34 @@ data class AgentRunResult(
     val totalPromptTokens: Int get() = turns.sumOf { it.cache.promptTokens }
     val totalOutputTokens: Int get() = turns.sumOf { it.cache.outputTokens }
 
-    /** 稳态命中率（跳过第一轮 —— 冷启动必然未命中） */
+    /**
+     * 稳态命中率 —— **轮次平均**（跳过第一轮；冷启动必然未命中）。
+     *
+     * ⚠️ 这个数**系统性偏乐观**：它把"吃 6000 token 的大轮"与"只加 300 token 的小轮"
+     * **等权**看待。2026-10-19 的云端实测（`docs/实测-L1缓存复测-2026-10-19.md`）：
+     * 轮次平均 **90.8%**，而同样的样本按 token 加权只有 **84.6%** —— 差 6.2 个百分点，
+     * 因为低命中的正是 prompt 最大的那几轮（首轮冻结前缀、压缩后重建）。
+     * ⇒ 报指标时必须**两个一起报**，看成本请用 [steadyWeightedHitRate]。
+     */
     val steadyHitRate: Double?
         get() {
             val steady = turns.drop(1).mapNotNull { it.cache.hitRate }
             return if (steady.isEmpty()) null else steady.average()
+        }
+
+    /**
+     * 稳态命中率 —— **token 加权**（`Σcached / Σ(cached+prompt)`，跳过第一轮）。
+     *
+     * 这才是**对应真实账单**的口径：一个 6000-token 的 miss 远比一个 300-token 的 hit 贵。
+     * 与 [steadyHitRate] 一起展示，避免"轮次平均好看、实际很贵"的错觉。
+     */
+    val steadyWeightedHitRate: Double?
+        get() {
+            val steady = turns.drop(1).filter { it.cache.cacheReportingAvailable }
+            val cached = steady.sumOf { it.cache.cachedTokens ?: 0 }
+            val prompt = steady.sumOf { it.cache.promptTokens }
+            val total = cached + prompt
+            return if (total > 0) cached.toDouble() / total else null
         }
 }
 
