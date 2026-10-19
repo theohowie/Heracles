@@ -238,6 +238,39 @@ object Contract {
     }
 
     /**
+     * `web_fetch`（联网抓取）—— 2026-10-19，对齐成熟智能体的 WebFetch 能力。
+     *
+     * ## 为什么有硬上限
+     *
+     * 一个网页可以几 MB，而工具结果会**永久留在 append-only 会话里** ⇒
+     * 之后每一轮 prefill 都要付这笔 token。所以：下载字节有上限、进上下文的正文也有上限，
+     * 超了**如实截断并说明**（不假装完整）。
+     *
+     * ## 为什么拒绝内网地址（SSRF）
+     *
+     * 模型被提示词注入后可能去抓 `http://127.0.0.1:...` / 路由器后台 / 局域网服务。
+     * App 跑在用户手机上，那些地址**在设备内网是可达的** —— 这不是理论风险。
+     * 判定在 DNS 解析之后做（`InetAddress` 的 loopback/siteLocal/linkLocal），
+     * 所以 `2130706433` 这类十进制写法也挡得住。
+     */
+    object Web {
+        /** 单次下载最多读多少字节（512 KB）：够正文，又不至于塞爆内存 */
+        const val MAX_BYTES = 512 * 1024
+
+        /** 进上下文的正文最多多少字符（2 万 ≈ 5–8k token，一次工具结果的上限体量） */
+        const val MAX_TEXT_CHARS = 20_000
+
+        /** 连接超时（毫秒）—— 手机网络慢，15s 是"能连上"与"别白等"的折中 */
+        const val CONNECT_TIMEOUT_MS = 15_000
+
+        /** 读取超时（毫秒）—— 服务端连接上但迟迟不回数据时兜底 */
+        const val READ_TIMEOUT_MS = 20_000
+
+        /** 对外的 User-Agent（不伪装浏览器；让站点知道是自动化抓取） */
+        const val USER_AGENT = "Heracles/0.1 (Android agent; web_fetch)"
+    }
+
+    /**
      * 设备端 shell 执行 —— `26-编码层工具链与逆向引擎.md` §4.5。
      *
      * ⚠️ [LOG_EXCERPT_LINES] 自 **ADR-035 S1b** 起是**唯一**一套（原 `Zone.LOCAL_*` 的 40 行
