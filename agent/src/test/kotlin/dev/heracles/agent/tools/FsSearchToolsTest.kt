@@ -513,4 +513,45 @@ class FsSearchToolsTest {
             assertTrue(grepSpec.description.contains(it), "grep_files 描述必须说清「$it」：${grepSpec.description}")
         }
     }
+
+    // ============================================================ ⑦ .gitignore（2026-10-19）
+
+    @Test
+    @DisplayName("★★ 根 .gitignore 的目录规则生效：find_files 不再扫进自定义产物目录")
+    fun gitignoreSkipsIgnoredDirectory() {
+        // ★ 用 dist/ 而不是 build/ —— build/ 在固定忽略名单里，测不到 .gitignore 这条路径
+        val fs = FakeFs().apply {
+            file(".gitignore", "dist/\n")
+            file("dist/output.txt", "generated")
+            file("src/Main.kt", "fun main() {}")
+        }
+        val out = ok(find(fs, "pattern" to "*.txt"))
+
+        assertFalse(out.contains("dist/output.txt"), "被 .gitignore 忽略的目录不该出现在结果里：$out")
+        assertTrue(out.contains(".gitignore"), "要如实说明有被 .gitignore 跳过的项（不静默）：$out")
+    }
+
+    @Test
+    @DisplayName("★★ 根 .gitignore 的文件规则生效：grep_files 不搜 *.log")
+    fun gitignoreSkipsIgnoredFile() {
+        val fs = FakeFs().apply {
+            file(".gitignore", "*.log\n")
+            file("debug.log", "ERROR boom")
+            file("src/Main.kt", "val x = 1")
+        }
+        val out = ok(grep(fs, "pattern" to "ERROR"))
+        assertFalse(out.contains("debug.log"), "被忽略的文件不该被搜：$out")
+    }
+
+    @Test
+    @DisplayName("★ 没有 .gitignore 时行为完全不变（零回退）")
+    fun withoutGitignoreNothingIsSkipped() {
+        // 固定忽略名单里本来就有 build/ —— 换成自定义目录验证"没有 .gitignore 不额外忽略"
+        val fs = FakeFs().apply {
+            file("generated/output.txt", "generated")
+            file("src/Main.kt", "fun main() {}")
+        }
+        val out = ok(find(fs, "pattern" to "*.txt"))
+        assertTrue(out.contains("generated/output.txt"), "没有 .gitignore 就不该额外忽略：$out")
+    }
 }
