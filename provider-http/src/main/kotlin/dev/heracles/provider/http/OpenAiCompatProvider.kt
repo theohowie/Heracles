@@ -180,8 +180,13 @@ class OpenAiCompatProvider(
         if (!loaded) return Result.failure(IllegalStateException("必须先 load()"))
 
         val messages = request.messages ?: listOf(ChatMessage(ChatRole.USER, request.prompt))
-        return callChatOnce(messages, request.maxOutputTokens, request.structuredOutput, request.tools)
-            .map { (result, _) -> result }
+        return callChatOnce(
+            messages,
+            request.maxOutputTokens,
+            request.structuredOutput,
+            request.tools,
+            request.images,
+        ).map { (result, _) -> result }
     }
 
     /**
@@ -216,6 +221,7 @@ class OpenAiCompatProvider(
             stream = true,
             reasoning = request.reasoning,
             tools = request.tools,
+            images = request.images,
         )
         lastRequestBody = body
 
@@ -355,6 +361,7 @@ class OpenAiCompatProvider(
         maxOutputTokens: Int,
         structured: StructuredSpec?,
         tools: List<ToolSpec> = emptyList(),
+        images: List<String> = emptyList(),
     ): Result<Pair<GenerateResult, JsonObject>> = withContext(Dispatchers.IO) {
         runCatching {
             val body = buildRequestBody(
@@ -364,6 +371,7 @@ class OpenAiCompatProvider(
                 // 行为不得因为本次改动而变化。想看思考流请走 generateStream()。
                 reasoning = ReasoningLevel.OFF,
                 tools = tools,
+                images = images,
             )
             val json = HttpJson.postJson(
                 url = "${baseUrl.trimEnd('/')}/chat/completions",
@@ -386,6 +394,7 @@ class OpenAiCompatProvider(
         stream: Boolean = false,
         reasoning: ReasoningLevel = ReasoningLevel.AUTO,
         tools: List<ToolSpec> = emptyList(),
+        images: List<String> = emptyList(),
     ): JsonObject = JsonObject().apply {
         addProperty("model", modelName)
         add("messages", JsonArray().apply {
@@ -421,6 +430,27 @@ class OpenAiCompatProvider(
                     } else {
                         addProperty("content", m.content)
                     }
+                })
+            }
+
+            // ★ 多模态（2026-10-19）：图片作为**单独一条 user 消息**附在最后。
+            //   不塞进现有消息里，是为了不改动文本轨的既有形状（空列表 ⇒ 这段不执行 ⇒ 逐字节不变）。
+            //   `image_url.url` 是 data URL —— OpenAI 兼容端点直接接受。
+            if (images.isNotEmpty()) {
+                add(JsonObject().apply {
+                    addProperty("role", "user")
+                    add("content", JsonArray().apply {
+                        add(JsonObject().apply {
+                            addProperty("type", "text")
+                            addProperty("text", "（用户附上了下面的图片，请结合图片内容作答）")
+                        })
+                        images.forEach { url ->
+                            add(JsonObject().apply {
+                                addProperty("type", "image_url")
+                                add("image_url", JsonObject().apply { addProperty("url", url) })
+                            })
+                        }
+                    })
                 })
             }
         })

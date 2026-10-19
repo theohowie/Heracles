@@ -102,6 +102,15 @@ class OpenAiResponsesProvider(
     override suspend fun generate(request: GenerateRequest): Result<GenerateResult> =
         withContext(Dispatchers.IO) {
             check(loaded) { "先 load 再 generate（provider 生命周期）" }
+            // ★ 多模态（2026-10-19）：Responses 轨暂未接通图片 —— 显式失败，不静默丢图。
+            if (request.images.isNotEmpty()) {
+                return@withContext Result.failure(
+                    UnsupportedOperationException(
+                        "当前 Responses 后端暂不支持读图（已接通 OpenAI 兼容轨）；" +
+                            "请换用 OpenAI 兼容提供商，或移除图片后重试。",
+                    ),
+                )
+            }
             runCatching {
                 val resp = HttpJson.postText(
                     "$baseUrl/v1/responses",
@@ -115,6 +124,9 @@ class OpenAiResponsesProvider(
 
     override fun generateStream(request: GenerateRequest): Flow<StreamChunk> = flow {
         check(loaded) { "先 load 再 generateStream（provider 生命周期）" }
+        if (request.images.isNotEmpty()) {
+            error("当前 Responses 后端暂不支持读图（已接通 OpenAI 兼容轨）；请换用 OpenAI 兼容提供商")
+        }
         // ★ 原生调用分片（ADR-031 step 2）：按 `item_id` 归并，`output_item.done` **权威**
         val toolCalls = ResponsesToolCalls()
         var terminalEmitted = false

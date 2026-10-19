@@ -104,6 +104,16 @@ class AnthropicProvider(
     override suspend fun generate(request: GenerateRequest): Result<GenerateResult> =
         withContext(Dispatchers.IO) {
             check(loaded) { "先 load 再 generate（provider 生命周期）" }
+            // ★ 多模态（2026-10-19）：Anthropic 轨暂未接通图片。
+            //   必须**显式失败**，不能静默丢图（否则模型"看不见图"却继续答，用户以为它看过）。
+            if (request.images.isNotEmpty()) {
+                return@withContext Result.failure(
+                    UnsupportedOperationException(
+                        "当前 Anthropic 后端暂不支持读图（已接通 OpenAI 兼容轨）；" +
+                            "请换用 OpenAI 兼容提供商，或移除图片后重试。",
+                    ),
+                )
+            }
             runCatching {
                 val body = buildBody(
                     messages = request.messages ?: listOf(
@@ -125,6 +135,9 @@ class AnthropicProvider(
 
     override fun generateStream(request: GenerateRequest): Flow<StreamChunk> = flow {
         check(loaded) { "先 load 再 generateStream（provider 生命周期）" }
+        if (request.images.isNotEmpty()) {
+            error("当前 Anthropic 后端暂不支持读图（已接通 OpenAI 兼容轨）；请换用 OpenAI 兼容提供商")
+        }
         val body = buildBody(
             messages = request.messages ?: listOf(
                 ChatMessage(ChatRole.USER, request.prompt),

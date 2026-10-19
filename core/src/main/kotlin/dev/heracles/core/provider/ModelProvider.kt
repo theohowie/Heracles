@@ -165,6 +165,23 @@ data class GenerateRequest(
      * 详见 `NativeToolSchema` 的文件头。
      */
     val tools: List<ToolSpec> = emptyList(),
+
+    /**
+     * **图片输入**（2026-10-19，多模态）—— 元素是 **data URL**
+     * （`data:image/png;base64,....`）。
+     *
+     * ## 为什么用 data URL 而不是字节/路径
+     *
+     * data URL 是**后端中立**的：OpenAI 兼容端点直接吃 `image_url.url`；
+     * Anthropic 需要拆成 `media_type` + base64 —— 由它自己从 data URL 拆。
+     * 路径不行：`ModelProvider` 不该假设"图片在本地磁盘上"（将来可能是内容 URI/网络图）。
+     *
+     * ## 空列表 = 纯文本
+     *
+     * 默认空 ⇒ **请求体逐字节不变**（既有测试、缓存前缀、非多模态端点全不受影响）。
+     * 不支持读图的后端**必须显式失败**，不能静默丢图 —— 静默丢图 = 模型假装看不见却继续答。
+     */
+    val images: List<String> = emptyList(),
 )
 
 enum class FinishReason {

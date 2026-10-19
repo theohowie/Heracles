@@ -65,6 +65,8 @@ class ProviderContractInjectionTest {
             //   反射是按**签名**找方法的，签名对不上会 NoSuchMethodException
             //   （编译期看不出来，只有跑测试才炸）。
             List::class.java,
+            // ★ 多模态（2026-10-19）：`images` 参数追加在最后；空列表 = 逐字节不变
+            List::class.java,
         )
         m.isAccessible = true
         return m.invoke(
@@ -76,6 +78,7 @@ class ProviderContractInjectionTest {
             reasoning,
             // 既有契约注入测试**不带**原生工具 ⇒ 请求体与改动前逐字节相同
             emptyList<dev.heracles.core.tool.ToolSpec>(),
+            emptyList<String>(),
         ) as JsonObject
     }
 
