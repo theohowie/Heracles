@@ -44,6 +44,7 @@ import dev.heracles.workspace.WorkspaceFs
 import dev.heracles.workspace.WorkspaceStorage
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
+import android.util.Base64
 import java.io.File
 
 /**
@@ -500,7 +501,12 @@ class AgentBridge(private val context: Context) {
 
             // ★ 记忆注入（2026-10-16）：buildPrompt 读 .heracles/memory.md
             //   拼进首条消息 —— 模型每次 run 都"记得"项目偏好与坑
-            loop.run(buildPrompt(request, attachments, memoryNote), history)
+            // ★ 多模态（2026-10-19）：图片附件转 data URL，随请求发给支持读图的后端
+            loop.run(
+                buildPrompt(request, attachments, memoryNote),
+                history,
+                images = imageDataUrls(attachments),
+            )
         } finally {
             // ★ 记下冻结区规模，供"用量与上下文"面板展示（2026-10-11，t13）
             //
@@ -665,12 +671,12 @@ class AgentBridge(private val context: Context) {
                     }
                 }
                 "image" -> {
-                    // 多模态尚未接入 —— 如实告知，不要假装看懂了
+                    // ★ 多模态已接通（2026-10-19）：图片会作为**多模态输入**随请求发送
+                    //   （见 [imageDataUrls]），这里只需要在正文里标注"有图"，
+                    //   不再写"当前模型不支持读图"那种假话。
                     sb.append("（图片，")
                     sb.append(f.length())
-                    sb.append(" 字节）\n")
-                    sb.append("注意：当前模型不支持读图，")
-                    sb.append("请仅依据文件名与用户描述作答，不要臆测图像内容。")
+                    sb.append(" 字节，已作为多模态输入随本次请求发送）")
                 }
                 else -> {
                     sb.append("（二进制文件，")
@@ -682,6 +688,46 @@ class AgentBridge(private val context: Context) {
 
         return if (request.isBlank()) (sb.toString().trim() + memoryNote)
         else request + sb + memoryNote
+    }
+
+    /**
+     * 图片附件 → **data URL** 列表（2026-10-19，多模态）。
+     *
+     * ## 为什么在这里转而不是在 Dart
+     *
+     * 附件模型**刻意只存路径**（见 `app/lib/models/attachment.dart`）：照片动辄几 MB，
+     * base64 塞进消息流会撑爆内存并拖慢每次重建。真正读取发生在**发送那一刻**，
+     * 且 Kotlin 侧本来就要 `File(path)` 校验存在性。
+     *
+     * ## 上限（两条都是硬的）
+     *
+     * · 单张 ≤ [MAX_ATTACHMENT_IMAGE_BYTES]：base64 膨胀 ~33%，4 MB 原图 ≈ 5.3 MB 文本
+     * · 最多 [MAX_ATTACHMENT_IMAGES] 张：每张都会在**每一轮**重新计 token
+     *
+     * 超限的图片**不发**（正文里仍会写明"图片 N 字节"），但不静默失败 ——
+     * 模型会看到"有一张图但没送出去"这种信息缺口，由它决定是否向用户确认。
+     */
+    private fun imageDataUrls(attachments: List<Map<String, String>>): List<String> {
+        val out = mutableListOf<String>()
+        for (a in attachments) {
+            if (out.size >= MAX_ATTACHMENT_IMAGES) break
+            if (a["kind"] != "image") continue
+            val path = a["path"].orEmpty()
+            if (path.isBlank()) continue
+            val f = File(path)
+            if (!f.isFile) continue
+            if (f.length() > MAX_ATTACHMENT_IMAGE_BYTES) continue
+            val bytes = runCatching { f.readBytes() }.getOrNull() ?: continue
+            val mime = when (f.extension.lowercase()) {
+                "png" -> "image/png"
+                "jpg", "jpeg" -> "image/jpeg"
+                "webp" -> "image/webp"
+                "gif" -> "image/gif"
+                else -> "image/png"
+            }
+            out += "data:$mime;base64," + Base64.encodeToString(bytes, Base64.NO_WRAP)
+        }
+        return out
     }
 
     /**
@@ -948,5 +994,11 @@ class AgentBridge(private val context: Context) {
          * （`02-契约规范.md` §3.3 上下文预算）。
          */
         const val MAX_ATTACHMENT_CHARS = 8000
+
+        /** 单张图片附件的最大字节数（多模态，2026-10-19）—— 4 MB */
+        const val MAX_ATTACHMENT_IMAGE_BYTES = 4 * 1024 * 1024
+
+        /** 一次请求最多带几张图（多模态，2026-10-19）—— 每张每轮都计 token */
+        const val MAX_ATTACHMENT_IMAGES = 2
     }
 }

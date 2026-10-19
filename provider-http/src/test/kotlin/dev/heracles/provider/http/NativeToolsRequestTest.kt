@@ -93,6 +93,7 @@ class NativeToolsRequestTest {
             Boolean::class.javaPrimitiveType,
             ReasoningLevel::class.java,
             List::class.java,
+            List::class.java,
         )
         m.isAccessible = true
         return m.invoke(
@@ -103,6 +104,7 @@ class NativeToolsRequestTest {
             false,
             ReasoningLevel.AUTO,
             tools,
+            emptyList<String>(),
         ) as JsonObject
     }
 

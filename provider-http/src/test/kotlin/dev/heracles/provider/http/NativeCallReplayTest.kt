@@ -69,9 +69,10 @@ class NativeCallReplayTest {
         val p = OpenAiCompatProvider(
             id = "cloud:test", baseUrl = "https://example.invalid/v1", apiKey = "k", modelName = "m",
         )
-        val m = privateMethod(OpenAiCompatProvider::class.java, "buildRequestBody", 6)
+        val m = privateMethod(OpenAiCompatProvider::class.java, "buildRequestBody", 7)
         return m.invoke(
-            p, messages, 1024, StructuredSpec.Json, false, ReasoningLevel.AUTO, emptyList<ToolSpec>(),
+            p, messages, 1024, StructuredSpec.Json, false, ReasoningLevel.AUTO,
+            emptyList<ToolSpec>(), emptyList<String>(),
         ) as JsonObject
     }
 

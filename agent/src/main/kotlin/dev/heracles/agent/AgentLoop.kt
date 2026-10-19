@@ -974,6 +974,17 @@ class AgentLoop(
     fun run(
         userRequest: String,
         history: List<Pair<String, String>> = emptyList(),
+        /**
+         * **用户随本次请求附带的图片**（2026-10-19，多模态）。
+         *
+         * 元素是 **data URL**（`data:image/png;base64,...`）—— provider 无关的表示：
+         * 各 provider 自己翻译成自己的 wire（OpenAI `image_url` / Anthropic `image` block）。
+         * 空列表 = 纯文本（**请求体逐字节不变**，既有测试与缓存前缀不受影响）。
+         *
+         * 会随**本次 run 的每个请求**附带（而不是只第一轮）：本项目的会话是纯文本的，
+         * 不每轮带上模型就"看不到"图片。代价是每轮多付图片 token —— 已由调用方限量。
+         */
+        images: List<String> = emptyList(),
     ): AgentRunResult = runBlocking {
         var session = Session.start(frozenPrefix)
         val records = mutableListOf<TurnRecord>()
@@ -1261,6 +1272,7 @@ class AgentLoop(
                 session = session,
                 turnIndex = turnIndex,
                 stepId = streamStepId,
+                images = images,
             )
 
             if (streamed.failure != null) {
@@ -2077,6 +2089,7 @@ class AgentLoop(
         session: Session,
         turnIndex: Int,
         stepId: String,
+        images: List<String> = emptyList(),
     ): StreamedTurn {
         val coalescer = StreamCoalescer()
         val text = StringBuilder()
@@ -2115,6 +2128,7 @@ class AgentLoop(
             //   装 activeTools()（常驻 + 已披露的长尾）。默认关闭 ⇒ 空列表 ⇒
             //   文本轨请求体逐字节不变。
             tools = nativeToolSpecs(),
+            images = images,
         )
 
         // ★★ 终止块的载荷**必须**接住（F7c）★★
