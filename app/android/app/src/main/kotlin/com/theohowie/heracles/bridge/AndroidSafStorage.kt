@@ -77,7 +77,10 @@ class AndroidSafStorage(
 
         for (seg in relativePath.split('/')) {
             if (seg.isEmpty() || seg == "." || seg == "..") continue
-            cur = cur.findFile(seg) ?: return null
+            // ★ 与 resolveOrCreateDir 用**同一个**查找（2026-10-19）：只走 findFile
+            //   会让"读得到"与"写得到"不一致 —— 读用 findFile 找到、写却找不到，
+            //   症状是"文件明明在、却报不存在"。两处必须同源。
+            cur = findChild(cur, seg) ?: return null
         }
         return cur
     }
@@ -89,14 +92,49 @@ class AndroidSafStorage(
 
         for (seg in relativePath.split('/')) {
             if (seg.isEmpty() || seg == "." || seg == "..") continue
-            val next = cur.findFile(seg)
+            val next = findChild(cur, seg)
             cur = if (next != null && next.isDirectory) {
                 next
             } else {
-                cur.createDirectory(seg) ?: return null
+                // ★ 建目录失败后**必须**再查一次（2026-10-19 真机事故）：
+                //   DocumentsProvider 在同名目录已存在时会**自动改名**成
+                //   `名字 (1)` / `名字 (2)` … 并返回成功。JS 时代踩过文件名改写
+                //   （`hello.py` → `hello.py.txt`），目录也有同样的问题：
+                //   真机上就出现过 33 个 `.heracles (N)` 垃圾目录。
+                //   ⇒ 建完先看返回的名字是否与期望一致；不一致就**用回原名那个**，
+                //     并把刚建出来的空目录删掉（它里面一定还没有东西）。
+                val created = cur.createDirectory(seg)
+                if (created != null && created.name != seg) {
+                    runCatching { created.delete() }
+                    findChild(cur, seg) ?: return null
+                } else {
+                    created ?: return null
+                }
             }
         }
         return cur
+    }
+
+    /**
+     * 在 [dir] 里按名字找子项（2026-10-19 真机事故修复）。
+     *
+     * ## 为什么不能只用 `DocumentFile.findFile`
+     *
+     * `DocumentFile.findFile(name)` 内部用 `DocumentsContract.buildDocumentUriUsingTree`
+     * 按文档 id 定位，**名字必须精确命中**。真机上踩到的症状：
+     * 工作区里 `.heracles` 目录明明存在（`ls -ld` 可见），但写会话记录时报
+     * 「无法创建目录：.heracles」—— 因为 `findFile` 没找到 ⇒ 走 `createDirectory`
+     * ⇒ 同名目录已存在 ⇒ 返回 null ⇒ 整条链路失败，**用户看到的是"运行失败"**。
+     *
+     * ⇒ 先 `findFile`（快路径），失败再**遍历子项做一次不区分大小写的比对**
+     * （外部存储是大小写不敏感的，但 provider 返回的 display name 大小写可能不同）。
+     */
+    private fun findChild(dir: DocumentFile, name: String): DocumentFile? {
+        dir.findFile(name)?.let { return it }
+        // 慢路径：遍历比对（仅在 name 未命中时发生，代价可接受）
+        return runCatching {
+            dir.listFiles().firstOrNull { it.name?.equals(name, ignoreCase = true) == true }
+        }.getOrNull()
     }
 
     override suspend fun list(relativeDir: String): List<FileEntry> =
