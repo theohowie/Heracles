@@ -656,11 +656,12 @@ class AgentBridge {
   /// **危险操作审批通道**（2026-10-19）。
   ///
   /// 工具返回 `NeedsApproval` 时 Kotlin 侧会发 [kApprovalRequest] 并**挂起**；
-  /// UI 弹窗让用户选「允许 / 拒绝」，然后调用本方法。
+  /// UI 弹窗让用户选「允许 / 本会话始终允许 / 拒绝」，然后调用本方法。
+  /// `decision` 取值：`allow` / `allow_always` / `deny`。
   /// 没有在跑的任务时调用无害（Kotlin 侧队列已置 null）。
-  Future<void> replyApproval(bool allow) async {
+  Future<void> replyApproval(String decision) async {
     try {
-      await _channel.invokeMethod<bool>('replyApproval', {'allow': allow});
+      await _channel.invokeMethod<bool>('replyApproval', {'decision': decision});
     } on MissingPluginException {
       // 平台未实现（测试环境）—— 静默
     } on PlatformException {

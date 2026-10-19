@@ -626,7 +626,7 @@ class NativeToolFlowTest {
             provider.load(ProviderConfig()).getOrThrow()
             val responder = launch {
                 delay(200)
-                queue.reply(true)
+                queue.reply(AgentLoop.ApprovalDecision.ALLOW_ONCE)
             }
             AgentLoop(
                 provider, NoopFs(), listOf(tool),
@@ -661,7 +661,7 @@ class NativeToolFlowTest {
             provider.load(ProviderConfig()).getOrThrow()
             val responder = launch {
                 delay(200)
-                queue.reply(false)
+                queue.reply(AgentLoop.ApprovalDecision.DENY)
             }
             AgentLoop(
                 provider, NoopFs(), listOf(tool),
@@ -724,7 +724,7 @@ class NativeToolFlowTest {
             provider.load(ProviderConfig()).getOrThrow()
             val responder = launch {
                 delay(200)
-                queue.reply(false)
+                queue.reply(AgentLoop.ApprovalDecision.DENY)
             }
             AgentLoop(
                 provider, NoopFs(), listOf(tool),
@@ -763,7 +763,7 @@ class NativeToolFlowTest {
             provider.load(ProviderConfig()).getOrThrow()
             val responder = launch {
                 delay(200)
-                queue.reply(true)
+                queue.reply(AgentLoop.ApprovalDecision.ALLOW_ONCE)
             }
             AgentLoop(
                 provider, NoopFs(), listOf(tool),
@@ -806,5 +806,44 @@ class NativeToolFlowTest {
         )
         val toolMsg = provider.requests[1].messages!!.single { it.role == ChatRole.TOOL }
         assertEquals("已执行", toolMsg.content, "模型必须拿到真实执行结果")
+    }
+
+    @Test
+    @DisplayName("★★ 「本会话始终允许」⇒ 同一工具后续调用**不再弹窗**（仅本 run）")
+    fun allowAlwaysSkipsLaterApprovalsForSameTool() {
+        val callA = NativeToolCall("c_a", "write_file", """{"path":"a.txt","content":"a"}""")
+        val callB = NativeToolCall("c_b", "write_file", """{"path":"b.txt","content":"b"}""")
+        val provider = providerOf(
+            ScriptTurn("", FinishReason.TOOL_CALLS, listOf(callA)),
+            ScriptTurn("", FinishReason.TOOL_CALLS, listOf(callB)),
+            ScriptTurn("完成", FinishReason.STOP),
+        )
+        val tool = RecordingTool(writeSpec, ToolOutcome.Success("已写入"))
+        // 短超时：若实现出错（第二次又弹窗），测试快速失败而不是挂 10 分钟
+        val queue = AgentLoop.ApprovalQueue(kotlin.time.Duration.parse("400ms"))
+        val approvals = mutableListOf<AgentEvent.ApprovalRequest>()
+
+        runBlocking {
+            provider.load(ProviderConfig()).getOrThrow()
+            val responder = launch {
+                delay(150)
+                queue.reply(AgentLoop.ApprovalDecision.ALLOW_ALWAYS)
+            }
+            AgentLoop(
+                provider, NoopFs(), listOf(tool),
+                maxTurns = 4, nativeToolsEnabled = true,
+                approvalMode = ApprovalMode.MANUAL,
+                approvalReplies = queue,
+                onEvent = { e -> if (e is AgentEvent.ApprovalRequest) approvals += e },
+            ).run("写两个文件")
+            responder.join()
+        }
+
+        assertEquals(2, tool.executeCount, "两个写操作都应执行")
+        assertEquals(1, approvals.size, "「始终允许」后第二次不该再问：$approvals")
+        assertTrue(
+            approvals.single().reason.contains("手动审批"),
+            "第一次的审批理由应来自手动档位：${approvals.single().reason}",
+        )
     }
 }
