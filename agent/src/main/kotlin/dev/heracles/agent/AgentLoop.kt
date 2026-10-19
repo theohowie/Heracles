@@ -886,13 +886,28 @@ class AgentLoop(
     }
 
     /**
+     * **用户对一次审批请求的决定**（2026-10-19）。
+     *
+     * · [ALLOW_ONCE]：只执行这一次
+     * · [ALLOW_ALWAYS]：**本 run 内**同一工具 + 同一关键参数不再问
+     *   （成熟产品的 "Always allow"；范围仅当前任务，不落盘 —— 跨 run 的持久白名单
+     *   是另一个安全决定，不该顺手做）
+     * · [DENY]：不执行，作为失败回填
+     */
+    enum class ApprovalDecision { ALLOW_ONCE, ALLOW_ALWAYS, DENY }
+
+    /** 审批询问的结果（含"没人回答"这一种）。 */
+    enum class ApprovalResult { ALLOWED, DENIED, TIMEOUT }
+
+    /**
      * **危险操作的用户审批队列**（2026-10-19）。
      *
      * ## 语义
      *
      * 工具返回 `NeedsApproval` ⇒ `AgentLoop` 发 `ApprovalRequest` + 挂起 `await()`：
-     * · UI 点「允许」⇒ `reply(true)` ⇒ 重新执行那次调用
-     * · UI 点「拒绝」⇒ `reply(false)` ⇒ 以失败回填给模型
+     * · UI 点「允许」⇒ `reply(ALLOW_ONCE)` ⇒ 重新执行那次调用
+     * · UI 点「本会话始终允许」⇒ `reply(ALLOW_ALWAYS)` ⇒ 执行，且**本 run 内**记住签名
+     * · UI 点「拒绝」⇒ `reply(DENY)` ⇒ 以失败回填给模型
      * · 超时 ⇒ `null` ⇒ 同样按"未执行"失败回填（**绝不放行**）
      *
      * ## 为什么默认是"立即拒绝"（EMPTY）
@@ -906,17 +921,17 @@ class AgentLoop(
     class ApprovalQueue(
         private val timeout: kotlin.time.Duration = kotlin.time.Duration.parse("10m"),
     ) {
-        private val channel = kotlinx.coroutines.channels.Channel<Boolean>(
+        private val channel = kotlinx.coroutines.channels.Channel<ApprovalDecision>(
             kotlinx.coroutines.channels.Channel.RENDEZVOUS,
         )
 
         /** UI 层投递决定（弹窗提交时调用） */
-        fun reply(allow: Boolean) {
-            channel.trySend(allow)
+        fun reply(decision: ApprovalDecision) {
+            channel.trySend(decision)
         }
 
         /** 工具侧挂起等待决定；超时返回 null（= 未获批准，坚决不放行） */
-        suspend fun await(): Boolean? = kotlinx.coroutines.withTimeoutOrNull(timeout) {
+        suspend fun await(): ApprovalDecision? = kotlinx.coroutines.withTimeoutOrNull(timeout) {
             channel.receive()
         }
 
@@ -1017,6 +1032,33 @@ class AgentLoop(
                     "${newPlan.steps.count { it.status == TaskPlan.Status.done }} 步）\n" +
                     newPlan.render(),
             )
+        }
+
+        /** 本 run 内「始终允许」的操作签名（工具 + 关键参数）。**不落盘** —— 跨 run 的持久白名单是另一个安全决定。 */
+        val sessionApprovals = mutableSetOf<String>()
+
+        /** 「始终允许」的签名 = **工具名**（与 Claude Code 的 "always allow this tool" 同粒度）。
+         *
+         * 为什么不是"工具+参数"：同一 run 内重复的**完全相同**调用会被循环检测拦住，
+         * 所以按参数记签名时这条白名单几乎用不上；而"允许 write_file"这种粒度
+         * 正是用户在弹窗里能理解、也确实是常见选择的语义。
+         */
+        fun approvalSignature(call: ToolCall): String = call.tool
+
+        /** 询问用户（或按本 run 的白名单直接放行）。 */
+        suspend fun approve(turnIndex: Int, call: ToolCall, reason: String): ApprovalResult {
+            val sig = approvalSignature(call)
+            if (sig in sessionApprovals) return ApprovalResult.ALLOWED
+            emit(AgentEvent.ApprovalRequest(turnIndex, call, reason))
+            return when (approvalReplies.await()) {
+                ApprovalDecision.ALLOW_ONCE -> ApprovalResult.ALLOWED
+                ApprovalDecision.ALLOW_ALWAYS -> {
+                    sessionApprovals += sig
+                    ApprovalResult.ALLOWED
+                }
+                ApprovalDecision.DENY -> ApprovalResult.DENIED
+                null -> ApprovalResult.TIMEOUT
+            }
         }
 
         // 预热冻结区 —— 云端让它建立前缀缓存（实测-07：命中 1024 块）
@@ -1566,13 +1608,10 @@ class AgentLoop(
                     val manualTool = approvalMode == ApprovalMode.MANUAL && call.tool in mutatingTools
                     var manualDenied = false
                     if (manualTool) {
-                        emit(
-                            AgentEvent.ApprovalRequest(
-                                turnIndex, call,
-                                "当前权限档位「手动审批」：${call.tool} 会修改文件或设备，需要你确认",
-                            )
-                        )
-                        manualDenied = approvalReplies.await() != true
+                        manualDenied = approve(
+                            turnIndex, call,
+                            "当前权限档位「手动审批」：${call.tool} 会修改文件或设备，需要你确认",
+                        ) != ApprovalResult.ALLOWED
                     }
                     // ★ update_plan 是**循环状态工具**（2026-10-19）：它的"执行"就是改 plan + 发事件，
                     //   没有文件/网络副作用。工具实例拿不到 AgentLoop 的 plan，所以在这里拦截。
@@ -1591,11 +1630,11 @@ class AgentLoop(
                         outcome = if (approvalMode == ApprovalMode.FULL_ACCESS) {
                             tool.execute(call.args)
                         } else {
-                            emit(AgentEvent.ApprovalRequest(turnIndex, call, reason))
-                            when (approvalReplies.await()) {
-                                true -> tool.execute(call.args)
-                                false -> ToolOutcome.Failure("用户拒绝执行：$reason")
-                                null -> ToolOutcome.Failure("等待用户确认超时，未执行：$reason")
+                            when (approve(turnIndex, call, reason)) {
+                                ApprovalResult.ALLOWED -> tool.execute(call.args)
+                                ApprovalResult.DENIED -> ToolOutcome.Failure("用户拒绝执行：$reason")
+                                ApprovalResult.TIMEOUT ->
+                                    ToolOutcome.Failure("等待用户确认超时，未执行：$reason")
                             }
                         }
                     }
@@ -1755,13 +1794,10 @@ class AgentLoop(
                             approvalMode == ApprovalMode.MANUAL && extraCall.tool in mutatingTools
                         var extraManualDenied = false
                         if (extraManual) {
-                            emit(
-                                AgentEvent.ApprovalRequest(
-                                    turnIndex, extraCall,
-                                    "当前权限档位「手动审批」：${extraCall.tool} 会修改文件或设备，需要你确认",
-                                )
-                            )
-                            extraManualDenied = approvalReplies.await() != true
+                            extraManualDenied = approve(
+                                turnIndex, extraCall,
+                                "当前权限档位「手动审批」：${extraCall.tool} 会修改文件或设备，需要你确认",
+                            ) != ApprovalResult.ALLOWED
                         }
                         var extraOutcome = when {
                             extraManualDenied -> ToolOutcome.Failure(
@@ -1776,11 +1812,11 @@ class AgentLoop(
                             extraOutcome = if (approvalMode == ApprovalMode.FULL_ACCESS) {
                                 extraTool.execute(extraCall.args)
                             } else {
-                                emit(AgentEvent.ApprovalRequest(turnIndex, extraCall, reason))
-                                when (approvalReplies.await()) {
-                                    true -> extraTool.execute(extraCall.args)
-                                    false -> ToolOutcome.Failure("用户拒绝执行：$reason")
-                                    null -> ToolOutcome.Failure("等待用户确认超时，未执行：$reason")
+                                when (approve(turnIndex, extraCall, reason)) {
+                                    ApprovalResult.ALLOWED -> extraTool.execute(extraCall.args)
+                                    ApprovalResult.DENIED -> ToolOutcome.Failure("用户拒绝执行：$reason")
+                                    ApprovalResult.TIMEOUT ->
+                                        ToolOutcome.Failure("等待用户确认超时，未执行：$reason")
                                 }
                             }
                         }

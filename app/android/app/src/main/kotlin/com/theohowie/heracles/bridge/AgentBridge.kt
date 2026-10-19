@@ -551,9 +551,14 @@ class AgentBridge(private val context: Context) {
     @Volatile
     var activeApprovalQueue: AgentLoop.ApprovalQueue? = null
 
-    /** 用户对需要确认的工具调用了「允许 / 拒绝」（UI 弹窗提交时调用）。 */
-    fun replyApproval(allow: Boolean) {
-        activeApprovalQueue?.reply(allow)
+    /** 用户对需要确认的工具调用了「允许 / 始终允许 / 拒绝」（UI 弹窗提交时调用）。 */
+    fun replyApproval(decision: String) {
+        val d = when (decision.lowercase()) {
+            "allow_always", "always" -> AgentLoop.ApprovalDecision.ALLOW_ALWAYS
+            "allow", "allow_once" -> AgentLoop.ApprovalDecision.ALLOW_ONCE
+            else -> AgentLoop.ApprovalDecision.DENY
+        }
+        activeApprovalQueue?.reply(d)
     }
 
     /**

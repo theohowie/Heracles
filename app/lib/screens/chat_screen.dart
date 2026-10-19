@@ -3279,16 +3279,15 @@ class _ChatScreenState extends State<ChatScreen> {
   }) async {
     final h = Hue.of(context);
     // 只展示最有信息量的一段：命令原文 / 路径；太长截断（弹窗不是日志）
-    final detail = args == null || args!.isEmpty
-        ? ''
-        : args!.entries
-            .map((e) => '${e.key}: ${e.value}')
-            .join('\n')
-            .trim();
+    final detail = (args ?? const <String, String>{})
+        .entries
+        .map((e) => '${e.key}: ${e.value}')
+        .join('\n')
+        .trim();
     final shownDetail =
         detail.length > 500 ? '${detail.substring(0, 500)}…' : detail;
 
-    final allow = await showDialog<bool>(
+    final decision = await showDialog<String>(
       context: context,
       barrierDismissible: true,
       builder: (dlgCtx) => AlertDialog(
@@ -3337,12 +3336,19 @@ class _ChatScreenState extends State<ChatScreen> {
         ),
         actions: [
           TextButton(
-            onPressed: () => Navigator.of(dlgCtx).pop(false),
+            onPressed: () => Navigator.of(dlgCtx).pop('deny'),
             child: Text('拒绝',
                 style: TextStyle(fontSize: 13, color: h.textDim)),
           ),
+          // ★ 「本会话始终允许」（2026-10-19）：同一工具 + 同一关键参数不再问。
+          //   只在本 run 内有效（不落盘）—— 跨任务的持久白名单是另一个安全决定。
+          TextButton(
+            onPressed: () => Navigator.of(dlgCtx).pop('allow_always'),
+            child: Text('本会话始终允许',
+                style: TextStyle(fontSize: 13, color: h.textDim)),
+          ),
           FilledButton(
-            onPressed: () => Navigator.of(dlgCtx).pop(true),
+            onPressed: () => Navigator.of(dlgCtx).pop('allow'),
             style: FilledButton.styleFrom(backgroundColor: h.accent),
             child: const Text('允许', style: TextStyle(fontSize: 13)),
           ),
@@ -3350,7 +3356,7 @@ class _ChatScreenState extends State<ChatScreen> {
       ),
     );
     // null = 点外面/返回键 ⇒ 按**拒绝**处理（安全默认，绝不放行）
-    await _bridge.replyApproval(allow == true);
+    await _bridge.replyApproval(decision ?? 'deny');
   }
 
   /// **目录选模型**（2026-10-14，二级弹层）。

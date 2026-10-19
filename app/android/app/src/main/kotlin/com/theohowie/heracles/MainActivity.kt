@@ -340,10 +340,10 @@ class MainActivity : FlutterActivity() {
                     bridge.replyAsk(text)
                     result.success(true)
                 }
-                // ★ 危险操作审批（2026-10-19）：UI 点允许/拒绝 → 挂起的 AgentLoop 拿到
+                // ★ 危险操作审批（2026-10-19）：UI 点允许/始终允许/拒绝 → 挂起的 AgentLoop 拿到
                 "replyApproval" -> {
-                    val allow = call.argument<Boolean>("allow") ?: false
-                    bridge.replyApproval(allow)
+                    val decision = call.argument<String>("decision") ?: "deny"
+                    bridge.replyApproval(decision)
                     result.success(true)
                 }
                 "listDir" -> handleListDir(call, result)
