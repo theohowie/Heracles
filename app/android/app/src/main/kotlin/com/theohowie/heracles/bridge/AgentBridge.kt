@@ -10,7 +10,6 @@ import dev.heracles.agent.TaskPlan
 import dev.heracles.agent.ToolZonePlan
 import dev.heracles.agent.TurnRecord
 import dev.heracles.agent.tools.AndroidTools
-import dev.heracles.agent.tools.ApplyPatchTool
 import dev.heracles.agent.tools.AskUserTool
 import dev.heracles.agent.tools.FindFilesTool
 import dev.heracles.agent.tools.GrepFilesTool
@@ -19,6 +18,7 @@ import dev.heracles.agent.tools.WebTools
 import dev.heracles.agent.tools.ListFilesTool
 import dev.heracles.agent.tools.MkdirTool
 import dev.heracles.agent.tools.PathTools
+import dev.heracles.agent.tools.PatchTools
 import dev.heracles.agent.tools.ReadFileTool
 import dev.heracles.agent.tools.RunShellCommandTool
 import dev.heracles.agent.tools.SaveMemoryTool
@@ -330,7 +330,7 @@ class AgentBridge(private val context: Context) {
             stagingRoot = buildStagingRoot,
             stagingRunnerFactory = buildStagingRunnerFactory,
         ) +
-            listOf(UnzipFileTool(fs), ZipFileTool(fs), ApplyPatchTool(fs))
+            listOf(UnzipFileTool(fs), ZipFileTool(fs)) + PatchTools.create(fs)
         // 名字重复 / 漏登记分组 ⇒ 启动期就响亮失败（不是运行期静默失灵）
         AndroidTools.assertConsistent(androidLongTail)
 
@@ -397,7 +397,8 @@ class AgentBridge(private val context: Context) {
             resident = tools.map { it.spec },
             longTail = longTail.map { it.spec },
             // 分组表要覆盖**全部**长尾工具（漏一个 ⇒ 那个工具的同义说法检索不到、静默退化）
-            groups = AndroidTools.GROUPS + PathTools.GROUPS + WebTools.GROUPS + ImageTools.GROUPS,
+            groups = AndroidTools.GROUPS + PathTools.GROUPS + WebTools.GROUPS + ImageTools.GROUPS +
+                PatchTools.GROUPS,
             // ★ S1b：三个上限**不再按后端传**（`Contract.Zone` 已删）——
             //   默认值就是唯一一套 12 / 24 / 6。装配处刻意不传，
             //   避免"App 侧自己造判断"（`docs/27` §3 根因 C 那类分裂）。
