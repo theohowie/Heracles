@@ -722,8 +722,34 @@ class AgentBridge {
     }
   }
 
-  /// **拉取后端的可用模型列表**（2026-10-14，接入第三方 API 服务）。
+  /// **「始终允许」白名单**（2026-10-19）—— 跨 run 持久，存在原生侧。
   ///
+  /// 用户在审批弹窗点了「本会话始终允许」后，那个工具名会被记住（原生侧
+  /// `SharedPreferences("heracles_approvals")`），**下次启动仍然生效**。
+  /// 这份白名单不放进 `AppSettings`：它是**安全决定**，不该被"恢复默认设置"顺手清掉。
+  Future<List<String>> alwaysAllowedTools() async {
+    try {
+      final list = await _channel.invokeListMethod<String>('alwaysAllowedTools');
+      return list ?? const [];
+    } on MissingPluginException {
+      return const [];
+    } on PlatformException {
+      return const [];
+    }
+  }
+
+  /// 清空「始终允许」白名单（设置页「清除」按钮）。
+  Future<void> clearAlwaysAllowed() async {
+    try {
+      await _channel.invokeMethod<bool>('clearAlwaysAllowed');
+    } on MissingPluginException {
+      // 测试环境 —— 静默
+    } on PlatformException {
+      // 清空失败不影响使用（下次写入会覆盖）—— 静默
+    }
+  }
+
+  /// **拉取后端的可用模型列表**（2026-10-14，接入第三方 API 服务）。
   /// ## 为什么需要它
   ///
   /// 用户接入第三方聚合服务（如基元律动 tokenrhythm.studio）时，

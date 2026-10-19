@@ -61,8 +61,9 @@ class NativeCallReplayTest {
 
     private fun anthropicBody(messages: List<ChatMessage>): JsonObject {
         val p = AnthropicProvider(baseUrl = "https://example.invalid", apiKey = "k", modelName = "m")
-        val m = privateMethod(AnthropicProvider::class.java, "buildBody", 4)
-        return m.invoke(p, messages, 1024, false, emptyList<ToolSpec>()) as JsonObject
+        // ★ 2026-10-19 多模态起是 arity 5（…, tools, images）
+        val m = privateMethod(AnthropicProvider::class.java, "buildBody", 5)
+        return m.invoke(p, messages, 1024, false, emptyList<ToolSpec>(), emptyList<String>()) as JsonObject
     }
 
     private fun openAiBody(messages: List<ChatMessage>): JsonObject {
@@ -85,8 +86,9 @@ class NativeCallReplayTest {
             maxOutputTokens = 1024,
             messages = messages,
         )
-        val m = privateMethod(OpenAiResponsesProvider::class.java, "buildBody", 2)
-        return m.invoke(p, request, false) as JsonObject
+        // ★ 2026-10-19 多模态起是 arity 3（request, stream, images）
+        val m = privateMethod(OpenAiResponsesProvider::class.java, "buildBody", 3)
+        return m.invoke(p, request, false, emptyList<String>()) as JsonObject
     }
 
     // ---------------------------------------------------------------- 测试用消息

@@ -411,6 +411,12 @@ class MainActivity : FlutterActivity() {
                     pendingOpenSession = null
                     result.success(p)
                 }
+                // ★ 「始终允许」白名单（2026-10-19）—— 跨 run 持久，设置页可读可清
+                "alwaysAllowedTools" -> result.success(bridge.alwaysAllowedTools().toList())
+                "clearAlwaysAllowed" -> {
+                    bridge.clearAlwaysAllowed()
+                    result.success(true)
+                }
                 "listDir" -> handleListDir(call, result)
                 "pickFiles" -> handlePickFiles(call, result)
                 "benchmarkStorage" -> handleBenchmark(call, result)
@@ -1311,7 +1317,61 @@ class MainActivity : FlutterActivity() {
                     "ts" to System.currentTimeMillis(),
                 ),
             )
+        } else {
+            // ★★ run **没有产出最终回答**（出错 / 被中断 / 撞预算）时的 usage 兜底（2026-10-19）★★
+            //
+            // ## 修的是什么
+            //
+            // 上面那个 `if` 是真的：只有跑出最终回答才写 `role=assistant` 行，
+            // 而 `cached` / `prompt` / `out` **只在这条记录里**。于是：
+            // **一次失败的 run 不是"少一轮"，而是"整次 run 的全部 usage 蒸发"**。
+            //
+            // 2026-10-19 真机实在踩到：一个任务跑了 13 个工具、13 次模型往返后报「未知错误」，
+            // 会话 `.jsonl` 里 `role=assistant` **0 条** ⇒ L1 缓存采样（`实测-L1缓存复测`）
+            // 拿不到任何数据，只能重跑。这类"失败也要记账"的诉求与
+            // `finally { lastFrozenTokens = … }`（上面那句注释）是同一个道理。
+            //
+            // ## 为什么用 `role=usage` 而不是复用 `role=assistant`
+            //
+            // UI 把 `role=assistant` 当**对话气泡**渲染；失败 run 的 `finalText` 是空的，
+            // 落成 assistant 会多出一个空气泡。`role=usage` 是**纯记账**行：
+            // · UI 不认识它 ⇒ 直接忽略（向后兼容，旧 App 读到也只会跳过）
+            // · 采样脚本按 `role in {assistant, usage}` 取 `cached/prompt`
+            // · **严格 append-only**：只追加，不改既有行
+            //
+            // ⚠️ 取的是**本次已发生的各轮之和**（`cacheOf()`），不是最后一轮 ——
+            //    失败 run 的重点恰恰是"这些请求真的发出去了、真的花了钱"。
+            val (cachedSum, promptSum, outSum) = cacheOf(result.turns)
+            if (cachedSum + promptSum + outSum > 0) {
+                store.appendMessage(
+                    storage, sessionId,
+                    mapOf(
+                        "role" to "usage",
+                        "text" to "",
+                        "cached" to cachedSum,
+                        "prompt" to promptSum,
+                        "out" to outSum,
+                        "turns" to result.turns.size,
+                        "stopReason" to result.stopReason,
+                        "ts" to System.currentTimeMillis(),
+                    ),
+                )
+            }
         }
+    }
+
+    /** 把一次 run 各轮的 cache 记账求和（失败 run 的 usage 兜底用）。 */
+    private fun cacheOf(turns: List<dev.heracles.agent.TurnRecord>): Triple<Int, Int, Int> {
+        var cached = 0
+        var prompt = 0
+        var out = 0
+        for (t in turns) {
+            val c = t.cache
+            cached += c.cachedTokens ?: 0
+            prompt += c.promptTokens
+            out += c.outputTokens
+        }
+        return Triple(cached, prompt, out)
     }
 
     /** 读一个会话的历史消息 */

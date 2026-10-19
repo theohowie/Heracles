@@ -266,6 +266,21 @@ class AgentBridge(private val context: Context) {
         // ★ 危险操作审批通道（2026-10-19）—— 与 askQueue 同生命周期。
         //   工具返回 NeedsApproval ⇒ AgentLoop 挂起在这里；UI 点允许/拒绝 → replyApproval。
         val approvalQueue = AgentLoop.ApprovalQueue()
+        // ★ 跨 run 的「始终允许」白名单（2026-10-19）：从设置里读出来预填。
+        //   为什么由装配处读写：`:agent` 是纯 JVM，**不知道**会话/设置存在哪 ——
+        //   落盘归这里管，AgentLoop 只持有那份内存集合。
+        //
+        // ⚠️ 2026-10-19 真机排障：这一步**埋了句**，不是噪音。当时的真机现象是
+        //   「点了『本会话始终允许』、write_file 执行成功、run 正常结束，
+        //   但 `shared_prefs/heracles_approvals.xml` 里的集合仍然是**空的**」——
+        //   而 `finally` 里 `saveAlwaysAllowed` 是 `runCatching`，**写失败/写空集都不出声**。
+        //   没有这行就只能靠 `run-as cat` 反推，二选一猜不清：
+        //   「ALLOW_ALWAYS 根本没到 approve()」 vs 「到了但集合没写进去」。
+        //   这行记**读到了几条**，与下面 finally 的「写了 N 条」成对看，一次就能定位。
+        runCatching { alwaysAllowedTools() }.getOrDefault(emptySet()).let { seeded ->
+            approvalQueue.seed(seeded)
+            println("[heracles][approval] seed ${seeded.size} 条持久白名单：${seeded.sorted()}")
+        }
         activeApprovalQueue = approvalQueue
 
         // ================== 编码层 wiring（阶段二，ADR-020/021/023）==================
@@ -476,6 +491,9 @@ class AgentBridge(private val context: Context) {
             askReplies = askQueue,
             // ★ 危险操作审批（2026-10-19）：NeedsApproval 时挂起问用户
             approvalReplies = approvalQueue,
+            // ★ 跨 run 持久白名单的**读点**（2026-10-19 修断线）：只 seed 不读的话
+            //   「始终允许」永远是摆设 —— 详见 AgentLoop.persistentAllowlist 的 KDoc。
+            persistentAllowlist = approvalQueue.alwaysAllowed,
             // ★ 审批档位（2026-10-19）：手动档在**执行前**问；完全访问档自动放行 NeedsApproval
             approvalMode = approvalMode,
             // ★ 计划跨 run 记忆（2026-10-19）：从会话文件恢复 + 变更即落盘
@@ -521,6 +539,19 @@ class AgentBridge(private val context: Context) {
             // 放在 finally：**失败也要记** —— 面板要能解释"这次为什么贵/满了"，
             // 而失败那次的冻结区同样是真实发送过的。
             lastFrozenTokens = loop.frozenPrefix.estimatedTokens
+            // ★ 把本 run 里用户点过的「始终允许」写回设置（2026-10-19）。
+            //   写失败**不能**影响 run 结果 —— 白名单是增强，不是硬依赖。
+            //   ⚠️ 但要**出声**：`runCatching` 静默吞掉读写异常时，真机上表现为
+            //   「设置页永远显示『无』」，而没有任何线索能区分"没读到 / 没写进 / 写了空集"。
+            //   与 run 开头的 `[heracles][approval] seed …` 成对看。
+            val saved = runCatching {
+                saveAlwaysAllowed(approvalQueue.alwaysAllowed)
+                approvalQueue.alwaysAllowed.toSortedSet()
+            }
+            println(
+                "[heracles][approval] save ${saved.getOrNull()?.size ?: -1} 条：" +
+                    "${saved.getOrNull() ?: saved.exceptionOrNull()?.let { "${it.javaClass.simpleName}: ${it.message}" }}",
+            )
             // ★ ask / 审批队列随 run 结束作废（此时回答已无意义）
             activeAskQueue = null
             activeApprovalQueue = null
@@ -577,6 +608,52 @@ class AgentBridge(private val context: Context) {
             else -> AgentLoop.ApprovalDecision.DENY
         }
         activeApprovalQueue?.reply(d)
+    }
+
+    // ---------------------------------------------------------------- 始终允许（持久白名单）
+
+    /**
+     * **「始终允许」的工具白名单**（2026-10-19）—— 跨 run 有效。
+     *
+     * ## 存在哪
+     *
+     * `SharedPreferences("heracles_approvals")` 的一个 `StringSet`。
+     * 与用户设置（`AppSettings`）**分开存**：那是 Flutter 侧的模型/外观配置，
+     * 而这份是**安全决定**，不该被"恢复默认设置"顺手清掉，也不该随设置导出。
+     *
+     * ## 安全语义（不许淡化）
+     *
+     * · 粒度是**工具名**（"允许 write_file"），不是某个具体命令 —— 与 Claude Code 的
+     *   "always allow this tool" 一致；粒度再细会变成"每个文件都要点一次"
+     * · 用户可以随时在设置页**整体清除**
+     * · 它只跳过"要不要问"这一步；工具自身的守卫（`CommandGuard` / 路径校验）照常生效
+     */
+    private val approvalsPrefs by lazy {
+        context.getSharedPreferences("heracles_approvals", Context.MODE_PRIVATE)
+    }
+
+    /** 读当前白名单（返回**副本** —— `getStringSet` 的集合不可直接改）。 */
+    fun alwaysAllowedTools(): Set<String> =
+        approvalsPrefs.getStringSet(KEY_ALWAYS_ALLOWED, emptySet())
+            ?.toSet() ?: emptySet()
+
+    /** 覆盖写入白名单。 */
+    private fun saveAlwaysAllowed(tools: Collection<String>) {
+        // ★ 存**副本**：SharedPreferences 不会立即用你给的集合对象，
+        //   但传一个之后还会被 main 线程改的集合是自找麻烦。
+        approvalsPrefs.edit()
+            .putStringSet(KEY_ALWAYS_ALLOWED, tools.toSet())
+            .apply()
+    }
+
+    /** 清空白名单（设置页「清除」按钮）。 */
+    fun clearAlwaysAllowed() {
+        approvalsPrefs.edit().remove(KEY_ALWAYS_ALLOWED).apply()
+    }
+
+    /** 把**当前 run 内**的临时白名单也写回（run 中途被问到时用）。 */
+    fun persistAlwaysAllowedNow() {
+        activeApprovalQueue?.let { saveAlwaysAllowed(it.alwaysAllowed) }
     }
 
     /**
@@ -1008,5 +1085,8 @@ class AgentBridge(private val context: Context) {
 
         /** 一次请求最多带几张图（多模态，2026-10-19）—— 每张每轮都计 token */
         const val MAX_ATTACHMENT_IMAGES = 2
+
+        /** 「始终允许」白名单在 SharedPreferences 里的键（2026-10-19） */
+        private const val KEY_ALWAYS_ALLOWED = "always_allowed_tools"
     }
 }

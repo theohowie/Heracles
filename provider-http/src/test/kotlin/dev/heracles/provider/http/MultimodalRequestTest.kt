@@ -79,10 +79,12 @@ class MultimodalRequestTest {
     }
 
     @Test
-    @DisplayName("★★ Anthropic 轨未接通读图 ⇒ 显式失败（不静默丢图）")
-    fun anthropicFailsLoudly() = runBlocking {
+    @DisplayName("★★ Anthropic 轨已接通读图 ⇒ 不再显式失败（形状由 MultimodalTracksTest 钉住）")
+    fun anthropicAcceptsImagesNow() = runBlocking {
         val p = AnthropicProvider(apiKey = "k", modelName = "m")
         p.load(ProviderConfig()).getOrThrow()
+        // ⚠️ **不发网络**（没有 Key，也不该联网）：这里只证明"图片这一关已经过了"——
+        //    失败原因不能再是"不支持读图"。真正的形状断言在 `MultimodalTracksTest`。
         val r = p.generate(
             GenerateRequest(
                 prompt = "看这张图",
@@ -90,16 +92,15 @@ class MultimodalRequestTest {
                 images = listOf(dataUrl),
             ),
         )
-        assertTrue(r.isFailure, "必须失败：$r")
-        assertTrue(
+        assertFalse(
             r.exceptionOrNull()?.message?.contains("不支持读图") == true,
-            "失败原因必须说清是读图不支持：${r.exceptionOrNull()?.message}",
+            "★ 早退已删除：Anthropic 现在必须接受图片（2026-10-19 接通）：${r.exceptionOrNull()?.message}",
         )
     }
 
     @Test
-    @DisplayName("★★ Responses 轨未接通读图 ⇒ 显式失败（不静默丢图）")
-    fun responsesFailsLoudly() = runBlocking {
+    @DisplayName("★★ Responses 轨已接通读图 ⇒ 不再显式失败（形状由 MultimodalTracksTest 钉住）")
+    fun responsesAcceptsImagesNow() = runBlocking {
         val p = OpenAiResponsesProvider("responses:test", "https://example.invalid", "k", "m")
         p.load(ProviderConfig()).getOrThrow()
         val r = p.generate(
@@ -109,10 +110,9 @@ class MultimodalRequestTest {
                 images = listOf(dataUrl),
             ),
         )
-        assertTrue(r.isFailure, "必须失败：$r")
-        assertTrue(
+        assertFalse(
             r.exceptionOrNull()?.message?.contains("不支持读图") == true,
-            "失败原因必须说清是读图不支持：${r.exceptionOrNull()?.message}",
+            "★ 早退已删除：Responses 现在必须接受图片（2026-10-19 接通）：${r.exceptionOrNull()?.message}",
         )
     }
 
@@ -121,16 +121,18 @@ class MultimodalRequestTest {
     fun textOnlyStillWorks() = runBlocking {
         val a = AnthropicProvider(apiKey = "k", modelName = "m")
         a.load(ProviderConfig()).getOrThrow()
-        // 只构造请求体，不发网络：用反射调 buildBody 证明不抛
-        val m = AnthropicProvider::class.java.getDeclaredMethod(
-            "buildBody",
-            List::class.java,
-            Int::class.javaPrimitiveType,
-            Boolean::class.javaPrimitiveType,
-            List::class.java,
+        // 只构造请求体，不发网络：用反射调 buildBody 证明不抛。
+        //
+        // ★ 按 **名字 + 参数个数**取，**不是** `getDeclaredMethod(精确签名)`：
+        //   2026-10-19 多模态给 `buildBody` 加了 `images` 参数（4 → 5），
+        //   精确签名匹配会在**运行时**抛 `NoSuchMethodException`，而**编译是绿的** ——
+        //   这条门禁曾差一点就这样静默失效（`NativeCallReplayTest.privateMethod` 记的同一个坑）。
+        val m = AnthropicProvider::class.java.declaredMethods
+            .single { it.name == "buildBody" && it.parameterCount == 5 }
+            .apply { isAccessible = true }
+        val body = m.invoke(
+            a, listOf(ChatMessage(ChatRole.USER, "hi")), 16, false, emptyList<Any>(), emptyList<String>(),
         )
-        m.isAccessible = true
-        val body = m.invoke(a, listOf(ChatMessage(ChatRole.USER, "hi")), 16, false, emptyList<Any>())
         assertTrue(body.toString().contains("hi"))
     }
 }

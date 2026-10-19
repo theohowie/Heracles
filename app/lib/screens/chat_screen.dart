@@ -812,6 +812,17 @@ class _ChatScreenState extends State<ChatScreen> {
           // 读取出错时的提示 —— 必须显示，否则用户以为记录真的没了
           out.add(HAssistantMessage(id: id, text: text));
 
+        // ---- ★ `role=usage`：失败 run 的记账行（2026-10-19）----
+        //
+        // Kotlin 侧在一次 run **没跑出最终回答**（出错 / 中断 / 撞预算）时会追加一行
+        // `{"role":"usage","cached":…,"prompt":…,"out":…}`：那些请求真的发出去了、
+        // 真的花了钱，不记的话「一次失败 = 整次 run 的 usage 蒸发」。
+        //
+        // 这里是**纯记账**行，不是对话：**不产出任何气泡**（`finalText` 是空的，
+        // 落成 assistant 会多一个空气泡）。将来若要给用户看，应挂到用量面板而不是聊天流。
+        case 'usage':
+          break;
+
         // ---- ★★ 工作步骤（2026-10-12，S5 修复「切会话步骤消失」）★★ ----
         //
         // ## 用户报的 bug

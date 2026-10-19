@@ -109,20 +109,18 @@ class NativeToolsRequestTest {
     }
 
     private fun anthropicBody(tools: List<ToolSpec> = emptyList()): JsonObject {
-        val m = AnthropicProvider::class.java.getDeclaredMethod(
-            "buildBody",
-            List::class.java,
-            Int::class.javaPrimitiveType,
-            Boolean::class.javaPrimitiveType,
-            List::class.java,
-        )
-        m.isAccessible = true
+        // ★ 2026-10-19 多模态起 arity 是 5（…, tools, images）。按「名字 + 个数」取 ——
+        //   精确签名会在这类加参数的改动后**运行时**失效而编译仍绿。
+        val m = AnthropicProvider::class.java.declaredMethods
+            .single { it.name == "buildBody" && it.parameterCount == 5 }
+            .apply { isAccessible = true }
         return m.invoke(
             anthropicProvider(),
             listOf(ChatMessage(ChatRole.USER, "hi")),
             16,
             false,
             tools,
+            emptyList<String>(),
         ) as JsonObject
     }
 
@@ -135,16 +133,15 @@ class NativeToolsRequestTest {
         tools: List<ToolSpec> = emptyList(),
         structured: StructuredSpec? = null,
     ): JsonObject {
-        val m = OpenAiResponsesProvider::class.java.getDeclaredMethod(
-            "buildBody",
-            GenerateRequest::class.java,
-            Boolean::class.javaPrimitiveType,
-        )
-        m.isAccessible = true
+        // ★ 2026-10-19 多模态起 arity 是 3（request, stream, images）
+        val m = OpenAiResponsesProvider::class.java.declaredMethods
+            .single { it.name == "buildBody" && it.parameterCount == 3 }
+            .apply { isAccessible = true }
         return m.invoke(
             responsesProvider(),
             GenerateRequest(prompt = "hi", maxOutputTokens = 16, tools = tools, structuredOutput = structured),
             false,
+            emptyList<String>(),
         ) as JsonObject
     }
 
@@ -501,11 +498,9 @@ class NativeToolsRequestTest {
     @DisplayName("★ Responses 是**会漂移**：`buildBody` 收整个 request（读得到），今天只是没读")
     fun responsesHasTheSeamButDoesNotUseItYet() {
         // 签名证据：它**看得到** structuredOutput（与 Anthropic 的"看不见"不同）
-        val m = OpenAiResponsesProvider::class.java.getDeclaredMethod(
-            "buildBody",
-            GenerateRequest::class.java,
-            Boolean::class.javaPrimitiveType,
-        )
+        // ★ 2026-10-19 多模态起 arity 是 3（request, stream, images）
+        val m = OpenAiResponsesProvider::class.java.declaredMethods
+            .single { it.name == "buildBody" && it.parameterCount == 3 }
         assertTrue(
             m.parameterTypes.contains(GenerateRequest::class.java),
             "Responses 的 buildBody 收的是整个 GenerateRequest ⇒ 读得到 structuredOutput ⇒ 属于\"会漂移\"那一类",

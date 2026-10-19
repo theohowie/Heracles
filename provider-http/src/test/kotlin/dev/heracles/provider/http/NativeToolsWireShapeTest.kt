@@ -87,25 +87,25 @@ class NativeToolsWireShapeTest {
             id = "responses:test", baseUrl = "https://example.invalid", apiKey = "k", modelName = "m",
         )
 
-    /** Anthropic `buildBody(messages, maxOutputTokens, stream, tools)` —— arity 4。 */
+    /** Anthropic `buildBody(messages, maxOutputTokens, stream, tools, images)` —— arity 5（2026-10-19 多模态后）。 */
     private fun anthropicBody(
         tools: List<ToolSpec> = emptyList(),
         messages: List<ChatMessage> = listOf(ChatMessage(ChatRole.USER, "hi")),
     ): JsonObject {
-        val m = privateMethod(AnthropicProvider::class.java, "buildBody", 4)
-        return m.invoke(anthropicProvider(), messages, 16, false, tools) as JsonObject
+        val m = privateMethod(AnthropicProvider::class.java, "buildBody", 5)
+        return m.invoke(anthropicProvider(), messages, 16, false, tools, emptyList<String>()) as JsonObject
     }
 
-    /** Responses `buildBody(request, stream)` —— arity 2。 */
+    /** Responses `buildBody(request, stream, images)` —— arity 3（2026-10-19 多模态后）。 */
     private fun responsesBody(
         tools: List<ToolSpec> = emptyList(),
         messages: List<ChatMessage> = listOf(ChatMessage(ChatRole.USER, "hi")),
     ): JsonObject {
-        val m = privateMethod(OpenAiResponsesProvider::class.java, "buildBody", 2)
+        val m = privateMethod(OpenAiResponsesProvider::class.java, "buildBody", 3)
         val request = GenerateRequest(
             prompt = "hi", maxOutputTokens = 16, messages = messages, tools = tools,
         )
-        return m.invoke(responsesProvider(), request, false) as JsonObject
+        return m.invoke(responsesProvider(), request, false, emptyList<String>()) as JsonObject
     }
 
     private fun parseAnthropic(json: String): GenerateResult {
@@ -498,62 +498,70 @@ class NativeToolsWireShapeTest {
     }
 
     // ================================================================
-    // 7. 多模态：两轨**显式失败**（不静默丢图）+ 附带缺口记录
+    // 7. 多模态（**2026-10-19 已接通**；原"两轨显式失败"的缺口记录已兑现）
     // ================================================================
 
     private val dataUrl =
         "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg=="
 
     @Test
-    @DisplayName("★★ Anthropic `generate()` 带图 ⇒ **failure**（不静默丢图），文案含「不支持读图」且不含 data URL")
-    fun anthropicGenerateWithImageFailsLoudly() = runBlocking {
+    @DisplayName("★★ Anthropic `generate()` 带图**不再**显式失败（早退已删除，2026-10-19 接通）")
+    fun anthropicGenerateWithImageNoLongerFailsEarly() = runBlocking {
         val p = anthropicProvider()
         p.load(ProviderConfig()).getOrThrow()
+        // ⚠️ **不发网络**：这里只证明"图片这一关过了" —— 失败原因不能再是「不支持读图」。
+        //    形状断言在 `MultimodalTracksTest`（那边有整串金标准与 text/image 顺序）。
         val r = p.generate(GenerateRequest(prompt = "看图", maxOutputTokens = 16, images = listOf(dataUrl)))
-        assertTrue(r.isFailure, "★ 必须显式失败 —— 静默丢图 = 模型看不见却一本正经地答：$r")
-        val msg = r.exceptionOrNull()?.message.orEmpty()
-        assertTrue(msg.contains("不支持读图"), "失败文案必须说清是「读图不支持」（用户要能据此换 provider）：$msg")
-        assertFalse(msg.contains("base64"), "★ 失败文案**不得**回显 data URL（长、且是用户内容）：$msg")
-        assertTrue(r.exceptionOrNull() is UnsupportedOperationException, "异常类型应当是 UnsupportedOperationException")
+        assertFalse(
+            r.exceptionOrNull()?.message?.contains("不支持读图") == true,
+            "★ 早退已删除：带合法 PNG 不该再被判为「不支持读图」：${r.exceptionOrNull()?.message}",
+        )
     }
 
     @Test
-    @DisplayName("★★ Responses `generate()` 带图 ⇒ **failure**（不静默丢图），文案含「不支持读图」")
-    fun responsesGenerateWithImageFailsLoudly() = runBlocking {
+    @DisplayName("★★ Responses `generate()` 带图**不再**显式失败（早退已删除，2026-10-19 接通）")
+    fun responsesGenerateWithImageNoLongerFailsEarly() = runBlocking {
         val p = responsesProvider()
         p.load(ProviderConfig()).getOrThrow()
         val r = p.generate(GenerateRequest(prompt = "看图", maxOutputTokens = 16, images = listOf(dataUrl)))
-        assertTrue(r.isFailure, "★ 必须显式失败：$r")
-        val msg = r.exceptionOrNull()?.message.orEmpty()
-        assertTrue(msg.contains("不支持读图"), "失败文案必须说清：$msg")
-        assertFalse(msg.contains("base64"), "不得回显 data URL：$msg")
-        assertTrue(r.exceptionOrNull() is UnsupportedOperationException)
+        assertFalse(
+            r.exceptionOrNull()?.message?.contains("不支持读图") == true,
+            "★ 早退已删除：${r.exceptionOrNull()?.message}",
+        )
     }
 
     @Test
-    @DisplayName("★★ 两轨的流式入口同口径：带图 ⇒ Flow 以异常终止（不是静默跳过图片）")
-    fun bothTracksFailLoudlyOnStreamingToo() {
-        // 与 generate() 的 Result.failure 语义对应（ModelProvider 的契约：
-        // 出错时以异常终止 Flow，不产出 done 块）
+    @DisplayName("★★ 两轨的流式入口同口径：带图**不再**以「不支持读图」终止")
+    fun bothTracksNoLongerRejectImagesOnStreaming() {
+        // 与 generate() 的语义对应：图片这一关已过 ⇒ 流式失败的原因只可能是网络。
+        // ⚠️ 端点用 `127.0.0.1:9`（不可能连上）—— 这仍然**不是**网络证据，只是"图片没被拒"。
+        val unreachable = "http://127.0.0.1:9"
+
         val anthropic = runCatching {
             runBlocking {
-                anthropicProvider().apply { load(ProviderConfig()).getOrThrow() }
+                AnthropicProvider(baseUrl = unreachable, apiKey = "k", modelName = "m")
+                    .apply { load(ProviderConfig()).getOrThrow() }
                     .generateStream(GenerateRequest(prompt = "看图", maxOutputTokens = 16, images = listOf(dataUrl)))
-                    .collect { /* 不该有任何块 */ error("带图时**不许**收到任何流块") }
+                    .collect { }
             }
         }
-        val aMsg = anthropic.exceptionOrNull()?.message.orEmpty()
-        assertTrue(aMsg.contains("不支持读图"), "Anthropic 流式：$aMsg")
+        assertFalse(
+            anthropic.exceptionOrNull()?.message.orEmpty().contains("不支持读图"),
+            "Anthropic 流式不该再报「不支持读图」：${anthropic.exceptionOrNull()?.message}",
+        )
 
         val responses = runCatching {
             runBlocking {
-                responsesProvider().apply { load(ProviderConfig()).getOrThrow() }
+                OpenAiResponsesProvider("responses:test", unreachable, "k", "m")
+                    .apply { load(ProviderConfig()).getOrThrow() }
                     .generateStream(GenerateRequest(prompt = "看图", maxOutputTokens = 16, images = listOf(dataUrl)))
-                    .collect { error("带图时**不许**收到任何流块") }
+                    .collect { }
             }
         }
-        val rMsg = responses.exceptionOrNull()?.message.orEmpty()
-        assertTrue(rMsg.contains("不支持读图"), "Responses 流式：$rMsg")
+        assertFalse(
+            responses.exceptionOrNull()?.message.orEmpty().contains("不支持读图"),
+            "Responses 流式不该再报「不支持读图」：${responses.exceptionOrNull()?.message}",
+        )
     }
 
     @Test
@@ -570,22 +578,29 @@ class NativeToolsWireShapeTest {
     }
 
     @Test
-    @DisplayName("★ 缺口记录：两轨**连图片形状都构造不出来**（buildBody 不收 images）")
-    fun neitherTrackCanExpressImagesYet() {
-        // 这不是"设计得对"，是**缺口**：Anthropic 文档里图片是
-        //   {type:"image", source:{type:"base64", media_type, data}}
-        //（SDK `ImageBlockParam` + `Base64ImageSourceParam`：media_type ∈ jpeg/png/gif/webp）
-        // Responses 文档里是 {type:"input_image", image_url: "<data URL>", detail:"auto"}
-        //（OpenAPI `InputImageContent`）。两条**都能接**，只是没接。
-        // ⚠️ 一旦开接，`buildBody` 的**参数个数会变** ⇒ 本文件所有 `privateMethod(..., n)`
-        //   都会在运行时抛 "single element" 错误 —— 这就是提醒：回来把第 7 节整段重写。
-        //    真接的时候**必须**：① 从 data URL 拆 media_type/base64 ② 真 Key 验证
-        //    ③ 把上面那条「带图 ⇒ failure」的断言改成形状断言。
-        val anthropicArity4 = AnthropicProvider::class.java.declaredMethods
-            .count { it.name == "buildBody" && it.parameterCount == 4 }
+    @DisplayName("★★ 缺口已兑现：两轨的 buildBody **都有** images 入口（arity 5 / 3）")
+    fun bothTracksNowCanExpressImages() {
+        // 【原文（2026-10-18）】"两轨连图片形状都构造不出来（buildBody 不收 images）" ——
+        //   **那是缺口记录，2026-10-19 已兑现**。当时这段话自己就写明了要做什么：
+        //     ① 从 data URL 拆 media_type/base64 ② 真 Key 验证
+        //     ③ 把「带图 ⇒ failure」的断言改成形状断言。
+        //   ①③ 已做（`DataUrl` + `MultimodalTracksTest`）；**② 仍未做**。
+        //
+        // 形状（留档，真 Key 验证时对着看）：
+        //   Anthropic：{type:"image", source:{type:"base64", media_type, data}}
+        //     （SDK `ImageBlockParam` + `Base64ImageSourceParam`：media_type ∈ jpeg/png/gif/webp）
+        //   Responses：{type:"input_image", image_url:"<data URL>"}（OpenAPI `InputImageContent`）
         assertEquals(
-            1, anthropicArity4,
-            "★ Anthropic `buildBody` 目前是 4 参（messages, maxOutputTokens, stream, tools），没有 images 入口",
+            1,
+            AnthropicProvider::class.java.declaredMethods
+                .count { it.name == "buildBody" && it.parameterCount == 5 },
+            "★ Anthropic `buildBody` 现在是 5 参（…, tools, images）—— 图片已有入口",
+        )
+        assertEquals(
+            1,
+            OpenAiResponsesProvider::class.java.declaredMethods
+                .count { it.name == "buildBody" && it.parameterCount == 3 },
+            "★ Responses `buildBody` 现在是 3 参（request, stream, images）",
         )
         // 对照：OpenAI 兼容轨的 `buildRequestBody` **有** images 参数（7 参里的最后一个）
         val compatHasImages = OpenAiCompatProvider::class.java.declaredMethods
