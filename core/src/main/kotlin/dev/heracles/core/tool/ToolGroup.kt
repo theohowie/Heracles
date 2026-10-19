@@ -44,5 +44,10 @@ enum class ToolGroup(val label: String, val keywords: List<String>) {
         "设备", "命令", "执行命令", "安装", "日志",
     )),
 
+    NETWORK("网络", listOf(
+        "web", "http", "https", "url", "fetch", "download", "page", "docs",
+        "网页", "网站", "联网", "抓取", "下载", "文档", "链接",
+    )),
+
     META("元工具", listOf("search", "tool", "help", "find", "工具", "搜索", "查找", "有什么")),
 }

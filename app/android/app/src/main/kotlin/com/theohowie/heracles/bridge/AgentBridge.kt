@@ -14,6 +14,7 @@ import dev.heracles.agent.tools.ApplyPatchTool
 import dev.heracles.agent.tools.AskUserTool
 import dev.heracles.agent.tools.FindFilesTool
 import dev.heracles.agent.tools.GrepFilesTool
+import dev.heracles.agent.tools.WebTools
 import dev.heracles.agent.tools.ListFilesTool
 import dev.heracles.agent.tools.MkdirTool
 import dev.heracles.agent.tools.PathTools
@@ -376,6 +377,9 @@ class AgentBridge(private val context: Context) {
             add(GrepFilesTool(fs))
             addAll(androidLongTail)
             addAll(pathTools)
+            // ★ 联网抓取（2026-10-19，对齐成熟智能体的 WebFetch）——
+            //   不占常驻格（常驻已 12/12），走长尾：`search_tools("网络/网页")` 可发现。
+            addAll(WebTools.create())
         }
         // 越档**当场抛**（不静默截断 —— 截断会让模型"以为工具没了"，只能靠命中率下滑发现）
         val zone = ToolZonePlan.partition(candidateTools)
@@ -388,7 +392,7 @@ class AgentBridge(private val context: Context) {
             resident = tools.map { it.spec },
             longTail = longTail.map { it.spec },
             // 分组表要覆盖**全部**长尾工具（漏一个 ⇒ 那个工具的同义说法检索不到、静默退化）
-            groups = AndroidTools.GROUPS + PathTools.GROUPS,
+            groups = AndroidTools.GROUPS + PathTools.GROUPS + WebTools.GROUPS,
             // ★ S1b：三个上限**不再按后端传**（`Contract.Zone` 已删）——
             //   默认值就是唯一一套 12 / 24 / 6。装配处刻意不传，
             //   避免"App 侧自己造判断"（`docs/27` §3 根因 C 那类分裂）。
