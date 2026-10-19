@@ -134,7 +134,7 @@ class FindFilesTool(private val fs: WorkspaceFs) : AgentTool {
         description = "按文件名或相对路径的通配查找工作区里的文件（只返回文件，不返回目录）。" +
             "* 匹配段内任意字符、? 匹配单个字符、** 匹配任意层目录；不含 / 的写法按文件名匹配、" +
             "任意深度（如 *.kt）。纯 Kotlin 走工作区文件系统，不依赖 shell，SAF 工作区同样可用。" +
-            "固定忽略 ${ignoredRuleText()} 目录，最多递归 $MAX_DEPTH 层；" +
+            "固定忽略 ${ignoredRuleText()} 目录，并遵循工作区根的 .gitignore；最多递归 $MAX_DEPTH 层；" +
             "结果超过 max_results 会截断，并如实给出匹配总数。",
         parameters = listOf(
             ToolParam(
@@ -191,7 +191,7 @@ class FindFilesTool(private val fs: WorkspaceFs) : AgentTool {
         val matches = mutableListOf<String>()
         var totalMatches = 0
 
-        walkFiles(fs, dir, stats) { entry ->
+        walkFiles(fs, dir, stats, loadGitIgnore(fs)) { entry ->
             val target = if (matchFullPath) {
                 if (dir.isEmpty()) entry.relativePath else entry.relativePath.removePrefix("$dir/")
             } else {
@@ -267,7 +267,7 @@ class GrepFilesTool(private val fs: WorkspaceFs) : AgentTool {
         name = "grep_files",
         description = "在工作区文件内容里按正则搜索，返回「相对路径:行号:行内容」（按行匹配，pattern 不跨行）。" +
             "纯 Kotlin 走工作区文件系统，不依赖 shell，SAF 工作区同样可用。" +
-            "固定忽略 ${ignoredRuleText()} 目录；二进制与超大文件会跳过并说明；单行超长会截断。" +
+            "固定忽略 ${ignoredRuleText()} 目录，并遵循工作区根的 .gitignore；二进制与超大文件会跳过并说明；单行超长会截断。" +
             "命中多时结果被截断，并如实给出未显示的命中数。",
         parameters = listOf(
             ToolParam(
@@ -331,7 +331,7 @@ class GrepFilesTool(private val fs: WorkspaceFs) : AgentTool {
         val hitFiles = mutableSetOf<String>()
         var totalHits = 0
 
-        walkFiles(fs, dir, stats) { entry ->
+        walkFiles(fs, dir, stats, loadGitIgnore(fs)) { entry ->
             val ext = entry.relativePath.substringAfterLast('/')
                 .substringAfterLast('.', "")
                 .lowercase()
@@ -436,6 +436,9 @@ private class ScanStats {
     /** 因固定规则跳过的目录数 */
     var ignoredDirs: Int = 0
 
+    /** 因根 `.gitignore` 跳过的条目数（目录 + 文件，2026-10-19） */
+    var ignoredByGitIgnore: Int = 0
+
     /** 因超过深度上限未进入的目录数 */
     var depthStops: Int = 0
 
@@ -474,6 +477,8 @@ private suspend fun walkFiles(
     fs: WorkspaceFs,
     startDir: String,
     stats: ScanStats,
+    /** 根 `.gitignore`（读不到 = [GitIgnore.EMPTY]，行为与加本功能之前一致） */
+    ignore: GitIgnore,
     onFile: suspend (FileEntry) -> Unit,
 ) {
     val queue = ArrayDeque<Pair<String, Int>>()
@@ -514,12 +519,22 @@ private suspend fun walkFiles(
                     stats.ignoredDirs++
                     continue
                 }
+                // ★ 根 .gitignore（2026-10-19）：目录整棵跳过（不再下行）
+                if (ignore.isIgnored(entry.relativePath, isDirectory = true)) {
+                    stats.ignoredByGitIgnore++
+                    continue
+                }
                 if (depth + 1 > MAX_DEPTH) {
                     stats.depthStops++
                     continue
                 }
                 queue.addLast(entry.relativePath to (depth + 1))
             } else {
+                // ★ 文件级忽略：`*.log` / `local.properties` 这类
+                if (ignore.isIgnored(entry.relativePath, isDirectory = false)) {
+                    stats.ignoredByGitIgnore++
+                    continue
+                }
                 onFile(entry)
             }
         }
@@ -529,6 +544,19 @@ private suspend fun walkFiles(
 // ============================================================================
 // 参数与路径
 // ============================================================================
+
+/**
+ * 读工作区根的 `.gitignore`（2026-10-19）。
+ *
+ * **读不到 / 内容坏 ⇒ [GitIgnore.EMPTY]**（行为 = 加本功能之前）：
+ * 忽略规则是优化，不是正确性前提，不能因为它让搜索失败。
+ * 只读根一份 —— 嵌套 `.gitignore` 明确不在子集内（见 [GitIgnore] KDoc）。
+ */
+private suspend fun loadGitIgnore(fs: WorkspaceFs): GitIgnore =
+    runCatching { fs.readText(".gitignore") }
+        .getOrNull()
+        ?.let(GitIgnore::parse)
+        ?: GitIgnore.EMPTY
 
 private sealed interface MaxSpec {
     data class Ok(val value: Int, val note: String) : MaxSpec
@@ -671,6 +699,9 @@ private fun scanNotes(stats: ScanStats, zeroHits: Boolean): String {
     } else if (zeroHits) {
         // 0 命中时**必须**说明搜索范围：否则模型分不清"真没有"还是"没找对地方"
         parts += "已忽略目录：${ignoredRuleText()}"
+    }
+    if (stats.ignoredByGitIgnore > 0) {
+        parts += "另有 ${stats.ignoredByGitIgnore} 项被工作区根 .gitignore 跳过"
     }
     if (stats.depthStops > 0) parts += "有 ${stats.depthStops} 个目录超过 $MAX_DEPTH 层未进入"
     if (stats.visitedLimitHit) {
