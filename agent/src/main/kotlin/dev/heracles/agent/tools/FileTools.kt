@@ -138,6 +138,9 @@ internal object DiffReceipt {
  */
 class ReadFileTool(private val fs: WorkspaceFs) : AgentTool {
 
+    /** 纯读（不产生副作用）⇒ 可并发（见 [AgentTool.parallelSafe]）。 */
+    override val parallelSafe: Boolean get() = true
+
     override val spec = ToolSpec(
         name = "read_file",
         description = "读取工作区里一个文本文件的内容。在修改前先用它看清现有代码。大文件可用 offset/limit 分段读（两个都不给或都传空字符串 = 整读，与不分段完全一致）；一旦分段，返回的**第一行**是行号说明（读了第几行、共几行、还有多少行未读、用哪个 offset 继续），它不是文件内容。写 `apply_patch` 前建议传 numbered=true 拿到行号，否则只能猜 @@ 的起点。",
@@ -295,6 +298,9 @@ private fun numberLines(lines: List<String>, startLine: Int, hasNewlineAfter: Bo
 
 /** 列目录工具 —— 让模型先看清项目结构。 */
 class ListFilesTool(private val fs: WorkspaceFs) : AgentTool {
+
+    /** 纯读（不产生副作用）⇒ 可并发。 */
+    override val parallelSafe: Boolean get() = true
 
     override val spec = ToolSpec(
         name = "list_files",
