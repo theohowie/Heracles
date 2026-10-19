@@ -271,6 +271,20 @@ object Contract {
     }
 
     /**
+     * **图片输入**（2026-10-19，多模态 + `view_image` 工具）。
+     *
+     * 两条上限的理由见 [Web]：工具结果会永久留在 append-only 会话里，
+     * 而图片按"每轮重发"处理 ⇒ 张数比体积更要紧。
+     */
+    object Media {
+        /** 单张图片上限：4 MB 原图 base64 后约 5.3 MB 文本 */
+        const val MAX_IMAGE_BYTES = 4 * 1024 * 1024
+
+        /** 一个 run 最多带几张图（用户附件 + `view_image` 累计）—— 每张每轮都计 token */
+        const val MAX_IMAGES_PER_RUN = 4
+    }
+
+    /**
      * 设备端 shell 执行 —— `26-编码层工具链与逆向引擎.md` §4.5。
      *
      * ⚠️ [LOG_EXCERPT_LINES] 自 **ADR-035 S1b** 起是**唯一**一套（原 `Zone.LOCAL_*` 的 40 行

@@ -432,6 +432,7 @@ class ProgressReportingTool(
 
         val (ok, summary) = when (outcome) {
             is ToolOutcome.Success -> true to outcome.detail
+            is ToolOutcome.SuccessWithImage -> true to outcome.detail
             is ToolOutcome.Failure -> false to outcome.reason
             // 需要用户确认 = 这次调用**没有做事**（这 5 个工具都是"做完才回来"）。
             // ⇒ 按"未成功"撤服务，文案带上原因 —— 不然通知栏里会留个空的"正在构建"，

@@ -986,6 +986,8 @@ class AgentLoop(
          */
         images: List<String> = emptyList(),
     ): AgentRunResult = runBlocking {
+        // 本 run 的图片列表：初始 = 用户附带的，`view_image` 工具会往里追加（2026-10-19）
+        val runImages = images.toMutableList()
         var session = Session.start(frozenPrefix)
         val records = mutableListOf<TurnRecord>()
         var finalText = ""
@@ -1272,7 +1274,7 @@ class AgentLoop(
                 session = session,
                 turnIndex = turnIndex,
                 stepId = streamStepId,
-                images = images,
+                images = runImages,
             )
 
             if (streamed.failure != null) {
@@ -1654,14 +1656,24 @@ class AgentLoop(
 
                     val outcomeText = when (outcome) {
                         is ToolOutcome.Success -> outcome.detail
+                        is ToolOutcome.SuccessWithImage -> outcome.detail
                         is ToolOutcome.Failure -> "失败：${outcome.reason}"
                         is ToolOutcome.NeedsApproval -> "需要用户确认：${outcome.detail}"
+                    }
+
+                    // ★ view_image（2026-10-19）：把图片加进本 run 的图片列表，
+                    //   之后每轮请求都带上（模型"看过"这张图）。
+                    if (outcome is ToolOutcome.SuccessWithImage) {
+                        if (runImages.size < Contract.Media.MAX_IMAGES_PER_RUN) {
+                            runImages += outcome.imageDataUrl
+                        }
                     }
 
                     // ★ 连续失败计数（ADR-033 / P0-1）——
                     //   成功清零；需要确认**既不增也不清零**（不是失败，也不算进展）。
                     consecutiveToolFailures = when (outcome) {
                         is ToolOutcome.Success -> 0
+                        is ToolOutcome.SuccessWithImage -> 0
                         is ToolOutcome.Failure -> consecutiveToolFailures + 1
                         is ToolOutcome.NeedsApproval -> consecutiveToolFailures
                     }
@@ -1835,12 +1847,20 @@ class AgentLoop(
                         val extraWallMs = (System.nanoTime() - extraStartedAt) / 1_000_000
                         val extraText = when (extraOutcome) {
                             is ToolOutcome.Success -> extraOutcome.detail
+                            is ToolOutcome.SuccessWithImage -> extraOutcome.detail
                             is ToolOutcome.Failure -> "失败：${extraOutcome.reason}"
                             is ToolOutcome.NeedsApproval -> "需要用户确认：${extraOutcome.detail}"
+                        }
+                        // ★ view_image 在并行批次里同样收集（2026-10-19）
+                        if (extraOutcome is ToolOutcome.SuccessWithImage &&
+                            runImages.size < Contract.Media.MAX_IMAGES_PER_RUN
+                        ) {
+                            runImages += extraOutcome.imageDataUrl
                         }
                         lastFailureText = extraText
                         consecutiveToolFailures = when (extraOutcome) {
                             is ToolOutcome.Success -> 0
+                            is ToolOutcome.SuccessWithImage -> 0
                             is ToolOutcome.Failure -> consecutiveToolFailures + 1
                             is ToolOutcome.NeedsApproval -> consecutiveToolFailures
                         }
@@ -2128,7 +2148,10 @@ class AgentLoop(
             //   装 activeTools()（常驻 + 已披露的长尾）。默认关闭 ⇒ 空列表 ⇒
             //   文本轨请求体逐字节不变。
             tools = nativeToolSpecs(),
-            images = images,
+            // ★ 快照（不是可变列表的引用）：请求发出去之后 `view_image`
+            //   还会往 runImages 里追加 —— 传引用会让"已发出的请求"事后变样
+            //   （真机上是同一 tick 内消费所以看不出来，但语义上是错的）。
+            images = images.toList(),
         )
 
         // ★★ 终止块的载荷**必须**接住（F7c）★★

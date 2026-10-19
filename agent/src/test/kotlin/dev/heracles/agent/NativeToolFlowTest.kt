@@ -846,4 +846,44 @@ class NativeToolFlowTest {
             "第一次的审批理由应来自手动档位：${approvals.single().reason}",
         )
     }
+
+    // ==================================================== 12. 多模态 / view_image（2026-10-19）
+
+    @Test
+    @DisplayName("★★ view_image ⇒ 图片随**下一次**请求发出（模型能持续「看到」）")
+    fun viewImageAttachesToNextRequest() {
+        val imageTool = object : AgentTool {
+            override val spec = ToolSpec(
+                "view_image", "看图",
+                listOf(ToolParam("path", "string", "路径")),
+            )
+
+            override suspend fun execute(args: Map<String, String>): ToolOutcome =
+                ToolOutcome.SuccessWithImage("已读取图片 a.png", "data:image/png;base64,AAAA")
+        }
+        val provider = providerOf(
+            ScriptTurn(
+                "", FinishReason.TOOL_CALLS,
+                listOf(NativeToolCall("c_v", "view_image", """{"path":"a.png"}""")),
+            ),
+            ScriptTurn("图里是一个登录页", FinishReason.STOP),
+        )
+
+        runBlocking {
+            provider.load(ProviderConfig()).getOrThrow()
+            AgentLoop(
+                provider, NoopFs(), listOf(imageTool),
+                maxTurns = 3, nativeToolsEnabled = true,
+            ).run("看看这张图")
+        }
+
+        assertEquals(
+            emptyList<String>(), provider.requests[0].images,
+            "第一轮还没读图，不该带图片",
+        )
+        assertEquals(
+            listOf("data:image/png;base64,AAAA"), provider.requests[1].images,
+            "读图之后每一轮都必须带上图片（否则模型下一轮就「忘了」）",
+        )
+    }
 }

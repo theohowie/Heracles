@@ -120,6 +120,16 @@ data class AgentRunResult(
 /** 工具执行结果 */
 sealed interface ToolOutcome {
     data class Success(val detail: String) : ToolOutcome
+
+    /**
+     * 成功，**并且**这次调用的产物是一张图片（2026-10-19，`view_image`）。
+     *
+     * 为什么单独一个变体：图片不能塞进文本结果 —— 它要随**下一次请求**
+     * 作为多模态输入发出去（`GenerateRequest.images`）。`AgentLoop` 看到这个变体会
+     * 把 [imageDataUrl] 加进本 run 的图片列表，之后每轮都带上（模型"记得"看过）。
+     */
+    data class SuccessWithImage(val detail: String, val imageDataUrl: String) : ToolOutcome
+
     data class Failure(val reason: String) : ToolOutcome
     /** 需要用户确认（阶段二的权限三档会用上，见 `00-需求文档.md` §2.13.2） */
     data class NeedsApproval(val detail: String) : ToolOutcome
