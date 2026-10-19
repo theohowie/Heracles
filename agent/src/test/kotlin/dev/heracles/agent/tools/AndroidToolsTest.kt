@@ -125,6 +125,31 @@ class AndroidToolsTest {
     }
 
     @Test
+    @DisplayName("★★ 分组校验认**全部模块**的分组（真机事故：edit 登记在 PatchTools 却被判未登记）")
+    fun groupsFromOtherModulesAreRecognised() {
+        // 真机症状：App 启动期抛「这些编码层工具没有登记分组：[edit]」，整个会话打不开。
+        // 根因 = 各模块分工登记 GROUPS，而校验只看 AndroidTools.GROUPS。
+        val foreign = listOf(
+            ApplyPatchTool(fs),
+            EditFileTool(fs),
+            ViewImageTool(fs),
+            WebFetchTool(),
+        )
+        // 这几个工具都登记在**别的模块**的 GROUPS 里，校验必须放行
+        AndroidTools.assertConsistent(foreign)
+
+        val union = AndroidTools.allGroups
+        for (name in foreign.map { it.spec.name }) {
+            assertTrue(name in union, "$name 必须出现在 allGroups 里，否则检索静默失灵")
+        }
+        // 已知的、按模块登记的条目一个都不能漏
+        assertTrue("edit" in union, "edit 必须登记分组（PatchTools.GROUPS）")
+        assertTrue("view_image" in union, "view_image 必须登记分组（ImageTools.GROUPS）")
+        assertTrue("web_fetch" in union, "web_fetch 必须登记分组（WebTools.GROUPS）")
+        assertTrue("delete_path" in union, "delete_path 必须登记分组（PathTools.GROUPS）")
+    }
+
+    @Test
     @DisplayName("scaffold_android：生成骨架并给出下一步")
     fun scaffoldWritesProject() = runBlocking {
         val r = ScaffoldAndroidTool(fs).execute(

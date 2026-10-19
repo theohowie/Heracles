@@ -242,6 +242,12 @@ class OpenAiResponsesProvider(
                                 add(messageItem("assistant", m.content))
                             }
                             m.nativeCalls.forEach { c ->
+                                // 同上：没有 `call_id` 就发不出可配对的 `function_call`
+                                // （`call_id` 是 `Required`，OpenAPI `FunctionToolCall`）。
+                                // ⚠️ `NativeCalls.fromResponsesOutput` 已用 `call_id`（缺省时 `id`）
+                                //   兜过底，所以这条**理论上到不了** —— 留着只是不让"编一个空 id"
+                                //   成为可能：宁可少一个孤儿调用项。
+                                if (c.id.isEmpty()) return@forEach
                                 add(JsonObject().apply {
                                     addProperty("type", "function_call")
                                     addProperty("call_id", c.id)
@@ -250,11 +256,21 @@ class OpenAiResponsesProvider(
                                 })
                             }
                         }
-                        ChatRole.TOOL -> add(JsonObject().apply {
-                            addProperty("type", "function_call_output")
-                            addProperty("call_id", m.toolCallId ?: "")
-                            addProperty("output", m.content)
-                        })
+                        // ⚠️ `call_id` 为空串**不得**发 `function_call_output`
+                        //   （2026-10-19 修的真实 wire 形状错误）：它配不上任何
+                        //   `function_call`，对方要么 400、要么把它当孤儿项。
+                        //   文本轨 / 没拿到 id ⇒ 退回 user 文本消息（不编 id）。
+                        ChatRole.TOOL -> add(
+                            if (m.toolCallId.isNullOrEmpty()) {
+                                messageItem("user", m.content)
+                            } else {
+                                JsonObject().apply {
+                                    addProperty("type", "function_call_output")
+                                    addProperty("call_id", m.toolCallId)
+                                    addProperty("output", m.content)
+                                }
+                            }
+                        )
                         else -> add(messageItem("user", m.content))
                     }
                 }

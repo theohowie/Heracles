@@ -1671,6 +1671,8 @@ class AgentLoop(
 
                     // ★ 连续失败计数（ADR-033 / P0-1）——
                     //   成功清零；需要确认**既不增也不清零**（不是失败，也不算进展）。
+                    //   （这里两个成功分支都归 0 是对的，但下面几处"算不算成功"
+                    //    一律走 `isSuccess`：图片也是成功，判错它就是真机上的红卡 bug。）
                     consecutiveToolFailures = when (outcome) {
                         is ToolOutcome.Success -> 0
                         is ToolOutcome.SuccessWithImage -> 0
@@ -1682,20 +1684,22 @@ class AgentLoop(
                     emit(
                         AgentEvent.ToolFinished(
                             turnIndex, call, outcomeText,
-                            outcome is ToolOutcome.Success,
+                            outcome.isSuccess,
                             toolWallMs,
                         )
                     )
 
                     records += TurnRecord(
                         turnIndex, userRequest, raw, call, outcomeText,
-                        (if (outcome is ToolOutcome.Success) "工具成功" else "工具失败") + nativeNote,
+                        (if (outcome.isSuccess) "工具成功" else "工具失败") + nativeNote,
                         result.cache, wallMs,
                         // ★ 唯一**真正执行过**工具的分支 —— 只有这里能给出
                         //   结构化的成功/失败。上面三条拦截分支刻意不传，
                         //   于是它们是 `null` ⇒ `toolState == blocked`。
                         //   详见 TurnRecord.toolSucceeded 的说明（H-1）。
-                        toolSucceeded = outcome is ToolOutcome.Success,
+                        //   `isSuccess`（不是 `is Success`）：`SuccessWithImage` 也是成功 ——
+                        //   这是"真机上 view_image 成功却记 failed / 红卡"的直接修复点。
+                        toolSucceeded = outcome.isSuccess,
                     )
 
                     // ★ 原生轨回填（ADR-031 step 2）：assistant 轮带上 `tool_calls`，
@@ -1707,7 +1711,8 @@ class AgentLoop(
                         Turn.ToolResult(
                             call.tool, outcomeText,
                             callId = nativeCalls.firstOrNull()?.id,
-                            isError = nativeCalls.isNotEmpty() && outcome !is ToolOutcome.Success,
+                            // 图片也算成功：否则 provider 会把这次 tool_result 标成错误
+                            isError = nativeCalls.isNotEmpty() && !outcome.isSuccess,
                         )
                     )
 
@@ -1867,21 +1872,22 @@ class AgentLoop(
                         emit(
                             AgentEvent.ToolFinished(
                                 turnIndex, extraCall, extraText,
-                                extraOutcome is ToolOutcome.Success, extraWallMs,
+                                extraOutcome.isSuccess, extraWallMs,
                             )
                         )
                         records += TurnRecord(
                             turnIndex, userRequest, raw, extraCall, extraText,
-                            (if (extraOutcome is ToolOutcome.Success) "工具成功" else "工具失败") +
+                            (if (extraOutcome.isSuccess) "工具成功" else "工具失败") +
                                 nativeNote,
                             result.cache, wallMs,
-                            toolSucceeded = extraOutcome is ToolOutcome.Success,
+                            // 并行批次里同样是"图片 = 成功"（与上面第一个调用同一判据）
+                            toolSucceeded = extraOutcome.isSuccess,
                         )
                         session = session.append(
                             Turn.ToolResult(
                                 extraCall.tool, extraText,
                                 callId = extra.id,
-                                isError = extraOutcome !is ToolOutcome.Success,
+                                isError = !extraOutcome.isSuccess,
                             )
                         )
                     }

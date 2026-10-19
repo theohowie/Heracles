@@ -886,4 +886,127 @@ class NativeToolFlowTest {
             "读图之后每一轮都必须带上图片（否则模型下一轮就「忘了」）",
         )
     }
+
+    // ==================================================== 13. isSuccess 记账（2026-10-19 真机 bug）
+
+    /**
+     * **`SuccessWithImage` 也必须记成成功** —— 真机 bug 的回归门禁。
+     *
+     * 为什么这一条必须存在、光有 `ToolOutcomeContractTest` 不够：
+     * 那个文件守的是"判据本身"和"源码里不再出现 `is Success`"；
+     * 这条守的是**判据真的被用在了落盘字段上** ——
+     * `ToolFinished.ok` / `verdict` / `toolSucceeded` / 配对回填的 `isError`。
+     * 只把 `isSuccess` 定义对、却把它漏用在某一处，源码扫描是看不出来的。
+     *
+     * 判据取自 [TurnRecord] 的**结构化字段**（`toolSucceeded` / `toolState`），
+     * 而不是 UI 或 CLI 的渲染文本 —— 后者是下游，前者的错它们一概继承。
+     */
+    @Test
+    @DisplayName("★★ SuccessWithImage ⇒ toolSucceeded=true、verdict 是「工具成功」（真机红卡 bug）")
+    fun successWithImageRecordsAsSucceeded() {
+        val imageTool = RecordingTool(
+            ToolSpec("view_image", "看图", listOf(ToolParam("path", "string", "路径"))),
+            ToolOutcome.SuccessWithImage("已读取图片 a.png", "data:image/png;base64,AAAA"),
+        )
+        val provider = providerOf(
+            ScriptTurn(
+                "", FinishReason.TOOL_CALLS,
+                listOf(NativeToolCall("c_v", "view_image", """{"path":"a.png"}""")),
+            ),
+            ScriptTurn("图里是登录页", FinishReason.STOP),
+        )
+        val rec = recorder()
+
+        val run = runBlocking {
+            provider.load(ProviderConfig()).getOrThrow()
+            AgentLoop(
+                provider, NoopFs(), listOf(imageTool),
+                maxTurns = 3, nativeToolsEnabled = true,
+                onEvent = rec.handler,
+            ).run("看看这张图")
+        }
+
+        val turn = run.turns.single { it.toolCall?.tool == "view_image" }
+        assertEquals(
+            true, turn.toolSucceeded,
+            "SuccessWithImage 不是 Success 的子类型 —— 这里曾经是 false（真机 ok:false 的来源）",
+        )
+        assertEquals(ToolState.succeeded, turn.toolState, "UI 的三态来源必须是 succeeded")
+        assertTrue(turn.verdict.contains("工具成功"), "verdict 应是「工具成功」：${turn.verdict}")
+        assertTrue(turn.verdict.isNotBlank() && !turn.verdict.contains("工具失败"), "verdict：${turn.verdict}")
+
+        val finished = rec.events.filterIsInstance<AgentEvent.ToolFinished>().single()
+        assertTrue(finished.ok, "ToolFinished.ok 决定 UI 画绿卡还是红卡：$finished")
+        // 配对回填给 provider 的 tool_result 也不该被标成 error（模型会读成"失败了"）
+        val toolMsg = provider.requests[1].messages!!
+            .single { it.role == ChatRole.TOOL && it.toolCallId == "c_v" }
+        assertEquals(false, toolMsg.isError, "native tool_result 的 isError 必须为 false")
+    }
+
+    @Test
+    @DisplayName("★ 并行批次里第二个调用是 SuccessWithImage 也记成功")
+    fun successWithImageInExtraBatchRecordsAsSucceeded() {
+        val write = RecordingTool(
+            writeSpec, ToolOutcome.Success("已写入"),
+        )
+        val image = RecordingTool(
+            ToolSpec("view_image", "看图", listOf(ToolParam("path", "string", "路径"))),
+            ToolOutcome.SuccessWithImage("已读取图片 a.png", "data:image/png;base64,AAAA"),
+        )
+        val provider = providerOf(
+            ScriptTurn(
+                "", FinishReason.TOOL_CALLS,
+                listOf(
+                    NativeToolCall("c_1", "write_file", """{"path":"a.txt","content":"hi"}"""),
+                    NativeToolCall("c_2", "view_image", """{"path":"a.png"}"""),
+                ),
+            ),
+            ScriptTurn("写好了，图里是登录页", FinishReason.STOP),
+        )
+
+        val run = runBlocking {
+            provider.load(ProviderConfig()).getOrThrow()
+            AgentLoop(
+                provider, NoopFs(), listOf(write, image),
+                maxTurns = 3, nativeToolsEnabled = true,
+            ).run("写个文件再看看图")
+        }
+
+        // 第二个调用走的是**并行批次**那条记录路径（与第一个是两段独立代码）
+        val rec = run.turns.single { it.toolCall?.tool == "view_image" }
+        assertEquals(true, rec.toolSucceeded, "并行批次同样必须按 isSuccess 判：$rec")
+        assertTrue(!rec.verdict.contains("工具失败"), "verdict：${rec.verdict}")
+        val toolMsg = provider.requests[1].messages!!
+            .single { it.role == ChatRole.TOOL && it.toolCallId == "c_2" }
+        assertEquals(false, toolMsg.isError, "配对回填的 isError 必须为 false")
+    }
+
+    @Test
+    @DisplayName("★ 反证：Failure 仍记失败（别把判据放宽成「一律成功」）")
+    fun failureStillRecordsAsFailed() {
+        val imageTool = RecordingTool(
+            ToolSpec("view_image", "看图", listOf(ToolParam("path", "string", "路径"))),
+            ToolOutcome.Failure("文件不存在：missing.png"),
+        )
+        val provider = providerOf(
+            ScriptTurn(
+                "", FinishReason.TOOL_CALLS,
+                listOf(NativeToolCall("c_f", "view_image", """{"path":"missing.png"}""")),
+            ),
+            ScriptTurn("读不到图", FinishReason.STOP),
+        )
+
+        val run = runBlocking {
+            provider.load(ProviderConfig()).getOrThrow()
+            AgentLoop(
+                provider, NoopFs(), listOf(imageTool),
+                maxTurns = 3, nativeToolsEnabled = true,
+            ).run("看看这张图")
+        }
+
+        val turn = run.turns.single { it.toolCall?.tool == "view_image" }
+        assertEquals(false, turn.toolSucceeded, "Failure 必须记 false：$turn")
+        assertEquals(ToolState.failed, turn.toolState)
+        assertTrue(turn.verdict.contains("工具失败"), "verdict 应含「工具失败」：${turn.verdict}")
+    }
 }
