@@ -1,0 +1,191 @@
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools">
+
+    <!-- ★ 发行版必须含 INTERNET（云端 API）—— 见 00-需求文档.md §2.11 与 ADR-013 取代记录 -->
+    <uses-permission android:name="android.permission.INTERNET" />
+    <!--
+      ★ Shizuku（2026-10-16 用户需求「接入 shizuku」）。
+
+      ## 为什么需要两条权限（用户实测「Shizuku 里找不到本 App」的根因之一）
+
+      1. `API_V23` —— 访问 Shizuku 服务的前提
+      2. **`INTERACT_ACROSS_USERS_FULL`** —— ShizukuProvider 跨进程通信需要。
+         官方 demo 与 Hail/gkd 等成功项目都声明了它；
+         **缺它会表现为"App 不出现在 Shizuku 的授权列表里"**（隐身）。
+    -->
+    <uses-permission android:name="moe.shizuku.manager.permission.API_V23" />
+    <uses-permission android:name="android.permission.INTERACT_ACROSS_USERS_FULL" />
+    <!--
+      ★★ `WRITE_SECURE_SETTINGS` **必须在这里声明**（2026-10-16 真机实测根因）★★
+
+      ## 踩的坑
+
+      用户实测「Shizuku 授权按钮显示 ✅ exit=0，但状态仍是未授权」。
+      日志给出真相：
+
+          E PermissionService: Permission android.permission.WRITE_SECURE_SETTINGS
+             isn't requested by package com.theohowie.heracles
+
+      **`pm grant` 只能授予 App 已用 `<uses-permission>` 声明过的权限。**
+      没声明 → 命令 exit code 仍是 0（看起来成功）但权限**根本没授予** ——
+      这正是"让失败看起来像成功"，必须从架构上消灭。
+
+      声明后 `pm grant` 才真正生效（ADR-016：development 保护级别可被 adb 授予）。
+    -->
+    <uses-permission android:name="android.permission.WRITE_SECURE_SETTINGS" />
+
+    <!--
+      ★ 构建前台服务（2026-10-16）—— docs/26 §7.1，需求模块 5。
+
+      ## 为什么需要
+      一次 aapt2 + javac + d8 全量构建真机要 1–3 分钟，用户必然会切走 App。
+      App 退到后台后进程优先级掉到 cached —— 那是 LMK 第一个回收的一档。
+      有个前台服务在跑，优先级就是 foreground，构建不会被内存回收打断。
+
+      ## 三条权限一条都不能少
+      1. FOREGROUND_SERVICE            —— API 28+ 的基本要求
+      2. FOREGROUND_SERVICE_DATA_SYNC  —— API 34+ **按类型**要求，缺了 startForeground
+                                          直接抛 SecurityException，且报错不说是缺哪条
+      3. POST_NOTIFICATIONS            —— API 33+ 的运行时权限；没授予时通知不显示
+                                          （服务本身仍能跑，但用户看不到进度）
+    -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+
+    <application
+        android:label="Heracles"
+        android:name="${applicationName}"
+        android:icon="@mipmap/ic_launcher"
+        android:allowBackup="false"
+        android:usesCleartextTraffic="true">
+        <!--
+          ★ allowBackup="false"（2026-10-14，FR-11.7 配套）：
+
+          API Key 已迁到 flutter_secure_storage（Android Keystore）。
+          Keystore 密钥本身**不可导出**，所以 adb backup 拿不到明文；
+          但备份仍会带走 provider 配置（含哨兵）与工作区文件 ——
+          关掉备份让"密钥只在本机可用"这条保证更干净。
+
+          ⚠️ 副作用：用户换机时配置不跟随。这是**有意的取舍** ——
+             配置里含 API 凭据，默认随备份漂移的风险更大。
+        -->
+        <!--
+          ★ usesCleartextTraffic="true" 的原因（安全性说明）：
+
+          本地 llama-server 监听 http://127.0.0.1:8080，是**明文 HTTP**。
+          Android 9+ 默认禁止明文流量，不开这个开关本地后端直接不可用。
+
+          为什么可以接受：
+          1. 它只用于 **loopback（127.0.0.1）**，流量不出设备
+          2. 本地后端是**开发测试路径**，不是发行版主用法
+          3. 云端后端走 HTTPS，不受此设置影响
+
+          ⚠️ 更严谨的做法是用 networkSecurityConfig 只对 127.0.0.1 放行。
+          留作后续改进（见 19-Flutter与Kotlin通道.md 的遗留清单）。
+        -->
+        <activity
+            android:name=".MainActivity"
+            android:exported="true"
+            android:launchMode="singleTop"
+            android:taskAffinity=""
+            android:theme="@style/LaunchTheme"
+            android:configChanges="orientation|keyboardHidden|keyboard|screenSize|smallestScreenSize|locale|layoutDirection|fontScale|screenLayout|density|uiMode"
+            android:hardwareAccelerated="true"
+            android:windowSoftInputMode="adjustResize">
+            <!-- Specifies an Android theme to apply to this Activity as soon as
+                 the Android process has started. This theme is visible to the user
+                 while the Flutter UI initializes. After that, this theme continues
+                 to determine the Window background behind the Flutter UI. -->
+            <meta-data
+              android:name="io.flutter.embedding.android.NormalTheme"
+              android:resource="@style/NormalTheme"
+              />
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN"/>
+                <category android:name="android.intent.category.LAUNCHER"/>
+            </intent-filter>
+        </activity>
+        <!--
+          ★ ShizukuProvider（2026-10-16 用户需求「接入 shizuku」）——
+          官方要求的跨进程 binder 获取方式。**没有它，Shizuku App 的
+          授权列表里看不到本 App**（用户实测：在 Shizuku 上找不到本 App）。
+          authorities 必须 `${applicationId}.shizuku`。
+        -->
+        <provider
+            android:name="rikka.shizuku.ShizukuProvider"
+            android:authorities="${applicationId}.shizuku"
+            android:enabled="true"
+            android:exported="true"
+            android:multiprocess="false"
+            android:permission="android.permission.INTERACT_ACROSS_USERS_FULL" />
+        <!--
+          ★ StellarProvider（2026-10-16 用户需求「接入 stellar 获取最高权限」）。
+
+          Stellar 是 Shizuku 的深度定制分支（roro2239），支持 ADB **或 Root**
+          启动，能力更强。它与 Shizuku **可共存**（不同包名 + 不同 authority），
+          所以两个 Provider 同时注册，运行时自动选可用的一方。
+
+          ⚠️ `roro.stellar.permissions` meta-data 是 Stellar 独有的 ——
+          声明本 App 需要哪些 Stellar 权限（`stellar` = 基础 API 访问）。
+        -->
+        <provider
+            android:name="roro.stellar.StellarProvider"
+            android:authorities="${applicationId}.stellar"
+            android:enabled="true"
+            android:exported="true"
+            android:multiprocess="false"
+            android:permission="android.permission.INTERACT_ACROSS_USERS_FULL" />
+        <meta-data
+            android:name="roro.stellar.permissions"
+            android:value="stellar" />
+        <!--
+          ★ 声明支持 Shizuku V3 API（2026-10-16）。
+
+          provider 库会自动合并一个同名 meta-data，但**没有 tools:replace
+          时可能与库里的声明冲突** —— 这是"应用隐身/闪退"的常见根因
+          （官方 demo 与 Hail、gkd 都显式声明 + tools:replace）。
+        -->
+        <meta-data
+            android:name="moe.shizuku.client.V3_SUPPORT"
+            android:value="true"
+            tools:replace="android:value" />
+        <!-- Don't delete the meta-data below.
+             This is used by the Flutter tool to generate GeneratedPluginRegistrant.java -->
+        <meta-data
+            android:name="flutterEmbedding"
+            android:value="2" />
+
+        <!--
+          ★ 构建前台服务（docs/26 §7.1）。
+          foregroundServiceType 必须与 AgentBuildService.SERVICE_TYPE 一致，
+          且必须有对应的 FOREGROUND_SERVICE_DATA_SYNC 权限。
+          exported="false"：只有本 App 能启动它。
+        -->
+        <service
+            android:name=".bridge.AgentBuildService"
+            android:exported="false"
+            android:foregroundServiceType="dataSync" />
+
+        <!--
+          ★ 聊天任务前台服务（2026-10-19）—— 后台续跑的前提。
+          真机实测：没有它时 MIUI 会冻结后台 App，任务停在半路、完成通知永不触发。
+          与构建服务同类型（dataSync）+ 同一套权限声明。
+        -->
+        <service
+            android:name=".bridge.AgentChatService"
+            android:exported="false"
+            android:foregroundServiceType="dataSync" />
+    </application>
+    <!-- Required to query activities that can process text, see:
+         https://developer.android.com/training/package-visibility and
+         https://developer.android.com/reference/android/content/Intent#ACTION_PROCESS_TEXT.
+
+         In particular, this is used by the Flutter engine in io.flutter.plugin.text.ProcessTextPlugin. -->
+    <queries>
+        <intent>
+            <action android:name="android.intent.action.PROCESS_TEXT"/>
+            <data android:mimeType="text/plain"/>
+        </intent>
+    </queries>
+</manifest>
