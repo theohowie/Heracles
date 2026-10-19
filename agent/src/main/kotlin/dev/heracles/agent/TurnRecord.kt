@@ -179,6 +179,30 @@ interface AgentTool {
 
     /** 执行。**实现必须自行做路径/参数防护**，不得假设入参安全。 */
     suspend fun execute(args: Map<String, String>): ToolOutcome
+
+    /**
+     * **能否与同批次的其他调用真正并发执行**（2026-10-19）。
+     *
+     * ## 为什么默认 `false`（保守）
+     *
+     * 并发执行会引入**竞态**：两个 `write_file` 同时写同一文件、`delete_path` 与
+     * `read_file` 交错 …… 这些错误的症状是"偶发的数据错乱"，**极难复现**。
+     * 所以默认**串行**，只有明确安全的工具才打开 —— 宁可慢，不可错。
+     *
+     * ## 什么时候可以是 true
+     *
+     * · **纯读**工具（`read_file` / `list_files` / `find_files` / `grep_files` /
+     *   `view_image` / `web_fetch`）—— 不产生副作用，并发没有正确性问题
+     * · 注意 `web_fetch` 虽是网络 IO（并发收益最大），但它**有 SSRF 与限流**考量：
+     *   本批次最多 `Contract.Tools.MAX_NATIVE_CALLS_PER_TURN`(=4) 个，量级可控，所以允许。
+     *
+     * ## 实现要求
+     *
+     * 声明 `true` 的工具**必须**：不共享可变状态、不改文件系统、不改设备。
+     * 装配处（`AndroidTools.progressReporting` 等装饰器）**必须**把这个值透传出去 ——
+     * 装饰器吞掉它会让"本来安全的工具白等"（性能问题）或"不安全工具被当安全"（正确性问题）。
+     */
+    val parallelSafe: Boolean get() = false
 }
 
 /** 校验 [ToolCall] 是否可执行；把 [ToolValidator] 的结论翻译成人类可读文本。 */

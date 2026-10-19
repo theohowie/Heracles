@@ -19,6 +19,8 @@ import dev.heracles.core.tool.ToolCall
 import dev.heracles.core.tool.ToolSpec
 import dev.heracles.workspace.WorkspaceFs
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.async
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.runBlocking
 
@@ -925,6 +927,28 @@ class AgentLoop(
             kotlinx.coroutines.channels.Channel.RENDEZVOUS,
         )
 
+        /**
+         * **跨 run 的持久白名单**（2026-10-19）—— 用户点过「始终允许」的工具名。
+         *
+         * ## 为什么要它（以及为什么是"注入"而不是"自己存盘"）
+         *
+         * `:agent` 是纯 JVM 模块，**不知道**会话存在哪、也不知道用户点过什么 ——
+         * 落盘归装配处（`AgentBridge`）管。所以这里只持有**一份可变的集合**：
+         * 装配处读盘后塞进来，改了之后自己写回去。
+         *
+         * ## 安全语义（不许淡化）
+         *
+         * · 白名单是**按工具名**（不是按参数），与 Claude Code 的 "always allow this tool" 同粒度
+         * · 用户可以随时在设置里清空（装配处负责提供那个入口）
+         * · 它**只跳过"要不要问"这一步**，工具自身的守卫（`CommandGuard` / 路径校验）照常生效
+         */
+        val alwaysAllowed: MutableSet<String> = java.util.concurrent.ConcurrentHashMap.newKeySet()
+
+        /** 预填白名单（装配处从设置里读出来时用）。 */
+        fun seed(list: Collection<String>) {
+            alwaysAllowed.addAll(list)
+        }
+
         /** UI 层投递决定（弹窗提交时调用） */
         fun reply(decision: ApprovalDecision) {
             channel.trySend(decision)
@@ -1731,12 +1755,25 @@ class AgentLoop(
                         )
                     )
 
-                    // ★ 并行调用 v2（2026-10-19）：**逐个执行**本轮其余原生调用（串行）。
+                    // ★ 并行调用 v2（2026-10-19）：逐个执行本轮其余原生调用。
+                    //
                     //   每个调用独立走：解析 → 校验 → 重复检测 → 预算 → 执行 → 事件 → 记录 → 配对回填。
                     //   单个失败**不打断后续**（独立操作）；连续失败熔断在批末统一判。
                     //   文本轨 `nativeCalls` 为空 ⇒ 这段整体不执行，与改动前逐字段相同。
+                    //
+                    //   ★ **真并发**（2026-10-19）：`AgentTool.parallelSafe` 为 true 的工具
+                    //     （纯读 / 网络）**同时执行**；其余照旧串行。默认 false ⇒ 既有工具行为不变。
+                    //     为什么默认串行：并发写同一文件/边删边读会产生**偶发数据错乱**，极难复现。
+                    //     ⚠️ 需要确认的调用（审批/ask_user）**永不并发** —— 并发弹窗会让用户无法判断
+                    //     "我正在批准的是哪一个"，且队列是单槽的（第二个 reply 会喂错调用）。
+                    //
+                    //   ⚠️ **实现的形态**：循环开始前先把"本批次里所有可并发的调用"**并发跑掉**，
+                    //     结果按 id 存进 [preFetched]；循环里照常按序做校验/审批/事件/记录，
+                    //     轮到可并发的那个时直接取结果（不再执行）。
+                    //     ⇒ 顺序判定与事件顺序保持确定，而 IO 已经并行完成。
                     var lastFailureText = outcomeText
                     val batchLimit = Contract.Tools.MAX_NATIVE_CALLS_PER_TURN
+                    val preFetched = preFetchParallelSafe(turnIndex, nativeCalls, batchLimit)
                     for ((extraIndex, extra) in nativeCalls.withIndex()) {
                         if (extraIndex == 0) continue // 第一个已在上面执行
                         if (extraIndex >= batchLimit) {
@@ -1857,11 +1894,19 @@ class AgentLoop(
                             extraManualDenied = approve(turnIndex, extraCall, reason) !=
                                 ApprovalResult.ALLOWED
                         }
+                        // ★ 并发资格（2026-10-19）：无需批准 + 工具声明 parallelSafe + 非循环状态工具。
+                        //   ⚠️ 只对**本 run 的第一个调用之外**的批次成员生效（第一个已在上面执行）。
+                        val canRunConcurrently = !extraNeedAsk &&
+                            extraCall.tool != "update_plan" &&
+                            extraTool.parallelSafe
                         var extraOutcome = when {
                             extraManualDenied -> ToolOutcome.Failure(
                                 "用户未批准（手动审批档位），未执行：${extraCall.tool}",
                             )
                             extraCall.tool == "update_plan" -> applyUpdatePlan(turnIndex, extraCall)
+                            // ★ 已并发预取（见循环前的 preFetchParallelSafe）⇒ 直接取，不再执行
+                            canRunConcurrently && preFetched.containsKey(extra.id) ->
+                                preFetched.getValue(extra.id)
                             else -> extraTool.execute(extraCall.args)
                         }
                         // ★ 并行批次里的"需要确认"同样要挂起问用户（2026-10-19）
@@ -2140,6 +2185,56 @@ class AgentLoop(
      * 见 [ThinkingBudget]：思考超过预算后**不再转发**给 UI，
      * 防止"开了思考就永远出不了答案"。
      */
+    /**
+     * **并发预取**本批次里"可安全并发"的原生调用（2026-10-19）。
+     *
+     * ## 只跑"不需要任何人点头"的调用
+     *
+     * 能进并发的必须同时满足：工具声明了 [AgentTool.parallelSafe]、**不是** `update_plan`、
+     * 参数能解析、**不会**触发审批（本循环里审批只在 `approve` 处发生，那需要单槽队列 →
+     * 并发会喂错调用）。这里用的是**保守判定**：只有 `parallelSafe` 且工具名不在
+     * [mutatingTools] 里的才并发；其余留给主循环逐条处理（含审批）。
+     *
+     * ## 失败不抛
+     *
+     * 任何异常都转成 [ToolOutcome.Failure] —— 与串行路径的行为一致
+     * （串行路径里 `execute` 抛异常也会被上层捕获成失败）。
+     * **单个失败不影响其他并发项**（各自独立 await）。
+     *
+     * @return `callId → outcome`；没进并发的调用不会出现在 map 里（主循环会照常执行）
+     */
+    private suspend fun preFetchParallelSafe(
+        turnIndex: Int,
+        calls: List<dev.heracles.core.tool.NativeToolCall>,
+        batchLimit: Int,
+    ): Map<String, ToolOutcome> {
+        if (calls.size < 2) return emptyMap()
+        val specs = activeTools().map { it.spec }
+        val tools = activeTools()
+        // 先挑出候选：跳过第一个（它已执行）、超出上限的、不可并发的
+        val candidates = calls.drop(1).take(batchLimit - 1).mapNotNull { call ->
+            if (call.tool == "update_plan") return@mapNotNull null
+            val parsed = runCatching { AgentOutputParser.fromNativeCall(call) }.getOrNull()
+            val tc = (parsed as? AgentOutput.ToolRequest)?.call ?: return@mapNotNull null
+            if (tc.tool in mutatingTools) return@mapNotNull null
+            if (describeValidation(tc, specs) != null) return@mapNotNull null
+            val tool = tools.firstOrNull { it.spec.name == tc.tool } ?: return@mapNotNull null
+            if (!tool.parallelSafe) return@mapNotNull null
+            Triple(call.id, tool, tc.args)
+        }
+        // 少于 2 个 ⇒ 并发没有意义（还多了协程开销）
+        if (candidates.size < 2) return emptyMap()
+        return coroutineScope {
+            candidates.map { (id, tool, args) ->
+                async {
+                    id to runCatching { tool.execute(args) }.getOrElse {
+                        ToolOutcome.Failure("并发执行异常：${it.javaClass.simpleName}: ${it.message}")
+                    }
+                }
+            }.map { it.await() }.toMap()
+        }
+    }
+
     private suspend fun runStreamingTurn(
         session: Session,
         turnIndex: Int,

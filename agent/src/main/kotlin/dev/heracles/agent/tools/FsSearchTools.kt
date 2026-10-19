@@ -129,6 +129,9 @@ private val BINARY_EXTENSIONS = setOf(
  */
 class FindFilesTool(private val fs: WorkspaceFs) : AgentTool {
 
+    /** 纯读（只 list 不读内容）⇒ 可并发。 */
+    override val parallelSafe: Boolean get() = true
+
     override val spec = ToolSpec(
         name = "find_files",
         description = "按文件名或相对路径的通配查找工作区里的文件（只返回文件，不返回目录）。" +
@@ -262,6 +265,9 @@ class FindFilesTool(private val fs: WorkspaceFs) : AgentTool {
  * · 单个文件超过 [MAX_READ_BYTES] 直接跳过（`WorkspaceFs.readText` 本来也会拒绝）
  */
 class GrepFilesTool(private val fs: WorkspaceFs) : AgentTool {
+
+    /** 纯读（只读内容不写）⇒ 可并发。 */
+    override val parallelSafe: Boolean get() = true
 
     override val spec = ToolSpec(
         name = "grep_files",

@@ -55,6 +55,15 @@ class WebFetchTool(
     private val allowLoopback: Boolean = false,
 ) : AgentTool {
 
+    /**
+     * **网络 IO，但可并发**（2026-10-19）。
+     *
+     * 它是最值得并发的工具（一次抓 3 个文档页，串行要等 3 个 RTT）。
+     * 不共享可变状态、不写文件 ⇒ 并发没有正确性问题。
+     * 数量由批次上限兜住（`Contract.Tools.MAX_NATIVE_CALLS_PER_TURN` = 4）。
+     */
+    override val parallelSafe: Boolean get() = true
+
     override val spec = ToolSpec(
         name = "web_fetch",
         description = "抓取一个公开网页并转成纯文本（http/https，最多 " +

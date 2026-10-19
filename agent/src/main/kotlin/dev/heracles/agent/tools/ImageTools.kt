@@ -34,6 +34,9 @@ import java.util.Base64
  */
 class ViewImageTool(private val fs: WorkspaceFs) : AgentTool {
 
+    /** 纯读（只读图片字节）⇒ 可并发。 */
+    override val parallelSafe: Boolean get() = true
+
     override val spec = ToolSpec(
         name = "view_image",
         description = "读取工作区里的一张图片（截图/照片/设计稿），让模型真正看到图片内容。" +
