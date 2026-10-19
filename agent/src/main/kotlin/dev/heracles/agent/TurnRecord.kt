@@ -119,6 +119,21 @@ data class AgentRunResult(
 
 /** 工具执行结果 */
 sealed interface ToolOutcome {
+
+    /**
+     * **"这次调用成功了吗"的唯一判据**（2026-10-19）。
+     *
+     * 为什么要有它：`SuccessWithImage` 上线后，散落各处的
+     * `outcome is ToolOutcome.Success` 把它判成**失败** —— 真机上表现为
+     * `view_image` 明明把图片送出去了，UI 却画红色失败卡、会话记 `ok:false`。
+     * ⇒ 把所有"成功与否"的判断收敛到这一个属性，新增成功变体时只改这里。
+     *
+     * ⚠️ 源码扫描门禁（`ToolOutcomeContractTest`）禁止生产代码用 `x is ToolOutcome.Success`
+     * 判断成功；它按**整段 getter 定义体**识别本属性，单行/折行/大括号三种写法都放行
+     * ⇒ 这里的换行**不是**产品约束（早先按"必须同一行"实现过，已放宽）。
+     */
+    val isSuccess: Boolean get() = this is Success || this is SuccessWithImage
+
     data class Success(val detail: String) : ToolOutcome
 
     /**

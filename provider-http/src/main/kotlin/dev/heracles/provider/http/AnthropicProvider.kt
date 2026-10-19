@@ -268,11 +268,11 @@ class AnthropicProvider(
                     // 工具结果：Anthropic 用 user 轮 + `tool_result` 块回传
                     //（`tool_use_id` 必须与 assistant 里那个 `tool_use.id` 逐字相同）
                     //
-                    // ⚠️ 判别靠 `toolCallId`：为 null = 文本轨（阶段一的 JSON 文本协议），
+                    // ⚠️ 判别靠 `toolCallId`：为空 = 文本轨（阶段一的 JSON 文本协议），
                     //   继续走纯文本 user 消息 —— **一字节不变**。
+                    //   非空 = 原生轨 ⇒ `tool_result` 块。
                     ChatRole.TOOL -> add(
-                        if (m.toolCallId == null) msgObj("user", m.content)
-                        else toolResultMsg(m)
+                        if (canPairToolResult(m)) toolResultMsg(m) else msgObj("user", m.content)
                     )
                 }
             }
@@ -329,6 +329,13 @@ class AnthropicProvider(
      * 工具结果的**原生形状**：user 轮 + `tool_result` 块。
      *
      * `is_error` 如实传 —— 把失败写成成功，模型会在错的前提上继续做事。
+     *
+     * ## ⚠️ `callId == null` 时**绝不**走这里（2026-10-19 修的真实 wire 形状错误）
+     *
+     * 旧实现只判 `m.role == TOOL`：`toolCallId` 为空串时就发
+     * `{"type":"tool_result","tool_use_id":""}` —— 违反 SDK 的 `tool_use_id: Required[str]`，
+     * 且必然对不上任何 `tool_use.id`。文档没写"空串会 400"，但**没有任何一种情况下
+     * 空 `tool_use_id` 是对的** ⇒ 退回文本轨迹的 user 文本消息（与人设一致：不编 id）。
      */
     private fun toolResultMsg(m: ChatMessage) = JsonObject().apply {
         addProperty("role", "user")
@@ -341,6 +348,15 @@ class AnthropicProvider(
             })
         })
     }
+
+    /**
+     * 结果能不能配成 `tool_result` 块：**必须有非空的 `tool_use_id`**。
+     *
+     * 见 [toolResultMsg] 的说明 —— `tool_use_id` 是 `Required[str]`（SDK 类型定义），
+     * 空串不是一个"合法但语义模糊"的值，而是**根本配不上** assistant 里的 `tool_use.id`。
+     */
+    private fun canPairToolResult(m: ChatMessage): Boolean =
+        m.role == ChatRole.TOOL && !m.toolCallId.isNullOrEmpty()
 
     /**
      * `arguments` 原文 → `input` **对象**。

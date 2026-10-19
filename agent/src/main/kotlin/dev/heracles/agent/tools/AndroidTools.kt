@@ -430,6 +430,8 @@ class ProgressReportingTool(
             throw t
         }
 
+        // 这里是**取文本**（`detail`）的分支，不是"算不算成功"的判据 ——
+        // 所以按类型分开，而不是顺手合并成 `outcome.isSuccess`。
         val (ok, summary) = when (outcome) {
             is ToolOutcome.Success -> true to outcome.detail
             is ToolOutcome.SuccessWithImage -> true to outcome.detail
@@ -553,9 +555,13 @@ object AndroidTools {
     fun assertConsistent(tools: List<AgentTool>) {
         val names = tools.map { it.spec.name }
         require(names.size == names.toSet().size) { "编码层工具名重复：$names" }
-        val ungrouped = names.filterNot { it in GROUPS }
+        // ★ 2026-10-19 真机事故修复：`edit` 登记在 PathTools/PatchTools 自己的 GROUPS 里，
+        //   却是用 `AndroidTools.assertConsistent` 校验的 ⇒ 启动期当场抛
+        //   「[edit] 没有登记分组」而整个 App 打不开会话。
+        //   分组是**分工登记的**（Android / Path / Web / Image / Patch），校验必须看**并集**。
+        val ungrouped = names.filterNot { it in allGroups }
         require(ungrouped.isEmpty()) {
-            "这些编码层工具没有登记分组，检索会静默失灵：$ungrouped（请补进 AndroidTools.GROUPS）"
+            "这些编码层工具没有登记分组，检索会静默失灵：$ungrouped（请补进各模块的 GROUPS 并加进 allGroups）"
         }
         // 常驻 + 长尾的总数必须还在「模型能选对」的范围内（契约 §4.1）
         require(names.size <= Contract.Tools.LONG_TAIL_LIMIT) {
@@ -563,4 +569,15 @@ object AndroidTools {
                 "(${Contract.Tools.LONG_TAIL_LIMIT}) —— 工具太多会让模型选错"
         }
     }
+
+    /**
+     * **全部分组表的并集**（2026-10-19）—— 装配处与校验**必须**用同一份。
+     *
+     * 分组是按模块登记的（`AndroidTools` / `PathTools` / `WebTools` / `ImageTools` / `PatchTools`），
+     * 而校验过去只认 `AndroidTools.GROUPS` ⇒ 别的模块登记的工具会被判"没登记"。
+     * 真机上这个错误表现为**整个 App 打不开会话**（启动期 `require` 抛）。
+     * ⇒ 并集放在这里一处定义，`AgentBridge` 与测试都读它，不再各拼一份。
+     */
+    val allGroups: Map<String, dev.heracles.core.tool.ToolGroup>
+        get() = GROUPS + PathTools.GROUPS + WebTools.GROUPS + ImageTools.GROUPS + PatchTools.GROUPS
 }

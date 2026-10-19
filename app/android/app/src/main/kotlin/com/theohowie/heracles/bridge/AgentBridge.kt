@@ -397,8 +397,11 @@ class AgentBridge(private val context: Context) {
             resident = tools.map { it.spec },
             longTail = longTail.map { it.spec },
             // 分组表要覆盖**全部**长尾工具（漏一个 ⇒ 那个工具的同义说法检索不到、静默退化）
-            groups = AndroidTools.GROUPS + PathTools.GROUPS + WebTools.GROUPS + ImageTools.GROUPS +
-                PatchTools.GROUPS,
+            // ★ 分组表**只能**用 `AndroidTools.allGroups`（2026-10-19 真机事故）：
+            //   过去这里自己拼一份、而 `assertConsistent` 只认 AndroidTools.GROUPS，
+            //   于是别的模块登记的工具被判"没登记" ⇒ 启动期抛异常 ⇒ App 打不开会话。
+            //   现在两边读同一份并集，"登记了却漏拼"这种错不可能再发生。
+            groups = AndroidTools.allGroups,
             // ★ S1b：三个上限**不再按后端传**（`Contract.Zone` 已删）——
             //   默认值就是唯一一套 12 / 24 / 6。装配处刻意不传，
             //   避免"App 侧自己造判断"（`docs/27` §3 根因 C 那类分裂）。

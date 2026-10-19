@@ -49,5 +49,18 @@ enum class ToolGroup(val label: String, val keywords: List<String>) {
         "网页", "网站", "联网", "抓取", "下载", "文档", "链接",
     )),
 
+    /**
+     * **图片 / 看图**（2026-10-19）。
+     *
+     * ⚠️ 关键词必须覆盖**模型真实会说的整句说法**，而不只是名词：
+     * 真机上模型搜的是「查看图片」，而早先 `view_image` 挂在 FILE 组（关键词只有
+     * 「文件/读/写」）⇒ **搜不到** ⇒ 模型直接回"我没有看图的工具"。
+     * 检索是 `haystack.contains(term)` 的**子串**匹配，所以整句说法要原样列进来。
+     */
+    IMAGE("图片", listOf(
+        "image", "img", "picture", "photo", "screenshot", "view", "vision", "ocr",
+        "看", "看图", "查看图片", "读取图片", "看图片", "图片", "截图", "照片", "图像", "设计稿", "识别",
+    )),
+
     META("元工具", listOf("search", "tool", "help", "find", "工具", "搜索", "查找", "有什么")),
 }

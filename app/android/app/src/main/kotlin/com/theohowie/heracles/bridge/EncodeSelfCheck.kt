@@ -400,7 +400,9 @@ object EncodeSelfCheck {
                     mapOf("project_dir" to PROJECT_DIR, "out_apk" to APK_NAME),
                 )
                 val ms = System.currentTimeMillis() - started
-                val buildOk = outcome is ToolOutcome.Success
+                // 判据用 `isSuccess`：`SuccessWithImage` 也是成功（`build_apk` 目前不返回它，
+                // 但"成功与否"只该有一处判据 —— 见 `ToolOutcome.isSuccess`）。
+                val buildOk = outcome.isSuccess
 
                 say("⑨ 构建         ok=$buildOk  ${ms}ms（走 build_apk 工具 = 模型走的那条路）")
                 liveSteps.forEach { say("   $it" ) }

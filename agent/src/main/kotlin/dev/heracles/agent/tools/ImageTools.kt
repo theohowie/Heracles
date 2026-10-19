@@ -100,7 +100,9 @@ class ViewImageTool(private val fs: WorkspaceFs) : AgentTool {
  */
 object ImageTools {
     val GROUPS: Map<String, ToolGroup> = mapOf(
-        "view_image" to ToolGroup.FILE,
+        // ★ 2026-10-19 真机修复：早先挂在 FILE 组，而 FILE 的关键词只有「文件/读/写」
+        //   ⇒ 模型搜「查看图片」搜不到 ⇒ 它回"我没有看图的工具"。改用专用 IMAGE 组。
+        "view_image" to ToolGroup.IMAGE,
     )
 
     fun create(fs: WorkspaceFs): List<AgentTool> = listOf(ViewImageTool(fs))
