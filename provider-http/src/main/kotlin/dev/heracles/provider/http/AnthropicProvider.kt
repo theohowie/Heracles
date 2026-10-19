@@ -60,6 +60,27 @@ import java.time.Duration
  *
  * Provider 配置 `protocol = "anthropic"` → AgentBridge 走本类。
  * 配置页下拉里列出（用户参考图的三协议下拉）。
+ *
+ * ## 读图（2026-10-19 接通；⚠️ **零真 Key 验证**）
+ *
+ * 图片走 **`type:"image"` 内容块**，作为**独立一条 user 消息**追加在对话末尾：
+ *
+ * ```json
+ * {"role":"user","content":[
+ *   {"type":"text","text":"（用户附上了下面的图片，…）"},
+ *   {"type":"image","source":{"type":"base64","media_type":"image/png","data":"<纯 base64>"}}
+ * ]}
+ * ```
+ *
+ * 三个必须守住的口径（都由 [MultimodalTracksTest] 钉住）：
+ *
+ * 1. **`data` 是纯 base64** —— `data:` 前缀一旦漏进去，服务端要么 400、要么解码出垃圾；
+ *    拆分只走 [DataUrl]（解析的唯一入口）。
+ * 2. **mime 白名单 = jpeg / png / gif / webp**，其余**明确失败不猜**。
+ * 3. **不传图 ⇒ 请求体逐字节不变**（`images` 为空 ⇒ 那段根本不执行）。
+ *
+ * 原来的 `images.isNotEmpty() ⇒ UnsupportedOperationException` 早退**已删除**：
+ * 那条是"还没接通"的诚实声明，接通之后就变成了缺陷（用户带图必然失败）。
  */
 class AnthropicProvider(
     override val id: String = "anthropic:claude",
@@ -104,16 +125,6 @@ class AnthropicProvider(
     override suspend fun generate(request: GenerateRequest): Result<GenerateResult> =
         withContext(Dispatchers.IO) {
             check(loaded) { "先 load 再 generate（provider 生命周期）" }
-            // ★ 多模态（2026-10-19）：Anthropic 轨暂未接通图片。
-            //   必须**显式失败**，不能静默丢图（否则模型"看不见图"却继续答，用户以为它看过）。
-            if (request.images.isNotEmpty()) {
-                return@withContext Result.failure(
-                    UnsupportedOperationException(
-                        "当前 Anthropic 后端暂不支持读图（已接通 OpenAI 兼容轨）；" +
-                            "请换用 OpenAI 兼容提供商，或移除图片后重试。",
-                    ),
-                )
-            }
             runCatching {
                 val body = buildBody(
                     messages = request.messages ?: listOf(
@@ -122,6 +133,10 @@ class AnthropicProvider(
                     maxOutputTokens = request.maxOutputTokens,
                     stream = false,
                     tools = request.tools,
+                    // ★ 多模态（2026-10-19）：图片在这里进请求体。
+                    //   data URL **在 buildBody 里、动网络之前**就被校验 ⇒ 坏图是 failure，不是 400 之后的谜语。
+                    //   空列表 ⇒ buildBody 不进那段 ⇒ 请求体与改动前逐字节相同。
+                    images = request.images,
                 )
                 val resp = HttpJson.postText(
                     "$baseUrl/v1/messages",
@@ -135,9 +150,9 @@ class AnthropicProvider(
 
     override fun generateStream(request: GenerateRequest): Flow<StreamChunk> = flow {
         check(loaded) { "先 load 再 generateStream（provider 生命周期）" }
-        if (request.images.isNotEmpty()) {
-            error("当前 Anthropic 后端暂不支持读图（已接通 OpenAI 兼容轨）；请换用 OpenAI 兼容提供商")
-        }
+        // ★ 多模态（2026-10-19）：**不再抛**。图片与文本同一条请求发出去；
+        //   data URL 的校验发生在 buildBody 里（流开始之前）⇒ 坏图在这里就失败，
+        //   不会出现"流已经开了一半才发现图坏了"。
         val body = buildBody(
             messages = request.messages ?: listOf(
                 ChatMessage(ChatRole.USER, request.prompt),
@@ -145,6 +160,7 @@ class AnthropicProvider(
             maxOutputTokens = request.maxOutputTokens,
             stream = true,
             tools = request.tools,
+            images = request.images,
         )
         // Anthropic 的 SSE 事件流：content_block_delta 带 text_delta /
         // thinking_delta（思考）；content_block_start + input_json_delta 是**工具调用分片**；
@@ -245,6 +261,7 @@ class AnthropicProvider(
         maxOutputTokens: Int,
         stream: Boolean,
         tools: List<ToolSpec> = emptyList(),
+        images: List<String> = emptyList(),
     ): JsonObject = JsonObject().apply {
         addProperty("model", modelName)
         addProperty("max_tokens", maxOf(maxOutputTokens, 1)) // Anthropic 必填且 ≥1
@@ -275,6 +292,56 @@ class AnthropicProvider(
                         if (canPairToolResult(m)) toolResultMsg(m) else msgObj("user", m.content)
                     )
                 }
+            }
+            // ★ 多模态（2026-10-19）：图片作为**独立一条 user 消息追加在末尾**。
+            //
+            //   ## 为什么单独一条，而不是塞进最后一条 user 消息的 content
+            //
+            //   · Anthropic 的 `content[]` 已经承载了 `tool_use` / `tool_result` 块，
+            //     往里"再插一个 image 块"就要判断"最后一条 user 是纯文本还是 tool_result" ——
+            //     那是**每个调用点都要重算一遍**的分支，且历史是 append-only 的（图片属于"这一轮"，
+            //     不属于"哪条历史消息"）。
+            //   · 单独一条 user 的语义在 Messages API 里是**合法的**：
+            //     连续两条 user 消息 = "上一句 + 这一句"，服务端会合并理解。
+            //   · 与 OpenAI 兼容轨（`OpenAiCompatProvider` 同一天的做法）**同一个主意** ⇒
+            //     三轨在"图片放在会话的哪个位置"上不会各自漂移。
+            //
+            //   ## 顺序是**硬的**
+            //
+            //   `content[0]` 必须是 `text`、`content[1]` 起才是 `image`。
+            //   Anthropic 文档明确建议图片**跟在提问之后**（"先说问什么，再看图"），
+            //   而且**空 text 块会被判非法** ⇒ 这里的引导语是**必填的**，不是装饰。
+            //
+            //   ## 空列表 = 这段不执行
+            //
+            //   ⇒ 纯文本请求体与改动前**逐字节相同**（`MultimodalTracksTest` 用整串金标准钉住）。
+            if (images.isNotEmpty()) {
+                add(JsonObject().apply {
+                    addProperty("role", "user")
+                    add("content", JsonArray().apply {
+                        add(JsonObject().apply {
+                            addProperty("type", "text")
+                            addProperty("text", IMAGE_LEAD_IN)
+                        })
+                        // `DataUrl.parse` 对**每一张**都做白名单 + 上限 + base64 校验；
+                        // 任一张坏 ⇒ 抛 IllegalArgumentException ⇒ generate() 返回 failure（带原因）。
+                        // **绝不跳过坏的那张继续发** —— 那就是"静默丢图"。
+                        images.forEach { url ->
+                            val parsed = DataUrl.parse(url)
+                            add(JsonObject().apply {
+                                addProperty("type", "image")
+                                add("source", JsonObject().apply {
+                                    // ★ 固定 `base64`：本类**不发** `type:"url"`（那要服务端自己去下载，
+                                    //   手机上不可控，也让"图到底发没发出去"多一个失败面）。
+                                    addProperty("type", "base64")
+                                    addProperty("media_type", parsed.mediaType)
+                                    // ★ 纯 base64 —— 不带 `data:` 前缀（DataUrl.Parsed 已保证）
+                                    addProperty("data", parsed.base64)
+                                })
+                            })
+                        }
+                    })
+                })
             }
         })
 
@@ -422,5 +489,18 @@ class AnthropicProvider(
 
     companion object {
         const val DEFAULT_BASE_URL = "https://api.anthropic.com"
+
+        /**
+         * 图片那条 user 消息的 `content[0].text`（2026-10-19 多模态）。
+         *
+         * **为什么是常量而不是内联字符串**：它**真的会出现在 wire 上** ——
+         * 改了它，带图的请求体就变了（`:MultimodalTracksTest` 用整串金标准钉住）。
+         * 写成具名常量，至少让"谁改了这个文案"在 diff 里一眼可见。
+         *
+         * **为什么必须是这个语义**：`content` 里**不能只有 image 块**（Anthropic 要求
+         * 有 text 或图片要跟在提问之后），所以这段文字是**让请求合法的那一半**。
+         * 与 OpenAI 兼容轨的引导语同义（三轨对模型说的是同一句话）。
+         */
+        const val IMAGE_LEAD_IN = "（用户附上了下面的图片，请结合图片内容作答）"
     }
 }

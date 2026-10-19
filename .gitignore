@@ -38,3 +38,7 @@ docs/
 WORKLOG.md
 AGENTS.md
 phone/
+
+# 2026-10-19 真机采样/分析临时目录（本地材料，不入库）
+.tmp-l1long/
+.dsh-evidence/

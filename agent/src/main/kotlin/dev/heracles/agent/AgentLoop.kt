@@ -327,6 +327,17 @@ class AgentLoop(
     private val approvalReplies: ApprovalQueue = ApprovalQueue.EMPTY,
 
     /**
+     * **跨 run 的持久白名单读点**（2026-10-19）。
+     *
+     * 之前 [ApprovalQueue.alwaysAllowed] 只被 `seed()` 写、**全文没有读点** ⇒
+     * 白名单形同虚设，且装配处 run 结束时把「一个空集」写回磁盘 ⇒ **每次 run 都把用户积累清空**。
+     * 现在把**同一份集合**（装配处持有的那个 `ApprovalQueue`）传进来，`approve()` 会查它。
+     *
+     * 默认 `emptySet()` = 与改动前行为一致（CLI / 测试零改动：什么都仍要问）。
+     */
+    private val persistentAllowlist: Set<String> = emptySet(),
+
+    /**
      * **审批档位**（2026-10-19）—— 决定"什么操作要问用户"。
      *
      * 默认 [ApprovalMode.WORKSPACE_AUTO]：与接档位之前**行为一致**
@@ -1086,11 +1097,29 @@ class AgentLoop(
         suspend fun approve(turnIndex: Int, call: ToolCall, reason: String): ApprovalResult {
             val sig = approvalSignature(call)
             if (sig in sessionApprovals) return ApprovalResult.ALLOWED
+            // 跨 run 的持久白名单（装配处 seed 进来的）—— 已「始终允许」过的工具不再问。
+            // ⚠️ 少了这一行时 alwaysAllowed 只被 seed() 写、没有任何读点 ⇒ 白名单形同虚设，
+            //    且 AgentBridge 的 finally 把「一个空集」写回磁盘 ⇒ 每次 run 都把用户积累清空。
+            // 只读不写：`sessionApprovals` 才是本 run 的写向（早退只按本 run 的集合，**不**往持久集合里回写）。
+            if (sig in persistentAllowlist) return ApprovalResult.ALLOWED
             emit(AgentEvent.ApprovalRequest(turnIndex, call, reason))
             return when (approvalReplies.await()) {
                 ApprovalDecision.ALLOW_ONCE -> ApprovalResult.ALLOWED
                 ApprovalDecision.ALLOW_ALWAYS -> {
+                    // ★★ 两个集合**必须在这里一起写**（2026-10-19 真机排障）★★
+                    //
+                    // 历史 bug：最初只有 `sessionApprovals += sig`，
+                    // 「记进持久白名单」散落在两条**调用方**路径里（`needAsk` 那条 / `NeedsApproval` 那条）。
+                    // 而 `write_file` 这类工具在 MANUAL 档会**两条都走**：
+                    //   路径 A（needAsk）→ approve() → ALLOW_ALWAYS → `sessionApprovals += write_file`
+                    //   路径 B（工具返回 NeedsApproval，因为 write_file 的**实现**会这么返回）→ 再 approve()
+                    //         → `sig in sessionApprovals` **早退** → 早退分支不碰 `lastDecision`
+                    //         ⇒ 调用方那行 `if (lastDecision == ALLOW_ALWAYS)` **永远不执行**
+                    // 真机现象：弹窗点了「本会话始终允许」、工具执行成功、落盘却是 `save 0 条：[]`。
+                    //
+                    // 结论：**「谁来记」不能交给调用方** —— 记在唯一出口（这里），早退就绕不过去。
                     sessionApprovals += sig
+                    approvalReplies.alwaysAllowed += sig
                     ApprovalResult.ALLOWED
                 }
                 ApprovalDecision.DENY -> ApprovalResult.DENIED
@@ -1683,6 +1712,8 @@ class AgentLoop(
                         outcome = if (approvalMode == ApprovalMode.FULL_ACCESS) {
                             tool.execute(call.args)
                         } else {
+                            // ⚠️ 「始终允许」的记账**不在这里** —— 收口在 `approve()` 里唯一的出口，
+                            //   见那段 KDoc：放调用方会被 `sessionApprovals` 早退绕过（真机 bug）。
                             when (approve(turnIndex, call, reason)) {
                                 ApprovalResult.ALLOWED -> tool.execute(call.args)
                                 ApprovalResult.DENIED -> ToolOutcome.Failure("用户拒绝执行：$reason")

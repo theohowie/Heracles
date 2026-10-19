@@ -730,6 +730,10 @@ class GeneralSettingsPage extends StatelessWidget {
               const _WarningNote(
                 '⚠️ 「完全访问」需要 Shizuku 或 root 才能真正生效。',
               ),
+            // ★ 「始终允许」白名单（2026-10-19）：用户点过「本会话始终允许」的工具会
+            //   **跨 run 记住**（存在原生侧），所以必须有个地方能看到并清掉它 ——
+            //   否则用户会疑惑"为什么这次不问我了"。
+            const _AlwaysAllowedRow(),
             Divider(),
 
             // ---- 语言 ----
@@ -2306,5 +2310,72 @@ class _WarningNote extends StatelessWidget {
           ),
         ),
       );
+  }
+}
+
+/// **「始终允许」白名单**（2026-10-19）—— 展示 + 清除。
+///
+/// 用户点过「本会话始终允许」的工具会被原生侧**跨 run 记住**，所以必须有个地方
+/// 能看到并清掉它；否则用户会疑惑"为什么这次不问我了"。
+/// 数据在原生侧（`SharedPreferences("heracles_approvals")`），不进 `AppSettings`。
+class _AlwaysAllowedRow extends StatefulWidget {
+  const _AlwaysAllowedRow();
+
+  @override
+  State<_AlwaysAllowedRow> createState() => _AlwaysAllowedRowState();
+}
+
+class _AlwaysAllowedRowState extends State<_AlwaysAllowedRow> {
+  List<String>? _tools;
+
+  @override
+  void initState() {
+    super.initState();
+    _reload();
+  }
+
+  Future<void> _reload() async {
+    final list = await AgentBridge().alwaysAllowedTools();
+    if (!mounted) return;
+    setState(() => _tools = list);
+  }
+
+  Future<void> _clear() async {
+    await AgentBridge().clearAlwaysAllowed();
+    await _reload();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final h = Hue.of(context);
+    final tools = _tools;
+    // 加载中不显示（一闪而过的"无"比不显示更让人困惑）
+    if (tools == null) return const SizedBox.shrink();
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(HSpace.lg, 0, HSpace.lg, HSpace.sm),
+      child: Row(
+        children: [
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text('已始终允许的工具',
+                    style: TextStyle(fontSize: 13, color: h.text)),
+                const SizedBox(height: 2),
+                Text(
+                  tools.isEmpty ? '无' : tools.join('、'),
+                  style: TextStyle(fontSize: 11.5, color: h.textDim),
+                ),
+              ],
+            ),
+          ),
+          if (tools.isNotEmpty)
+            TextButton(
+              onPressed: _clear,
+              child: const Text('清除', style: TextStyle(fontSize: 12)),
+            ),
+        ],
+      ),
+    );
   }
 }

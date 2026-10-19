@@ -102,19 +102,12 @@ class OpenAiResponsesProvider(
     override suspend fun generate(request: GenerateRequest): Result<GenerateResult> =
         withContext(Dispatchers.IO) {
             check(loaded) { "先 load 再 generate（provider 生命周期）" }
-            // ★ 多模态（2026-10-19）：Responses 轨暂未接通图片 —— 显式失败，不静默丢图。
-            if (request.images.isNotEmpty()) {
-                return@withContext Result.failure(
-                    UnsupportedOperationException(
-                        "当前 Responses 后端暂不支持读图（已接通 OpenAI 兼容轨）；" +
-                            "请换用 OpenAI 兼容提供商，或移除图片后重试。",
-                    ),
-                )
-            }
             runCatching {
+                // ★ 多模态（2026-10-19）：图片在 buildBody 里被校验并装进 `input[]`
+                //   —— 校验发生在**动网络之前** ⇒ 坏图是 failure，不是 400 之后的谜语。
                 val resp = HttpJson.postText(
                     "$baseUrl/v1/responses",
-                    buildBody(request, stream = false).toString(),
+                    buildBody(request, stream = false, images = request.images).toString(),
                     headers = authHeaders(),
                     timeout = requestTimeout,
                 )
@@ -124,9 +117,9 @@ class OpenAiResponsesProvider(
 
     override fun generateStream(request: GenerateRequest): Flow<StreamChunk> = flow {
         check(loaded) { "先 load 再 generateStream（provider 生命周期）" }
-        if (request.images.isNotEmpty()) {
-            error("当前 Responses 后端暂不支持读图（已接通 OpenAI 兼容轨）；请换用 OpenAI 兼容提供商")
-        }
+        // ★ 多模态（2026-10-19）：**不再抛**。图片与文本同一条请求发出去；
+        //   data URL 的校验在 buildBody 里（流开始之前）⇒ 坏图在这里就失败，
+        //   不会出现"流已经开了一半才发现图坏了"。
         // ★ 原生调用分片（ADR-031 step 2）：按 `item_id` 归并，`output_item.done` **权威**
         val toolCalls = ResponsesToolCalls()
         var terminalEmitted = false
@@ -148,7 +141,7 @@ class OpenAiResponsesProvider(
 
         HttpJson.postSse(
             url = "$baseUrl/v1/responses",
-            body = buildBody(request, stream = true).toString(),
+            body = buildBody(request, stream = true, images = request.images).toString(),
             headers = authHeaders(),
             timeout = Duration.ofMinutes(5),
         ).collect { event ->
@@ -213,7 +206,11 @@ class OpenAiResponsesProvider(
 
     // ------------------------------------------------------ 请求体
 
-    private fun buildBody(request: GenerateRequest, stream: Boolean): JsonObject =
+    private fun buildBody(
+        request: GenerateRequest,
+        stream: Boolean,
+        images: List<String> = emptyList(),
+    ): JsonObject =
         JsonObject().apply {
             addProperty("model", modelName)
 
@@ -273,6 +270,47 @@ class OpenAiResponsesProvider(
                         )
                         else -> add(messageItem("user", m.content))
                     }
+                }
+
+                // ★ 多模态（2026-10-19）：图片作为**独立一条 `type:"message"` item 追加在 `input[]` 末尾**。
+                //
+                //   ## 与 Chat Completions 最要命的一处形状差异
+                //
+                //   Responses 的 message item **`content` 必须是数组**，且块类型是
+                //   **`input_text` / `input_image`**（不是 Chat 的 `text` / `image_url`）。
+                //   把 Chat 的形状搬过来（`"content":"…"` 字符串）会被判非法 ——
+                //   这与 `input` vs `messages`、`instructions` vs `system` 是同一类坑。
+                //
+                //   ## `image_url` 是**整个 data URL 原样**
+                //
+                //   Responses 的 `input_image.image_url` 接受 data URL（与 Chat 的
+                //   `image_url.url` 同形），所以这里**不拆** —— 但仍然先过 [DataUrl.parse]
+                //   做**白名单 + 上限**校验：不拆 ≠ 不校验，坏图必须在发请求之前失败。
+                //   ⚠️ 这里刻意**不用** `Parsed.base64`：原样回填 data URL 才是本协议要的形状。
+                //
+                //   ## 空列表 = 这段不执行
+                //
+                //   ⇒ 纯文本请求体与改动前**逐字节相同**（`MultimodalTracksTest` 用整串金标准钉住）。
+                if (images.isNotEmpty()) {
+                    add(JsonObject().apply {
+                        addProperty("type", "message")
+                        addProperty("role", "user")
+                        add("content", JsonArray().apply {
+                            add(JsonObject().apply {
+                                addProperty("type", "input_text")
+                                addProperty("text", IMAGE_LEAD_IN)
+                            })
+                            images.forEach { url ->
+                                // 任一张坏 ⇒ 抛 IllegalArgumentException ⇒ generate() 返回 failure（带原因）。
+                                // **绝不跳过坏的那张继续发** —— 那就是"静默丢图"。
+                                DataUrl.parse(url)
+                                add(JsonObject().apply {
+                                    addProperty("type", "input_image")
+                                    addProperty("image_url", url)
+                                })
+                            }
+                        })
+                    })
                 }
             })
 
@@ -365,5 +403,18 @@ class OpenAiResponsesProvider(
 
     private object JsonHolder {
         fun parse(s: String) = com.google.gson.JsonParser.parseString(s).asJsonObject
+    }
+
+    companion object {
+        /**
+         * 图片那条 message item 的 `content[0].text`（2026-10-19 多模态）。
+         *
+         * **为什么是常量而不是内联字符串**：它**真的会出现在 wire 上** ——
+         * 改了它，带图的请求体就变了（`MultimodalTracksTest` 用整串金标准钉住）。
+         *
+         * `content` 里不能只有 `input_image` 块（问句得说在哪），所以这段文字是
+         * **让请求合法的那一半**。与另两轨同义（三轨对模型说的是同一句话）。
+         */
+        const val IMAGE_LEAD_IN = "（用户附上了下面的图片，请结合图片内容作答）"
     }
 }
