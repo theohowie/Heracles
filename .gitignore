@@ -1,0 +1,40 @@
+# Gradle / Kotlin
+.gradle/
+build/
+!gradle/wrapper/gradle-wrapper.jar
+
+# IDE
+.idea/
+*.iml
+.kotlin/
+
+# 开发脚手架：PC 侧设备脚本、CLI 探针、Android 兼容性探针、Flutter 模板说明
+# 都是开发/取证用的，不属于产品主体，不随仓库发布。
+staging/
+cli/
+android-probe/
+app/README.md
+
+# 本地环境
+local.properties
+*.log
+
+# 端到端演示的工作区（运行产物）
+sandbox-demo/
+
+sandbox-local/
+app/build/
+app/.dart_tool/
+app/android/.gradle/
+app/android/local.properties
+
+# AgentTeams 内部协调状态（会话/邮箱/计划）—— 不属于仓库产物
+.agent-teams/
+
+# ===== 本地私有材料：只留在本机，**不随仓库发布** =====
+# 设计/实测/决策文档、工作留痕、开发代理规范、早期的 PC 侧测量脚本
+# 都属于"自己看的"东西；仓库对外只保留可运行的代码与运行说明。
+docs/
+WORKLOG.md
+AGENTS.md
+phone/

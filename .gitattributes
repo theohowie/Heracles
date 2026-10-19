@@ -1,0 +1,22 @@
+# 统一换行符 —— 防止 Windows 的 core.autocrlf 破坏在 Linux/Android 上执行的文件
+#
+# 背景：默认设置会把检出的文本文件写成 CRLF。对 .sh 脚本（要推到 Android 执行）
+# 和 .kts / .kt 源码都可能出问题。这里显式规定每个类型的行尾。
+
+* text=auto eol=lf
+
+# Windows 原生脚本必须 CRLF
+*.ps1   text eol=crlf
+*.bat   text eol=crlf
+*.cmd   text eol=crlf
+
+# 要在 Linux / Android / Termux 上执行的脚本必须 LF（否则 shebang 后带 \r 会执行失败）
+*.sh    text eol=lf
+
+# 二进制与产物不做转换
+*.jar   binary
+*.png   binary
+*.jpg   binary
+*.gguf  binary
+*.zip   binary
+*.tar.gz binary
