@@ -1009,4 +1009,109 @@ class NativeToolFlowTest {
         assertEquals(ToolState.failed, turn.toolState)
         assertTrue(turn.verdict.contains("工具失败"), "verdict 应含「工具失败」：${turn.verdict}")
     }
+
+    // ============================================ 14. 工作区内修改档的「越界才问」（2026-10-19）
+
+    @Test
+    @DisplayName("★★ 工作区内修改档：工作区内的写**不弹窗**直接执行")
+    fun workspaceAutoInsideDoesNotAsk() {
+        val tool = RecordingTool(writeSpec, ToolOutcome.Success("已写入"))
+        val call = NativeToolCall("c_in", "write_file", """{"path":"src/App.kt","content":"x"}""")
+        val provider = providerOf(
+            ScriptTurn("", FinishReason.TOOL_CALLS, listOf(call)),
+            ScriptTurn("好", FinishReason.STOP),
+        )
+        val approvals = mutableListOf<AgentEvent.ApprovalRequest>()
+
+        runBlocking {
+            provider.load(ProviderConfig()).getOrThrow()
+            AgentLoop(
+                provider, NoopFs(), listOf(tool),
+                maxTurns = 3, nativeToolsEnabled = true,
+                approvalMode = ApprovalMode.WORKSPACE_AUTO,
+                onEvent = { e -> if (e is AgentEvent.ApprovalRequest) approvals += e },
+            ).run("写文件")
+        }
+
+        assertEquals(1, tool.executeCount, "工作区内的写应当直接执行")
+        assertTrue(approvals.isEmpty(), "工作区内不该弹窗（弹多了用户会条件反射点允许）：$approvals")
+    }
+
+    @Test
+    @DisplayName("★★ 工作区内修改档：**越界**路径要问；拒绝 ⇒ 一次都不执行")
+    fun workspaceAutoOutsideAsksAndDenyBlocks() {
+        val tool = RecordingTool(writeSpec, ToolOutcome.Success("已写入"))
+        val call = NativeToolCall(
+            "c_out", "write_file",
+            """{"path":"../outside.txt","content":"x"}""",
+        )
+        val provider = providerOf(
+            ScriptTurn("", FinishReason.TOOL_CALLS, listOf(call)),
+            ScriptTurn("好", FinishReason.STOP),
+        )
+        val queue = AgentLoop.ApprovalQueue()
+        val approvals = mutableListOf<AgentEvent.ApprovalRequest>()
+
+        runBlocking {
+            provider.load(ProviderConfig()).getOrThrow()
+            val responder = launch {
+                delay(200)
+                queue.reply(AgentLoop.ApprovalDecision.DENY)
+            }
+            AgentLoop(
+                provider, NoopFs(), listOf(tool),
+                maxTurns = 3, nativeToolsEnabled = true,
+                approvalMode = ApprovalMode.WORKSPACE_AUTO,
+                approvalReplies = queue,
+                onEvent = { e -> if (e is AgentEvent.ApprovalRequest) approvals += e },
+            ).run("写文件")
+            responder.join()
+        }
+
+        assertEquals(1, approvals.size, "越界必须问一次：$approvals")
+        assertTrue(
+            approvals.single().reason.contains("工作区之外"),
+            "理由要说清是越界：${approvals.single().reason}",
+        )
+        assertEquals(0, tool.executeCount, "拒绝后一次都不能执行")
+        val toolMsg = provider.requests[1].messages!!.single { it.role == ChatRole.TOOL }
+        assertTrue(toolMsg.content.contains("未批准"), "模型必须收到显式失败：${toolMsg.content}")
+    }
+
+    @Test
+    @DisplayName("★★ 并行批次里的越界同样要问（否则一次多发几个调用就能绕过）")
+    fun workspaceAutoOutsideInBatchAsks() {
+        val tool = RecordingTool(writeSpec, ToolOutcome.Success("已写入"))
+        val inside = NativeToolCall("c_1", "write_file", """{"path":"a.txt","content":"a"}""")
+        val outside = NativeToolCall("c_2", "write_file", """{"path":"/etc/passwd","content":"x"}""")
+        val provider = providerOf(
+            ScriptTurn("", FinishReason.TOOL_CALLS, listOf(inside, outside)),
+            ScriptTurn("好", FinishReason.STOP),
+        )
+        val queue = AgentLoop.ApprovalQueue()
+        val approvals = mutableListOf<AgentEvent.ApprovalRequest>()
+
+        runBlocking {
+            provider.load(ProviderConfig()).getOrThrow()
+            val responder = launch {
+                delay(200)
+                queue.reply(AgentLoop.ApprovalDecision.DENY)
+            }
+            AgentLoop(
+                provider, NoopFs(), listOf(tool),
+                maxTurns = 3, nativeToolsEnabled = true,
+                approvalMode = ApprovalMode.WORKSPACE_AUTO,
+                approvalReplies = queue,
+                onEvent = { e -> if (e is AgentEvent.ApprovalRequest) approvals += e },
+            ).run("写两个文件")
+            responder.join()
+        }
+
+        assertEquals(1, approvals.size, "批次里只有越界那个该问：$approvals")
+        assertTrue(
+            approvals.single().reason.contains("工作区之外"),
+            "理由要说清越界：${approvals.single().reason}",
+        )
+        assertEquals(1, tool.executeCount, "工作区内那个照常执行，越界那个被拒")
+    }
 }

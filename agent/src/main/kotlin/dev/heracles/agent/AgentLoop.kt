@@ -1617,15 +1617,30 @@ class AgentLoop(
                     toolCallCount++
 
                     val toolStartedAt = System.nanoTime()
-                    // ★ 手动审批档位（2026-10-19）：有副作用的工具**执行前**先问用户。
-                    //   拒绝 ⇒ 不执行，模型收到显式失败（而不是"静默没做"）。
-                    val manualTool = approvalMode == ApprovalMode.MANUAL && call.tool in mutatingTools
+                    // ★ 审批判据（2026-10-19）：
+                    //   · MANUAL 档：**所有**有副作用的工具都问
+                    //   · WORKSPACE_AUTO 档：**只有越界**（路径跑到工作区外）才问 ——
+                    //     这正是设置里那句「工作区内的改动自动执行，越界仍会询问」的后半句。
+                    //     在此之前它只是文案：越界根本没有判定。
+                    val outside = if (call.tool in mutatingTools) {
+                        WorkspaceBoundary.outOfWorkspaceArgs(call.args)
+                    } else {
+                        emptyList()
+                    }
+                    val needAsk = when (approvalMode) {
+                        ApprovalMode.MANUAL -> call.tool in mutatingTools
+                        ApprovalMode.WORKSPACE_AUTO -> outside.isNotEmpty()
+                        ApprovalMode.FULL_ACCESS -> false
+                    }
                     var manualDenied = false
-                    if (manualTool) {
-                        manualDenied = approve(
-                            turnIndex, call,
-                            "当前权限档位「手动审批」：${call.tool} 会修改文件或设备，需要你确认",
-                        ) != ApprovalResult.ALLOWED
+                    if (needAsk) {
+                        val reason = if (approvalMode == ApprovalMode.MANUAL) {
+                            "当前权限档位「手动审批」：${call.tool} 会修改文件或设备，需要你确认"
+                        } else {
+                            "这次 ${call.tool} 要访问**工作区之外**的位置（${outside.joinToString("；")}），" +
+                                "当前档位「工作区内修改」只在工作区内自动放行，需要你确认"
+                        }
+                        manualDenied = approve(turnIndex, call, reason) != ApprovalResult.ALLOWED
                     }
                     // ★ update_plan 是**循环状态工具**（2026-10-19）：它的"执行"就是改 plan + 发事件，
                     //   没有文件/网络副作用。工具实例拿不到 AgentLoop 的 plan，所以在这里拦截。
@@ -1818,15 +1833,29 @@ class AgentLoop(
                             )
                         }
                         val extraStartedAt = System.nanoTime()
-                        // ★ 手动审批档位（2026-10-19）：并行批次同样要**执行前**问
-                        val extraManual =
-                            approvalMode == ApprovalMode.MANUAL && extraCall.tool in mutatingTools
+                        // ★ 审批判据（2026-10-19）：与单调用路径**同一条**规则，
+                        //   否则"模型一次发 4 个调用"就能绕过越界询问。
+                        val extraOutside = if (extraCall.tool in mutatingTools) {
+                            WorkspaceBoundary.outOfWorkspaceArgs(extraCall.args)
+                        } else {
+                            emptyList()
+                        }
+                        val extraNeedAsk = when (approvalMode) {
+                            ApprovalMode.MANUAL -> extraCall.tool in mutatingTools
+                            ApprovalMode.WORKSPACE_AUTO -> extraOutside.isNotEmpty()
+                            ApprovalMode.FULL_ACCESS -> false
+                        }
                         var extraManualDenied = false
-                        if (extraManual) {
-                            extraManualDenied = approve(
-                                turnIndex, extraCall,
-                                "当前权限档位「手动审批」：${extraCall.tool} 会修改文件或设备，需要你确认",
-                            ) != ApprovalResult.ALLOWED
+                        if (extraNeedAsk) {
+                            val reason = if (approvalMode == ApprovalMode.MANUAL) {
+                                "当前权限档位「手动审批」：${extraCall.tool} 会修改文件或设备，需要你确认"
+                            } else {
+                                "这次 ${extraCall.tool} 要访问**工作区之外**的位置" +
+                                    "（${extraOutside.joinToString("；")}），" +
+                                    "当前档位「工作区内修改」只在工作区内自动放行，需要你确认"
+                            }
+                            extraManualDenied = approve(turnIndex, extraCall, reason) !=
+                                ApprovalResult.ALLOWED
                         }
                         var extraOutcome = when {
                             extraManualDenied -> ToolOutcome.Failure(
