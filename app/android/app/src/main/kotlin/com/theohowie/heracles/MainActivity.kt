@@ -132,6 +132,18 @@ class MainActivity : FlutterActivity() {
     private val mainHandler = Handler(Looper.getMainLooper())
 
     /**
+     * **主通道引用**（2026-10-19，通知点击定位会话用）。
+     *
+     * Kotlin → Dart 的方向此前不存在（只有 EventChannel 的流式事件）。
+     * 这条是"用户点了完成通知，请打开对应会话"的回调通道。
+     */
+    private var commandChannel: MethodChannel? = null
+
+    /** 冷启动时 Dart 还没注册 handler ⇒ 先把请求存着，等 Dart 主动来取。 */
+    @Volatile
+    private var pendingOpenSession: Map<String, String>? = null
+
+    /**
      * 会话 `.jsonl` 的**进程内写锁**（2026-10-12，S5）。
      *
      * `SessionStore.appendMessage` 是「读全文 → 追加 → 写全文」，
@@ -160,6 +172,8 @@ class MainActivity : FlutterActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         maybeRunEncodeSelfCheck()
+        // ★ 冷启动：从完成通知点进来（Dart 还没就绪 ⇒ 先存 pending）
+        handleNotifyIntent(intent)
         // ★ 运行时请求通知权限（2026-10-19，API 33+）——
         //   不请求的话「任务完成通知」永远发不出去，且用户不知道能开。
         //   只在没授权时请求一次（系统会记住"已拒绝"；下次不重复骚扰）。
@@ -213,8 +227,16 @@ class MainActivity : FlutterActivity() {
     /**
      * 发一条"任务完成/失败"通知。**前台或未授权时静默跳过** ——
      * 用户正看着界面时再响一声是噪音；没授权就发是无效劳动。
+     *
+     * @param sessionId / @param workspacePath 用于"点通知 → 打开对应会话"（2026-10-19）；
+     *   为 null 时通知仍会发，只是点击只打开 App。
      */
-    private fun notifyChatResult(success: Boolean, text: String) {
+    private fun notifyChatResult(
+        success: Boolean,
+        text: String,
+        sessionId: String? = null,
+        workspacePath: String? = null,
+    ) {
         if (appInForeground) return
         if (checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) !=
             PackageManager.PERMISSION_GRANTED
@@ -223,8 +245,14 @@ class MainActivity : FlutterActivity() {
         val body = text.trim().replace('\n', ' ').take(80).ifEmpty {
             if (success) "任务已完成" else "任务失败"
         }
+        val openIntent = Intent(this, MainActivity::class.java).apply {
+            if (!sessionId.isNullOrBlank()) putExtra(EXTRA_NOTIFY_SESSION, sessionId)
+            if (!workspacePath.isNullOrBlank()) {
+                putExtra(EXTRA_NOTIFY_WORKSPACE, workspacePath)
+            }
+        }
         val open = PendingIntent.getActivity(
-            this, 1, Intent(this, MainActivity::class.java),
+            this, 1, openIntent,
             PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT,
         )
         val n = Notification.Builder(this, CHAT_CHANNEL_ID)
@@ -240,6 +268,35 @@ class MainActivity : FlutterActivity() {
     }
 
     /**
+     * 读出"通知点击带过来的会话"，并尝试立刻通知 Dart。
+     *
+     * 冷启动时 Dart 可能还没注册 handler ⇒ 先存 [pendingOpenSession]，
+     * Dart 启动后会调 `consumePendingOpen` 主动取走。
+     */
+    private fun handleNotifyIntent(intent: Intent?) {
+        val sid = intent?.getStringExtra(EXTRA_NOTIFY_SESSION) ?: return
+        intent.removeExtra(EXTRA_NOTIFY_SESSION)
+        val ws = intent.getStringExtra(EXTRA_NOTIFY_WORKSPACE).orEmpty()
+        intent.removeExtra(EXTRA_NOTIFY_WORKSPACE)
+        val payload = mapOf("sessionId" to sid, "workspacePath" to ws)
+        pendingOpenSession = payload
+        android.util.Log.i(
+            "HERC-OPEN",
+            "notify intent: sid=$sid ws=$ws channel=${commandChannel != null}",
+        )
+        val ch = commandChannel
+        if (ch != null) {
+            try {
+                ch.invokeMethod("openSession", payload)
+                pendingOpenSession = null
+            } catch (_: Exception) {
+                // Dart 还没就绪 —— 留在 pending，等 Dart 来取
+                android.util.Log.i("HERC-OPEN", "invoke failed, kept pending")
+            }
+        }
+    }
+
+    /**
      * `am start` 打到**已经在前台**的实例时走这里，**不进** [onCreate]。
      *
      * 漏了它就会出现"命令发出去了、什么都没发生" —— 2026-10-17 真机撞到
@@ -251,6 +308,8 @@ class MainActivity : FlutterActivity() {
         // 让下面的 `intent` 属性读到**这一次**的 extra（否则还是启动时那个）
         setIntent(intent)
         maybeRunEncodeSelfCheck()
+        // ★ 热启动：直接通知 Dart（它的 handler 已注册）
+        handleNotifyIntent(intent)
     }
 
     private fun maybeRunEncodeSelfCheck() {
@@ -289,7 +348,7 @@ class MainActivity : FlutterActivity() {
         MethodChannel(
             flutterEngine.dartExecutor.binaryMessenger,
             CHANNEL,
-        ).setMethodCallHandler { call, result ->
+        ).also { commandChannel = it }.setMethodCallHandler { call, result ->
             when (call.method) {
                 // ---- 工作区 ----
                 "pickWorkspace" -> handlePickWorkspace(result)
@@ -345,6 +404,12 @@ class MainActivity : FlutterActivity() {
                     val decision = call.argument<String>("decision") ?: "deny"
                     bridge.replyApproval(decision)
                     result.success(true)
+                }
+                // ★ 冷启动时"通知点击打开的会话"（2026-10-19）
+                "consumePendingOpen" -> {
+                    val p = pendingOpenSession
+                    pendingOpenSession = null
+                    result.success(p)
                 }
                 "listDir" -> handleListDir(call, result)
                 "pickFiles" -> handlePickFiles(call, result)
@@ -804,6 +869,8 @@ class MainActivity : FlutterActivity() {
         //   任务停在半路、完成通知永不触发（真机实测，见 AgentChatService 注释）。
         //   在 Activity 仍在前台时启动（FGS 启动限制要求）。
         AgentChatService.start(this)
+        // ★ 失败通知也要能定位会话 —— sid 在 try 里才创建，所以提一个槽位供 catch 用
+        var notifySid: String? = null
         runJob = scope.launch {
             try {
                 // ★ SAF 或 POSIX 由 treeUri 决定 —— 会话记录必须走同一个存储
@@ -813,6 +880,7 @@ class MainActivity : FlutterActivity() {
                     ?: withContext(Dispatchers.IO) {
                         store.createSession(storage, deriveTitle(request, attachments))
                     }
+                notifySid = sid
 
                 // ★ 用户消息**先落盘**（2026-10-10 严重 bug 修复）
                 //
@@ -976,6 +1044,8 @@ class MainActivity : FlutterActivity() {
                 notifyChatResult(
                     success = true,
                     text = runResult.finalText.ifBlank { runResult.stopReason },
+                    sessionId = sid,
+                    workspacePath = workspacePath,
                 )
             } catch (e: kotlinx.coroutines.CancellationException) {
                 // ★ 用户点了停止（2026-10-13）—— 这是**正常路径**，不是错误。
@@ -1002,6 +1072,8 @@ class MainActivity : FlutterActivity() {
                 notifyChatResult(
                     success = false,
                     text = "运行失败：${e.message ?: e.javaClass.simpleName}",
+                    sessionId = notifySid,
+                    workspacePath = workspacePath,
                 )
             } finally {
                 // ★ 前台服务与 run 同生命周期（2026-10-19）
@@ -1455,6 +1527,10 @@ class MainActivity : FlutterActivity() {
         /** 聊天完成通知（2026-10-19）：通道 + 通知 id（固定 id ⇒ 新任务覆盖旧提醒）。 */
         private const val CHAT_CHANNEL_ID = "heracles_chat_done"
         private const val CHAT_NOTIFY_ID = 2001
+
+        /** 完成通知点击时要打开的会话（2026-10-19） */
+        private const val EXTRA_NOTIFY_SESSION = "heracles_notify_session"
+        private const val EXTRA_NOTIFY_WORKSPACE = "heracles_notify_workspace"
 
         /** 运行时通知权限的 requestCode（与权限名一一对应即可） */
         private const val REQ_POST_NOTIFICATIONS = 1001

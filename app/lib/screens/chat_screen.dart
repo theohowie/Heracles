@@ -184,6 +184,7 @@ class _ChatScreenState extends State<ChatScreen> {
   /// **必须取消**（见 [dispose] 与 [_startLive]）—— 不取消的话
   /// 平台侧会一直持有 sink，每次进页面都多一条订阅。
   StreamSubscription<AgentEvent>? _eventSub;
+  StreamSubscription<Map<String, String>>? _openSessionSub;
 
   /// 当前「正在生成…」占位行的 id（同一轮复用，不重复插入）
   String? _progressId;
@@ -364,8 +365,63 @@ class _ChatScreenState extends State<ChatScreen> {
     super.initState();
     // ★ 监听手动滚动 —— 用户上滑即暂停自动滚动（`docs/25` §5.3 第 3 条）
     _scroll.addListener(_onScroll);
+    // ★ 通知点击定位会话（2026-10-19）：热启动走广播流，冷启动走 pending 兜底
+    _openSessionSub = AgentBridge.openSessionRequests.listen(_onOpenSessionRequest);
     _restoreView();
-    _reload();
+    unawaited(_reload().then((_) => _consumePendingOpenSession()));
+  }
+
+  /// **完成通知点击 → 打开对应会话**（2026-10-19）。
+  ///
+  /// 找不到工作区（已被移除/换了路径）时**安静忽略** —— 通知是"顺手一看"，
+  /// 不该弹错误打断用户。工作区还没加载完时先存起来，`_reload` 后补处理。
+  Map<String, String>? _pendingOpenRequest;
+
+  Future<void> _onOpenSessionRequest(Map<String, String> req) async {
+    final sid = req['sessionId'] ?? '';
+    // ignore: avoid_print
+    print('HERC-OPEN dart request sid=$sid ws=${req['workspacePath']} '
+        'workspaces=${_workspaces.length}');
+    if (sid.isEmpty) return;
+    if (_workspaces.isEmpty) {
+      _pendingOpenRequest = req;
+      return;
+    }
+    final wsPath = req['workspacePath'] ?? '';
+    String? wsId;
+    for (final w in _workspaces) {
+      if (w.path == wsPath) {
+        wsId = w.id;
+        break;
+      }
+    }
+    // 路径对不上（/sdcard vs /storage/emulated/0 这类别名）⇒ 按**会话 id** 反查。
+    // 会话 id 全局唯一，比路径可靠。
+    if (wsId == null) {
+      for (final w in _workspaces) {
+        if (w.sessions.any((s) => s.id == sid)) {
+          wsId = w.id;
+          break;
+        }
+      }
+    }
+    // 最后兜底：用当前工作区（用户至少能看到那个会话）
+    wsId ??= _activeWorkspace?.id;
+    if (wsId == null) return;
+    await _selectSession(wsId, sid);
+  }
+
+  Future<void> _consumePendingOpenSession() async {
+    final p = await _bridge.consumePendingOpenSession();
+    if (p != null && mounted) {
+      await _onOpenSessionRequest(p);
+      return;
+    }
+    final queued = _pendingOpenRequest;
+    if (queued != null && mounted) {
+      _pendingOpenRequest = null;
+      await _onOpenSessionRequest(queued);
+    }
   }
 
   /// 恢复视图选项。
@@ -2809,6 +2865,8 @@ class _ChatScreenState extends State<ChatScreen> {
     //   且事件会打到一个已卸载的 State 上。
     _eventSub?.cancel();
     _eventSub = null;
+    _openSessionSub?.cancel();
+    _openSessionSub = null;
     // ★★ 16ms 帧定时器**必须**在这里取消 ★★
     //
     // `Timer.periodic` 不受 widget 生命周期管理：不取消的话，离开页面后

@@ -26,6 +26,10 @@ import '../models/workspace.dart';
 ///    └── 会话 ⋯重命名 / 🗑删除 / ⭐收藏
 /// ```
 class AgentBridge {
+  AgentBridge() {
+    _installOpenSessionHandler();
+  }
+
   static const _channel = MethodChannel('heracles/command');
 
   /// ★ 事件流通道（2026-10-10 流式）—— 必须与 Kotlin 侧
@@ -80,6 +84,55 @@ class AgentBridge {
 
   static Map<String, dynamic> _castMap(dynamic e) =>
       (e as Map<dynamic, dynamic>).cast<String, dynamic>();
+
+  // ------------------------------------------------------------ 通知点击定位会话
+
+  /// **Kotlin → Dart：用户点了完成通知，要求打开对应会话**（2026-10-19）。
+  ///
+  /// 此前只有 EventChannel 的"事件流"方向；这条是**命令回调**方向。
+  /// 广播流 ⇒ 任何时候订阅都不会错过（页面重建也不丢；冷启动的请求由
+  /// [consumePendingOpenSession] 兜底）。
+  static final StreamController<Map<String, String>> _openSessionCtl =
+      StreamController<Map<String, String>>.broadcast();
+  static bool _openHandlerInstalled = false;
+
+  static Stream<Map<String, String>> get openSessionRequests =>
+      _openSessionCtl.stream;
+
+  void _installOpenSessionHandler() {
+    if (_openHandlerInstalled) return;
+    _openHandlerInstalled = true;
+    _channel.setMethodCallHandler((call) async {
+      if (call.method == 'openSession') {
+        final raw = call.arguments;
+        final args = raw is Map ? raw.cast<dynamic, dynamic>() : const {};
+        _openSessionCtl.add({
+          'sessionId': (args['sessionId'] as String?) ?? '',
+          'workspacePath': (args['workspacePath'] as String?) ?? '',
+        });
+      }
+      return null;
+    });
+  }
+
+  /// **冷启动兜底**：Kotlin 在 Dart 还没就绪时先把"要打开的会话"存着。
+  /// 返回 null = 没有待处理请求（最常见）。
+  Future<Map<String, String>?> consumePendingOpenSession() async {
+    try {
+      final m = await _channel.invokeMapMethod<String, dynamic>('consumePendingOpen');
+      if (m == null) return null;
+      final sid = (m['sessionId'] as String?) ?? '';
+      if (sid.isEmpty) return null;
+      return {
+        'sessionId': sid,
+        'workspacePath': (m['workspacePath'] as String?) ?? '',
+      };
+    } on MissingPluginException {
+      return null;
+    } on PlatformException {
+      return null;
+    }
+  }
 
   // ------------------------------------------------------------ 用量与上下文
 
