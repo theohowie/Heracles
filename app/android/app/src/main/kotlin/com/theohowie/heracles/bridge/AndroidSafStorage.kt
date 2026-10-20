@@ -111,22 +111,40 @@ class AndroidSafStorage(
     /**
      * **工作区是否仍然有效**（2026-10-20）。
      *
-     * ## 为什么不能只看 `exists()`
+     * ## 为什么不能只看 `exists()` / `canWrite()` / `listFiles()`
      *
-     * `DocumentFile.fromTreeUri` 对"已被删掉的目录"**仍返回非 null 句柄**，
-     * 且 `exists()` 也返回 true —— 它只证明"我手里有个 URI 对象"，不证明那个位置还在。
-     * 真机实测（工作区目录被外部删掉后）：
-     *   `mkdir '.heracles' under 'null' -> created=null canWrite=false children=0`
-     * 句柄的 `name` 都成了 null，`createDirectory` 静默返回 null。
+     * 真机实测（工作区目录被外部删掉后，逐条否掉了我原先的三种判据）：
+     * · `DocumentFile.fromTreeUri` **仍返回非 null 句柄**
+     * · `exists()` 返回 **true**
+     * · `canWrite()` 返回 **true**（provider 只查权限位，不查磁盘）
+     * · `listFiles()` **不抛异常**（返回空列表）
      *
-     * ⇒ 用**能不能真干活**判活：`canWrite()` 为 false、或 `listFiles()` 抛异常 ⇒ 失效。
+     * 于是 `isRootAlive()` 判"活着" ⇒ 跳过失效提示 ⇒ 一直到
+     * `SessionStore.appendMessage` 写盘时才炸，用户看到的是
+     * 「无法保存会话记录到 /test/test（无法创建目录：.heracles/sessions）」
+     * —— **说得太晚，也太技术化**。
+     *
+     * ## 唯一可靠的判据：真的建一个目录试试
+     *
+     * `createDirectory` 会真正落到 provider 那边去查 document 是否存在。
+     * 目录不在了 ⇒ 返回 null（不抛异常，所以必须判返回值）。
+     * 建出来立刻删掉，不留痕迹。
      */
-    private fun isRootAlive(): Boolean = runCatching {
-        val r = root() ?: return@runCatching false
-        if (!r.canWrite()) return@runCatching false
-        r.listFiles() // 句柄失效时会抛 IllegalArgumentException / FileNotFoundException
-        true
-    }.getOrDefault(false)
+    private fun isRootAlive(): Boolean {
+        val r = root() ?: return false
+        if (!r.canWrite()) return false
+        // ★ 三层都不可信，必须**回读验证**（2026-10-20 真机实测）：
+        //   · `exists()` / `canWrite()` 返回 true（provider 只查权限位）
+        //   · `listFiles()` 不抛异常（返回空列表）
+        //   · **`createDirectory()` 甚至返回非 null** —— 但磁盘上什么都没有！
+        //     （真机：目录删掉后 App"建"了 probe，`/sdcard/test` 里却依然是空的）
+        // ⇒ 唯一可信的判据：建完之后**再查一次它是否真的在**。
+        val probe = runCatching { r.createDirectory(".heracles_probe") }.getOrNull() ?: return false
+        // 回读：能按名字找回来才算真建出来了
+        val reallyThere = runCatching { findChild(r, ".heracles_probe") != null }.getOrDefault(false)
+        runCatching { probe.delete() }
+        return reallyThere
+    }
 
     /**
      * **工作区失效时的用户提示**（2026-10-20）。

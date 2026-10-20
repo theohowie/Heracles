@@ -426,26 +426,54 @@ class SessionStore(private val context: Context) {
         try {
             storage.writeText(path, existing + line)
         } catch (e: Throwable) {
-            // ★ 不静默 —— 丢消息是严重问题，必须让用户知道
-            //
-            // ★★ 但**不能把内部细节直接丢给用户**（2026-10-20 真机截图修）★★
-            //
-            // 原来这里是 `storage.locationLabel + "/" + path`，而 SAF 的 locationLabel
-            // 是**完整的 tree URI** ⇒ 用户看到的是
-            //   `无法写会话记录：content://com.android.externalstorage.documents/tree/primary%3Atest%2Ftest/.heracles/sessions.json（无法创建目录：.heracles）`
-            // 一屏百分号编码 + 一个内部目录名，**用户既看不懂也不知道该做什么**。
-            //
-            // 现在：位置用 [friendlyLabel]（`/test/test` 这种人话），
-            // 并在末尾**给出可执行的动作**（"检查文件夹是否还在/是否可写"）——
-            // 这类失败最常见的原因就是用户在文件管理器里把工作区目录删了或改名了。
-            val where = (storage as? AndroidSafStorage)?.friendlyLabel ?: storage.locationLabel
-            throw IllegalStateException(
-                "无法保存会话记录到「$where」。\n" +
-                    "常见原因：这个文件夹被删除/改名了，或者 App 失去了它的访问权限。\n" +
-                    "请在侧边栏重新选择一次工作区（或重建该文件夹）后重试。\n" +
-                    "技术细节：$path（${e.message}）"
-            )
+            throw sessionWriteFailure(storage, path, e)
         }
+    }
+
+    /**
+     * **会话写盘失败时的统一文案**（2026-10-20）。
+     *
+     * ## 为什么抽成一个函数
+     *
+     * 这个类里有**两处**写会话记录的出口（`appendMessage` 写 `.jsonl`、
+     * `writeSessions` 写 `sessions.json`）。2026-10-20 第一次只改了前者，
+     * 真机上来的仍是后者那句带 `content://` 的旧文案 —— **同一个错误提示两个来源**，
+     * 改一处漏一处。抽出来之后只有一份真相。
+     *
+     * ## 文案口径（用户要求）
+     *
+     * 用户原话：
+     * > 「这个地方怎么能报错呢？而且报错的信息为什么是要用户去解决呢？」
+     *
+     * 所以：**位置用人话**（`/test/test` 而不是 `content://…%2F…`）、
+     * **说清可能原因**、**给出可执行动作**；技术细节放到最后一行（排障用，不喧宾夺主）。
+     */
+    private fun sessionWriteFailure(
+        storage: WorkspaceStorage,
+        path: String,
+        e: Throwable,
+    ): IllegalStateException {
+        // SAF：**写不进去 = 工作区失效**（2026-10-20 最终定案）
+        //
+        // 为什么不在写之前"预探测"工作区有效性 —— 真机实测证明 SAF 的探测**全部不可信**：
+        //   · `exists()` / `canWrite()` 返回 true（只查权限位）
+        //   · `listFiles()` 不抛异常（返回空列表）
+        //   · `createDirectory()` 甚至返回非 null，**但磁盘上什么都没建**（回读也查不到）
+        // ⇒ 唯一可信的信号就是"真写一次失败了"。在这里判定，既准确又不会误报。
+        //
+        // 文案按用户要求：
+        // 「只是说这个文件夹没有了，随之带着这个工作区也失效了，此时输出：
+        //   xxx 工作区已失效，请检查工作区所指向文件夹是否存在。」
+        val saf = storage as? AndroidSafStorage
+        if (saf != null) {
+            return IllegalStateException(saf.workspaceInvalidMessage())
+        }
+        val where = storage.locationLabel
+        return IllegalStateException(
+            "无法保存会话记录到「$where」。\n" +
+                "请检查工作区所指向的文件夹是否可写，然后在侧边栏重新选择一次工作区。\n" +
+                "技术细节：$path（${e.message}）"
+        )
     }
 
     /**
@@ -809,10 +837,9 @@ class SessionStore(private val context: Context) {
         try {
             storage.writeText(KEY, arr.toString())
         } catch (e: Throwable) {
-            throw IllegalStateException(
-                "无法写会话记录：" + storage.locationLabel + "/" + KEY +
-                    "（" + e.message + "）"
-            )
+            // ★ 与 `appendMessage` 共用同一份文案（2026-10-20）——
+            //   这里原来自己拼了一句带 `content://` URI 的旧文案，改一处漏一处。
+            throw sessionWriteFailure(storage, KEY, e)
         }
     }
 }
