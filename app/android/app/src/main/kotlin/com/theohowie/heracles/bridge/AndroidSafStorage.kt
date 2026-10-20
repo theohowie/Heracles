@@ -230,9 +230,39 @@ class AndroidSafStorage(
                 ?: throw IllegalStateException("无法创建目录：$parentRel")
 
             // 已存在则先删（DocumentFile 没有 truncate，必须删了重建）
-            parent.findFile(fileName)?.let { existing ->
+            //
+            // ⚠️ 必须走 `findChild`（含 listFiles 降级），**不能**裸调 `parent.findFile`（2026-10-20 真机修）：
+            //
+            // 真机现象（e35e48c6，SAF 工作区 `primary:test/test`，被「停止任务」中断的那次 run）：
+            //   `无法保存会话记录：… 文件系统改写了文件名：请求 s1792464530361.jsonl，
+            //    实际 s1792464530361 (1).jsonl。该位置不支持原样命名，请换一个文件夹。`
+            //
+            // 根因不是"这个目录不支持原样命名"，而是：**文件明明已经存在**
+            // （同一 run 的 `step` 行刚写进去过），但 `DocumentFile.findFile(name)` 返回了 null
+            // ⇒ 跳过删除 ⇒ `createFile` 撞名 ⇒ provider 自动加 ` (1)`
+            // ⇒ 下面的"名字不符"防御如实报错。
+            //
+            // `findChild` 早就有这个降级（`实测-03` 那次 33 个 `.heracles (N)` 垃圾目录
+            // 就是同一个病），但只有 `resolve`/`resolveOrCreateDir` 用了它，**写入的这条覆盖分支漏改**。
+            // 两处必须同源 —— 否则就是"读得到、写却删不掉"。
+            //
+            // ⚠️ 第二轮（同日，修完 findChild 之后）：`delete()` 本身也可能失败 ——
+            //   真机报 `无法覆盖已存在的文件`。SAF 的 `DocumentFile.delete()` 对
+            //   **某些 provider / 某些状态**会返回 false（不是抛异常）。
+            //   ⇒ 不再"删不掉就整条写失败"（那会让一次记账把整个 run 的收尾打断），
+            //     而是**降级为原地覆盖**：不删，直接 `openOutputStream(uri, "wt")` 截断重写。
+            //     若覆盖也失败，才如实报错（仍然不静默）。
+            findChild(parent, fileName)?.let { existing ->
                 if (!existing.delete()) {
-                    throw IllegalStateException("无法覆盖已存在的文件：$relativePath")
+                    // 降级：不删，直接截断重写。能覆盖就不必重建。
+                    return@withContext runCatching {
+                        writeTo(existing, bytes, relativePath, truncate = true)
+                    }.getOrElse {
+                        throw IllegalStateException(
+                            "无法覆盖已存在的文件且无法原地重写：$relativePath" +
+                                "（${it.javaClass.simpleName}: ${it.message}）"
+                        )
+                    }
                 }
             }
 
@@ -268,12 +298,27 @@ class AndroidSafStorage(
         }
 
     /** 写入并返回字节数 */
+    /**
+     * 写入并返回字节数。
+     *
+     * @param truncate `true` = 用 `"wt"` 模式**截断**后再写。
+     *
+     * ## 为什么需要这个参数（2026-10-20）
+     *
+     * `openOutputStream(uri)` 默认走 `"w"` —— 它**从开头写但不截断**。
+     * 对于"先删再建"的正常路径，新文件是空的，两者没区别；
+     * 但**降级覆盖**那条路（`delete()` 失败时原地重写）若不截断，
+     * 当新内容比旧内容短时，文件尾部会残留上一版的字节 ⇒ 会话 `.jsonl` 变成
+     * "新行 + 旧尾巴"，读回来是**坏 JSON**。这类损坏最难查（内容"看起来"写进去了）。
+     */
     private fun writeTo(
         file: DocumentFile,
         bytes: ByteArray,
         relativePath: String,
+        truncate: Boolean = false,
     ): Long {
-        context.contentResolver.openOutputStream(file.uri)?.use { out ->
+        val mode = if (truncate) "wt" else "w"
+        context.contentResolver.openOutputStream(file.uri, mode)?.use { out ->
             out.write(bytes)
             out.flush()
         } ?: throw IllegalStateException("无法写入：$relativePath")
