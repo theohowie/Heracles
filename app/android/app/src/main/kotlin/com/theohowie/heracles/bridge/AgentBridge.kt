@@ -1,4 +1,4 @@
-﻿package com.theohowie.heracles.bridge
+package com.theohowie.heracles.bridge
 
 import android.content.Context
 import dev.heracles.agent.AgentEvent
@@ -235,6 +235,25 @@ class AgentBridge(private val context: Context) {
         //   2. **POSIX** —— 应用私有目录，或已获全盘权限时。
         //
         // [WorkspaceStorage] 抽象掉这个差异，上层的工具层完全不用感知。
+        // ★★ 工作区自愈（2026-10-20）—— App 的依赖目录由 App 自己建，**不问用户** ★★
+        //
+        // ## 产品约定（用户原话）
+        //
+        // 「所有的依赖文件是 APP 自己给根目录的，包括 `.heracles`。用户随便拿一个新的、
+        //   且空的文件夹给你，你都可以直接在上面完成；或者这个文件夹里面有内容，
+        //   也可以直接接管。**这不是要报错的问题**，这个地方是 APP 自带的功能。」
+        //
+        // ## 旧行为错在哪
+        //
+        // 原来这里只有一句 `if (!storage.isWritable()) error(...)`。
+        // 于是"工作区目录被外部删掉/改名"这类**不是用户的错、也不该让用户处理**的情况，
+        // 会变成一句 `无法创建目录：.heracles` 把任务打死 —— 而 `.heracles` 是**我们自己的**内部目录。
+        //
+        // ## 现在的分层
+        //
+        // ① **能自愈的自愈**：根还活着 ⇒ 缺什么目录建什么目录 ⇒ 写个探针文件确认真的能写
+        // ② **不能自愈才说人话**：只有"这个文件夹真的没了/没权限了"才报错，
+        //    且文案是**可执行动作**（重新选工作区），不是甩一个 `content://` URI 出去
         val storage: WorkspaceStorage = if (treeUri.isNotBlank()) {
             AndroidSafStorage(
                 context = context,
@@ -247,13 +266,16 @@ class AgentBridge(private val context: Context) {
             PosixStorage(dir.toPath())
         }
 
-        // 写不了就**当场报错** —— 让用户发消息之前就知道，
-        // 而不是跑完一轮才看到"写入失败"
-        if (!storage.isWritable()) {
-            error(
-                "工作区不可写：${storage.locationLabel}\n" +
-                    "请换一个文件夹，或在系统设置里授予文件访问权限。"
-            )
+        // `:workspace` 自己的依赖目录（会话/计划/快照都在 `.heracles` 下）。
+        // 列在这里 ⇒ **每次 run 前自动补齐**，用户永远不需要手动创建它们。
+        run {
+            val problem = when (storage) {
+                is AndroidSafStorage -> storage.ensureWorkspace(
+                    listOf(".heracles", ".heracles/sessions", ".heracles/plans"),
+                )
+                else -> null // POSIX：`writeText` 自带 mkdirs，不需要预建
+            }
+            if (problem != null) error(problem)
         }
 
         val fs = StorageBackedWorkspaceFs(storage)

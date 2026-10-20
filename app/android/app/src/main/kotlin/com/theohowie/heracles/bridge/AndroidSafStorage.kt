@@ -43,6 +43,29 @@ class AndroidSafStorage(
     override val locationLabel: String get() = treeUri.toString()
 
     /**
+     * **给用户看的**位置名（2026-10-20）。
+     *
+     * `locationLabel` 是 `content://…` 的树 URI —— 那是给日志和排障用的，
+     * 直接丢给用户只会得到：
+     * `无法写会话记录：content://com.android.externalstorage.documents/tree/primary%3Atest%2Ftest/…`
+     * 一屏百分号编码，**看不出该做什么**。
+     *
+     * 这里把 `primary:test/test` 这类 authority 段解出来，渲染成 `/test/test`。
+     */
+    val friendlyLabel: String
+        get() = runCatching {
+            val raw = treeUri.toString()
+            val marker = "/tree/"
+            val idx = raw.indexOf(marker)
+            if (idx < 0) return@runCatching displayName
+            val decoded = java.net.URLDecoder.decode(
+                raw.substring(idx + marker.length), "UTF-8",
+            )
+            val colon = decoded.indexOf(':')
+            if (colon < 0) "/$decoded" else "/" + decoded.substring(colon + 1)
+        }.getOrDefault(displayName)
+
+    /**
      * SAF **没有**真实文件系统根 —— 只有 `content://` URI。
      *
      * 显式声明 `null`（而不是继承默认值就完事）：任何需要绝对路径的功能
@@ -85,9 +108,90 @@ class AndroidSafStorage(
         return cur
     }
 
+    /**
+     * **工作区是否仍然有效**（2026-10-20）。
+     *
+     * ## 为什么不能只看 `exists()`
+     *
+     * `DocumentFile.fromTreeUri` 对"已被删掉的目录"**仍返回非 null 句柄**，
+     * 且 `exists()` 也返回 true —— 它只证明"我手里有个 URI 对象"，不证明那个位置还在。
+     * 真机实测（工作区目录被外部删掉后）：
+     *   `mkdir '.heracles' under 'null' -> created=null canWrite=false children=0`
+     * 句柄的 `name` 都成了 null，`createDirectory` 静默返回 null。
+     *
+     * ⇒ 用**能不能真干活**判活：`canWrite()` 为 false、或 `listFiles()` 抛异常 ⇒ 失效。
+     */
+    private fun isRootAlive(): Boolean = runCatching {
+        val r = root() ?: return@runCatching false
+        if (!r.canWrite()) return@runCatching false
+        r.listFiles() // 句柄失效时会抛 IllegalArgumentException / FileNotFoundException
+        true
+    }.getOrDefault(false)
+
+    /**
+     * **工作区失效时的用户提示**（2026-10-20）。
+     *
+     * 用户要求原文：
+     * > 「只是说这个文件夹没有了，随之带着这个工作区也失效了，此时输出：
+     * >   xxx 工作区已失效，请检查工作区所指向文件夹是否存在。」
+     *
+     * 所以文案就照这个写：**点名哪个工作区**、**说清发生了什么**、**告诉用户去查什么**。
+     * 不出现 `content://` URI，也不出现 `.heracles` 这种内部目录名。
+     */
+    fun workspaceInvalidMessage(): String =
+        "「$displayName」工作区已失效：它指向的文件夹不存在或已无访问权限。\n" +
+            "请检查工作区所指向的文件夹是否存在（是否被删除、改名或移动），" +
+            "然后在侧边栏重新选择工作区。"
+
+    /**
+     * **把工作区准备好**（2026-10-20）—— App 自己的活，不问用户。
+     *
+     * ## 产品约定（用户原话）
+     *
+     * 「所有的依赖文件是 APP 自己给根目录的，包括 `.heracles`。用户随便拿一个新的、
+     *   且空的文件夹给你，你都可以直接在上面完成；或者这个文件夹里面有内容，
+     *   也可以直接接管。**这不是要报错的问题**。」
+     *
+     * ⇒ 有内容的 / 空的文件夹都直接接管：缺什么目录建什么目录。
+     * ⇒ 只有"这个文件夹真的没了"才报错，且文案是 [workspaceInvalidMessage]。
+     *
+     * ⚠️ **不做自动重建**：曾试过用父目录 `createDirectory` 把删掉的目录建回来，
+     *   但它依赖 `DocumentsContract` 的未文档化行为、对第三方 provider 不成立，
+     *   而且用户删掉的东西被 App 悄悄建回来更让人困惑。删了就如实说"工作区失效"。
+     *
+     * @return `null` = 就绪；非 null = 给用户看的失败原因
+     */
+    suspend fun ensureWorkspace(requiredDirs: List<String> = emptyList()): String? =
+        withContext(Dispatchers.IO) {
+            // ① 工作区还有效吗？没了就如实说
+            if (!isRootAlive()) return@withContext workspaceInvalidMessage()
+
+            // ② 依赖目录（`.heracles/sessions` 等）—— **缺了就建**
+            for (dir in requiredDirs) {
+                if (resolveOrCreateDir(dir) == null) {
+                    return@withContext "无法在「$displayName」里准备目录" +
+                        "（${dir.substringAfterLast('/')}）。\n" +
+                        "请检查该文件夹是否仍可写，或在侧边栏重新选择工作区。"
+                }
+            }
+
+            // ③ 真的写一次小文件 —— `canWrite`/`createDirectory` 都可能有假阳性，
+            //    而"第一轮跑到一半才发现写不进去"对用户是最糟的体验。
+            val probeRel = ".heracles/.write_probe"
+            val probeOk = runCatching {
+                writeText(probeRel, "ok")
+                delete(probeRel)
+                true
+            }.getOrDefault(false)
+            if (!probeOk) {
+                return@withContext "「$displayName」工作区目前无法写入。\n" +
+                    "请检查是否还有访问权限，或在侧边栏重新选择工作区。"
+            }
+            null
+        }
+
     /** 找到父目录（写文件时用），不存在则逐级创建 */
-    private fun resolveOrCreateDir(relativePath: String): DocumentFile? {
-        var cur: DocumentFile = root() ?: return null
+    private fun resolveOrCreateDir(relativePath: String): DocumentFile? {        var cur: DocumentFile = root() ?: return null
         if (relativePath.isBlank()) return cur
 
         for (seg in relativePath.split('/')) {
