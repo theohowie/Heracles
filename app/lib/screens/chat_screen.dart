@@ -523,7 +523,27 @@ class _ChatScreenState extends State<ChatScreen> {
 
   /// **选一个已有文件夹**作为工作区（不是"新建目录"）
   Future<void> _pickWorkspace() async {
+    // ★ 先关抽屉，**并等它关完**再拉起 SAF 选择器（2026-10-20 真机 bug）
+    //
+    // ## 用户报的现象
+    //
+    // 「我选了一个文件夹做工作区，但是左侧边栏看不到工作区。」
+    // 真机复现时看到更早一步的故障：点「选择文件夹」后**系统选择器根本没弹出**，
+    // 抽屉直接关掉、回到聊天页，什么都没发生（也没有任何报错）。
+    //
+    // ## 为什么
+    //
+    // 原来这里是「`pop()` 立刻 `await pickWorkspace()`」——
+    // 抽屉关闭要走一段过渡动画，而 `pickWorkspace` 最终是
+    // `Activity.startActivityForResult(...)`。在 Activity 还处于**过渡/焦点切换**
+    // 的那一帧发起，请求会被系统吞掉（真机 logcat 里一条异常都没有，正是这个原因）。
+    //
+    // ⇒ 让出一帧再拉起。这不是"玄学延时"：抽屉的 route 必须在
+    //   `startActivityForResult` 之前完成出栈，否则 Flutter 侧的 Navigator
+    //   与 Android 侧的 Activity 状态会打架。
     Navigator.of(context).pop(); // 关抽屉
+    await Future<void>.delayed(const Duration(milliseconds: 260));
+    if (!mounted) return;
     try {
       final ws = await _bridge.pickWorkspace();
       if (!mounted) return;
@@ -557,12 +577,20 @@ class _ChatScreenState extends State<ChatScreen> {
   ///
   /// ## 为什么要顺手建一个会话
   ///
-  /// 侧边栏的列表**只渲染有会话的工作区**（分组视图过滤掉 `sessions.isEmpty`，
-  /// 单列表视图按会话铺行）。只登记、不建会话的话，用户点完按钮
-  /// **界面上什么都不会发生** —— 既看不到新工作区，也没有能发消息的会话。
-  /// 建一个会话顺带满足"点完出现在侧边栏且被选中"。
+  /// ~~侧边栏的列表**只渲染有会话的工作区**（分组视图过滤掉 `sessions.isEmpty`）~~
+  ///
+  /// **【2026-10-20 已修】** 那句话描述的正是本轮的 bug 根因 ——
+  /// 侧边栏曾把空工作区整个过滤掉（用户选了文件夹却**看不到任何工作区**）。
+  /// 现在 `workspace_drawer` 会列出所有工作区，空工作区也显示（带"新建会话"入口）。
+  /// 所以"顺手建会话"不再是**可见性**的前提，只是让用户点完就能直接开始聊。
+  ///
+  /// ⚠️ 但仍保留这段逻辑：用户点「使用默认工作区」的意图就是"我要开始干活"，
+  ///    直接给他一个能发消息的会话比让他再点一次「新会话」更顺。
   Future<void> _addAppWorkspace() async {
+    // ★ 同 [_pickWorkspace]：让抽屉先关完（2026-10-20）
     Navigator.of(context).pop(); // 关抽屉
+    await Future<void>.delayed(const Duration(milliseconds: 260));
+    if (!mounted) return;
     try {
       final ws = await _bridge.ensureAppWorkspace();
       if (!mounted) return;

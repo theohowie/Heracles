@@ -46,7 +46,23 @@ class FolderPickerBridge(private val activity: Activity) {
                     Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION
             )
         }
-        activity.startActivityForResult(intent, REQUEST_CODE)
+        // ★ 诊断 + 兜底（2026-10-20）：
+        //   真机上出现过"点「选择文件夹」后没反应、logcat 也没有异常"的情况。
+        //   两种可能：① startActivityForResult 抛了（Activity 已 finishing / 无 handler）
+        //            ② 系统没有能处理 ACTION_OPEN_DOCUMENT_TREE 的 Activity
+        //   ⚠️ 两条都**必须把 result 回掉**，否则 Dart 侧那个 `await` 永久挂起
+        //      —— 界面看起来像"点了没反应"，其实是在等一个永不到来的结果。
+        try {
+            activity.startActivityForResult(intent, REQUEST_CODE)
+            println("[heracles][picker] startActivityForResult 已发出 requestCode=$REQUEST_CODE")
+        } catch (e: Throwable) {
+            println(
+                "[heracles][picker] startActivityForResult 失败：" +
+                    "${e.javaClass.simpleName}: ${e.message}",
+            )
+            pendingResult = null
+            onResult(null)
+        }
     }
 
     fun onCancelled() {
