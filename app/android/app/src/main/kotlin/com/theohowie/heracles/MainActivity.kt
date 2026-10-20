@@ -877,6 +877,12 @@ class MainActivity : FlutterActivity() {
         AgentChatService.start(this)
         // ★ 失败通知也要能定位会话 —— sid 在 try 里才创建，所以提一个槽位供 catch 用
         var notifySid: String? = null
+        // ★★ 取消/异常路径的 usage 兜底同样要 sessionId + storage（2026-10-20）★★
+        //    那两条路径**不经过** `persistTurns`（CancellationException 直接抛到 catch），
+        //    所以这两个值必须在 try **之前**声明，否则 catch 里根本拿不到。
+        //    （同 `notifySid` 的既有做法，不改任何既有语义。）
+        var caughtStorage: dev.heracles.workspace.WorkspaceStorage? = null
+        var caughtSid: String? = null
         runJob = scope.launch {
             try {
                 // ★ SAF 或 POSIX 由 treeUri 决定 —— 会话记录必须走同一个存储
@@ -887,6 +893,8 @@ class MainActivity : FlutterActivity() {
                         store.createSession(storage, deriveTitle(request, attachments))
                     }
                 notifySid = sid
+                caughtStorage = storage
+                caughtSid = sid
 
                 // ★ 用户消息**先落盘**（2026-10-10 严重 bug 修复）
                 //
@@ -1042,6 +1050,15 @@ class MainActivity : FlutterActivity() {
                         store.touchSession(storage, sid)
                     }
                 }
+                // ★ 成功路径的 usage 兜底判断（2026-10-20）
+                //   成功时 `persistTurns` 的 `role=assistant` 已经带了 usage ⇒ 这里什么都不写。
+                //   放在这里是为了让三条路径（成功 / 取消 / 异常）共用一个出口。
+                persistUsageFallback(
+                    store, storage, sid,
+                    turns = runResult.turns,
+                    stopReason = runResult.stopReason,
+                    finalTextBlank = runResult.finalText.isBlank(),
+                )
 
                 val map = bridge.toMap(runResult).toMutableMap()
                 map["sessionId"] = sid
@@ -1063,16 +1080,40 @@ class MainActivity : FlutterActivity() {
                 // 用 `result.success` 回一个**结构化**的已取消结果：
                 // Dart 侧据此把界面切回可用状态，且**不**把半截结果当成
                 // 完整回答渲染。
+                //
+                // ★★ usage 兜底（2026-10-20）★★
+                // 取消时 `AgentRunResult` **不存在**（异常把它带走了），
+                // 但本次 run 已发出的请求**真的花了钱**。
+                // `AgentLoop.lastRecords` 专为此暴露：取消后仍读得到本次 records。
+                runCatching {
+                    val st = caughtStorage
+                    val cs = caughtSid
+                    if (st != null && !cs.isNullOrBlank()) {
+                        bridge.persistCancelledUsage(store, st, cs, "用户已停止")
+                    }
+                }
                 result.success(
                     mapOf(
                         "cancelled" to true,
                         "stopReason" to "用户已停止",
-                        "sessionId" to "", // 取消时不一定有 sid（可能建会话前就停了）
+                        // ★ 2026-10-20：取消时也带上真实 sid（原先回空串 ⇒ 落盘定位不了）
+                        "sessionId" to (caughtSid ?: ""),
                         "turns" to emptyList<Map<String, Any?>>(),
                         "finalText" to "",
                     )
                 )
             } catch (e: Throwable) {
+                // ★★ usage 兜底（2026-10-20）★★ —— 失败 run 的用量同样不能蒸发
+                runCatching {
+                    val st = caughtStorage
+                    val cs = caughtSid
+                    if (st != null && !cs.isNullOrBlank()) {
+                        bridge.persistCancelledUsage(
+                            store, st, cs,
+                            "运行失败：" + e.javaClass.simpleName,
+                        )
+                    }
+                }
                 result.error("RUN_FAILED", e.message ?: e.javaClass.simpleName, null)
                 // ★ 后台失败也要提醒（2026-10-19）—— 否则切回来只剩沉默
                 notifyChatResult(
@@ -1356,6 +1397,48 @@ class MainActivity : FlutterActivity() {
                         "ts" to System.currentTimeMillis(),
                     ),
                 )
+            }
+        }
+    }
+
+    /**
+     * **一次 run 的 usage 兜底记账**（2026-10-20）—— 成功路径与 `persistTurns` 配合。
+     *
+     * `persistTurns` 成功时已经写了 `role=assistant`（带 usage）⇒ 这里
+     * `finalTextBlank=false` 时**直接返回**，不会重复记账。
+     * 真正写这一行的是 `AgentBridge.persistCancelledUsage`（取消/异常两条路径）。
+     *
+     * 保留这个薄封装是为了让「三条路径共用一个出口」在调用处一眼可见。
+     */
+    private suspend fun persistUsageFallback(
+        store: SessionStore,
+        storage: dev.heracles.workspace.WorkspaceStorage,
+        sessionId: String,
+        turns: List<dev.heracles.agent.TurnRecord>,
+        stopReason: String,
+        finalTextBlank: Boolean,
+    ) {
+        // 成功路径已经写过 assistant（带 usage）⇒ 不重复记账
+        if (!finalTextBlank) return
+        val (cachedSum, promptSum, outSum) = cacheOf(turns)
+        if (cachedSum + promptSum + outSum <= 0) return
+        withContext(Dispatchers.IO) {
+            runCatching {
+                store.appendMessage(
+                    storage, sessionId,
+                    mapOf(
+                        "role" to "usage",
+                        "text" to "",
+                        "cached" to cachedSum,
+                        "prompt" to promptSum,
+                        "out" to outSum,
+                        "turns" to turns.size,
+                        "stopReason" to stopReason,
+                        "ts" to System.currentTimeMillis(),
+                    ),
+                )
+            }.onFailure {
+                println("[heracles][usage] 兜底行写入失败：${it.javaClass.simpleName}: ${it.message}")
             }
         }
     }

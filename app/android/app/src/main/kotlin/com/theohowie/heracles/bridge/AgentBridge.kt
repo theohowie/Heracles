@@ -1,4 +1,4 @@
-package com.theohowie.heracles.bridge
+﻿package com.theohowie.heracles.bridge
 
 import android.content.Context
 import dev.heracles.agent.AgentEvent
@@ -44,6 +44,7 @@ import dev.heracles.workspace.StorageBackedWorkspaceFs
 import dev.heracles.workspace.WorkspaceFs
 import dev.heracles.workspace.WorkspaceStorage
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.withContext
 import android.util.Base64
 import java.io.File
@@ -446,8 +447,7 @@ class AgentBridge(private val context: Context) {
         val loop = AgentLoop(
             provider = provider,
             workspace = fs,
-            tools = toolsWithMeta,
-            // ★★ 原生 function calling 接线（2026-10-19）★★
+            tools = toolsWithMeta,            // ★★ 原生 function calling 接线（2026-10-19）★★
             //
             // 此前**刻意没接**：响应侧（`tool_calls` → 执行 → 配对回填）当时还没落地，
             // 发 tools 只会把"看得见的解析失败"换成"模型调了工具却什么都不发生"。
@@ -511,6 +511,14 @@ class AgentBridge(private val context: Context) {
             //   （`nativeToolsEnabled` 决定原生 / 云端文本），本地那份文案已随本地后端删除。
         )
 
+        // ★ 让装配处在**取消/异常**后仍能拿到本次 run 的逐轮记账（2026-10-20）
+        //
+        // `CancellationException` 会把 `AgentRunResult` 一起带走 ⇒ `MainActivity`
+        // 的 catch 块拿不到 records ⇒ 写不出 usage 兜底行
+        // ⇒ 被「停止」或失败中断的 run，**整段用量凭空消失**。
+        // 真机证据：2026-10-20 两次"跑到一半被停"的会话，jsonl 只有 user + step。
+        activeLoop = loop
+
         try {
             // ★ 传历史（2026-10-14）—— 让模型"记得"之前的对话。
             //   不传 = 每次都是新会话（用户实测的"没有记忆了"）
@@ -555,6 +563,11 @@ class AgentBridge(private val context: Context) {
             // ★ ask / 审批队列随 run 结束作废（此时回答已无意义）
             activeAskQueue = null
             activeApprovalQueue = null
+            // ⚠️ `activeLoop` **故意不在这里清空**（2026-10-20）：
+            //   本 finally 在 `bridge.run` 抛出**之前**执行，而调用方的 catch 要在此之后
+            //   才读 `lastRecords` 记账。清空它恰好会让兜底失效（那就白改了）。
+            //   它由**下一次 run** 覆盖，生命周期比本次 run 略长一格 —— 只写不读的地方，
+            //   留一格是安全的。
             provider.release()
         }
     }
@@ -599,6 +612,96 @@ class AgentBridge(private val context: Context) {
      */
     @Volatile
     var activeApprovalQueue: AgentLoop.ApprovalQueue? = null
+
+    /**
+     * **当前 run 的 `AgentLoop`**（2026-10-20）—— 只为一件事：取消/异常后
+     * 从 [AgentLoop.lastRecords] 取回本次已发生的逐轮记账，写 usage 兜底行。
+     *
+     * 为什么需要：`CancellationException` 原样抛出是对的（调用方靠它区分"用户停的"
+     * 与"provider 出错"），但代价是 `AgentRunResult` 丢了 —— 而本次 run
+     * **已经发出去的请求是真的花了钱的**。
+     *
+     * ⚠️ 生命周期比 run **略长一格**：`run()` 的 finally 里**不清空**它，
+     * 因为调用方的 catch 要在此之后才读。由下一次 run 覆盖（只写不读的地方留一格是安全的）。
+     */
+    @Volatile
+    var activeLoop: AgentLoop? = null
+
+    /**
+     * **被取消 / 失败中断的 run 的 usage 兜底记账**（2026-10-20）。
+     *
+     * ## 修的是什么
+     *
+     * `MainActivity.persistTurns` 只在 `finalText` 非空时写 `role=assistant`（带 usage），
+     * 而取消/异常**根本不经过它**。⇒ 一次被「停止」的 run，**整段用量凭空消失**。
+     *
+     * 真机证据（2026-10-20，e35e48c6）：两次跑到一半被停的会话，`.jsonl` 里
+     * 只有 `user` + `step`，没有 `assistant`、也没有 `usage` ⇒ L1 采样对这类 run 完全失明。
+     *
+     * ## 为什么落 `role=usage` 而不是 `role=assistant`
+     *
+     * UI 把 `assistant` 当**对话气泡**渲染；被停的 run `finalText` 是空的，
+     * 落成 assistant 会多一个**空气泡**。`usage` 是纯记账行：UI 不认识就跳过
+     * （`chat_screen` 有 `case 'usage': break;`），采样脚本按 `role in {assistant, usage}` 取数。
+     *
+     * ## 为什么吞异常但**必须出声**
+     *
+     * 记账失败不能影响 run 结果（白名单/记账都是增强，不是硬依赖）；
+     * 但静默失败正是"数据凭空消失"最难查的成因 —— 所以打一行日志。
+     */
+    suspend fun persistCancelledUsage(
+        store: SessionStore,
+        storage: dev.heracles.workspace.WorkspaceStorage,
+        sessionId: String,
+        stopReason: String,
+    ) {
+        if (sessionId.isBlank()) return
+        val turns = activeLoop?.lastRecords.orEmpty()
+        if (turns.isEmpty()) return
+        var cached = 0
+        var prompt = 0
+        var out = 0
+        for (t in turns) {
+            val c = t.cache
+            cached += c.cachedTokens ?: 0
+            prompt += c.promptTokens
+            out += c.outputTokens
+        }
+        // 全是 0 ⇒ 这次 run 还没真正发出过请求，无可记
+        if (cached + prompt + out <= 0) return
+        // ★★ 必须跳出**已被取消**的协程上下文（2026-10-20 真机踩到）★★
+        //
+        // 第一次实现直接在这里 `store.appendMessage(...)`，真机 logcat 报：
+        //   `[heracles][usage] 兜底行写入失败：JobCancellationException: StandaloneCoroutine was cancelled`
+        //
+        // 根因：本函数是在 `catch (CancellationException)` 里被调的，此时
+        // **调用方的 Job 已经处于 cancelled 状态** ⇒ 任何挂起点（`appendMessage` 是 suspend，
+        // 内部还会 `withContext(IO)`）都会立刻抛 `JobCancellationException`。
+        // 换句话说：**"取消之后还想再做一件事"必须换一个不会被取消的 scope**。
+        //
+        // `NonCancellable` 正是为这种"清理/记账必须完成"的场景准备的 —— 它让这段
+        // 代码不再响应父 Job 的取消。⚠️ 代价：这里若卡住，会拖住 catch 的返回；
+        // 记账是一次小 append（毫秒级），可接受。
+        withContext(NonCancellable + Dispatchers.IO) {
+            runCatching {
+                store.appendMessage(
+                    storage, sessionId,
+                    mapOf(
+                        "role" to "usage",
+                        "text" to "",
+                        "cached" to cached,
+                        "prompt" to prompt,
+                        "out" to out,
+                        "turns" to turns.size,
+                        "stopReason" to stopReason,
+                        "ts" to System.currentTimeMillis(),
+                    ),
+                )
+            }.onFailure {
+                println("[heracles][usage] 兜底行写入失败：${it.javaClass.simpleName}: ${it.message}")
+            }
+        }
+    }
 
     /** 用户对需要确认的工具调用了「允许 / 始终允许 / 拒绝」（UI 弹窗提交时调用）。 */
     fun replyApproval(decision: String) {

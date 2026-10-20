@@ -668,6 +668,26 @@ class SessionStore(private val context: Context) {
                     put("ms", m["ms"] ?: 0L)
                     if (m["truncated"] == true) put("truncated", true)
                 }
+                // ★★ `usage`：失败/被取消的 run 的**纯记账行**（2026-10-20）★★
+                //
+                // ## 这个分支为什么必须有（不写就有真实 bug）
+                //
+                // `messageToJson` 是**白名单式**序列化：只把 `when` 里点名的字段写出去。
+                // 没有 `usage` 分支时，2026-10-20 真机写出来的行是
+                //   `{"role":"usage","text":"","ts":…}`  ← **cached/prompt/out 全丢了**
+                // 而那三个数正是这一行存在的**唯一理由**（L1 缓存采样靠它）。
+                //
+                // ⇒ 记账行"写成功了"但内容是空的，比没写更糟：采样脚本会把它当成
+                //    一次 0 token 的轮次，静默污染分母。
+                "usage" -> {
+                    put("cached", m["cached"] ?: 0)
+                    put("prompt", m["prompt"] ?: 0)
+                    put("out", m["out"] ?: 0)
+                    (m["turns"] as? Int)?.let { put("turns", it) }
+                    (m["stopReason"] as? String)?.takeIf { it.isNotBlank() }?.let {
+                        put("stopReason", it)
+                    }
+                }
             }
         }
 

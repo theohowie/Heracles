@@ -514,6 +514,29 @@ class AgentLoop(
      * - 云端（1024）：补齐到块边界的略上方
      * - 本地（1）：**不补齐**，token 级精确复用不需要，补了纯属浪费
      */
+    /**
+     * **最近一次 `run()` 的逐轮记账**（2026-10-20）—— 含**被取消**的那些。
+     *
+     * ## 为什么单独暴露
+     *
+     * `run()` 在用户点「停止」时把 `CancellationException` **原样抛出**（必须如此：
+     * 调用方靠它区分"用户停的"与"provider 出错"）。但抛出意味着 `AgentRunResult` 丢了，
+     * 装配处（`MainActivity`）就**拿不到 `records`** ⇒ 本次 run 已经花掉的 usage
+     * 一行都写不进磁盘 ⇒ L1 缓存采样对"失败/被停的 run"完全失明。
+     *
+     * 真机证据（2026-10-20，e35e48c6）：两次"跑到一半被停"的会话，
+     * `.jsonl` 里只有 `user` + `step`，**没有** `assistant`、也**没有** `usage`。
+     *
+     * ## 契约
+     *
+     * · `run()` 一进来就把它指向本次的 `records`（**同一个可变列表**，后续 append 可见）
+     * · 取消/异常后由装配处读它记账；**正常路径仍以返回值 `AgentRunResult` 为准**
+     * · `@Volatile`：写在 IO 线程、读可能在主线程（虽然实际上都在同一协程链上）
+     */
+    @Volatile
+    var lastRecords: List<TurnRecord> = emptyList()
+        private set
+
     val frozenPrefix = PrefixBuilder.buildFrozenAligned(
         // ★ F3c：工具协议进冻结前缀 —— 文本轨 / 原生轨各一份（S1b 起只有这两态）。
         //   代价：改文案 = **跨构建首次 prefix cache miss 一次**。
@@ -1027,6 +1050,26 @@ class AgentLoop(
         val records = mutableListOf<TurnRecord>()
         var finalText = ""
         var stopReason = "未完成"
+
+        // ★ 取消时把**已经发生的** records 暴露出去（2026-10-20）
+        //
+        // ## 为什么需要
+        //
+        // 用户点「停止」时 `CancellationException` 会**原样抛出**（这是对的 ——
+        // 它必须与 provider 错误区分开，见下面 generateStream 那段）。
+        // 但抛出去的代价是：`AgentRunResult` 丢了 ⇒ 装配处（`MainActivity`）拿不到
+        // `records` ⇒ **本次 run 已经花掉的 usage 一行都写不进磁盘**。
+        //
+        // 真机实测（2026-10-20，e35e48c6）：两次"跑到一半被停"的会话，`.jsonl` 里
+        // 只有 `user` + `step`，**没有** `assistant` 也**没有** `usage` ⇒
+        // L1 缓存采样对"失败/被停的 run"完全失明。
+        //
+        // ## 为什么不用"取消也返回结果"
+        //
+        // 那会把取消伪装成正常完成 —— 调用方（UI / CLI）靠异常判"是不是用户停的"。
+        // 所以保持异常语义不变，只把**记账需要的数据**放一个可读字段里。
+        // 只写不读不影响任何既有调用方（`records` 本身仍是局部的）。
+        lastRecords = records
 
         // ★ 重建历史上下文（2026-10-14）—— 让模型"记得"之前聊过什么。
         //   顺序必须与真实发生的一致（user → assistant → user → assistant），
