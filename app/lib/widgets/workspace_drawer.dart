@@ -188,8 +188,43 @@ class WorkspaceDrawer extends StatelessWidget {
     if (workspaces.isEmpty) return _empty(h);
 
     final visible = _visible;
-    final hasAny = visible.any((w) => w.sessions.isNotEmpty);
-    if (!hasAny) return _noResults(h);
+
+    // ★★ 工作区**永远要显示**，哪怕它一个会话都没有（2026-10-20 真机 bug）★★
+    //
+    // ## 用户报的现象
+    //
+    // 「我选了一个文件夹做工作区，但是左侧边栏看不到工作区。」
+    // 真机复现（e35e48c6）：`heracles_workspaces.xml` 里**确实登记了**两个工作区，
+    // 但抽屉里显示「这个筛选下没有会话」，**一条工作区都看不到**。
+    //
+    // ## 根因
+    //
+    // 这里原来是 `if (!hasAny) return _noResults(h)`，而 `_groupedList` 里又有
+    // `visible.where((w) => w.sessions.isNotEmpty)` —— 两处都要求"工作区里必须有会话"。
+    // ⇒ 用户刚选一个**空文件夹**当工作区（会话数 = 0）⇒ 整个抽屉判定为"无结果"
+    // ⇒ 既看不到工作区，也**没有入口给它新建会话**（鸡生蛋：没会话就不显示，
+    //    不显示就没法建会话）。
+    //
+    // ## 修法
+    //
+    // 工作区是**容器**，会话是容器里的内容 —— 容器空着也得显示，
+    // 否则用户永远没法往里放第一个会话。
+    //
+    // ## ⚠️ 第一版修错了（2026-10-20 用户复现打回）
+    //
+    // 第一版写成「用户搜索过 或 `filter != all` 就算在筛选 ⇒ 全空时显示『没有匹配』」。
+    // 但 `hideArchived` 是**默认值**（不是用户主动选的）⇒ 用户把默认工作区的会话
+    // 全删掉之后，**两个工作区一起消失**，抽屉又变成"这个筛选下没有会话"。
+    //
+    // ⇒ 判据只能是**用户是否真的在搜索**。归档筛选不影响"工作区该不该显示"
+    //   —— 一个工作区的会话全被归档时，工作区本身当然还在，只是里面暂时没内容。
+    //   那种情况由 `_WorkspaceGroup` 自然渲染成"空分组"，**不该把整个抽屉判成无结果**。
+    final searching = searchQuery.isNotEmpty;
+    if (searching && visible.every((w) => w.sessions.isEmpty)) {
+      // 搜索确实没命中 —— 这时提示"没有匹配"是对的，但要让人知道**工作区还在**、
+      // 只是搜索结果为空（所以文案里点明搜索词，而不是笼统说"这个筛选下没有会话"）。
+      return _noResults(h);
+    }
 
     switch (viewOptions.grouping) {
       case SessionGrouping.flatList:
@@ -200,7 +235,9 @@ class WorkspaceDrawer extends StatelessWidget {
   }
 
   Widget _groupedList(BuildContext context, List<HWorkspace> visible, Hue h) {
-    final rows = visible.where((w) => w.sessions.isNotEmpty).toList();
+    // ★ 不再按 `sessions.isNotEmpty` 过滤（2026-10-20）：空工作区也要列出来，
+    //   否则用户新建的工作区在侧边栏不可见、也没法给它建第一个会话。
+    final rows = visible;
     return ListView.builder(
       padding: const EdgeInsets.only(bottom: HSpace.lg),
       itemCount: rows.length,
