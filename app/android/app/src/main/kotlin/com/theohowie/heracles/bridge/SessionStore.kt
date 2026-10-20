@@ -427,9 +427,23 @@ class SessionStore(private val context: Context) {
             storage.writeText(path, existing + line)
         } catch (e: Throwable) {
             // ★ 不静默 —— 丢消息是严重问题，必须让用户知道
+            //
+            // ★★ 但**不能把内部细节直接丢给用户**（2026-10-20 真机截图修）★★
+            //
+            // 原来这里是 `storage.locationLabel + "/" + path`，而 SAF 的 locationLabel
+            // 是**完整的 tree URI** ⇒ 用户看到的是
+            //   `无法写会话记录：content://com.android.externalstorage.documents/tree/primary%3Atest%2Ftest/.heracles/sessions.json（无法创建目录：.heracles）`
+            // 一屏百分号编码 + 一个内部目录名，**用户既看不懂也不知道该做什么**。
+            //
+            // 现在：位置用 [friendlyLabel]（`/test/test` 这种人话），
+            // 并在末尾**给出可执行的动作**（"检查文件夹是否还在/是否可写"）——
+            // 这类失败最常见的原因就是用户在文件管理器里把工作区目录删了或改名了。
+            val where = (storage as? AndroidSafStorage)?.friendlyLabel ?: storage.locationLabel
             throw IllegalStateException(
-                "无法保存会话记录：" + storage.locationLabel + "/" + path +
-                    "（" + e.message + "）"
+                "无法保存会话记录到「$where」。\n" +
+                    "常见原因：这个文件夹被删除/改名了，或者 App 失去了它的访问权限。\n" +
+                    "请在侧边栏重新选择一次工作区（或重建该文件夹）后重试。\n" +
+                    "技术细节：$path（${e.message}）"
             )
         }
     }
