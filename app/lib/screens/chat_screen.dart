@@ -3368,40 +3368,63 @@ class _ChatScreenState extends State<ChatScreen> {
             const Text('需要你确认', style: TextStyle(fontSize: 16)),
           ],
         ),
-        content: Column(
-          mainAxisSize: MainAxisSize.min,
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Text(
-              reason.isEmpty ? '这个操作需要你确认后才会执行。' : reason,
-              style: TextStyle(fontSize: 14, height: 1.5, color: h.text),
-            ),
-            if (shownDetail.isNotEmpty) ...[
-              const SizedBox(height: HSpace.sm),
-              Container(
-                width: double.infinity,
-                padding: const EdgeInsets.all(HSpace.sm),
-                decoration: BoxDecoration(
-                  color: h.surface,
-                  borderRadius: BorderRadius.circular(HRadius.sm),
+        // ★★ 内容必须**可滚动 + 限高**（2026-10-20 真机修）★★
+        //
+        // ## 修的是什么
+        //
+        // 真机实测（设备 e35e48c6，手动审批档，模型连续 apply_patch）：
+        // 参数一长，弹窗就报 **`BOTTOM OVERFLOWED BY 346 PIXELS`**（另有 281/309/325 三种读数），
+        // 内容被黄色警示条截断 —— **用户看不到完整的 patch，却在被要求对这次修改签字**。
+        // 那不是"观感问题"：审批的全部意义就是"看清楚再点允许"。
+        //
+        // ## 为什么用 `Flexible` + `SingleChildScrollView` 而不是直接限高
+        //
+        // `AlertDialog` 的 content 在 Column 里是**无界**的 —— 子组件想多高就多高。
+        // 套一层 `ConstrainedBox` 只给出**上限**，再让 `SingleChildScrollView` 吃掉超出部分：
+        // · 短内容 ⇒ 弹窗照常按内容收缩（不出现空白滚动区）
+        // · 长内容 ⇒ 到 60% 屏高就停，内部可滚，**按钮永远可见**
+        // 60% 是取"不把底部按钮挤出屏幕"的经验上限，与系统弹窗的观感一致。
+        content: ConstrainedBox(
+          constraints: BoxConstraints(
+            maxHeight: MediaQuery.sizeOf(context).height * 0.6,
+          ),
+          child: SingleChildScrollView(
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  reason.isEmpty ? '这个操作需要你确认后才会执行。' : reason,
+                  style: TextStyle(fontSize: 14, height: 1.5, color: h.text),
                 ),
-                child: Text(
-                  shownDetail,
-                  style: TextStyle(
-                    fontSize: 12,
-                    height: 1.4,
-                    fontFamily: 'monospace',
-                    color: h.textDim,
+                if (shownDetail.isNotEmpty) ...[
+                  const SizedBox(height: HSpace.sm),
+                  Container(
+                    width: double.infinity,
+                    padding: const EdgeInsets.all(HSpace.sm),
+                    decoration: BoxDecoration(
+                      color: h.surface,
+                      borderRadius: BorderRadius.circular(HRadius.sm),
+                    ),
+                    child: Text(
+                      shownDetail,
+                      style: TextStyle(
+                        fontSize: 12,
+                        height: 1.4,
+                        fontFamily: 'monospace',
+                        color: h.textDim,
+                      ),
+                    ),
                   ),
+                ],
+                const SizedBox(height: HSpace.sm),
+                Text(
+                  '允许：执行这次调用；拒绝：本次不执行（模型会收到"被拒绝"）。',
+                  style: TextStyle(fontSize: 12, color: h.textFaint),
                 ),
-              ),
-            ],
-            const SizedBox(height: HSpace.sm),
-            Text(
-              '允许：执行这次调用；拒绝：本次不执行（模型会收到"被拒绝"）。',
-              style: TextStyle(fontSize: 12, color: h.textFaint),
+              ],
             ),
-          ],
+          ),
         ),
         actions: [
           TextButton(
@@ -3420,6 +3443,38 @@ class _ChatScreenState extends State<ChatScreen> {
             onPressed: () => Navigator.of(dlgCtx).pop('allow'),
             style: FilledButton.styleFrom(backgroundColor: h.accent),
             child: const Text('允许', style: TextStyle(fontSize: 13)),
+          ),
+          // ★★ 停止入口（2026-10-20 真机修）★★
+          //
+          // ## 修的是什么
+          //
+          // 真机实测（e35e48c6，手动审批档）：一个"写多段文章"的任务会**连续**触发
+          // `write_file` / `apply_patch` 审批。每个弹窗都盖住整屏（含底部输入栏的停止键）
+          // ⇒ 用户**物理上点不到停止**，只能反复点「允许」或「拒绝」。
+          //
+          // 而用户要的恰恰是「暂停打断」—— 这个档位反而让它**不可达**。
+          //
+          // ## 为什么放在弹窗里，而不是做成悬浮层
+          //
+          // 悬浮层要盖在 modal barrier 之上，得走 `Overlay` 手动插条，还要自己处理
+          // 位置 / 安全区 / 被键盘顶起 —— 换来的只是"少一次点击的距离"。
+          // 放进 actions 是**同一个模态会话内的入口**：语义清楚（"我不想继续了"），
+          // 不引入第二套层级，也不和弹窗抢点击。
+          //
+          // ## 语义边界（不许含糊）
+          //
+          // 这里**只**停 agent 运行，**不**替用户做审批决定：
+          // 先 `pop('deny')` 让挂起的 `approve()` 立刻拿到结果（否则它会等满 10 分钟），
+          // 再 `_stopRun()` 停整个 run。**拒绝 + 停止**是两件事，顺序也要对。
+          const SizedBox(width: HSpace.xs),
+          TextButton(
+            onPressed: () {
+              Navigator.of(dlgCtx).pop('deny');
+              unawaited(_stopRun());
+            },
+            child: Text('停止任务',
+                style: TextStyle(
+                    fontSize: 13, color: HColors.errorOn(h.dark))),
           ),
         ],
       ),
