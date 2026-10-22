@@ -1,0 +1,33 @@
+name: heracles_backend
+description: Heracles 后端 —— 基于 dart_agent_core 的云端 Agent 编排层。
+version: 0.1.0
+publish_to: none
+
+# ============================================================================
+# 为什么是独立包而不是塞进 app/
+# ============================================================================
+#
+# 1. **可单测**：纯 Dart 包能跑 `dart test`，不需要模拟器、不需要 Flutter。
+#    编排逻辑（循环、预算、工具调度、缓存对齐）必须能在毫秒级验证。
+# 2. **强制边界**：这个包**不得** import `package:flutter/*`。
+#    后端不该知道 UI 的存在 —— 事件通过 Stream 出去，UI 自己消费。
+# 3. **可 CLI**：将来想在没有 UI 的情况下跑一次任务（排查/压测），
+#    直接 `dart run` 即可。
+# ============================================================================
+
+environment:
+  sdk: ^3.12.2
+
+dependencies:
+  # 编排层：agent 循环、工具调度、计划、循环检测、hooks、MCP、子代理
+  dart_agent_core: ^2.1.8
+
+  # 流式/取消：dart_agent_core 的 CancelToken 就来自 dio，这里必须一致
+  dio: ^5.11.1
+
+  # 用于工具参数的 JSON 处理（stdlib 的 dart:convert 够用，但保留显式意图）
+  meta: ^1.18.0
+
+dev_dependencies:
+  test: ^1.25.0
+  lints: ^5.1.1

@@ -80,25 +80,15 @@ kotlin {
 }
 
 // ---------------------------------------------------------------------------
-// ★ 依赖主工程的 Kotlin 核心
+// ★ 依赖（2026-10-22 起**不含**任何本项目后端模块）
 //
-// 这四个模块是**已验证的资产**（66 项测试 + 实测 06/07/08/09/10）。
-// Flutter 只做展示与输入，核心逻辑全部留在这里
-// （见 `15-前端选型与通道协议.md` §2 的硬约束）。
-//
-// 它们用 `kotlin("jvm")` 插件，产出 Java 17 字节码 ——
-// 能被 Android 直接消费（D8/R8 接受 major ≤ 61）。
+// 原来这里有 5 条 `implementation(project(":core"))` 等，指向已被用户删除的
+// 纯 JVM 后端模块。后端改用 Dart 重写（`backend/`），Kotlin 侧只剩**设备能力**：
+// 文件 IO / shell / 健康读数 / 选择器 / 构建通知 —— 全部在本模块内实现，
+// 不依赖任何 `dev.heracles.*` 符号。
 // ---------------------------------------------------------------------------
 dependencies {
-    implementation(project(":core"))
-    implementation(project(":provider-http"))
-    implementation(project(":workspace"))
-    implementation(project(":agent"))
-    // 编码层工具的后端（构建引擎 / APK 逆向 / 工具链定位）。
-    // 见 docs/09-决策记录.md ADR-021 与 docs/12-模块与文件清单.md。
-    implementation(project(":toolchain"))
-
-    // 核心用 kotlinx-coroutines；AgentLoop 是 suspend 函数
+    // 取消 / 超时 / 并发读流 —— 设备通道的运行面需要它
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.9.0")
 
     // SAF（Storage Access Framework）文档访问 —— 用于路线 A 的实测对比

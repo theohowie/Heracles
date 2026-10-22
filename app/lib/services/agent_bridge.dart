@@ -9,6 +9,8 @@ import '../models/message.dart';
 import '../models/model_capabilities.dart';
 import '../models/settings.dart';
 import '../models/workspace.dart';
+import 'local_agent.dart';
+import 'session_store.dart';
 
 /// Flutter → Kotlin 的桥（`15-前端选型与通道协议.md` §3.1）。
 ///
@@ -32,9 +34,13 @@ class AgentBridge {
 
   static const _channel = MethodChannel('heracles/command');
 
-  /// ★ 事件流通道（2026-10-10 流式）—— 必须与 Kotlin 侧
-  /// `MainActivity.EVENT_CHANNEL` **逐字符一致**，否则静默收不到任何事件。
-  static const _events = EventChannel('heracles/events');
+  // ★ `heracles/events` 的 EventChannel 已于 2026-10-22 **删除**。
+  //
+  // 那个通道的 Kotlin 侧 handler 随 `AgentBridge.kt` 一起消失，留着它就是
+  // 一条永远静默的订阅（界面会永远停在"正在生成…"）。事件改由 `backend`
+  // 的 `HeraclesAgent` 在**同一进程内**产出，见 `_localEvents`。
+  //
+  // ⚠️ 不要把这条通道加回来"以防万一"：静默无事件的流比明确没有流更难排查。
 
   /// **上一次 [fetchModels] 读到的模型能力映射**（2026-10-14 重做）。
   ///
@@ -78,10 +84,38 @@ class AgentBridge {
   ///
   /// 每次访问本 getter 都会**新建一条平台订阅**，
   /// 调用方应只订阅一次并保存 `StreamSubscription`。
-  Stream<AgentEvent> get events => _events
-      .receiveBroadcastStream()
-      .map((e) => AgentEvent.fromMap(_castMap(e)));
+  ///
+  /// ## ★ 2026-10-22：事件来源从 EventChannel 改为**进程内流**
+  ///
+  /// 重构把编排从 Kotlin 搬进了 Dart（`backend/`）。原来的
+  /// `EventChannel('heracles/events')` **没有原生实现了**（那个 handler
+  /// 随 `AgentBridge.kt` 一起删除）⇒ 继续听它就是一个永远静默的流，
+  /// 界面会永远停在"正在生成…"。
+  ///
+  /// 现在的事件来自 `LocalAgentExecutor`（同一个 VM 内），不需要跨进程序列化。
+  ///
+  /// ⚠️ **铁律不变**：事件流可能丢（消费端提前取消/重建），
+  /// UI 仍必须以 [run] 返回的 `AgentRunResult` 为准补齐界面。
+  Stream<AgentEvent> get events => _localEvents.stream;
 
+  /// 进程内事件的广播出口（**静态**：`AgentBridge` 会被多处置新，
+  /// 而事件流必须全局唯一 —— 否则 UI 订阅的实例与真正在跑的实例不是同一个，
+  /// 事件全丢）。
+  static final StreamController<AgentEvent> _localEvents =
+      StreamController<AgentEvent>.broadcast();
+
+  /// 把进程内事件推给所有订阅者（由 [run] 的事件泵调用）。
+  static void emitLocalEvent(AgentEvent e) {
+    if (!_localEvents.isClosed) _localEvents.add(e);
+  }
+
+  /// 把平台通道的 Map 转成 `Map<String, dynamic>`。
+  ///
+  /// ⚠️ **生产路径已不再用它**（事件改走进程内流，不再过通道）。
+  /// 保留是因为 `AgentEvent.fromMap` 仍然是 UI 的**事件词表契约** ——
+  /// `agent_event_channel_test.dart` 用它验证"序列化后能原样解回来"，
+  /// 那条测试锁的是 UI 认识的字段集合，与传输方式无关。
+  // ignore: unused_element
   static Map<String, dynamic> _castMap(dynamic e) =>
       (e as Map<dynamic, dynamic>).cast<String, dynamic>();
 
@@ -136,52 +170,29 @@ class AgentBridge {
 
   // ------------------------------------------------------------ 用量与上下文
 
-  /// 上一次运行的**冻结区**估算 token；`-1` = 还没跑过任何一次。
+  /// ★ 2026-10-22：这两个数**改由进程内 run 记账**（旧的 `usageInfo`
+  /// 通道方法随 Kotlin 后端删除，一直返回 -1 ⇒ 顶栏 `— 0%`、侧栏"不可用"）。
+  ///
+  /// 静态：`AgentBridge` 会被多处 new，用量必须全局唯一（与 `_localEvents` 同理）。
+  static int _lastFrozenTokens = -1;
+  static int _lastContextLimit = -1;
+
+  /// 上一次运行的**冻结区** token；`-1` = 还没跑过任何一次。
   ///
   /// 冻结区 = 系统提示词 + 工具定义 + 工具协议，会话内逐字节不变
-  /// （`02-契约规范.md` §1）。它是**每个会话都要发一遍**的固定成本，
-  /// 所以"上下文被谁占了"的第一大块就是它。
+  /// （`02-契约规范.md` §1）。
   ///
-  /// ⚠️ 这是 `TextMath.estimateTokens` 的**估算**，不是真实 tokenizer
-  /// （`实测-08`：曾 40% 高估）—— UI 必须标 `~`。
-  Future<int> lastFrozenTokens() async {
-    try {
-      final m = await _channel.invokeMapMethod<String, dynamic>('usageInfo');
-      return (m?['frozenTokens'] as num?)?.toInt() ?? -1;
-    } on MissingPluginException {
-      return -1;
-    } on PlatformException {
-      // 面板是**只读展示**，取不到就显示"未知"，不该让界面报错
-      return -1;
-    }
-  }
+  /// ⚠️ 口径：**首轮请求的 promptTokens**（provider 真实上报，不是估算）。
+  /// 首轮历史只有这一条用户消息，所以它 ≈ 冻结区 + 一句用户输入 ——
+  /// 比旧实现的 `TextMath` 估算**更真**（估算曾 40% 高估）。
+  Future<int> lastFrozenTokens() async => _lastFrozenTokens;
 
   /// 上下文上限（token）。`<= 0` = 未知（不画进度条）。
   ///
-  /// 取自 Kotlin 侧 —— **不在 Dart 里另写常量**，否则两处真相迟早漂移。
-  ///
-  /// ## ★ isCloud 必须传对（2026-10-14 用户反馈修复）
-  ///
-  /// 用户实测：调基元律动的 `deepseek-v4-flash-0731`（1M 上下文），
-  /// UI 却显示「已用 56% · 2.3K / 4.1K」—— 本地 4096 被用到了云端。
-  /// 后果不只是显示错：压缩阈值（0.8）会按 4K 触发 → **过早压缩会话**，
-  /// 丢上下文并损害缓存命中（铁律 1）。
-  ///
-  /// @param isCloud 当前 provider 是否走云端类后端
-  ///   （云 / Anthropic / Responses / 自建中转都算；只有本机 llama.cpp 不算）
-  Future<int> contextLimitTokens({required bool isCloud}) async {
-    try {
-      final m = await _channel.invokeMapMethod<String, dynamic>(
-        'usageInfo',
-        {'isCloud': isCloud},
-      );
-      return (m?['contextLimit'] as num?)?.toInt() ?? -1;
-    } on MissingPluginException {
-      return -1;
-    } on PlatformException {
-      return -1;
-    }
-  }
+  /// 来源：用户在「设置 → 模型」里配置的 provider 的 `contextLength`
+  /// （由 `fetchModels` 从服务端读到）。**不再走通道** —— 通道那头已经没有了。
+  Future<int> contextLimitTokens({required bool isCloud}) async =>
+      _lastContextLimit;
 
   // ------------------------------------------------------------ 工作区
 
@@ -253,47 +264,73 @@ class AgentBridge {
   }
 
   // ------------------------------------------------------------ 会话
+  //
+  // ★★ 2026-10-22：会话 CRUD 从**通道**切到**进程内 `SessionStore`** ★★
+  //
+  // ## 为什么必须切（真机实测证据）
+  //
+  // 切之前 `listSessions` 走 `invokeListMethod('listSessions')`，而
+  // `MainActivity` 已不再处理它 ⇒ 通道回 `{"ok": false, "error": "未知方法：listSessions"}`
+  // ⇒ `invokeListMethod` 把那个 **Map 强转成 List** 时抛：
+  //
+  // ```
+  // 读取工作区失败：type '_Map<Object?, Object?>' is not a subtype of
+  // type 'List<dynamic>?' in type cast
+  // ```
+  //
+  // 这是**真机上看到的第一条红字**（2026-10-22 14:31，设备 `e35e48c6`），
+  // 后果是侧边栏永远空、连"发第一条消息"都进不去。
+  //
+  // ## 为什么能用同一个通道
+  //
+  // `SessionStore` 走 `heracles/device` 的 `fs.*`，那是**还活着**的通道
+  // （`DeviceChannel` 17 个方法）。所以会话读写今天完全可用。
+  //
+  // ## 缓存
+  //
+  // `SessionStore` 与工作区绑定。`AgentBridge` 本身是无状态的（每次调用传路径），
+  // 所以这里按 `路径|treeUri` 缓存实例 —— 键里带 treeUri 是因为同一个路径
+  // 在 SAF 与 POSIX 下是不同的访问方式（漏了会拿错路由）。
 
-  Future<List<HSession>> listSessions(String workspacePath, {String treeUri = ''}) async {
-    try {
-      final list = await _channel.invokeListMethod<dynamic>('listSessions', {
-        'workspacePath': workspacePath,
-        // SAF 授权时必须有 treeUri —— 否则 Kotlin 侧会走 java.io.File 然后 EPERM
-        'treeUri': treeUri,
-      });
-      return _maps(list).map(HSession.fromMap).toList();
-    } on MissingPluginException {
-      return const [];
-    }
+  final Map<String, SessionStore> _sessionStores = {};
+
+  SessionStore _storeFor(String workspacePath, String treeUri) {
+    final key = '$workspacePath|$treeUri';
+    return _sessionStores.putIfAbsent(
+      key,
+      () => SessionStore(workspaceRoot: workspacePath),
+    );
   }
 
-  /// ★ 所有会话操作都必须带 [treeUri]。
+  Future<List<HSession>> listSessions(String workspacePath, {String treeUri = ''}) async {
+    final store = _storeFor(workspacePath, treeUri);
+    final metas = await store.listSessions();
+    if (store.lastError != null) {
+      // 读不出来**不静默返回空列表** —— 那会让用户以为"会话全丢了"。
+      // 但也不抛（侧边栏是只读展示，抛了会整页红）。
+      // 交给 UI 的空态 + 这个字段去排障。
+      return const [];
+    }
+    return metas.map((m) => HSession.fromMap(m.toMap())).toList();
+  }
+
+  /// ★ 所有会话操作都必须带 [treeUri]（SAF 工作区的访问方式由它决定）。
   ///
-  /// SAF 授权的工作区，Kotlin 侧用它决定走 `DocumentFile` 还是 `java.io.File`。
-  /// 漏传的后果是 `EPERM (Operation not permitted)`（真机实测过两次）。
+  /// ⚠️ 今天 Dart 侧的 `SessionStore` 走 `heracles/device` 的 `fs.*`，
+  /// 而 **Kotlin `DeviceFs` 自己按路径查登记表决定 SAF/POSIX 路由** ——
+  /// 所以 `treeUri` 在 Dart 这一层只是保留参数（保持调用方签名不变），
+  /// 不再需要手工往下传。留着它是因为 `workspace_drawer` 等调用方一直在传。
   Future<String?> createSession(
     String workspacePath,
     String title, {
     String treeUri = '',
   }) async {
-    try {
-      return await _channel.invokeMethod<String>('createSession', {
-        'workspacePath': workspacePath,
-        'treeUri': treeUri,
-        'title': title,
-      });
-    } on MissingPluginException {
-      return null;
-    }
+    final store = _storeFor(workspacePath, treeUri);
+    final id = await store.createSession(title);
+    return id.isEmpty ? null : id;
   }
 
   /// **建一个新会话并把前缀消息灌进去**（2026-10-13，回答的「新会话分支」）。
-  ///
-  /// ## 为什么必须走 Kotlin（不能在 Dart 里拼 jsonl）
-  ///
-  /// `.jsonl` 的格式与路径由 `SessionStore` 说了算
-  /// （`<工作区>/.heracles/sessions/<id>.jsonl`）。Dart 侧自己拼字符串
-  /// 等于**复制一份格式知识** —— 以后格式一改就两地不一致。
   ///
   /// ## 为什么不是"在原会话上开分支"
   ///
@@ -307,18 +344,14 @@ class AgentBridge {
     required List<Map<String, String>> entries,
     String treeUri = '',
   }) async {
-    try {
-      return await _channel.invokeMethod<String>('seedBranch', {
-        'workspacePath': workspacePath,
-        'treeUri': treeUri,
-        'title': title,
-        'entries': entries,
-      });
-    } on MissingPluginException {
-      return null;
-    } on PlatformException catch (e) {
-      throw AgentBridgeException(e.message ?? e.code);
-    }
+    final store = _storeFor(workspacePath, treeUri);
+    // `entries` 是 `List<Map<String, String>>`（UI 侧的形状），
+    // 而 `SessionStore.seedBranch` 吃 `List<Map<String, dynamic>>` ——
+    // 这里做**显式**转换（不是隐式 upcast），避免砖头式泛型报错。
+    final rows = entries
+        .map((e) => <String, dynamic>{for (final kv in e.entries) kv.key: kv.value})
+        .toList();
+    return store.seedBranch(rows, title: title);
   }
 
   Future<void> renameSession(
@@ -327,16 +360,7 @@ class AgentBridge {
     String title, {
     String treeUri = '',
   }) async {
-    try {
-      await _channel.invokeMethod<bool>('renameSession', {
-        'workspacePath': workspacePath,
-        'treeUri': treeUri,
-        'sessionId': sessionId,
-        'title': title,
-      });
-    } on MissingPluginException {
-      // 忽略
-    }
+    await _storeFor(workspacePath, treeUri).renameSession(sessionId, title);
   }
 
   Future<void> deleteSession(
@@ -344,15 +368,7 @@ class AgentBridge {
     String sessionId, {
     String treeUri = '',
   }) async {
-    try {
-      await _channel.invokeMethod<bool>('deleteSession', {
-        'workspacePath': workspacePath,
-        'treeUri': treeUri,
-        'sessionId': sessionId,
-      });
-    } on MissingPluginException {
-      // 忽略
-    }
+    await _storeFor(workspacePath, treeUri).deleteSession(sessionId);
   }
 
   /// 切换收藏，返回新状态
@@ -360,58 +376,26 @@ class AgentBridge {
     String workspacePath,
     String sessionId, {
     String treeUri = '',
-  }) async {
-    try {
-      return await _channel.invokeMethod<bool>('toggleStar', {
-            'workspacePath': workspacePath,
-            'treeUri': treeUri,
-            'sessionId': sessionId,
-          }) ??
-          false;
-    } on MissingPluginException {
-      return false;
-    }
-  }
+  }) async =>
+      _storeFor(workspacePath, treeUri).toggleStar(sessionId);
 
-  /// ★ 读取一个会话的历史消息（2026-10-10 修复丢记录 bug）
+  /// ★ 读取一个会话的历史消息
   ///
   /// 返回原始行列表，由上层转成 UI 模型 —— 桥接层不猜 UI 的形状。
   Future<List<Map<String, dynamic>>> loadMessages(
     String workspacePath,
     String sessionId, {
     String treeUri = '',
-  }) async {
-    try {
-      final list = await _channel.invokeListMethod<dynamic>('loadMessages', {
-        'workspacePath': workspacePath,
-        'treeUri': treeUri,
-        'sessionId': sessionId,
-      });
-      return _maps(list);
-    } on PlatformException catch (e) {
-      throw AgentBridgeException(e.message ?? e.code);
-    } on MissingPluginException {
-      return const [];
-    }
-  }
+  }) async =>
+      _storeFor(workspacePath, treeUri).loadMessages(sessionId);
 
   /// 切换归档，返回新状态
   Future<bool> toggleArchive(
     String workspacePath,
     String sessionId, {
     String treeUri = '',
-  }) async {
-    try {
-      return await _channel.invokeMethod<bool>('toggleArchive', {
-            'workspacePath': workspacePath,
-            'treeUri': treeUri,
-            'sessionId': sessionId,
-          }) ??
-          false;
-    } on MissingPluginException {
-      return false;
-    }
-  }
+  }) async =>
+      _storeFor(workspacePath, treeUri).toggleArchive(sessionId);
 
   // ------------------------------------------------------------ 运行
 
@@ -458,79 +442,98 @@ class AgentBridge {
 
     // ★ 协议分派（2026-10-14）：三协议真实支持（各有对应 Kotlin provider）
     //
-    // | protocol | backend 参数 | Kotlin 分派到 |
+    // | protocol | 进程内 BackendProvider |
     // |---|---|---|
-    // | anthropic | 'anthropic' | AnthropicProvider（x-api-key + /v1/messages）|
-    // | openaiResponses | 'responses' | OpenAiResponsesProvider（/v1/responses）|
-    // | openaiChat | 'cloud' | OpenAiCompatProvider |
+    // | anthropic | BackendProvider.anthropic（x-api-key + /v1/messages）|
+    // | openaiResponses | BackendProvider.openAiResponses（/v1/responses）|
+    // | openaiChat | BackendProvider.openAiCompatible（/v1/chat/completions）|
     //
-    // ⚠️ **`'local'` 已不存在**（ADR-035）：原先"自建/局域网 ⇒ `'local'`
-    //   （带 `enable_thinking=false`）"那条分支随本地后端一起删除 ——
-    //   自建端点今天同样走 `'cloud'`（OpenAiCompatProvider）。
-    //   不要再让这里产出 `'local'`：Kotlin 侧那个分支现在是 `error(...)`。
-    final backend = switch (provider.protocol) {
-      ProviderProtocol.anthropic => 'anthropic',
-      ProviderProtocol.openaiResponses => 'responses',
-      ProviderProtocol.openaiChat => 'cloud',
-    };
+    // ★ 2026-10-22：这张表不再产出**字符串**形式的后端名 —— 编排在进程内，
+    //   协议直接映射成枚举（见 `local_agent.dart`）。旧的"字符串 → Kotlin 分派"
+    //   已随通道一起消失。
+
+    // ★★ 编排改为**进程内 Dart**（`backend/`）★★
+    //
+    // 原来这里 `invokeMapMethod('runAgent', ...)` 打给 Kotlin。那个类已随
+    // 5 个 Kotlin 模块一起删除，`MainActivity` 也不再处理 `runAgent`
+    // ⇒ 继续走通道只会拿到 `{"ok": false, "error": "未知方法：runAgent"}`，
+    // 而 `AgentRunResult.fromMap` 会把那个 map 解成"空结果"，
+    // 用户看到的是一条**空回答**（最糟的假信息）。
+    //
+    // 现在：直接用 `LocalAgentExecutor` 在同一个 Dart VM 里驱动
+    // `HeraclesAgent`。参数不再需要序列化，`apiKey` 也不会离开本进程。
+    final executor = LocalAgentExecutor(
+      workspacePath: workspacePath,
+      settings: settings,
+      sessionStore: SessionStore(workspaceRoot: workspacePath),
+    );
 
     try {
-      final raw = await _channel.invokeMapMethod<String, dynamic>('runAgent', {
-        'workspacePath': workspacePath,
-        'request': request,
-        'sessionId': sessionId,
-        // SAF tree URI —— 分区存储下必须靠它才能读写
-        'treeUri': treeUri,
-        'backend': backend,
-        // ⚠️ 这里**不再有兜底值**（原 `provider?.model ?? 'qwen3.5-4b'`）：
-        //   provider 已在上方确保非空，模型名直接取用户的真实配置。
-        //   拿一个写死的模型名去兜底是**假信息** —— 用户没配就该明确失败。
-        'baseUrl': provider.baseUrl,
-        'apiKey': provider.apiKey,
-        'modelName': provider.model,
-        // ★ 推理等级五档（2026-10-12，S4/S5）—— 字符串必须与 Kotlin 侧
-        //   `ReasoningLevel` 的 `name.lowercase()` 逐字符一致。
-        //   缺省 `auto` 与改造前行为一致（本地的 auto = 关思考）。
-        //   Kotlin 侧对不认识的值会**回落 AUTO 并留日志**，不会崩。
-        'reasoningLevel': settings.reasoningLevel.wire,
-        // ★ 审批档位（2026-10-19）—— 字符串与 Kotlin `ApprovalMode` 的 name 对齐：
-        //   manual / workspaceAuto / fullAccess。Kotlin 认不出 ⇒ 回落 WORKSPACE_AUTO。
-        'permission': settings.permission.name,
-        // ★ 单次任务最大轮次（2026-10-18，docs/27 P0-1 / ADR-033）。
-        //
-        // ## 修的是什么
-        //
-        // 这个参数**以前根本不存在** —— `AgentLoop` 的 maxTurns 硬编码 8，
-        // 所以真机上**云端模型也只在 8 轮内跑**，长任务被无理由截断
-        // 且没有任何提示。
-        //
-        // ## 为什么 `0` 也必须传（不能"默认就不传"）
-        //
-        // `0` 的语义是**"按后端自动"**（Kotlin `Contract.Budget`：本地 8 / 云端 40），
-        // 不是"没设置"。Kotlin 侧按这个名字读；显式传 `0` 让"自动"
-        // 这个选择是**可观测**的（抓包/日志里一眼看到用户确实选了自动），
-        // 也避免以后有人把 Kotlin 侧默认值改掉时这边的行为悄悄变。
-        'maxTurns': settings.maxTurns,
-        'attachments': attachments
-            .map((a) => {
-                  'path': a.path,
-                  'name': a.name,
-                  'kind': a.kind.name,
-                })
-            .toList(),
-      });
-      if (raw == null) {
-        throw const AgentBridgeException('Kotlin 侧返回空结果');
+      final handle = await executor.run(request: request, sessionId: sessionId);
+      _currentHandle = handle;
+
+      // 把执行器产出的事件搬到全局广播流上（UI 只订阅 `events`）。
+      final pump = handle.events.listen(AgentBridge.emitLocalEvent);
+      try {
+        final r = await handle.result;
+        // ★ 用量记账落地（2026-10-22）：顶栏"上下文占用"与侧栏读这两个数。
+        //   冻结区 = 首轮 promptTokens（provider 真实上报）；
+        //   上限 = 用户配置的模型上下文长度（`fetchModels` 从服务端读到的）。
+        _lastFrozenTokens = executor.lastFrozenTokens;
+        _lastContextLimit = provider.contextLength > 0
+            ? provider.contextLength
+            : -1;
+        return r;
+      } finally {
+        await pump.cancel();
+        _currentHandle = null;
       }
-      return AgentRunResult.fromMap(raw);
-    } on PlatformException catch (e) {
-      throw AgentBridgeException(e.message ?? e.code);
-    } on MissingPluginException {
-      throw const AgentBridgeException(
-        '桥接未就绪 —— 请确认已重新构建 APK（不是热重载）',
-      );
+    } catch (e) {
+      _currentHandle = null;
+      throw AgentBridgeException('运行失败：$e');
     }
   }
+
+  /// 当前在跑的句柄（**唯一**取消入口）。
+  LocalRunHandle? _currentHandle;
+
+  /// ~keep~ 旧实现留档：以下是被替换掉的通道调用（勿重新启用）：
+  ///
+  /// ```dart
+  /// final raw = await _channel.invokeMapMethod<String, dynamic>('runAgent', {
+  ///   'workspacePath': workspacePath,
+  ///   'request': request,
+  ///   'sessionId': sessionId,
+  ///   'treeUri': treeUri,
+  ///   'backend': backend,
+  ///   'baseUrl': provider.baseUrl,
+  ///   'apiKey': provider.apiKey,
+  ///   'modelName': provider.model,
+  ///   'reasoningLevel': settings.reasoningLevel.wire,
+  ///   'permission': settings.permission.name,
+  ///   'maxTurns': settings.maxTurns,
+  ///   'attachments': attachments.map((a) => {
+  ///         'path': a.path, 'name': a.name, 'kind': a.kind.name,
+  ///       }).toList(),
+  /// });
+  /// return AgentRunResult.fromMap(raw!);
+  /// ```
+  ///
+  /// ⚠️ 参数里的 `reasoningLevel` / `permission` 今天**没有映射到 backend**
+  /// （框架的 `ModelConfig` 有 `reasoningEffort`，审批三态还没接线）——
+  /// 这是本轮明确的缺口，见 `docs/nextwork.md`，不要以为它们生效了。
+  ///
+  /// 更早的实现（供对照）：
+  /// ```dart
+  /// } on PlatformException catch (e) {
+  ///   throw AgentBridgeException(e.message ?? e.code);
+  /// } on MissingPluginException {
+  ///   throw const AgentBridgeException('桥接未就绪 —— 请确认已重新构建 APK（不是热重载）');
+  /// }
+  /// // ❌ provider == null / baseUrl 空 / apiKey 空 这三条校验**保留在上方**，
+  /// //    它们与传输方式无关，是产品约束。
+  /// ```
+  /// ~endkeep~
 
   /// **停止当前在跑的那一轮**（2026-10-13）。
   ///
@@ -544,17 +547,11 @@ class AgentBridge {
   /// 返回值：`true` = 确实取消到了一个在跑的任务；
   /// `false` = 没有在跑的（幂等，不是错误 —— 用户可能连点两下）。
   Future<bool> cancelRun() async {
-    try {
-      final r = await _channel
-          .invokeMapMethod<String, dynamic>('cancelRun', const {});
-      return (r?['cancelled'] as bool?) ?? false;
-    } on MissingPluginException {
-      // 桥接未就绪时不要抛 —— 停止是"尽力而为"的操作，
-      // 抛异常会让界面弹一条用户看不懂的红字
-      return false;
-    } on PlatformException {
-      return false;
-    }
+    // ★ 2026-10-22：取消改走**进程内**（旧通道 `cancelRun` 已随 Kotlin 后端删除）。
+    // 返回语义不变：`true` = 确实停了一个在跑的；`false` = 本来就没在跑（幂等）。
+    final h = _currentHandle;
+    if (h == null) return false;
+    return h.cancel();
   }
 
   /// **向正在跑的任务插话**（2026-10-13，思考间隙引导）。
@@ -572,15 +569,24 @@ class AgentBridge {
   /// Kotlin 侧如实回 `accepted: false`，这里透传；
   /// **不要**在这里代发第二条，避免同一句话跑两遍。
   Future<bool> interruptRun(String text) async {
-    try {
-      final r = await _channel
-          .invokeMapMethod<String, dynamic>('interruptRun', {'text': text});
-      return (r?['accepted'] as bool?) ?? false;
-    } on MissingPluginException {
-      return false;
-    } on PlatformException {
-      return false;
-    }
+    // ★ 2026-10-22：插话本轮**降级为"不可用"**，如实回 false。
+    //
+    // ## 为什么不做（而不是假装做了）
+    //
+    // 旧语义：AgentLoop 在当前轮结束后、下一轮开始前把这句话 append 进会话。
+    // 今天编排在框架的 `StatefulAgent` 里，**没有"轮间注入"的挂载点** ——
+    // `AgentHook.onTurnCompletion` 只能接受/拒绝一轮，不能插消息。
+    //
+    // 硬凑的两种做法都更糟：
+    //   · 在 Dart 侧缓存文本、等 run 结束后再发一轮 ⇒ 用户看到"插话了但模型
+    //     还在按原任务跑"，**语义撒谎**；
+    //   · 直接把"插话"当成"取消" ⇒ 用户点引导、任务被停，比不实现危险得多。
+    //
+    // ⇒ 如实回 `false`。调用方（`chat_screen`）对 `false` 的既定处理是
+    //   **走正常发送**（把这句话当新任务发出去），这是可接受的降级。
+    //   详见 `docs/nextwork.md` 的「插话（interrupt）未接线」。
+    if (_currentHandle == null) return false;
+    return false;
   }
 
   /// **设备权限状态**（2026-10-16，无线调试/Shizuku/adb 授权引导）。
@@ -1094,6 +1100,7 @@ class AgentEvent {
     this.reachedGoal,
     this.planClosedReason,
     this.questions,
+    this.changeFiles,
   });
 
   /// 判别字段：轮级 `turn_started` / `model_output` / `tool_started` /
@@ -1196,7 +1203,16 @@ class AgentEvent {
   /// `null` / 空列表 = 题目格式非法（Kotlin 侧解析失败），UI 应提示而不是弹空窗。
   final List<Map<String, dynamic>>? questions;
 
+  /// **`changes`：一次 run 的变更报告**（2026-10-22，对齐参考界面）。
+  ///
+  /// 每项：`{"path": 相对路径, "added": N, "removed": M}`。
+  /// 数字来自**工具结果里的 diff**（不是模型自报）；空/坏数据由 UI 容错跳过。
+  final List<Map<String, dynamic>>? changeFiles;
+
   // ------------------------------------------------------------ 判别辅助
+
+  /// **一次 run 的变更报告**（写类工具按文件聚合，run 结束时发一条）。
+  static const kChanges = 'changes';
 
   static const kTurnStarted = 'turn_started';
   static const kModelOutput = 'model_output';
@@ -1275,6 +1291,7 @@ class AgentEvent {
     kReasoningDelta,
     kStepDelta,
     kStepEnded,
+    kChanges,
   };
 
   /// `step_ended` 的三态取值（与 Kotlin 侧 `StepEnded.STATUS_*` 对齐）。
@@ -1346,6 +1363,11 @@ class AgentEvent {
       status: m['status'] as String?,
       durationMs: (m['durationMs'] as num?)?.toInt(),
       summary: m['summary'] as String?,
+      // ★ 变更报告（2026-10-22）：`{"files":[{"path","added","removed"}]}`
+      changeFiles: (m['files'] as List?)
+          ?.whereType<Map>()
+          .map((e) => e.cast<String, dynamic>())
+          .toList(),
     );
   }
 
@@ -1396,11 +1418,19 @@ class AgentRunResult {
     this.taskWallMs = 0,
     this.sessionId,
     this.cancelled = false,
+    this.changeFiles,
   });
 
   final String stopReason;
   final String finalText;
   final List<AgentTurn> turns;
+
+  /// **变更报告**（2026-10-22）：本次 run 写类工具按文件聚合的结果，
+  /// 每项 `{path, added, removed}`。`null`/空 = 这次没动过文件（不画卡片）。
+  ///
+  /// 数字来自工具结果的 diff（结果无 diff 时退回按参数行数估算），
+  /// **不是模型自报** —— 模型可能撒谎，diff 不会。
+  final List<Map<String, dynamic>>? changeFiles;
 
   final int totalCachedTokens;
   final int totalPromptTokens;

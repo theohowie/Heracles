@@ -1,0 +1,843 @@
+/// **会话持久化（Dart 侧）** —— 替代已删除的 Kotlin `SessionStore.kt`。
+///
+/// ## 数据布局（**必须与旧格式完全兼容**）
+///
+/// UI 与既有会话文件都按这个结构存在磁盘上，换实现**不许改格式**：
+///
+/// ```
+/// <工作区>/.heracles/
+///   ├── sessions.json          ← 索引（JSON 数组，可整体重写）
+///   └── sessions/
+///         ├── s1791611845161.jsonl   ← 会话（严格 append-only）
+///         └── s1791611897233.jsonl
+/// ```
+///
+/// `sessions.json` 的元素：`{id, title, updatedAt(毫秒), starred, archived}`。
+/// `.jsonl` 每行一条 JSON，形状见 `_normalizeEntry` 与
+/// `app/lib/screens/chat_screen.dart` 的 `_toMessages`（**它是消费者，以它为准**）。
+///
+/// ## ★ 铁律：`.jsonl` 严格 append-only
+///
+/// 会话记录**只准追加，绝不准整文件重写**。理由不是洁癖，是这套产品的
+/// 缓存纪律：会话前缀必须字节稳定（`ADR-001`；append-only 命中 90–99% 可依赖，
+/// 而分支 25–105% **不可预测**）。改写历史 = 前缀漂移 = 缓存全灭。
+///
+/// 本实现里只有两处可以整体写 `.jsonl`：
+///
+/// | 位置 | 为什么允许 |
+/// |---|---|
+/// | `seedBranch` | **新建**一个文件（不是改写已有会话） |
+/// | `deleteSession` | **删掉**文件（不是改写内容） |
+///
+/// `appendMessage` 只准追加一行。
+///
+/// ## ⚠️ 一个必须如实说清的降级
+///
+/// **机械上不是 O(1) 追加**：`heracles/device` 通道**没有 append 原语**
+/// （只有 `fs.writeText` 整体覆盖）。所以 `appendMessage` 的实际动作是
+/// 「读全文 → 拼接 → 写全文」。语义上仍是 append-only（既有字节一个不改，
+/// 旧内容是新内容的**前缀**），但长会话下每次写都是 O(n)。
+/// 真铁律需要 Kotlin 侧加 `fs.appendText`（`File.appendText` /
+/// SAF 侧 `openOutputStream(uri, "wa")`），见 `docs/nextwork.md`。
+///
+/// **这个降级带来一个必须堵的坑**：通道的 `fs.readText` 有 **1 MB 上限**
+/// （`DeviceFs.MAX_TEXT_BYTES`），超了会 `truncated: true` **只给前 1 MB**。
+/// 若拿这份"只有前半截"的文本去拼新行再写回，**后半截会被永久删掉** ——
+/// 那就是教科书级的"读改写把用户数据吃掉"。所以 `appendMessage` 在
+/// `truncated == true` 时**直接拒绝**并说明原因，绝不赌一把。
+///
+/// ## ⚠️ 并发：**调用方必须串行化**
+///
+/// 本类**不是线程安全的**，也**不打算让它看起来是**。同一个会话的两次
+/// `appendMessage` 并发进入会互相读到对方的"旧全文"，后写的覆盖先写的（丢行）。
+/// 调用方（agent 循环 / UI）必须保证**同一会话的 append 串行**。
+/// 类内只做一件事：**检测**到并发时如实失败，而不是悄悄丢数据。
+library;
+
+import 'dart:convert';
+
+import 'package:heracles_backend/heracles_backend.dart';
+
+import 'device_capabilities.dart';
+
+// ============================================================================
+// 数据模型
+// ============================================================================
+
+/// 一条会话的**索引元数据**（`sessions.json` 里的一项）。
+///
+/// 字段名与旧格式逐字一致：`id` / `title` / `updatedAt` / `starred` / `archived`。
+class SessionMeta {
+  const SessionMeta({
+    required this.id,
+    required this.title,
+    required this.updatedAt,
+    this.starred = false,
+    this.archived = false,
+  });
+
+  /// 会话 id（`s<毫秒时间戳>`，与旧实现同款，便于人和旧文件对照）。
+  final String id;
+
+  /// 显示名。**空标题一律落到「新会话」**（UI 也会这么兜，两处一致）。
+  final String title;
+
+  /// 最后活动时间（**毫秒**）。排序主键之一。
+  final int updatedAt;
+
+  /// 收藏。排序时**优先于时间**（用户钉住的会话要浮在顶上）。
+  final bool starred;
+
+  /// 归档。归档的会话仍在索引里，由 UI 决定是否折叠显示。
+  final bool archived;
+
+  /// 索引里存的原样 Map（键名与旧格式一致，可直接给 `AgentBridge` 那类消费方）。
+  Map<String, dynamic> toMap() => <String, dynamic>{
+        'id': id,
+        'title': title,
+        'updatedAt': updatedAt,
+        'starred': starred,
+        'archived': archived,
+      };
+
+  /// 从索引里的一项解析；形状不对返回 `null`（**丢一项，不要让整个索引读失败**）。
+  static SessionMeta? fromMap(Object? raw) {
+    if (raw is! Map) return null;
+    final id = raw['id'];
+    if (id is! String || id.trim().isEmpty) return null;
+    return SessionMeta(
+      id: id,
+      title: _titleOf(raw['title']),
+      updatedAt: _intOf(raw['updatedAt']) ?? 0,
+      starred: _boolOf(raw['starred']) ?? false,
+      archived: _boolOf(raw['archived']) ?? false,
+    );
+  }
+
+  SessionMeta copyWith({
+    String? title,
+    int? updatedAt,
+    bool? starred,
+    bool? archived,
+  }) =>
+      SessionMeta(
+        id: id,
+        title: title ?? this.title,
+        updatedAt: updatedAt ?? this.updatedAt,
+        starred: starred ?? this.starred,
+        archived: archived ?? this.archived,
+      );
+
+  @override
+  String toString() => 'SessionMeta($id, $title, updatedAt=$updatedAt, '
+      'starred=$starred, archived=$archived)';
+}
+
+// ============================================================================
+// SessionStore
+// ============================================================================
+
+/// 工作区内的会话读写（全部走 `heracles/device` 的 `fs.*`）。
+///
+/// ## 为什么一律走 `fs.*` 而不是 `dart:io`
+///
+/// SAF 工作区（用户选的 `/sdcard/xxx`）在 `dart:io` 下写必 `EPERM`
+/// （App 不在 `media_rw` 组，真机实测见 `docs/20`）。旧 Kotlin 实现踩过
+/// 一次：`sessions.json` 用 `java.io.File` 写 ⇒ 真机上永远存不进去。
+/// 所以本类**不 import `dart:io`**，一切交给通道按路径路由（POSIX / SAF）。
+///
+/// ## 为什么 root 在构造函数里，不在每个方法参数里
+///
+/// 任务书写的是 `listSessions(root)` 这种形状。实现改成"构造时给一次"：
+/// 一个工作区一个 store 实例，避免每个调用点重复传 root ——
+/// **传错一次就会写进另一个工作区的会话目录**，而那种 bug 沉默且不可逆
+/// （会话记录跑到别处，用户以为丢了）。要切工作区就换一个实例。
+class SessionStore {
+  /// [workspaceRoot] 必须是设备上的**绝对路径**（SAF 工作区请传
+  /// `picker.folder` 返回的 `path`）。
+  ///
+  /// [channel] 可注入（测试用 mock handler）。
+  SessionStore({
+    required String workspaceRoot,
+    DeviceChannelClient? channel,
+  })  : _root = _normalizeRoot(workspaceRoot),
+        _ch = channel ?? const DeviceChannelClient();
+
+  final String _root;
+  final DeviceChannelClient _ch;
+
+  /// 索引相对工作区的位置（与旧实现同款）。
+  static const String _indexRel = '.heracles/sessions.json';
+
+  /// 会话文件所在目录（相对工作区）。
+  static const String _dirRel = '.heracles/sessions';
+
+  /// 上一次操作留下的失败原因（排障用；`null` = 上次没出错）。
+  ///
+  /// 为什么用字段而不是抛异常：会话读写失败**不该让 UI 崩**
+  /// （旧实现有"建了目录没写文件、界面无提示"的事故 —— 静默失败比崩溃更难查，
+  /// 所以**失败要能看见**；但也别抛，UI 那层没有恢复手段）。
+  String? lastError;
+
+  /// 工作区根（绝对路径，无尾部分隔符）。
+  String get workspaceRoot => _root;
+
+  /// 索引文件的绝对路径。
+  String get indexPath => '$_root/$_indexRel';
+
+  /// 某个会话的消息文件绝对路径。
+  String messagesPath(String sessionId) => '$_root/$_dirRel/$sessionId.jsonl';
+
+  static String _normalizeRoot(String raw) {
+    final t = raw.trim().replaceAll('\\', '/');
+    if (t.isEmpty) throw ArgumentError('workspaceRoot 不能为空');
+    if (!t.startsWith('/')) {
+      throw ArgumentError(
+        'workspaceRoot 必须是设备上的绝对路径（收到 `$raw`）。'
+        'SAF 工作区请传 `picker.folder` 返回的 path。',
+      );
+    }
+    final cleaned = t.replaceAll(RegExp('/{2,}'), '/');
+    if (cleaned.length > 1 && cleaned.endsWith('/')) {
+      return cleaned.substring(0, cleaned.length - 1);
+    }
+    return cleaned;
+  }
+
+  // ==========================================================================
+  // 索引（sessions.json）—— **可整体重写**（它是索引，不是会话）
+  // ==========================================================================
+
+  /// 列出会话，按「收藏 > 最后活动时间」倒序（与旧实现同一排序）。
+  ///
+  /// 索引不存在 / 损坏 ⇒ 返回空列表并置 [lastError]（**不崩 UI**，
+  /// 但错误可见）。单条形状不对 ⇒ 只丢那一条（不因一项坏掉丢整张表）。
+  Future<List<SessionMeta>> listSessions() async {
+    final read = await _readIndex();
+    return _sorted(read.items);
+  }
+
+  /// 列出会话并**带失败原因**（给"索引读不出来"要如实告警的场合）。
+  Future<CapabilityResult> listSessionsResult() async {
+    final read = await _readIndex();
+    if (read.error != null) return CapabilityFailure(read.error!);
+    final list = _sorted(read.items);
+    final buf = StringBuffer('会话 ${list.length} 个：');
+    if (list.isEmpty) {
+      buf.write('（还没有会话）');
+    } else {
+      for (final m in list) {
+        buf.write('\n- ${m.id}  ${m.title}'
+            '${m.starred ? " [收藏]" : ""}${m.archived ? " [归档]" : ""}');
+      }
+    }
+    return CapabilitySuccess(
+      buf.toString(),
+      metadata: <String, dynamic>{'count': list.length},
+    );
+  }
+
+  /// 解析 + 排序（两处共用，避免排序口径漂移）。
+  List<SessionMeta> _sorted(List<Object?> items) {
+    final list = <SessionMeta>[];
+    for (final item in items) {
+      final meta = SessionMeta.fromMap(item);
+      if (meta != null) list.add(meta);
+    }
+    list.sort((a, b) {
+      if (a.starred != b.starred) return a.starred ? -1 : 1;
+      return b.updatedAt.compareTo(a.updatedAt);
+    });
+    return list;
+  }
+
+  /// 新建会话，返回新 id。
+  ///
+  /// id 形如 `s1791611845161`（**毫秒时间戳**，与旧实现同款 —— 既有文件名
+  /// 都是这个形状，改格式会让新旧会话混在一个目录里看不出年代）。
+  /// 同一毫秒内连续建两个会撞 id，这里加一个顺延/后缀避免覆盖已有文件。
+  Future<String> createSession(String title) async {
+    final id = await _newId();
+    final list = await listSessions();
+    final updated = <SessionMeta>[
+      ...list,
+      SessionMeta(
+        id: id,
+        title: _titleOf(title),
+        updatedAt: DateTime.now().millisecondsSinceEpoch,
+        starred: false,
+        archived: false,
+      ),
+    ];
+    await _writeIndex(updated);
+    // 不预建空的 .jsonl：旧实现也不建（没有消息就没有文件），
+    // 建一个空文件只会让"这个会话有记录吗"多一个假信号。
+    return id;
+  }
+
+  /// 生成一个不撞现有文件的会话 id。
+  Future<String> _newId() async {
+    final ms = DateTime.now().millisecondsSinceEpoch;
+    // 撞了就往后挪（不改变"是时间戳"这个语义，也不会破坏排序）
+    for (var i = 0; i < 1000; i++) {
+      final candidate = 's${ms + i}';
+      final stat = await _ch.call('fs.stat', <String, Object?>{
+        'path': messagesPath(candidate),
+      });
+      // stat 失败（通道挂了）⇒ 不纠结，直接用当前候选（真写不进去会另有报错）
+      if (errorOf(stat) != null) return candidate;
+      if (stat['exists'] != true) return candidate;
+    }
+    // 1000 个候选都撞了：只可能是一次批量导入，直接用当前毫秒 + 随机尾巴
+    return 's$ms-${DateTime.now().microsecondsSinceEpoch % 100000}';
+  }
+
+  /// 改标题。
+  Future<bool> renameSession(String sessionId, String title) async {
+    final list = await listSessions();
+    var found = false;
+    final updated = list.map((m) {
+      if (m.id != sessionId) return m;
+      found = true;
+      return m.copyWith(title: _titleOf(title));
+    }).toList();
+    if (!found) {
+      lastError = '会话不存在：$sessionId';
+      return false;
+    }
+    return _writeIndex(updated);
+  }
+
+  /// 删除会话：**元数据 + 消息文件一起删**。
+  ///
+  /// 旧实现的首版只从索引里移除、**从没删过 `.jsonl`** —— 于是用户以为删掉的
+  /// 对话其实完整躺在磁盘上（隐私与整洁双输）。这里两件一起做。
+  ///
+  /// 删消息文件失败**不阻断**（索引已经改了）；失败记进 [lastError]，
+  /// 因为是"残留几 KB" vs "让用户以为删除没成功"的取舍 —— 后者更糟。
+  Future<bool> deleteSession(String sessionId) async {
+    lastError = null;
+    final list = await listSessions();
+    final remaining = list.where((m) => m.id != sessionId).toList();
+    if (remaining.length == list.length) {
+      lastError = '会话不存在：$sessionId';
+      return false;
+    }
+    final ok = await _writeIndex(remaining);
+    // 删文件（`recursive: false`：它是文件，不是目录）
+    final del = await _ch.call('fs.delete', <String, Object?>{
+      'path': messagesPath(sessionId),
+      'recursive': false,
+    });
+    final delErr = errorOf(del);
+    if (delErr != null && !delErr.contains('不存在')) {
+      lastError = '会话索引已更新，但消息文件删不掉：$delErr '
+          '（残留文件：${messagesPath(sessionId)}）';
+    }
+    return ok;
+  }
+
+  /// 切换收藏，返回**新状态**（旧实现同款语义）。
+  Future<bool> toggleStar(String sessionId) async {
+    final list = await listSessions();
+    var now = false;
+    var found = false;
+    final updated = list.map((m) {
+      if (m.id != sessionId) return m;
+      found = true;
+      now = !m.starred;
+      return m.copyWith(starred: now);
+    }).toList();
+    if (!found) {
+      lastError = '会话不存在：$sessionId';
+      return false;
+    }
+    await _writeIndex(updated);
+    return now;
+  }
+
+  /// 切换归档，返回**新状态**。
+  Future<bool> toggleArchive(String sessionId) async {
+    final list = await listSessions();
+    var now = false;
+    var found = false;
+    final updated = list.map((m) {
+      if (m.id != sessionId) return m;
+      found = true;
+      now = !m.archived;
+      return m.copyWith(archived: now);
+    }).toList();
+    if (!found) {
+      lastError = '会话不存在：$sessionId';
+      return false;
+    }
+    await _writeIndex(updated);
+    return now;
+  }
+
+  /// 把某个会话的 `updatedAt` 推到"现在"（有新消息时调）。
+  Future<void> touchSession(String sessionId) async {
+    final list = await listSessions();
+    final now = DateTime.now().millisecondsSinceEpoch;
+    final updated = list
+        .map((m) => m.id == sessionId ? m.copyWith(updatedAt: now) : m)
+        .toList();
+    await _writeIndex(updated);
+  }
+
+  /// 索引的读结果（内部用）。
+  Future<_IndexRead> _readIndex() async {
+    lastError = null;
+    final raw = await _ch.call('fs.readText', <String, Object?>{
+      'path': indexPath,
+      'offsetLine': 1,
+      'maxLines': 0,
+    });
+    final err = errorOf(raw);
+    if (err != null) {
+      // 索引还不存在 = 这个工作区还没有会话。**这是正常状态，不是错误。**
+      if (err.contains('不存在')) return const _IndexRead(<Object?>[]);
+      lastError = '读取会话索引失败：$err';
+      return _IndexRead(const <Object?>[], error: lastError);
+    }
+    if (raw['truncated'] == true) {
+      // 索引被 1MB 文本上限截断 ⇒ 解析出来必然是不完整 JSON。
+      // 绝不能拿它去 `_writeIndex`（那会把后面的会话全删掉）。如实失败。
+      final chars = (raw['text'] as String?)?.length ?? 0;
+      lastError = '会话索引超过通道 1MB 文本上限，无法完整读取'
+          '（读回 $chars 字符）。'
+          '这通常意味着会话数量异常多，请手动清理 sessions.json。';
+      return _IndexRead(const <Object?>[], error: lastError);
+    }
+    final text = ((raw['text'] as String?) ?? '').trim();
+    if (text.isEmpty) return const _IndexRead(<Object?>[]);
+    try {
+      final decoded = jsonDecode(text);
+      if (decoded is! List) {
+        lastError = '会话索引格式不对（期望 JSON 数组，实际是 '
+            '${decoded.runtimeType}）。文件：$indexPath';
+        return _IndexRead(const <Object?>[], error: lastError);
+      }
+      return _IndexRead(decoded);
+    } catch (e) {
+      lastError = '会话索引不是合法 JSON：${_humanize(e)}。文件：$indexPath';
+      return _IndexRead(const <Object?>[], error: lastError);
+    }
+  }
+
+  /// 整体重写索引（**这是唯一允许整体重写的文件** —— 它是索引不是会话）。
+  Future<bool> _writeIndex(List<SessionMeta> list) async {
+    final arr = <Map<String, dynamic>>[for (final m in list) m.toMap()];
+    final text = jsonEncode(arr);
+    final raw = await _ch.call('fs.writeText', <String, Object?>{
+      'path': indexPath,
+      'text': text,
+    });
+    final err = errorOf(raw);
+    if (err != null) {
+      lastError = '写入会话索引失败：$err';
+      return false;
+    }
+    return true;
+  }
+
+  // ==========================================================================
+  // 会话消息（<id>.jsonl）—— **严格 append-only**
+  // ==========================================================================
+
+  /// 读一个会话的全部消息行（**原样 Map 列表**，按写入顺序）。
+  ///
+  /// ## 为什么返回"原样行"而不是强类型
+  ///
+  /// `agent_bridge.dart` 的 `loadMessages` 契约就是"返回原始行列表，由上层
+  /// 转成 UI 模型 —— 桥接层不猜 UI 的形状"。这里保持同一口径：
+  /// **磁盘上是什么就给什么**，不在这里做业务解释。
+  ///
+  /// ## 坏行怎么办
+  ///
+  /// 跳过（`.jsonl` 的价值就是"一行坏了不影响其它行"）。
+  /// 但**读取整体失败**（不是"文件不存在"）时返回一条 `role: system` 记录
+  /// 说明原因 —— 与旧实现同款：**不能静默返回空列表**，那会让用户以为
+  /// 记录真的没了。
+  Future<List<Map<String, dynamic>>> loadMessages(String sessionId) async {
+    lastError = null;
+    final raw = await _ch.call('fs.readText', <String, Object?>{
+      'path': messagesPath(sessionId),
+      'offsetLine': 1,
+      'maxLines': 0,
+    });
+    final err = errorOf(raw);
+    if (err != null) {
+      if (err.contains('不存在')) return <Map<String, dynamic>>[];
+      lastError = err;
+      return <Map<String, dynamic>>[
+        <String, dynamic>{
+          'role': 'system',
+          'text': '无法读取会话记录：$err',
+          'ts': 0,
+        },
+      ];
+    }
+
+    if (raw['truncated'] == true) {
+      // 会话超过 1 MB 文本上限：**如实告知只读到一部分**，不假装完整。
+      // UI 会把 system 行画成一条提示气泡（`_toMessages` 的 'system' 分支）。
+      lastError = '会话记录超过通道 1MB 文本上限，只读回了前面一部分。';
+    }
+
+    final text = (raw['text'] as String?) ?? '';
+    final out = <Map<String, dynamic>>[];
+    for (final line in const LineSplitter().convert(text)) {
+      final t = line.trim();
+      if (t.isEmpty) continue;
+      try {
+        final decoded = jsonDecode(t);
+        if (decoded is Map) {
+          out.add(decoded.map((k, v) => MapEntry(k.toString(), v)));
+        }
+        // 不是对象（例如坏掉的一行只剩个数字）⇒ 跳过这行，不影响其它行
+      } catch (_) {
+        // 半行/坏行：跳过。`.jsonl` 的抗损坏能力就靠这个。
+        continue;
+      }
+    }
+    if (lastError != null) {
+      out.add(<String, dynamic>{
+        'role': 'system',
+        'text': '${lastError!}后面的消息没有显示。',
+        'ts': 0,
+      });
+    }
+    return out;
+  }
+
+  /// **追加一条消息** —— 只准追加，绝不准整文件重写。
+  ///
+  /// ## 实现形状（如实说明）
+  ///
+  /// 通道没有 append 原语 ⇒ 「读全文 → 在末尾拼一行 → 写全文」。
+  /// **语义上仍是 append-only**：写之前断言 `updated` 以 `existing` 为前缀，
+  /// 也就是**既有字节一个都没改**（见文件头 KDoc 的"降级"说明）。
+  /// 机械上不是 O(1) 追加；真铁律需要 Kotlin 侧加 `fs.appendText`。
+  ///
+  /// ## 三道防线（任何一道不过就**拒绝写入**，绝不赌）
+  ///
+  /// 1. **旧文件读不全**（`truncated == true`，超过 1 MB）⇒ 拒绝。
+  ///    否则写回时会把没读到的那半截**永久删掉**。
+  /// 2. **并发 append** ⇒ 拒绝（见 `_appending`）。
+  /// 3. **写回结果不是"旧内容 + 新行"** ⇒ 理论上不可能，但仍断言一次。
+  ///
+  /// ## ⚠️ 调用方必须串行化
+  ///
+  /// 同一会话的 append **不许并发**（本类不是线程安全的，也刻意不做成
+  /// 看起来是）。类内只能**检测**并发并如实失败 —— 检测不到跨实例 /
+  /// 跨进程的竞争。
+  Future<bool> appendMessage(
+    String sessionId,
+    Map<String, dynamic> message,
+  ) async {
+    lastError = null;
+    final path = messagesPath(sessionId);
+
+    if (_appending) {
+      // 检测到并发：如实失败比悄悄丢一行好
+      lastError = '同一个会话的上一次追加还没写完（并发调用 appendMessage）。'
+          '会话是 append-only 的，并发读改写会丢行 ⇒ 已拒绝本次写入。'
+          '调用方必须把同一会话的 append 串行化。';
+      return false;
+    }
+    _appending = true;
+    try {
+      // ---- 读旧全文 ----
+      final raw = await _ch.call('fs.readText', <String, Object?>{
+        'path': path,
+        'offsetLine': 1,
+        'maxLines': 0,
+      });
+      final err = errorOf(raw);
+      var existing = '';
+      if (err != null) {
+        if (!err.contains('不存在')) {
+          lastError = '读取会话记录失败，未追加：$err';
+          return false;
+        }
+        // 文件还不存在 ⇒ 本次写就是"建文件 + 第一行"，合法
+      } else {
+        if (raw['truncated'] == true) {
+          lastError = '会话记录已超过通道 1 MB 文本上限，读不全。'
+              '**本次没有写入** —— 在"只读到前半截"的状态下拼新行再写回，'
+              '会把没读到的那部分永久删掉。\n'
+              '请先把旧会话归档/裁短（或等通道支持 append 原语）再继续。\n'
+              '文件：$path';
+          return false;
+        }
+        existing = (raw['text'] as String?) ?? '';
+      }
+
+      // ---- 拼一行 ----
+      final entry = _normalizeEntry(message);
+      if (entry == null) {
+        lastError = '这一行消息缺少 role（或含不可编码对象），未写入。'
+            '`.jsonl` 每行都必须有 role，否则读方不知道该怎么画。';
+        return false;
+      }
+      final line = _encodeLine(entry);
+      if (line == null) {
+        lastError = '这一行消息无法编码成 JSON（可能含 NaN/Infinity 或循环引用），未写入。';
+        return false;
+      }
+
+      // 旧内容末尾没有换行时先补一个：补的是**追加**，既有字节没动。
+      final needsNewline = existing.isNotEmpty && !existing.endsWith('\n');
+      final updated = '$existing${needsNewline ? "\n" : ""}$line\n';
+
+      // ---- 防线③：既有内容必须是新内容的**前缀** ----
+      if (!updated.startsWith(existing)) {
+        lastError = '内部断言失败：拼接结果不是"旧内容 + 新行"，已放弃写入（会丢用户数据）。';
+        return false;
+      }
+
+      // ---- 写回 ----
+      final w = await _ch.call('fs.writeText', <String, Object?>{
+        'path': path,
+        'text': updated,
+      });
+      final werr = errorOf(w);
+      if (werr != null) {
+        lastError = '写入会话记录失败（${_humanize(werr)}）。会话文件位置：$path';
+        return false;
+      }
+      return true;
+    } finally {
+      _appending = false;
+    }
+  }
+
+  /// 本实例是否正在写（**只用于检测并发，不是锁**）。
+  bool _appending = false;
+
+  /// 从一条回答开新会话分支（与 UI 的 `_branchFrom` 配套）。
+  ///
+  /// ## 为什么是"新建文件"而不是"在原会话上开分支"
+  ///
+  /// 底层会话严格 append-only（`ADR-001`：分支的缓存命中 25–105% **不可预测**，
+  /// 而 append-only 有 90–99%）。所以分支 = **新建一个会话，把原会话到
+  /// 某条回答为止的内容整段抄过去**：新会话从第一行起就是干净的 append-only 流。
+  ///
+  /// 代价（如实写在 KDoc 里，别让人以为分支免费）：新会话第一轮**没有缓存命中**，
+  /// 上下文要重新预填充一次。
+  ///
+  /// ## 参数形状与任务书的两处差异（故意的）
+  ///
+  /// - 任务书写 `seedBranch(root, id, entries)`；这里 **id 是返回值**（新会话的 id
+  ///   调用方拿不到就没有意义），标题代替 id 做入参。想指定 id 可传 [sessionId]。
+  /// - [entries] 里的值**故意宽松**：UI 传过来的 `i` / `ms` 是**字符串**
+  ///   （`chat_screen.dart` 的 `_branchFrom` 里写的 `'i': old.index.toString()`）。
+  ///   写入前会被 `_normalizeEntry` 规整成数字 —— 因为消费方
+  ///   `_toMessages` 用的是 `(m['i'] as num?)?.toInt()`，
+  ///   拿到字符串会**抛 TypeError 把读会话整条链路打断**。
+  ///
+  /// @return 新会话 id（建索引 / 写消息失败返回 `null`，原因在 [lastError]）
+  Future<String?> seedBranch(
+    List<Map<String, dynamic>> entries, {
+    String title = '分支',
+    String? sessionId,
+  }) async {
+    lastError = null;
+    final id = sessionId ?? await _newId();
+
+    // ---- 先落索引（索引成功、消息失败 ⇒ 用户看到空会话；反过来更糟：
+    //      消息在但索引没有 ⇒ UI 根本列不出它，等于数据隐身）----
+    final list = await listSessions();
+    final now = DateTime.now().millisecondsSinceEpoch;
+    await _writeIndex(<SessionMeta>[
+      ...list,
+      SessionMeta(id: id, title: _titleOf(title), updatedAt: now),
+    ]);
+    if (lastError != null) return null;
+
+    // ---- 整份写消息文件（**新建**，不是改写既有会话 ⇒ 允许）----
+    final buf = StringBuffer();
+    for (final e in entries) {
+      final entry = _normalizeEntry(e);
+      if (entry == null) continue;
+      final line = _encodeLine(entry);
+      if (line == null) continue;
+      buf.writeln(line);
+    }
+    final raw = await _ch.call('fs.writeText', <String, Object?>{
+      'path': messagesPath(id),
+      'text': buf.toString(),
+    });
+    final err = errorOf(raw);
+    if (err != null) {
+      lastError = '分支会话的消息写入失败：$err';
+      return null;
+    }
+    return id;
+  }
+}
+
+// ============================================================================
+// 行规整 —— JSON 一行一条的守门人
+// ============================================================================
+
+/// 把一条 Map 编码成**单行** JSON；编码不了返回 `null`。
+///
+/// 为什么要单独一步而不是直接 `jsonEncode`：`jsonEncode` 对 `NaN` /
+/// `Infinity` / 循环引用会**抛异常**。那种异常发生在写盘路径上，
+/// 会把"这条消息没写成"变成"整个 append 崩了"。这里收敛成 `null`。
+String? _encodeLine(Map<String, dynamic> entry) {
+  try {
+    final line = jsonEncode(entry);
+    // `jsonEncode` 本身不会产出裸换行；真出现了说明被喂了畸形对象。
+    // 一行一条是 `.jsonl` 的命根子 ⇒ 转义掉，绝不写多行。
+    return line.contains('\n') ? line.replaceAll('\n', r'\n') : line;
+  } catch (_) {
+    return null;
+  }
+}
+
+/// 规整一条消息，让它**能被消费方安全读回**。
+///
+/// ## 为什么需要这一步（不是多余的）
+///
+/// 消费方是 `chat_screen.dart` 的 `_toMessages`，它用的是**硬 cast**：
+///
+/// ```dart
+/// index: (m['i'] as num?)?.toInt(),               // ← 字符串会抛 TypeError
+/// durationMs: (m['ms'] as num?)?.toInt(),
+/// truncated: (m['truncated'] as bool?) == true,   // ← 字符串会抛
+/// ```
+///
+/// 而 UI 的 `_branchFrom` 恰恰传的是**字符串**（`'i': old.index.toString()`）。
+/// 不规整的话：分支写进去 → 下次切换会话 → `as num?` 抛异常 → **整个会话打不开**。
+/// 旧 Kotlin 侧靠 `JSONObject.optInt()` 的宽松转换躲过了这个问题；
+/// Dart 的 JSON 读回来是 `num`/`String` 原样，所以必须在这里做。
+///
+/// ## 规整规则（只动"已知的数值/布尔字段"，**其它键一律原样保留**）
+///
+/// | 字段 | 目标类型 |
+/// |---|---|
+/// | `ts` / `i` / `ms` / `cached` / `prompt` / `out` / `turns` | int |
+/// | `ok` / `truncated` / `starred` / `archived` | bool |
+/// | `text` / `think` / `tool` / `result` / `reason` / `stage` / `stepId` / `title` / `role` / `attach` | String |
+/// | `args` | Map（值原样，读方自己 `toString()`） |
+///
+/// 未知键**保留**（`.jsonl` 是长期数据，将来加字段时旧版本也要能带着它）
+/// —— 但 `null` 值会被去掉（省字节，且 `containsKey` 判断更干净）。
+///
+/// 返回 `null` = 这行没有 `role`（读方无法画它）。**不编造 role**。
+Map<String, dynamic>? _normalizeEntry(Map<String, dynamic> message) {
+  final out = <String, dynamic>{};
+  for (final entry in message.entries) {
+    final k = entry.key;
+    final v = entry.value;
+    if (v == null) continue;
+
+    if (_intKeys.contains(k)) {
+      final n = _intOf(v);
+      if (n != null) out[k] = n;
+      continue;
+    }
+    if (_boolKeys.contains(k)) {
+      final b = _boolOf(v);
+      if (b != null) out[k] = b;
+      continue;
+    }
+    if (_stringKeys.contains(k)) {
+      out[k] = v is String ? v : '$v';
+      continue;
+    }
+    out[k] = v;
+  }
+
+  // `role` 必须有（没有 role 的行读方不知道该怎么画）
+  final role = out['role'];
+  if (role == null || '$role'.trim().isEmpty) {
+    // 不编造一个 role：那会让读方把一行未知数据画成用户消息。
+    // 返回 null ⇒ 调用方**跳过这一行**，其余照写（`.jsonl` 的抗损坏纪律）。
+    return null;
+  }
+
+  // `ts` 缺了就补（`.jsonl` 每行都该有时间戳，缺了排序/展示会怪）
+  out['ts'] ??= DateTime.now().millisecondsSinceEpoch;
+  return out;
+}
+
+const Set<String> _intKeys = <String>{
+  'ts',
+  'i',
+  'ms',
+  'cached',
+  'prompt',
+  'out',
+  'turns',
+};
+
+const Set<String> _boolKeys = <String>{
+  'ok',
+  'truncated',
+  'starred',
+  'archived',
+};
+
+const Set<String> _stringKeys = <String>{
+  'role',
+  'text',
+  'think',
+  'tool',
+  'result',
+  'reason',
+  'stage',
+  'stepId',
+  'title',
+  'attach',
+};
+
+// ============================================================================
+// 小工具
+// ============================================================================
+
+/// 索引读结果（内部用）。
+class _IndexRead {
+  const _IndexRead(this.items, {this.error});
+
+  final List<Object?> items;
+  final String? error;
+}
+
+/// 宽松取 int：`int` / `double` / 数字字符串都能来。
+///
+/// 为什么要吃字符串：UI 的 `_branchFrom` 传的是 `'i': index.toString()`。
+int? _intOf(Object? v) {
+  if (v is int) return v;
+  if (v is num) return v.isFinite ? v.toInt() : null;
+  if (v is String) return int.tryParse(v.trim());
+  if (v is bool) return v ? 1 : 0;
+  return null;
+}
+
+/// 宽松取 bool：`bool` / `"true"·"1"` / `1` 都认（旧数据里三种都出现过）。
+bool? _boolOf(Object? v) {
+  if (v is bool) return v;
+  if (v is num) return v != 0;
+  if (v is String) {
+    final t = v.trim().toLowerCase();
+    if (t == 'true' || t == '1' || t == 'yes') return true;
+    if (t == 'false' || t == '0' || t == 'no') return false;
+  }
+  return null;
+}
+
+/// 标题兜底：空标题一律落到「新会话」。
+String _titleOf(Object? v) {
+  final t = v is String ? v.trim() : '';
+  return t.isEmpty ? '新会话' : t;
+}
+
+/// 异常 → 短人话（与能力层同口径：堆栈对模型没用）。
+String _humanize(Object e) {
+  final s = e.toString();
+  return s.length > 300 ? '${s.substring(0, 300)}…' : s;
+}

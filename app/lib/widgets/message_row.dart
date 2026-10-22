@@ -1,11 +1,13 @@
 import 'dart:async';
 
+import 'package:flutter/cupertino.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart' show Clipboard, ClipboardData;
 
 import '../models/message.dart';
 import '../models/settings.dart';
 import '../theme/app_theme.dart';
+import '../theme/cupertino_kit.dart';
 import 'stream_step.dart';
 import 'tool_call_card.dart';
 
@@ -57,7 +59,8 @@ class MessageRow extends StatelessWidget {
       // ★ 传 build context 给长按菜单（StatelessWidget 里
       //   `_showMessageMenu` 无法自取 —— 显式传，见该方法注释）
       HUserMessage(:final text) => _user(h, text, message.id, context),
-      HAssistantMessage(:final text) => _assistant(h, text),
+      HAssistantMessage(:final text, :final changes) =>
+          _assistant(h, text, changes),
       HToolCall() =>
         ToolCallCard(call: message as HToolCall, stepDetail: stepDetail),
       HProgress(:final label) => _progress(h, label),
@@ -69,13 +72,130 @@ class MessageRow extends StatelessWidget {
         ),
       HBlocked() => _blocked(h, message as HBlocked),
       HRawOutput() => _rawOutput(h, message as HRawOutput),
+      // 旧数据兼容：独立一条的变更报告（新数据已挂进助手消息内部）
+      HChanges(:final files) => _changesCard(h, files),
     };
+  }
+
+  /// **变更报告卡片**（2026-10-22，用户点名要参考界面那个"已编辑 N 个文件"）。
+  ///
+  /// ```
+  /// ┌────────────────────────────────────────┐
+  /// │ </>  已编辑 4 个文件                      │
+  /// │     +168 −31                            │
+  /// │ ─────────────────────────────────────── │
+  /// │    app/lib/services/local_agent.dart  +58 −1 │
+  /// │    ...                                  │
+  /// └────────────────────────────────────────┘
+  /// ```
+  ///
+  /// ## 数字的可信性
+  ///
+  /// 来自**工具结果里的 diff**（`diffStatOf`），不是模型自报 ——
+  /// 模型说"我改了 3 个文件"可能撒谎，diff 不会。所以这里可以直接当事实展示。
+  Widget _changesCard(Hue h, List<HChangeFile> files) {
+    final totalAdded = files.fold<int>(0, (s, f) => s + f.added);
+    final totalRemoved = files.fold<int>(0, (s, f) => s + f.removed);
+    final green = HColors.successOn(h.dark);
+    final red = HColors.errorOn(h.dark);
+    return Container(
+      width: double.infinity,
+      margin: const EdgeInsets.only(bottom: HSpace.md),
+      decoration: BoxDecoration(
+        color: h.surfaceAlt,
+        borderRadius: BorderRadius.circular(HRadius.md),
+        border: Border.all(color: h.border),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Padding(
+            padding: const EdgeInsets.fromLTRB(
+                HSpace.md, HSpace.sm + 2, HSpace.md, HSpace.sm),
+            child: Row(
+              children: [
+                Container(
+                  padding: const EdgeInsets.all(6),
+                  decoration: BoxDecoration(
+                    color: h.bg,
+                    borderRadius: BorderRadius.circular(HRadius.sm),
+                  ),
+                  child: Icon(AppIcons.code, size: 16, color: h.accent),
+                ),
+                const SizedBox(width: HSpace.sm + 2),
+                Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      '已编辑 ${files.length} 个文件',
+                      style: TextStyle(
+                        fontSize: 13.5,
+                        fontWeight: FontWeight.w700,
+                        color: h.text,
+                      ),
+                    ),
+                    const SizedBox(height: 2),
+                    Row(
+                      children: [
+                        Text('+$totalAdded',
+                            style: TextStyle(
+                                fontSize: 12,
+                                fontWeight: FontWeight.w600,
+                                color: green)),
+                        const SizedBox(width: 6),
+                        Text('−$totalRemoved',
+                            style: TextStyle(
+                                fontSize: 12,
+                                fontWeight: FontWeight.w600,
+                                color: red)),
+                      ],
+                    ),
+                  ],
+                ),
+              ],
+            ),
+          ),
+          Divider(height: 1, color: h.border),
+          for (final f in files)
+            Padding(
+              padding: const EdgeInsets.symmetric(
+                  horizontal: HSpace.md, vertical: 5),
+              child: Row(
+                children: [
+                  Expanded(
+                    child: Text(
+                      f.path,
+                      overflow: TextOverflow.ellipsis,
+                      style: TextStyle(
+                        fontFamily: kMonoFontFamily,
+                        fontFamilyFallback: kMonoFallback,
+                        fontSize: 12,
+                        color: h.textDim,
+                      ),
+                    ),
+                  ),
+                  const SizedBox(width: HSpace.sm),
+                  Text('+${f.added}',
+                      style: TextStyle(
+                          fontSize: 12, fontWeight: FontWeight.w600,
+                          color: green)),
+                  const SizedBox(width: 6),
+                  Text('−${f.removed}',
+                      style: TextStyle(
+                          fontSize: 12, fontWeight: FontWeight.w600,
+                          color: red)),
+                ],
+              ),
+            ),
+        ],
+      ),
+    );
   }
 
   /// 用户消息：左侧强调色竖边 —— 与助手输出在视觉上明确区分
   ///
   /// ★ 长按交互（2026-10-13，参考 DeepSeek 移动端）：
-  ///   · **所有消息**长按 = 复制（+ SnackBar 回执）
+  ///   · **所有消息**长按 = 复制（+ iOS 吐司回执）
   ///   · **用户消息**长按额外有「编辑重发」—— 文本放回输入框，
   ///     用户改完自己点发送。**不做历史改写**：会话 append-only
   ///     （铁律 1），编辑重发 = 以这段内容为基础发一条新消息。
@@ -126,35 +246,41 @@ class MessageRow extends StatelessWidget {
   ///   但语义诚实：发了什么就是什么，历史不被偷偷改掉。
   Future<void> _showMessageMenu(
       BuildContext context, Hue h, String text, String id) async {
-    final action = await showModalBottomSheet<String>(
+    final action = await showCupertinoModalPopup<String>(
       context: context,
-      backgroundColor: h.surfaceAlt,
-      shape: const RoundedRectangleBorder(
-        borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
-      ),
-      builder: (sheetCtx) => SafeArea(
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            const SizedBox(height: HSpace.sm),
-            ListTile(
-              leading:
-                  Icon(Icons.copy_rounded, size: 20, color: h.textDim),
-              title: const Text('复制', style: TextStyle(fontSize: 15)),
-              onTap: () => Navigator.of(sheetCtx).pop('copy'),
+      builder: (sheetCtx) => CupertinoActionSheet(
+        actions: [
+          CupertinoActionSheetAction(
+            onPressed: () => Navigator.of(sheetCtx).pop('copy'),
+            child: Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Icon(AppIcons.copy, size: 21, color: h.textDim),
+                const SizedBox(width: HSpace.sm),
+                const Text('复制', style: TextStyle(fontSize: 15)),
+              ],
             ),
-            if (onEdit != null)
-              ListTile(
-                leading: Icon(Icons.edit_rounded, size: 20, color: h.textDim),
-                title: const Text('编辑重发',
-                    style: TextStyle(fontSize: 15)),
-                subtitle: Text('把这条消息放回输入框修改后重新发送',
-                    style: TextStyle(fontSize: 12, color: h.textFaint)),
-                onTap: () => Navigator.of(sheetCtx).pop('edit'),
+          ),
+          if (onEdit != null)
+            CupertinoActionSheetAction(
+              onPressed: () => Navigator.of(sheetCtx).pop('edit'),
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      Icon(AppIcons.edit, size: 21, color: h.textDim),
+                      const SizedBox(width: HSpace.sm),
+                      const Text('编辑重发', style: TextStyle(fontSize: 15)),
+                    ],
+                  ),
+                  Text('把这条消息放回输入框修改后重新发送',
+                      style: TextStyle(fontSize: 12, color: h.textFaint)),
+                ],
               ),
-            const SizedBox(height: HSpace.sm),
-          ],
-        ),
+            ),
+        ],
       ),
     );
     if (action == null || !context.mounted) return;
@@ -164,20 +290,14 @@ class MessageRow extends StatelessWidget {
       //   回执一起吞掉。复制是本地操作，发后不管即可。
       unawaited(Clipboard.setData(ClipboardData(text: text)));
       if (!context.mounted) return;
-      ScaffoldMessenger.maybeOf(context)?.showSnackBar(
-        const SnackBar(
-          content: Text('已复制'),
-          duration: Duration(seconds: 1),
-          behavior: SnackBarBehavior.floating,
-        ),
-      );
+      showIosToast(context, '已复制');
     } else if (action == 'edit') {
       onEdit?.call(text);
     }
   }
 
   /// 助手消息：无边框，靠间距与字体区分
-  Widget _assistant(Hue h, String text) {
+  Widget _assistant(Hue h, String text, List<HChangeFile>? changes) {
     return Padding(
       padding: const EdgeInsets.only(bottom: HSpace.lg),
       child: Column(
@@ -185,7 +305,7 @@ class MessageRow extends StatelessWidget {
         children: [
           Row(
             children: [
-              Icon(Icons.auto_awesome_rounded, size: 13, color: h.textFaint),
+              Icon(CupertinoIcons.sparkles, size: 14, color: h.textFaint),
               const SizedBox(width: HSpace.xs + 2),
               Text(
                 'Heracles',
@@ -217,6 +337,12 @@ class MessageRow extends StatelessWidget {
           // 主题走（`flutter_markdown` 的样式定制反而繁琐）。
           // 若将来语法需求超出覆盖面，再走依赖调研流程。
           _MarkdownLite(text: text),
+          // ★ 变更报告卡片（2026-10-22 用户指正位置）：
+          //   总结正文**下面**、复制/点赞操作行**上面**。
+          if (changes != null && changes.isNotEmpty) ...[
+            const SizedBox(height: HSpace.sm),
+            _changesCard(h, changes),
+          ],
           // ★ 回答末尾的操作行（2026-10-13 用户要求）：
           //   复制 · 点赞 · 点踩 · 新会话分支 · 用量统计 · 时间
           const SizedBox(height: HSpace.sm),
@@ -251,8 +377,8 @@ class MessageRow extends StatelessWidget {
           SizedBox(
             width: 12,
             height: 12,
-            child: CircularProgressIndicator(
-              strokeWidth: 1.6,
+            child: CupertinoActivityIndicator(
+              radius: 6,
               color: h.textFaint,
             ),
           ),
@@ -297,9 +423,9 @@ class MessageRow extends StatelessWidget {
                 // ★ 两种语义不同的"没执行"，图标与文案都要分开
                 //（2026-10-13 用户报：「总是显示已拦截，未执行，不是合法JSON」）
                 b.tool == null
-                    ? Icons.sync_problem_rounded
-                    : Icons.shield_outlined,
-                size: 15,
+                    ? AppIcons.warning
+                    : AppIcons.shield,
+                size: 16,
                 color: color,
               ),
               const SizedBox(width: HSpace.sm),
@@ -391,7 +517,8 @@ class MessageRow extends StatelessWidget {
             ),
             child: Row(
               children: [
-                Icon(Icons.notes_rounded, size: 13, color: h.textFaint),
+                Icon(CupertinoIcons.doc_plaintext,
+                    size: 14, color: h.textFaint),
                 const SizedBox(width: HSpace.sm),
                 Text(
                   '模型原始输出',
@@ -454,7 +581,7 @@ enum AnswerFeedback { up, down }
 ///
 /// ## 为什么复制不用 Clipboard 直接调
 ///
-/// 用了 —— `Clipboard.setData`。但要**给回执**（SnackBar）：
+/// 用了 —— `Clipboard.setData`。但要**给回执**（iOS 吐司）：
 /// 复制是"看不见结果"的操作，没有反馈用户不知道成没成。
 class _AnswerActions extends StatefulWidget {
   const _AnswerActions({
@@ -485,13 +612,7 @@ class _AnswerActionsState extends State<_AnswerActions> {
   Future<void> _copy() async {
     await Clipboard.setData(ClipboardData(text: widget.text));
     if (!mounted) return;
-    ScaffoldMessenger.maybeOf(context)?.showSnackBar(
-      const SnackBar(
-        content: Text('已复制'),
-        duration: Duration(seconds: 1),
-        behavior: SnackBarBehavior.floating,
-      ),
-    );
+    showIosToast(context, '已复制');
   }
 
   String _time() {
@@ -509,15 +630,15 @@ class _AnswerActionsState extends State<_AnswerActions> {
       children: [
         Row(
           children: [
-            _act(Icons.copy_rounded, '复制', _copy, h),
-            _feedbackBtn(Icons.thumb_up_alt_outlined,
-                Icons.thumb_up_alt_rounded, '有帮助', AnswerFeedback.up, h),
-            _feedbackBtn(Icons.thumb_down_alt_outlined,
-                Icons.thumb_down_alt_rounded, '没帮助', AnswerFeedback.down, h),
-            _act(Icons.call_split_rounded, '新会话分支',
+            _act(AppIcons.copy, '复制', _copy, h),
+            _feedbackBtn(AppIcons.thumbUpOutline,
+                AppIcons.thumbUp, '有帮助', AnswerFeedback.up, h),
+            _feedbackBtn(AppIcons.thumbDownOutline,
+                AppIcons.thumbDown, '没帮助', AnswerFeedback.down, h),
+            _act(AppIcons.branch, '新会话分支',
                 widget.onBranch == null ? null : () => widget.onBranch!(), h),
             if (widget.metrics != null)
-              _act(Icons.data_usage_rounded, '本次用量', () {
+              _act(AppIcons.usage, '本次用量', () {
                 setState(() => _showUsage = !_showUsage);
               }, h, active: _showUsage),
             const Spacer(),
@@ -551,7 +672,7 @@ class _AnswerActionsState extends State<_AnswerActions> {
           height: 32,
           child: Icon(
             icon,
-            size: 15,
+            size: 16,
             color: active ? h.accent : h.textFaint,
           ),
         ),
@@ -573,7 +694,7 @@ class _AnswerActionsState extends State<_AnswerActions> {
           height: 32,
           child: Icon(
             selected ? on : off,
-            size: 15,
+            size: 16,
             // 点赞用成功色、点踩用错误色 —— 选中态必须一眼看出
             color: selected
                 ? (value == AnswerFeedback.up
@@ -653,12 +774,191 @@ class _MarkdownLite extends StatelessWidget {
     final h = Hue.of(context);
     final lines = text.split('\n');
     final spans = <Widget>[];
-    for (final line in lines) {
+
+    // ★ 2026-10-22：从"纯逐行"升级为**块级扫描**。
+    //
+    // ## 为什么必须改（真机截图证据）
+    //
+    // 用户截图里模型输出了一张 Markdown 表格，界面把它**原样**画成
+    // `| id | title | updatedAt | starred |` —— 用户看到一堆竖线。
+    // 旧实现是"一行一 Widget"，**结构上不可能**认出跨行的表格/代码块。
+    //
+    // ## 现在识别哪些块
+    //
+    // | 块 | 触发 |
+    // |---|---|
+    // | 围栏代码块 | ``` 开头，吃到配对的 ``` |
+    // | 表格 | 行首 `|`，且**下一行是 `\|---\|` 分隔行**（GFM 口径） |
+    // | 分隔线 | `---` / `***` / `___` |
+    // | 引用 | `> ` 开头 |
+    // | 其余 | 交给原来的逐行渲染（标题/列表/段落/空行） |
+    //
+    // ⚠️ 表格必须有**分隔行**才认：否则 `a | b` 这种普通含竖线的
+    // 句子会被误判成表格（宁可少认，不要错渲染）。
+    var i = 0;
+    while (i < lines.length) {
+      final line = lines[i];
+      final t = line.trimLeft();
+
+      // ---- 围栏代码块 ----
+      if (t.startsWith('```')) {
+        final buf = StringBuffer();
+        i++;
+        while (i < lines.length && !lines[i].trimLeft().startsWith('```')) {
+          if (buf.isNotEmpty) buf.write('\n');
+          buf.write(lines[i]);
+          i++;
+        }
+        if (i < lines.length) i++; // 吃掉收尾的 ```
+        spans.add(_codeBlock(h, buf.toString()));
+        continue;
+      }
+
+      // ---- 表格（GFM：表头 + 分隔行 + 若干数据行）----
+      if (t.startsWith('|') &&
+          i + 1 < lines.length &&
+          _isTableSeparator(lines[i + 1])) {
+        final rows = <List<String>>[_splitRow(lines[i])];
+        i += 2; // 跳过表头与分隔行
+        while (i < lines.length && lines[i].trimLeft().startsWith('|')) {
+          rows.add(_splitRow(lines[i]));
+          i++;
+        }
+        spans.add(_table(h, rows));
+        continue;
+      }
+
+      // ---- 分隔线 ----
+      if (t == '---' || t == '***' || t == '___') {
+        spans.add(Padding(
+          padding: const EdgeInsets.symmetric(vertical: HSpace.sm),
+          child: Divider(height: 1, color: h.border),
+        ));
+        i++;
+        continue;
+      }
+
+      // ---- 引用 ----
+      if (t.startsWith('> ')) {
+        spans.add(_quote(h, t.substring(2)));
+        i++;
+        continue;
+      }
+
       spans.add(_line(context, h, line));
+      i++;
     }
+
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: spans,
+    );
+  }
+
+  // ============================================================
+  // 表格
+  // ============================================================
+
+  /// 是否是 `|---|:--:|---|` 这种分隔行（GFM 表格的判定锚点）。
+  bool _isTableSeparator(String line) {
+    final t = line.trim();
+    if (!t.startsWith('|')) return false;
+    final cells = _splitRow(t);
+    if (cells.isEmpty) return false;
+    return cells.every((c) => RegExp(r'^:?-{1,}:?$').hasMatch(c.trim()));
+  }
+
+  /// 把 `| a | b |` 拆成 `['a', 'b']`（去掉首尾空段）。
+  List<String> _splitRow(String line) {
+    var t = line.trim();
+    if (t.startsWith('|')) t = t.substring(1);
+    if (t.endsWith('|')) t = t.substring(0, t.length - 1);
+    return t.split('|').map((e) => e.trim()).toList();
+  }
+
+  /// 渲染成真正的 `Table`（不是等宽文本对齐 —— 手机上长值必然错位）。
+  ///
+  /// 列宽用 [FlexColumnWidth]：撑满可用宽度、**按比例**分配，
+  /// 单元格内文本自动换行。手机窄屏下 5 列表格会显得挤，
+  /// 但这比"原样吐竖线"和"横向滚动的死宽表格"都更可读。
+  Widget _table(Hue h, List<List<String>> rows) {
+    if (rows.isEmpty) return const SizedBox.shrink();
+    final header = rows.first;
+    final body = rows.skip(1).toList();
+    final cols = header.length;
+
+    TableRow buildRow(List<String> cells, {required bool head}) => TableRow(
+          decoration: head ? BoxDecoration(color: h.surfaceAlt) : null,
+          children: [
+            for (var c = 0; c < cols; c++)
+              Padding(
+                padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 6),
+                child: _rich(
+                  h,
+                  c < cells.length ? cells[c] : '',
+                  fontSize: 12,
+                  bold: head,
+                  lineHeight: 1.35,
+                ),
+              ),
+          ],
+        );
+
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: HSpace.sm),
+      child: Table(
+        border: TableBorder.all(color: h.border, width: 0.6),
+        defaultColumnWidth: const FlexColumnWidth(),
+        children: [
+          buildRow(header, head: true),
+          for (final r in body) buildRow(r, head: false),
+        ],
+      ),
+    );
+  }
+
+  // ============================================================
+  // 代码块 / 引用
+  // ============================================================
+
+  Widget _codeBlock(Hue h, String code) {
+    return Container(
+      width: double.infinity,
+      margin: const EdgeInsets.symmetric(vertical: HSpace.xs),
+      padding: const EdgeInsets.all(HSpace.sm),
+      decoration: BoxDecoration(
+        color: h.surfaceAlt,
+        borderRadius: BorderRadius.circular(HRadius.sm),
+        border: Border.all(color: h.border),
+      ),
+      // 代码不换行（换行会破坏缩进语义）⇒ 允许横向滚动
+      child: SingleChildScrollView(
+        scrollDirection: Axis.horizontal,
+        child: Text(
+          code,
+          style: TextStyle(
+            fontFamily: kMonoFontFamily,
+            fontFamilyFallback: kMonoFallback,
+            fontSize: 12.5,
+            height: 1.5,
+            color: h.textDim,
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _quote(Hue h, String text) {
+    return Container(
+      margin: const EdgeInsets.symmetric(vertical: HSpace.xs),
+      padding: const EdgeInsets.only(left: HSpace.sm),
+      decoration: BoxDecoration(
+        border: Border(left: BorderSide(color: h.border, width: 3)),
+      ),
+      child: Text(
+        text,
+        style: TextStyle(fontSize: 14.5, height: 1.6, color: h.textDim),
+      ),
     );
   }
 
@@ -720,8 +1020,19 @@ class _MarkdownLite extends StatelessWidget {
   ///   既是渲染捷径，也保证 `find.text(...)` 这类测试查找器
   ///   对无标记回答仍然有效（2026-10-13 套件假失败的真实原因：
   ///   RichText 不创建 Text widget，纯文本断言全空）。
-  Widget _rich(Hue h, String line) {
-    final base = TextStyle(fontSize: 15, height: 1.6, color: h.text);
+  Widget _rich(
+    Hue h,
+    String line, {
+    double fontSize = 15,
+    bool bold = false,
+    double lineHeight = 1.6,
+  }) {
+    final base = TextStyle(
+      fontSize: fontSize,
+      height: lineHeight,
+      color: h.text,
+      fontWeight: bold ? FontWeight.w700 : FontWeight.w400,
+    );
     if (!line.contains('**') && !line.contains('`')) {
       return Text(line, style: base);
     }

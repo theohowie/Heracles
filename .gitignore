@@ -27,6 +27,7 @@ app/build/
 app/.dart_tool/
 app/android/.gradle/
 app/android/local.properties
+backend/.dart_tool/
 
 # AgentTeams 内部协调状态（会话/邮箱/计划）—— 不属于仓库产物
 .agent-teams/
@@ -39,19 +40,17 @@ WORKLOG.md
 AGENTS.md
 phone/
 
-# 2026-10-19 �������/������ʱĿ¼�����ز��ϣ�����⣩
+# 2026-10-19 真机采样/分析临时目录（本地材料，不入库）
 .tmp-l1long/
 .dsh-evidence/
 
-# 2026-10-20 �� Key ̽����ʱĿ¼�����ز��ϣ�����⣩
+# 2026-10-20 真 Key 探针临时目录（本地材料，不入库）
 .tmp-probe/
-
-# 2026-10-22 audit dir: keep the Markdown reports, ignore debug artifacts
-.audit/*.log
-.audit/*.png
-.audit/*.ps1
-.audit/*.xml
 
 # 2026-10-22 tool output / private resume material (local only)
 .dsh-acl-out/
 .resume/
+
+# 2026-10-22 旧 Kotlin `toolchain` 模块的本地备份压缩包（重构后已从仓库删除该模块，
+# 这份 zip 只是本机留档，**不入库**；需要时解压即得旧源码）
+toolchain.zip

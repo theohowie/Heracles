@@ -1,4 +1,7 @@
+import 'package:flutter/cupertino.dart';
 import 'package:flutter/material.dart';
+
+import 'cupertino_kit.dart';
 
 /// 当前主题的语义色 —— **跟随外观设置变化**。
 ///
@@ -251,6 +254,18 @@ ThemeData buildHeraclesTheme({
       bodyColor: hue.text,
       displayColor: hue.text,
     ),
-    splashFactory: InkSparkle.splashFactory,
+    // ★ 全局关掉 Material 波纹（2026-10-22 Cupertino 化）—— iOS 上按下
+    //   **没有水波纹**。`kNoSplash` 一行就让全 App 现存的 InkWell/按钮
+    //   立刻失去 Material 波纹，不必逐个换控件（见 cupertino_kit.dart）。
+    //   旧值是 InkSparkle.splashFactory（Material 3 的星屑波纹）。
+    splashFactory: kNoSplash,
+    // ★ iOS 转场（2026-10-22 Cupertino 化）：页面切换用 Cupertino 的横向推拉+视差。
+    // 注意 pageTransitionsTheme 是 ThemeData 的参数，MaterialApp 上没有这个参数。
+    pageTransitionsTheme: const PageTransitionsTheme(
+      builders: <TargetPlatform, PageTransitionsBuilder>{
+        TargetPlatform.android: CupertinoPageTransitionsBuilder(),
+        TargetPlatform.iOS: CupertinoPageTransitionsBuilder(),
+      },
+    ),
   );
 }

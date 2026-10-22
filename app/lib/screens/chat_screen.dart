@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:convert';
 
+import 'package:flutter/cupertino.dart';
 import 'package:flutter/material.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
@@ -14,6 +15,7 @@ import '../services/agent_bridge.dart';
 import '../services/model_context_table.dart';
 import '../services/settings_controller.dart';
 import '../theme/app_theme.dart';
+import '../theme/cupertino_kit.dart';
 import 'settings_screen.dart';
 import '../widgets/input_bar.dart';
 import '../widgets/message_row.dart';
@@ -58,7 +60,7 @@ class _ChatScreenState extends State<ChatScreen> {
   ///
   /// 只存内存：这是**本条会话内的一次性态度**，不落盘也不上报。
   /// 发行版若要接云端评价，在写这个 Map 的地方加一次网络调用即可。
-  final Map<String, AnswerFeedback> _feedback = {};
+  final Map<String, AnswerFeedback?> _feedback = {};
 
   /// 每条回答的时间戳 —— 操作行右侧那个 `14:32`。
   /// 消息模型本身没带时间（`HAssistantMessage` 只有 id/text），
@@ -837,7 +839,17 @@ class _ChatScreenState extends State<ChatScreen> {
             ));
           }
         case 'assistant':
-          out.add(HAssistantMessage(id: id, text: text));
+          // ★ 变更报告挂在助手行自己的 `changes` 字段上（2026-10-22），
+          //   重开会话时卡片位置与实时一致（总结下面、操作行上面）。
+          final changes = (m['changes'] as List? ?? const [])
+              .map(HChangeFile.fromMap)
+              .whereType<HChangeFile>()
+              .toList();
+          out.add(HAssistantMessage(
+            id: id,
+            text: text,
+            changes: changes.isEmpty ? null : changes,
+          ));
           _metrics[id] = TurnMetrics(
             cachedTokens: (m['cached'] as num?)?.toInt(),
             promptTokens: (m['prompt'] as num?)?.toInt() ?? 0,
@@ -899,6 +911,19 @@ class _ChatScreenState extends State<ChatScreen> {
             // ★ 落盘时被上限截断过 —— 如实告知，不假装完整
             truncated: (m['truncated'] as bool?) == true,
           ));
+
+        // ---- ★ `role=changes`：变更报告（2026-10-22）----
+        //
+        // 与实时路径同一份数据（run 收尾时落盘），所以"当时看到的"
+        // 与"重开读回的"完全一致。坏条目逐条容错跳过，不崩整条会话。
+        case 'changes':
+          final files = (m['files'] as List? ?? const [])
+              .map(HChangeFile.fromMap)
+              .whereType<HChangeFile>()
+              .toList();
+          if (files.isNotEmpty) {
+            out.add(HChanges(id: id, files: files));
+          }
       }
     }
     return out;
@@ -909,29 +934,27 @@ class _ChatScreenState extends State<ChatScreen> {
     final s = _findSession(workspaceId, sessionId);
     final controller = TextEditingController(text: s?.title ?? '');
     final h = Hue.of(context);
-    final name = await showDialog<String>(
+    final name = await showCupertinoDialog<String>(
       context: context,
-      builder: (ctx) => AlertDialog(
-        backgroundColor: h.surfaceAlt,
-        shape: RoundedRectangleBorder(
-          borderRadius: BorderRadius.circular(HRadius.lg),
-          side: BorderSide(color: h.border),
-        ),
-        title: Text('重命名会话', style: TextStyle(color: h.text)),
-        content: TextField(
-          controller: controller,
-          autofocus: true,
-          style: TextStyle(color: h.text),
+      builder: (ctx) => CupertinoAlertDialog(
+        title: const Text('重命名会话'),
+        content: Padding(
+          padding: const EdgeInsets.only(top: 8),
+          child: CupertinoTextField(
+            controller: controller,
+            autofocus: true,
+            placeholder: '会话名称',
+            style: TextStyle(color: h.text),
+          ),
         ),
         actions: [
-          TextButton(
+          CupertinoDialogAction(
             onPressed: () => Navigator.of(ctx).pop(),
-            style: TextButton.styleFrom(foregroundColor: h.textDim),
             child: const Text('取消'),
           ),
-          FilledButton(
+          CupertinoDialogAction(
+            isDefaultAction: true,
             onPressed: () => Navigator.of(ctx).pop(controller.text.trim()),
-            style: FilledButton.styleFrom(backgroundColor: h.accent),
             child: const Text('保存'),
           ),
         ],
@@ -946,29 +969,22 @@ class _ChatScreenState extends State<ChatScreen> {
   /// ★ 删除 —— 之前是空实现
   Future<void> _deleteSession(String workspaceId, String sessionId) async {
     final h = Hue.of(context);
-    final ok = await showDialog<bool>(
+    final ok = await showCupertinoDialog<bool>(
       context: context,
-      builder: (ctx) => AlertDialog(
-        backgroundColor: h.surfaceAlt,
-        shape: RoundedRectangleBorder(
-          borderRadius: BorderRadius.circular(HRadius.lg),
-          side: BorderSide(color: h.border),
-        ),
-        title: Text('删除会话', style: TextStyle(color: h.text)),
+      builder: (ctx) => CupertinoAlertDialog(
+        title: const Text('删除会话'),
         content: Text(
           '这会删除该会话的记录。\n工作区里的文件不会被删除。',
           style: TextStyle(fontSize: 13, height: 1.5, color: h.textDim),
         ),
         actions: [
-          TextButton(
+          CupertinoDialogAction(
             onPressed: () => Navigator.of(ctx).pop(false),
-            style: TextButton.styleFrom(foregroundColor: h.textDim),
             child: const Text('取消'),
           ),
-          FilledButton(
+          CupertinoDialogAction(
+            isDestructiveAction: true,
             onPressed: () => Navigator.of(ctx).pop(true),
-            style: FilledButton.styleFrom(
-                backgroundColor: HColors.errorOn(h.dark)),
             child: const Text('删除'),
           ),
         ],
@@ -1077,14 +1093,14 @@ class _ChatScreenState extends State<ChatScreen> {
           mainAxisSize: MainAxisSize.min,
           children: [
             ListTile(
-              leading: Icon(Icons.photo_library_outlined, color: h.accent),
+              leading: Icon(AppIcons.image, color: h.accent),
               title: Text('照片', style: TextStyle(color: h.text)),
               subtitle: Text('截图、图片',
                   style: TextStyle(fontSize: 11.5, color: h.textFaint)),
               onTap: () => Navigator.of(ctx).pop('image'),
             ),
             ListTile(
-              leading: Icon(Icons.folder_open_rounded, color: h.accent),
+              leading: Icon(AppIcons.folder, color: h.accent),
               title: Text('文件', style: TextStyle(color: h.text)),
               subtitle: Text('代码、文本、文档',
                   style: TextStyle(fontSize: 11.5, color: h.textFaint)),
@@ -1701,8 +1717,15 @@ class _ChatScreenState extends State<ChatScreen> {
         // `step_ended` 丢了）。留一条永远转圈的步骤会让用户以为还活着。
         _settleOrphanSteps(e.type == AgentEvent.kFailed);
 
+      // ---- 变更报告（2026-10-22）----
+      //
+      // 曾经在这里收 `kChanges` 事件独立插一条消息 ⇒ 卡片排在总结**上面**。
+      // 用户指正后改为**挂在助手消息的 changes 字段**上（见 run 结果处理处），
+      // 事件流里不再有这条事件；`role:"changes"` 的独立行只作为
+      // "失败但动了文件"的兜底格式被 `_toMessages` 读取。
+
       default:
-        // ★★ 未知类型（Kotlin 侧比 Dart 新）—— 忽略而不是崩 ★★
+        // ★★ 未知类型（后端比 Dart 新）—— 忽略而不是崩 ★★
         //
         // 这正是 S2 交接里点名的"第一优先级"：后端已经在发新事件，
         // 若这里抛异常，用户一发消息 App **直接崩**。
@@ -2073,6 +2096,10 @@ class _ChatScreenState extends State<ChatScreen> {
           total += estimateTokens(reasoning) + estimateTokens(text);
         case HProgress():
           // 占位行不是真实上下文内容
+          break;
+        case HChanges():
+          // 变更报告是 **UI 侧的汇总卡片**（由工具结果推导），
+          // 不是模型吐进上下文的内容 —— 不计 token。
           break;
       }
     }
@@ -2822,7 +2849,17 @@ class _ChatScreenState extends State<ChatScreen> {
           }
           if (result.finalText.isNotEmpty) {
             final id = _nextId();
-            _messages.add(HAssistantMessage(id: id, text: result.finalText));
+            // ★ 变更报告**挂在助手消息上**（2026-10-22 用户指正：
+            //   要在总结下面、复制按钮上面 —— 不是独立一条消息）
+            final changes = (result.changeFiles ?? const <Map<String, dynamic>>[])
+                .map(HChangeFile.fromMap)
+                .whereType<HChangeFile>()
+                .toList();
+            _messages.add(HAssistantMessage(
+              id: id,
+              text: result.finalText,
+              changes: changes.isEmpty ? null : changes,
+            ));
             // 记这条回答的时间（操作行右侧显示，2026-10-13）
             _answerTs[id] = DateTime.now();
             final last = result.turns.isNotEmpty ? result.turns.last : null;
@@ -2981,13 +3018,7 @@ class _ChatScreenState extends State<ChatScreen> {
     }
 
     // 已切走 —— 用 SnackBar，**不碰** _messages / _error
-    final messenger = ScaffoldMessenger.maybeOf(context);
-    messenger?.showSnackBar(
-      SnackBar(
-        content: Text('上一个会话的运行失败：$message'),
-        duration: const Duration(seconds: 6),
-      ),
-    );
+    showIosToast(context, '上一个会话的运行失败：$message');
     _logDroppedRun(origin);
   }
 
@@ -3115,9 +3146,10 @@ class _ChatScreenState extends State<ChatScreen> {
       ),
       appBar: AppBar(
         titleSpacing: 0,
-        leading: IconButton(
-          icon: Icon(Icons.menu_rounded, size: 22, color: h.text),
+        leading: CupertinoButton(
+          padding: const EdgeInsets.all(8),
           onPressed: () => _scaffoldKey.currentState?.openDrawer(),
+          child: Icon(AppIcons.menu, size: 23, color: h.text),
         ),
         title: Row(
           children: [
@@ -3151,10 +3183,13 @@ class _ChatScreenState extends State<ChatScreen> {
             contextUsage: _contextUsage,
             onTap: _openUsageSidebar,
           ),
-          IconButton(
-            tooltip: '刷新',
-            icon: Icon(Icons.refresh_rounded, size: 20, color: h.textDim),
-            onPressed: _busy ? null : _reload,
+          Tooltip(
+            message: '刷新',
+            child: CupertinoButton(
+              padding: const EdgeInsets.all(8),
+              onPressed: _busy ? null : _reload,
+              child: Icon(AppIcons.refresh, size: 21, color: h.textDim),
+            ),
           ),
           const SizedBox(width: HSpace.xs),
         ],
@@ -3249,8 +3284,12 @@ class _ChatScreenState extends State<ChatScreen> {
                               timestamp:
                                   m is HAssistantMessage ? _tsOf(m.id) : null,
                               feedback: _feedback[m.id],
+                              // ★ 2026-10-22 用户要求：**再点一次要能取消**。
+                              //   以前点了就锁死（`= f`），点错改不回来。
+                              //   现在：点同一个 ⇒ 置空取消；点另一个 ⇒ 切换。
                               onFeedback: (f) => setState(() {
-                                _feedback[m.id] = f;
+                                _feedback[m.id] =
+                                    _feedback[m.id] == f ? null : f;
                               }),
                               onBranch: () => unawaited(_branchFrom(m)),
                               // ★ 编辑重发（2026-10-13，DeepSeek 移动端同款）：
@@ -3399,30 +3438,15 @@ class _ChatScreenState extends State<ChatScreen> {
     // 降级：老版本 Kotlin / 解析失败 —— 只显示题干，没有选项可点
     if (questions == null || questions.isEmpty) {
       // 只有一个"知道了"按钮；关掉后回传空答案（= 全部未回答，绝不编造）
-      await showDialog<bool>(
-        context: context,
-        barrierDismissible: true,
-        builder: (dlgCtx) => AlertDialog(
-          backgroundColor: h.surfaceAlt,
-          title: Row(children: [
-            Icon(Icons.help_outline_rounded, size: 20, color: h.accent),
-            const SizedBox(width: HSpace.sm),
-            const Text('模型需要你的回答', style: TextStyle(fontSize: 16)),
-          ]),
-          content: SingleChildScrollView(
-            child: Text(
-              fallbackText.isEmpty ? '（模型提了一个问题，但内容为空）' : fallbackText,
-              style: TextStyle(fontSize: 14, height: 1.5, color: h.text),
-            ),
-          ),
-          actions: [
-            FilledButton(
-              onPressed: () => Navigator.of(dlgCtx).pop(true),
-              style: FilledButton.styleFrom(backgroundColor: h.accent),
-              child: const Text('知道了', style: TextStyle(fontSize: 13)),
-            ),
-          ],
-        ),
+      await showIosDialog(
+        context,
+        title: '模型需要你的回答',
+        message: fallbackText.isEmpty
+            ? '（模型提了一个问题，但内容为空）'
+            : fallbackText,
+        actions: [
+          const IosAction('知道了', isDefaultAction: true),
+        ],
       );
       await _bridge.replyAsk(const {});
       return;
@@ -3433,7 +3457,7 @@ class _ChatScreenState extends State<ChatScreen> {
     var page = 0;
     final total = questions.length;
 
-    final result = await showDialog<Map<String, List<String>>?>(
+    final result = await showCupertinoDialog<Map<String, List<String>>?>(
       context: context,
       barrierDismissible: true,
       builder: (dlgCtx) {
@@ -3465,11 +3489,10 @@ class _ChatScreenState extends State<ChatScreen> {
               });
             }
 
-            return AlertDialog(
-              backgroundColor: h.surfaceAlt,
+            return CupertinoAlertDialog(
               title: Row(
                 children: [
-                  Icon(Icons.help_outline_rounded, size: 20, color: h.accent),
+                  Icon(CupertinoIcons.question_circle, size: 20, color: h.accent),
                   const SizedBox(width: HSpace.sm),
                   const Expanded(
                     child: Text('模型需要你的回答',
@@ -3520,32 +3543,29 @@ class _ChatScreenState extends State<ChatScreen> {
               actions: [
                 // 上一题 / 下一题（用户明确要求）
                 if (page > 0)
-                  TextButton(
+                  CupertinoDialogAction(
                     onPressed: () => setDlgState(() => page--),
-                    child: Text('上一题',
-                        style: TextStyle(fontSize: 13, color: h.textDim)),
+                    child: const Text('上一题'),
                   ),
                 if (!isLast)
-                  TextButton(
+                  CupertinoDialogAction(
                     onPressed: () => setDlgState(() => page++),
-                    child: Text('下一题',
-                        style: TextStyle(fontSize: 13, color: h.textDim)),
+                    child: const Text('下一题'),
                   ),
-                TextButton(
+                CupertinoDialogAction(
                   // 跳过 = 已答的仍然回传（别浪费用户已做的选择）
                   onPressed: () => Navigator.of(dlgCtx).pop(
                     picked.map((k, v) => MapEntry(k, v.toList())),
                   ),
-                  child: Text('跳过',
-                      style: TextStyle(fontSize: 13, color: h.textDim)),
+                  child: const Text('跳过'),
                 ),
                 if (isLast)
-                  FilledButton(
+                  CupertinoDialogAction(
+                    isDefaultAction: true,
                     onPressed: () => Navigator.of(dlgCtx).pop(
                       picked.map((k, v) => MapEntry(k, v.toList())),
                     ),
-                    style: FilledButton.styleFrom(backgroundColor: h.accent),
-                    child: const Text('提交', style: TextStyle(fontSize: 13)),
+                    child: const Text('提交'),
                   ),
               ],
             );
@@ -3658,7 +3678,7 @@ class _ChatScreenState extends State<ChatScreen> {
                 ),
               ),
               if (selected)
-                Icon(Icons.check_rounded, size: 16, color: h.accent),
+                Icon(AppIcons.check, size: 16, color: h.accent),
             ],
           ),
           ),
@@ -3754,14 +3774,13 @@ class _ChatScreenState extends State<ChatScreen> {
         ? '${detail.substring(0, 160).replaceAll('\n', ' ')}…'
         : '';
 
-    final decision = await showDialog<String>(
+    final decision = await showCupertinoDialog<String>(
       context: context,
       barrierDismissible: true,
-      builder: (dlgCtx) => AlertDialog(
-        backgroundColor: h.surfaceAlt,
+      builder: (dlgCtx) => CupertinoAlertDialog(
         title: Row(
           children: [
-            Icon(Icons.gpp_maybe_outlined, size: 20, color: h.accent),
+            Icon(AppIcons.shield, size: 20, color: h.accent),
             const SizedBox(width: HSpace.sm),
             const Text('需要你确认', style: TextStyle(fontSize: 16)),
           ],
@@ -3835,22 +3854,20 @@ class _ChatScreenState extends State<ChatScreen> {
           ),
         ),
         actions: [
-          TextButton(
+          CupertinoDialogAction(
             onPressed: () => Navigator.of(dlgCtx).pop('deny'),
-            child: Text('拒绝',
-                style: TextStyle(fontSize: 13, color: h.textDim)),
+            child: const Text('拒绝'),
           ),
           // ★ 「本会话始终允许」（2026-10-19）：同一工具 + 同一关键参数不再问。
           //   只在本 run 内有效（不落盘）—— 跨任务的持久白名单是另一个安全决定。
-          TextButton(
+          CupertinoDialogAction(
             onPressed: () => Navigator.of(dlgCtx).pop('allow_always'),
-            child: Text('本会话始终允许',
-                style: TextStyle(fontSize: 13, color: h.textDim)),
+            child: const Text('本会话始终允许'),
           ),
-          FilledButton(
+          CupertinoDialogAction(
+            isDefaultAction: true,
             onPressed: () => Navigator.of(dlgCtx).pop('allow'),
-            style: FilledButton.styleFrom(backgroundColor: h.accent),
-            child: const Text('允许', style: TextStyle(fontSize: 13)),
+            child: const Text('允许'),
           ),
           // ★★ 停止入口（2026-10-20 真机修）★★
           //
@@ -3874,15 +3891,13 @@ class _ChatScreenState extends State<ChatScreen> {
           // 这里**只**停 agent 运行，**不**替用户做审批决定：
           // 先 `pop('deny')` 让挂起的 `approve()` 立刻拿到结果（否则它会等满 10 分钟），
           // 再 `_stopRun()` 停整个 run。**拒绝 + 停止**是两件事，顺序也要对。
-          const SizedBox(width: HSpace.xs),
-          TextButton(
+          CupertinoDialogAction(
+            isDestructiveAction: true,
             onPressed: () {
               Navigator.of(dlgCtx).pop('deny');
               unawaited(_stopRun());
             },
-            child: Text('停止任务',
-                style: TextStyle(
-                    fontSize: 13, color: HColors.errorOn(h.dark))),
+            child: const Text('停止任务'),
           ),
         ],
       ),
@@ -3949,7 +3964,7 @@ class _ChatScreenState extends State<ChatScreen> {
                     dense: true,
                     title: Text(id, style: TextStyle(fontSize: 14, color: h.text)),
                     trailing: isCurrent
-                        ? Icon(Icons.check_rounded, size: 18, color: h.accent)
+                        ? Icon(AppIcons.check, size: 18, color: h.accent)
                         : null,
                     onTap: () => Navigator.of(sheetCtx).pop(id),
                   );
@@ -3972,14 +3987,15 @@ class _ChatScreenState extends State<ChatScreen> {
         child: SizedBox(
           width: 22,
           height: 22,
-          child: CircularProgressIndicator(strokeWidth: 2, color: h.textFaint),
+          child: CupertinoActivityIndicator(
+              radius: 11, color: h.textFaint),
         ),
       );
     }
     if (_workspaces.isEmpty) {
       return _Hint(
         h: h,
-        icon: Icons.folder_open_rounded,
+        icon: AppIcons.folder,
         title: '先选一个工作区',
         body: '工作区 = 你要让智能体操作的\n那个项目文件夹。\n\n'
             '点左上角菜单 → ⊕ 选择工作区。\n'
@@ -3990,7 +4006,7 @@ class _ChatScreenState extends State<ChatScreen> {
     }
     return _Hint(
       h: h,
-      icon: Icons.auto_awesome_rounded,
+      icon: CupertinoIcons.sparkles,
       // 空态文案（2026-10-12，用户指定）：
       // 「你好，今天想做些什么？」—— 与 llama.cpp Web UI 的
       // "Hello there / Type a message..." 空态同一形态，中文语境
@@ -4047,7 +4063,7 @@ class _NewContentButton extends StatelessWidget {
             width: 40,
             height: 40,
             child: Icon(
-              Icons.arrow_downward_rounded,
+              CupertinoIcons.arrow_down,
               size: 20,
               color: h.dark ? const Color(0xFF1A0E08) : Colors.white,
             ),
@@ -4164,18 +4180,10 @@ class _Hint extends StatelessWidget {  const _Hint({
             ),
             if (actionLabel != null) ...[
               const SizedBox(height: HSpace.xl),
-              FilledButton.icon(
+              IosButton(
+                label: actionLabel!,
                 onPressed: onAction,
-                icon: const Icon(Icons.folder_open_rounded, size: 18),
-                label: Text(actionLabel!),
-                style: FilledButton.styleFrom(
-                  backgroundColor: h.accent,
-                  foregroundColor: h.dark
-                      ? const Color(0xFF1A0E08)
-                      : const Color(0xFFFFFFFF),
-                  padding: const EdgeInsets.symmetric(
-                      horizontal: HSpace.xl, vertical: HSpace.md),
-                ),
+                color: h.accent,
               ),
             ],
           ],
@@ -4207,7 +4215,7 @@ class _SetupBanner extends StatelessWidget {
       padding: const EdgeInsets.fromLTRB(HSpace.lg, HSpace.sm, HSpace.sm, HSpace.sm),
       child: Row(
         children: [
-          Icon(Icons.key_rounded, size: 16, color: h.accent),
+          Icon(CupertinoIcons.lock, size: 16, color: h.accent),
           const SizedBox(width: HSpace.sm),
           Expanded(
             child: Text(
@@ -4215,15 +4223,11 @@ class _SetupBanner extends StatelessWidget {
               style: TextStyle(fontSize: 12, height: 1.4, color: h.text),
             ),
           ),
-          TextButton(
+          CupertinoButton(
             onPressed: onOpenSettings,
-            style: TextButton.styleFrom(
-              foregroundColor: h.accent,
-              minimumSize: const Size(0, 32),
-              padding: const EdgeInsets.symmetric(horizontal: HSpace.sm),
-              tapTargetSize: MaterialTapTargetSize.shrinkWrap,
-            ),
-            child: const Text('去设置', style: TextStyle(fontSize: 12)),
+            minimumSize: const Size(0, 32),
+            padding: const EdgeInsets.symmetric(horizontal: HSpace.sm),
+            child: Text('去设置', style: TextStyle(fontSize: 12, color: h.accent)),
           ),
         ],
       ),
@@ -4254,7 +4258,7 @@ class _ErrorBanner extends StatelessWidget {
       child: Row(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          Icon(Icons.error_outline_rounded,
+          Icon(AppIcons.error,
               size: 16, color: HColors.errorOn(h.dark)),
           const SizedBox(width: HSpace.sm),
           Expanded(
@@ -4267,25 +4271,23 @@ class _ErrorBanner extends StatelessWidget {
           // ★ 2026-10-19：错误必须**可恢复**（此前只能干看着，切走就只剩一句
           //   SnackBar，用户没有任何重试入口）。
           if (onRetry != null)
-            TextButton(
+            CupertinoButton(
               onPressed: onRetry,
-              style: TextButton.styleFrom(
-                foregroundColor: HColors.errorOn(h.dark),
-                minimumSize: const Size(0, 32),
-                padding: const EdgeInsets.symmetric(horizontal: HSpace.sm),
-                tapTargetSize: MaterialTapTargetSize.shrinkWrap,
-              ),
-              child: const Text('重试', style: TextStyle(fontSize: 12)),
+              minimumSize: const Size(0, 32),
+              padding: const EdgeInsets.symmetric(horizontal: HSpace.sm),
+              child: Text('重试',
+                  style: TextStyle(fontSize: 12, color: HColors.errorOn(h.dark))),
             ),
           if (onDismiss != null)
-            IconButton(
-              tooltip: '关闭',
-              onPressed: onDismiss,
-              icon: Icon(Icons.close_rounded,
-                  size: 16, color: HColors.errorOn(h.dark)),
-              visualDensity: VisualDensity.compact,
-              constraints: const BoxConstraints(minWidth: 32, minHeight: 32),
-              padding: EdgeInsets.zero,
+            Tooltip(
+              message: '关闭',
+              child: CupertinoButton(
+                onPressed: onDismiss,
+                minimumSize: const Size(32, 32),
+                padding: EdgeInsets.zero,
+                child: Icon(AppIcons.close,
+                    size: 16, color: HColors.errorOn(h.dark)),
+              ),
             ),
         ],
       ),

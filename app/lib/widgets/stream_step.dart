@@ -1,10 +1,12 @@
 import 'dart:convert';
 
+import 'package:flutter/cupertino.dart';
 import 'package:flutter/material.dart';
 
 import '../models/message.dart';
 import '../models/settings.dart';
 import '../theme/app_theme.dart';
+import '../theme/cupertino_kit.dart';
 import 'tool_call_card.dart' show kFileWritingTools, estimatedDiffStatOf, changedFilesOf;
 
 /// **逐字生成中的一个步骤** —— 思考与正文分开渲染。
@@ -85,90 +87,126 @@ class _StreamStepViewState extends State<StreamStepView> {
     //     几 KB 的文件内容不能滚进预览行）
     final streaming = !step.finished;
     final toolStreaming = StreamStepView.isStreamingToolCallStatic(step.text);
+
+    // ★ 2026-10-22（对齐用户给的 DSH 截图）：
+    //   收起态**即使在结束后也保留一行预览** —— 用户截图里那一行是
+    //   `思考 · The user is clarifying something important. Let me parse carefully.`
+    //
+    //   为什么结束也要留：用户对「思考不是一次性的」的要求，本质是
+    //   **每一轮都能看到模型当时在想什么**；只在流式时显示，回看历史就全丢了。
     final preview = streaming
         ? (step.reasoning.isNotEmpty
             ? _tail(step.reasoning)
             : (toolStreaming ? '正在修改文件代码…' : _tail(step.text)))
-        : '';
+        : (step.reasoning.isNotEmpty ? _tail(step.reasoning, 90) : '');
 
     return Container(
-      margin: const EdgeInsets.only(bottom: HSpace.md),
-      padding: const EdgeInsets.only(left: HSpace.md),
-      decoration: BoxDecoration(
-        border: Border(left: BorderSide(color: h.border, width: 2.5)),
-      ),
+      // ★ 2026-10-22 用户要求：**「分析需求」要和下面的工具行长得一样**。
+      //
+      // 旧样子是一条"带左侧竖线的引用块"（`border: left 2.5`），而工具行是
+      // 无边框的紧凑日志行 ⇒ 两套视觉语言摆在一起很割裂（用户截图指出）。
+      // 现在统一成与 `ToolCallCard` 同款：无边框、无左缩进、同样的下边距。
+      margin: const EdgeInsets.only(bottom: HSpace.xs),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          // ---- 标题行：状态点 + 标题 + 耗时 + 展开箭头 ----
-          //   整行可点（展开/收起）—— 44px 热区由内容高度补足，
-          //   但为保险用 InkWell 包住整行
-          InkWell(
+          // ---- 标题行（只有"值得折叠"时才画）----
+          //
+          // ★ 2026-10-22 用户要求（真机截图对照 DSH）：
+          //
+          // > 「调用工具，然后就是输出，这个输出不是思考，是展示给用户看
+          // >   做了什么，然后又干嘛干嘛」「现在软件要不就是一直调用工具、
+          // >   不汇报，要么就是思考都没有」
+          //
+          // 也就是说：**汇报（正文）必须一直看得见**，不能被折叠在
+          // 一条叫「正在生成…」的步骤行里 —— 那让人以为模型"闷头调工具"。
+          //
+          // 于是：
+          // · **思考**（reasoning）⇒ 一条可折叠的「思考」行（默认收起）
+          // · **正文**（text）    ⇒ 永远直接显示（除非与最终回答重复）
+          // · 没有思考、也没有工具子条目时，**连标题行都不画** ——
+          //   直接就是一段模型说的话，和 DSH 的观感一致。
+          if (_showHeader) InkWell(
             onTap: () => setState(() => _userExpanded = !_expanded),
             child: _header(h, accent, preview),
           ),
-          if (_expanded) ...[
-            // ---- 思考过程（较淡）----
-            //
-            // reasoning 为空 = 本次没有思考流（`enable_thinking=false`）——
-            // **不画空区块**，也不写"（无思考）"：那会让用户以为思考丢了。
-            //
-            // ★ 层级语义（2026-10-13，用户纠正）：
-            //   思考过程 = 模型的分析（到"我会创建一个完整的…游戏。"为止）
-            //   工具调用 = 独立条目（**不在思考区块里**）——
-            //   用户原话：「首先，这个是工具的调用，不是思考过程」
-            if (step.reasoning.isNotEmpty) ...[
-              const SizedBox(height: HSpace.sm),
-              _reasoning(h),
-            ],
-            // ---- 正文（思考的结论 = 给用户看的话）----
-            //
-            // ★ 流式中的工具调用 = **独立子条目**（不在思考区，也不再
-            //   出现在正文位置）—— 用户原话：「接下来就是输出展示给
-            //   用户看的思考的结论和下一步干的事……然后是一个
-            //   '正在创建文件并修改文件'。这个也是可以点击展开的，
-            //   看代码怎么写了，写了多少」。
-            //
-            // 结构：
-            //   ┃ 思考过程（…分析…待办…）
-            //   ┃ 正文："接下来创建文件"（剥壳后的人话）
-            //   ┃   ⏳ 正在修改文件代码…   ← 独立子条目，可展开看内容
-            if (step.bodyCollapsed) ...[
-              const SizedBox(height: HSpace.sm),
-              Text(
-                '回答见下方',
-                style:
-                    TextStyle(fontSize: 12, height: 1.5, color: h.textFaint),
-              ),
-            ] else ...[
-              // 正文：流式中若已进入工具调用形态，正文位置由
-              // 下面的工具子条目接管（协议要求正文与工具二选一）
-              if (step.text.isNotEmpty &&
-                  !StreamStepView.isStreamingToolCallStatic(step.text) &&
-                  !_isFinishedToolCall(step)) ...[
-                const SizedBox(height: HSpace.sm),
-                _body(h),
-              ],
-              // ---- 工具调用子条目（独立缩进层级，可展开看内容）----
-              if (StreamStepView.isStreamingToolCallStatic(step.text) ||
-                  _isFinishedToolCall(step)) ...[
-                const SizedBox(height: HSpace.sm),
-                _ToolSubEntry(text: step.text, finished: step.finished),
-              ],
-            ],
-            // 结束了但两个通道都空 —— 如实说明，而不是留一块空白
-            if (step.finished && !step.hasBody) ...[
-              const SizedBox(height: HSpace.sm),
-              Text(
-                step.isEmpty ? '本轮没有生成内容' : '本轮未返回内容',
-                style:
-                    TextStyle(fontSize: 12.5, height: 1.5, color: h.textFaint),
-              ),
-            ],
+
+          // ---- 思考：仅展开时显示 ----
+          if (_expanded && step.reasoning.isNotEmpty) ...[
+            const SizedBox(height: HSpace.sm),
+            _reasoning(h),
+          ],
+
+          // ---- 正文：**始终可见**（bodyCollapsed = 与最终回答重复才收起）----
+          if (!step.bodyCollapsed &&
+              step.text.isNotEmpty &&
+              !StreamStepView.isStreamingToolCallStatic(step.text) &&
+              !_isFinishedToolCall(step)) ...[
+            const SizedBox(height: HSpace.sm),
+            _body(h),
+          ],
+
+          // 正文与最终回答重复 ⇒ 收起来。
+          //
+          // ★ 2026-10-22：**连"回答见下方"这句话也不画** —— 标题行已经隐藏
+          // （`_showHeader` 对 `bodyCollapsed` 返回 false），再留一句提示
+          // 就是纯残渣（真机截图里出现过一行孤零零的「回答见下方」）。
+          // 用户要的是干净：这一轮直接消失，回答就在下面。
+
+          // ---- 工具调用子条目（流式中的 JSON 信封）----
+          if (_expanded &&
+              (StreamStepView.isStreamingToolCallStatic(step.text) ||
+                  _isFinishedToolCall(step))) ...[
+            const SizedBox(height: HSpace.sm),
+            _ToolSubEntry(text: step.text, finished: step.finished),
+          ],
+
+          // 结束了但两个通道都空 —— 如实说明，而不是留一块空白
+          if (step.finished && !step.hasBody) ...[
+            const SizedBox(height: HSpace.sm),
+            Text(
+              step.isEmpty ? '本轮没有生成内容' : '本轮未返回内容',
+              style:
+                  TextStyle(fontSize: 12.5, height: 1.5, color: h.textFaint),
+            ),
           ],
         ],
       ),
     );
+  }
+
+  /// 是否要画那条标题行（只有"有东西可折叠 / 有状态要报"时才画）。
+  ///
+  /// 纯文本的普通轮次**不画** —— 否则每条回答上面都顶一行
+  /// 「本轮输出 3.2s」，像日志噪音。
+  bool get _showHeader {
+    final step = widget.step;
+    if (step.reasoning.isNotEmpty) return true; // 有思考 ⇒ 需要那条「思考」行
+    if (_isFinishedToolCall(step)) return true;
+    if (StreamStepView.isStreamingToolCallStatic(step.text)) return true;
+    if (step.finished && !step.hasBody) return true; // 空轮次要报告
+    // ★ 2026-10-22 用户要求：**最终回答那一轮的标题行要隐藏**。
+    //
+    // 那一轮的文字因 `bodyCollapsed`（与下方正式回答重复）被折叠，于是界面上
+    // 只剩一行 `本轮输出 141ms` 的"空标题"，像残渣。用户原话：「隐藏这个！」
+    // ⇒ `bodyCollapsed` 时**连标题行一起不画**，正文由下方助手消息承担。
+    if (step.bodyCollapsed) return false;
+    return false;
+  }
+
+  /// 步骤行的时态文案（进行中 / 已完成），对齐参考界面的写法。
+  ///
+  /// 只有「分析」这一种会显示标题行（纯正文轮次的标题行已按用户要求隐藏），
+  /// 所以这里主要就是把 `分析需求` 说成 `正在分析请求` / `已完成分析`。
+  String _label(HStepStream step) {
+    final t = step.title;
+    if (t.isEmpty || t == '分析需求' || t == '分析') {
+      return step.finished ? '已完成分析' : '正在分析请求';
+    }
+    if (t == '本轮输出') {
+      return step.finished ? '已完成输出' : '正在输出';
+    }
+    return step.finished ? '已完成$t' : '正在$t…';
   }
 
   /// 已结束的步骤，其正文剥壳后是工具调用（无 final 内容）？
@@ -197,22 +235,33 @@ class _StreamStepViewState extends State<StreamStepView> {
     final step = widget.step;
     return Row(
       children: [
+        // ★ 左侧折叠箭头 —— 与 `ToolCallCard` 完全一致的位置（用户要求"样式一样"）
+        Icon(
+          _expanded ? AppIcons.chevronDown : AppIcons.chevronRight,
+          size: 18,
+          color: h.textFaint,
+        ),
+        const SizedBox(width: HSpace.xs),
         if (!step.finished)
           SizedBox(
             width: 12,
             height: 12,
-            child: CircularProgressIndicator(strokeWidth: 1.6, color: accent),
+            child: CupertinoActivityIndicator(radius: 6, color: accent),
           )
         else
           Icon(
-            step.isError ? Icons.error_outline_rounded : Icons.check_rounded,
-            size: 13,
+            step.isError ? AppIcons.error : AppIcons.check,
+            size: 14,
             color: accent,
           ),
         const SizedBox(width: HSpace.sm),
         Flexible(
           child: Text(
-            step.title.isEmpty ? '正在生成…' : step.title,
+            // ★ 2026-10-22：对齐参考界面的**时态文案**
+            //   进行中 → `正在分析请求`
+            //   已结束 → `已完成分析`
+            // （用户原话：「正在分析请求（分析完了要变成已完成分析）」）
+            _label(step),
             overflow: TextOverflow.ellipsis,
             style: TextStyle(
               fontSize: 12,
@@ -235,32 +284,25 @@ class _StreamStepViewState extends State<StreamStepView> {
           ),
           const SizedBox(width: HSpace.sm),
         ],
-        // ---- ★ 收起时的单行流式预览（DeepSeek harness 风格）----
-        //   Expanded 吃掉剩余宽度：预览长就往左截（tail），新字持续出现
+        // ---- ★ 收起时的单行预览（DeepSeek harness 风格）----
+        //   `思考 · The user is clarifying something...` —— 标签后面直接跟一行灰字。
+        //   之前是**右对齐 + 斜体**，读起来像"状态栏"；DSH 那张图是
+        //   **紧跟在标签后面**，所以改成左对齐、常规字重、仅灰色弱化。
         if (!_expanded && preview.isNotEmpty)
           Expanded(
             child: Text(
               preview,
               maxLines: 1,
               overflow: TextOverflow.ellipsis,
-              textAlign: TextAlign.right,
+              textAlign: TextAlign.left,
               style: TextStyle(
-                fontSize: 11,
-                fontStyle: FontStyle.italic,
+                fontSize: 11.5,
                 color: h.textFaint,
               ),
             ),
           )
         else
           const Spacer(),
-        // ---- 展开/收起箭头（所有档位都有 —— 用户原话："不管何种等级"）----
-        Icon(
-          _expanded
-              ? Icons.keyboard_arrow_up_rounded
-              : Icons.keyboard_arrow_down_rounded,
-          size: 16,
-          color: h.textFaint,
-        ),
       ],
     );
   }
@@ -277,7 +319,7 @@ class _StreamStepViewState extends State<StreamStepView> {
         children: [
           Row(
             children: [
-              Icon(Icons.psychology_outlined, size: 12, color: h.textFaint),
+              Icon(AppIcons.think, size: 13, color: h.textFaint),
               const SizedBox(width: HSpace.xs + 1),
               Text(
                 '思考过程',
@@ -311,8 +353,10 @@ class _StreamStepViewState extends State<StreamStepView> {
         widget.step.finished ? _format(widget.step.text) : widget.step.text;
     return Text(
       text,
+      // ★ 2026-10-22 用户要求：**正文汇报与最终总结同一号字（15）**，
+      //   工具行更小（12）—— "模型说的话"与"工具日志"一眼分开。
       style: TextStyle(
-        fontSize: 14.5,
+        fontSize: 15,
         height: 1.6,
         color: widget.step.isError ? HColors.errorOn(h.dark) : h.text,
       ),
@@ -400,12 +444,12 @@ class _ToolSubEntryState extends State<_ToolSubEntry> {
                     SizedBox(
                       width: 10,
                       height: 10,
-                      child: CircularProgressIndicator(
-                          strokeWidth: 1.4, color: h.textFaint),
+                      child: CupertinoActivityIndicator(
+                          radius: 5, color: h.textFaint),
                     )
                   else
-                    Icon(Icons.edit_note_rounded,
-                        size: 13, color: h.textFaint),
+                    Icon(AppIcons.edit,
+                        size: 14, color: h.textFaint),
                   const SizedBox(width: HSpace.sm),
                   Flexible(
                     child: Text(
@@ -451,9 +495,9 @@ class _ToolSubEntryState extends State<_ToolSubEntry> {
                   const SizedBox(width: HSpace.sm),
                   Icon(
                     _expanded
-                        ? Icons.keyboard_arrow_up_rounded
-                        : Icons.keyboard_arrow_down_rounded,
-                    size: 15,
+                        ? AppIcons.chevronUp
+                        : AppIcons.chevronDown,
+                    size: 16,
                     color: h.textFaint,
                   ),
                 ],

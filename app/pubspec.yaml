@@ -40,6 +40,34 @@ dependencies:
   shared_preferences: ^2.3.2
   flutter_secure_storage: ^11.2.0
 
+  # ==========================================================================
+  # ★ 后端（2026-10-22，Dart 重写）—— 端侧智能体的编排层**跑在 App 进程内**
+  # ==========================================================================
+  #
+  # ## 为什么是 `path:` 而不是发布到 pub.dev
+  #
+  # `backend/` 与 `app/` 在同一个仓库、同一个提交里演进。走 path 依赖时
+  # **改 backend 立刻对 app 生效**，不需要 `pub publish` / 改版本号；
+  # 而它永远不会发给第三方（`publish_to: none`），发版没有收益。
+  #
+  # ## 为什么后端不是"另一个进程/服务"
+  #
+  # 旧实现在 Kotlin 侧（5 个 Gradle 模块）。那些模块已被删除，编排逻辑
+  # 全部搬进 `backend/`。**同一个 Dart VM 里跑**意味着：
+  #   · 事件不需要跨进程序列化（直接走 Stream，逐字流式不掉帧）
+  #   · 工具调用不需要 MethodChannel 往返（只有**设备能力**才过通道）
+  #   · 单元测试能毫秒级验证编排逻辑（`cd backend && dart test`）
+  #
+  # ⚠️ `backend/` **不得** import flutter（它是纯 Dart 包）。
+  #    边界由 `backend/pubspec.yaml` 保证 —— 那里没有 flutter 依赖。
+  heracles_backend:
+    path: ../backend
+
+  # HTTP 抓取（`web_fetch` 工具）—— backend 的 `WebCapability` 需要它。
+  # 版本与 backend 自己声明的一致（`dio: ^5.11.1`），避免同一份代码
+  # 在两端解析出两个不兼容的 dio 主版本。
+  dio: ^5.11.1
+
 
 dev_dependencies:
   flutter_test:

@@ -31,11 +31,80 @@ class HUserMessage extends HMessage {
 
 /// 助手最终回答
 class HAssistantMessage extends HMessage {
-  const HAssistantMessage({required this.id, required this.text});
+  const HAssistantMessage({
+    required this.id,
+    required this.text,
+    this.changes,
+  });
 
   @override
   final String id;
   final String text;
+
+  /// **变更报告**（2026-10-22，用户指正位置：总结正文**下面**、
+  /// 复制/点赞操作行**上面**）。
+  ///
+  /// 之前做成独立一条 `HChanges` 消息 ⇒ 它排在助手消息**之前**
+  /// （事件顺序上 `changes` 比 run 返回的 finalText 早到），
+  /// 用户原话：「你这个变更报告位置放错了，放到总结的下面去，在复制按钮的上面」。
+  /// ⇒ 改为**挂在助手消息上**，与操作行一起属于同一条回答的收尾区。
+  final List<HChangeFile>? changes;
+}
+
+/// 一次改动的单个文件（变更报告卡片的一行）。
+class HChangeFile {
+  const HChangeFile({
+    required this.path,
+    required this.added,
+    required this.removed,
+  });
+
+  /// **相对工作区**的路径（工具参数本来就是相对路径）。
+  final String path;
+  final int added;
+  final int removed;
+
+  Map<String, dynamic> toMap() =>
+      <String, dynamic>{'path': path, 'added': added, 'removed': removed};
+
+  /// 容错解析（`.jsonl` 是长期数据，字段坏了不能崩整条会话）。
+  static HChangeFile? fromMap(Object? raw) {
+    if (raw is! Map) return null;
+    final path = (raw['path'] as String?)?.trim();
+    if (path == null || path.isEmpty) return null;
+    return HChangeFile(
+      path: path,
+      added: (raw['added'] as num?)?.toInt() ?? 0,
+      removed: (raw['removed'] as num?)?.toInt() ?? 0,
+    );
+  }
+}
+
+/// **变更报告**（2026-10-22，用户要求对齐参考界面的"已编辑 N 个文件"卡片）——
+/// 一次 run 结束后，把所有写类工具按文件聚合成一张卡：
+///
+/// ```
+/// </> 已编辑 4 个文件
+///    +168 −31
+///    app/lib/services/local_agent.dart        +58 −1
+///    ...
+/// ```
+///
+/// ## 为什么单独成一条消息（而不是塞进助手回答）
+///
+/// · 它是**结构化事实**（文件 + 行数），塞进正文会被 Markdown 渲染糊掉；
+/// · 落盘为 `{"role":"changes",...}` 一行，重开会话能原样读回；
+/// · 数字来源是**工具结果里的 diff**（`diffStatOf`），不是模型自报 ——
+///   自报会撒谎，diff 不会。
+class HChanges extends HMessage {
+  const HChanges({required this.id, required this.files});
+
+  @override
+  final String id;
+  final List<HChangeFile> files;
+
+  int get totalAdded => files.fold(0, (s, f) => s + f.added);
+  int get totalRemoved => files.fold(0, (s, f) => s + f.removed);
 }
 
 /// 工具调用 —— **coding agent 的核心展示单元**
