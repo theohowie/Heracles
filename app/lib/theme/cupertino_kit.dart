@@ -1,0 +1,361 @@
+/// Cupertino 设计语言基础件（2026-10-22，用户要求："设计语言改成 cupertino，不要 material"）。
+///
+/// ## 这个文件是什么
+///
+/// 全 App 从 Material 视觉语言迁到 iOS 风格的**共享地基**：
+/// 图标对照表、无波纹点击、iOS 弹窗 / 吐司 / 按钮 / 开关。
+/// 各屏的迁移只引用这里的常量与包装件，**不在各文件里散写映射** ——
+/// 两处真相迟早漂移（本仓库的老规矩）。
+///
+/// ## 迁移原则（改任何界面都按这五条）
+///
+/// 1. **图标**：`Icons.xxx` ⇒ [AppIcons] 里对照的 `CupertinoIcons.xxx`（见下表）。
+///    表里没有的图标，从 `package:flutter/cupertino.dart` 直接选语义相同的那个，
+///    并把新条目**补进 [AppIcons]**（保持唯一映射源）。
+/// 2. **点击反馈**：iOS 没有波纹。全局主题已把 `splashFactory` 设为
+///    [kNoSplash]（`app_theme.dart`），`InkWell` 可以保留不动；
+///    需要"按下变暗"的地方用 [IosTap]。
+/// 3. **弹窗**：`AlertDialog` ⇒ [showIosDialog]（`CupertinoAlertDialog`，
+///    动作按钮竖排/横排由 iOS 自适应，破坏性动作用红色 `isDestructiveAction`）。
+/// 4. **消息条**：`SnackBar` ⇒ [showIosToast]（顶部胶囊，2 秒自动消失 ——
+///    iOS 没有底部黑条）。
+/// 5. **表单件**：`FilledButton` ⇒ [IosButton.filled]；`Switch` ⇒ `CupertinoSwitch`；
+///    `CircularProgressIndicator` ⇒ `CupertinoActivityIndicator`；
+///    `TextField` ⇒ `CupertinoTextField`；`Slider` ⇒ `CupertinoSlider`；
+///    `PopupMenuButton` ⇒ `showCupertinoMenu`；`ListTile` ⇒ `CupertinoListTile`。
+///
+/// ## 图标对照表（Material → Cupertino）
+///
+/// | 语义 | 旧（Material） | 新（Cupertino） |
+/// |---|---|---|
+/// | 完成/成功 | `check_rounded` | `CupertinoIcons.check` |
+/// | 失败/错误 | `error_outline_rounded` | `exclamationmark_circle` |
+/// | 展开（下箭头） | `keyboard_arrow_down_rounded` | `chevron_down` |
+/// | 收起/右箭头 | `chevron_right_rounded` | `chevron_forward` |
+/// | 上箭头 | `keyboard_arrow_up_rounded` | `chevron_up` |
+/// | 复制 | `copy_rounded` | `doc_on_doc` |
+/// | 点赞 | `thumb_up_alt_rounded/outlined` | `hand_thumbsup_fill/_solid` |
+/// | 点踩 | `thumb_down_alt_rounded/outlined` | `hand_thumbsdown_fill/_solid` |
+/// | 分支 | `call_split_rounded` | `arrowshape_turn_up_right` |
+/// | 用量/统计 | `data_usage_rounded` | `chart_bar` |
+/// | 刷新 | `refresh` | `arrow_clockwise` |
+/// | 菜单 | `menu` | `line_horizontal_3` |
+/// | 关闭 | `close` | `xmark` |
+/// | 加号 | `add` | `add` |
+/// | 发送（上箭头） | `arrow_upward` | `arrow_up` |
+/// | 停止 | `stop_rounded` | `stop_fill` |
+/// | 代码 | `code_rounded` | `chevron_left_slash_chevron_right` |
+/// | 思考/分析 | `psychology_alt` | `lightbulb` |
+/// | 盾牌/权限 | `shield_outlined` | `lock_shield` |
+/// | 信息 | `info_outline` | `info_circle` |
+/// | 警告 | `warning_amber` | `exclamationmark_triangle` |
+/// | 星（加精） | `star` | `star_fill` |
+/// | 文件夹 | `folder_outlined` | `folder` |
+/// | 文档 | `description_outlined` | `doc_text` |
+/// | 图片 | `image_outlined` | `photo` |
+/// | 搜索 | `search` | `search` |
+/// | 设置 | `settings_outlined` | `gearshape_2` |
+/// | 垃圾桶 | `delete_outline` | `trash` |
+/// | 编辑 | `edit_outlined` | `pencil` |
+/// | 返回 | `arrow_back` | `left_chevron` / `back` |
+library;
+
+import 'package:flutter/cupertino.dart';
+import 'package:flutter/material.dart'
+    show NoSplash, SnackBar, ScaffoldMessenger, Widget, BuildContext, Color;
+
+// ============================================================================
+// 图标对照（唯一映射源）
+// ============================================================================
+
+/// Material → Cupertino 的图标对照。**所有界面只从这里取图标**，
+/// 不要再写 `Icons.*`（那是 Material 设计语言的最后痕迹）。
+///
+/// ⚠️ 名字都对着 SDK 的 `cupertino/icons.dart`（1322 个）逐个核过 ——
+/// `check`/`terminal`/`cpu`/`download`/`upload`/`gearshape`/`send`/`wave`
+/// 这些**不存在**（SF Symbols 用 `checkmark`/`command`/`speedometer`/…），
+/// 新增条目时先 `Select-String` 核名字，别猜。
+abstract final class AppIcons {
+  // ---- 状态 ----
+  static const check = CupertinoIcons.checkmark;
+  static const error = CupertinoIcons.exclamationmark_circle;
+  static const warning = CupertinoIcons.exclamationmark_triangle;
+  static const info = CupertinoIcons.info_circle;
+
+  // ---- 折叠箭头（工具行 / 步骤行的命脉）----
+  static const chevronDown = CupertinoIcons.chevron_down;
+  static const chevronRight = CupertinoIcons.chevron_forward;
+  static const chevronUp = CupertinoIcons.chevron_up;
+
+  // ---- 回答操作行 ----
+  static const copy = CupertinoIcons.doc_on_doc;
+  static const thumbUp = CupertinoIcons.hand_thumbsup_fill;
+  static const thumbUpOutline = CupertinoIcons.hand_thumbsup;
+  static const thumbDown = CupertinoIcons.hand_thumbsdown_fill;
+  static const thumbDownOutline = CupertinoIcons.hand_thumbsdown;
+  static const branch = CupertinoIcons.arrowshape_turn_up_right;
+  static const usage = CupertinoIcons.chart_bar;
+
+  // ---- 顶栏 / 导航 ----
+  static const refresh = CupertinoIcons.arrow_clockwise;
+  static const menu = CupertinoIcons.line_horizontal_3;
+  static const close = CupertinoIcons.xmark;
+  static const back = CupertinoIcons.back;
+
+  // ---- 输入区 ----
+  static const add = CupertinoIcons.add;
+  static const send = CupertinoIcons.arrow_up;
+  static const stop = CupertinoIcons.stop_fill;
+  static const attach = CupertinoIcons.paperclip;
+  static const camera = CupertinoIcons.camera;
+
+  // ---- 内容类型 ----
+  static const code = CupertinoIcons.chevron_left_slash_chevron_right;
+  static const think = CupertinoIcons.lightbulb;
+  static const shield = CupertinoIcons.lock_shield;
+  static const star = CupertinoIcons.star_fill;
+  static const folder = CupertinoIcons.folder;
+  static const file = CupertinoIcons.doc_text;
+  static const image = CupertinoIcons.photo;
+  static const search = CupertinoIcons.search;
+  static const settings = CupertinoIcons.gear;
+  static const trash = CupertinoIcons.trash;
+  static const edit = CupertinoIcons.pencil;
+  static const share = CupertinoIcons.share;
+  static const clock = CupertinoIcons.clock;
+  static const bolt = CupertinoIcons.bolt;
+  static const terminal = CupertinoIcons.command;
+  static const globe = CupertinoIcons.globe;
+  static const wifi = CupertinoIcons.wifi;
+  static const battery = CupertinoIcons.battery_100;
+  static const cpu = CupertinoIcons.speedometer;
+  static const eye = CupertinoIcons.eye;
+  static const play = CupertinoIcons.play;
+  static const pause = CupertinoIcons.pause;
+  static const download = CupertinoIcons.arrow_down_circle;
+  static const upload = CupertinoIcons.arrow_up_circle;
+  static const more = CupertinoIcons.ellipsis;
+  static const moreCompact = CupertinoIcons.ellipsis_circle;
+}
+
+// ============================================================================
+// 点击与反馈
+// ============================================================================
+
+/// 全局主题用的无波纹工厂 —— iOS 上按下**没有水波纹**。
+/// `app_theme.dart` 里 `splashFactory: kNoSplash` 一行，
+/// 让现存 33 处 `InkWell` 立刻失去 Material 波纹（不必逐个换控件）。
+const kNoSplash = NoSplash.splashFactory;
+
+/// iOS 风格的点按：**按下整体降到 0.6 透明度**，抬手恢复。
+///
+/// 用在"需要明确按下反馈"的地方（列表行、卡片按钮）；
+/// 普通 `InkWell`（已被 [kNoSplash] 去波纹）不必替换。
+class IosTap extends StatefulWidget {
+  const IosTap({required this.onTap, required this.child, super.key});
+
+  final VoidCallback? onTap;
+  final Widget child;
+
+  @override
+  State<IosTap> createState() => _IosTapState();
+}
+
+class _IosTapState extends State<IosTap> {
+  bool _down = false;
+
+  @override
+  Widget build(BuildContext context) {
+    return GestureDetector(
+      behavior: HitTestBehavior.opaque,
+      onTapDown: (_) => setState(() => _down = true),
+      onTapCancel: () => setState(() => _down = false),
+      onTapUp: (_) => setState(() => _down = false),
+      onTap: widget.onTap,
+      child: AnimatedOpacity(
+        duration: const Duration(milliseconds: 120),
+        opacity: _down ? 0.6 : 1.0,
+        child: widget.child,
+      ),
+    );
+  }
+}
+
+// ============================================================================
+// 弹窗 / 吐司 / 按钮
+// ============================================================================
+
+/// iOS 动作项（对应旧的 `TextButton` 弹窗按钮）。
+class IosAction {
+  const IosAction(
+    this.label, {
+    this.onTap,
+    this.isDefaultAction = false,
+    this.isDestructiveAction = false,
+  });
+
+  final String label;
+  final VoidCallback? onTap;
+
+  /// 蓝色加粗的主动作（iOS 的"默认按钮"）。
+  final bool isDefaultAction;
+
+  /// 红色破坏性动作（删除/清空）。iOS 里**必须**用它，而不是 Material 的红色文字。
+  final bool isDestructiveAction;
+}
+
+/// `CupertinoAlertDialog` 的统一入口（替换所有 `AlertDialog` + `showDialog`）。
+///
+/// 与旧代码的对应关系：
+/// · `actions: [TextButton(...)]` ⇒ `actions: [IosAction(...)]`
+/// · 返回选中动作：给 [IosAction.onTap] 传 `() => Navigator.pop(ctx, value)`。
+Future<void> showIosDialog(
+  BuildContext context, {
+  required String title,
+  String? message,
+  required List<IosAction> actions,
+}) {
+  return showCupertinoDialog<void>(
+    context: context,
+    builder: (ctx) => CupertinoAlertDialog(
+      title: Text(title),
+      content: message == null ? null : Text(message),
+      actions: [
+        for (final a in actions)
+          CupertinoDialogAction(
+            isDefaultAction: a.isDefaultAction,
+            isDestructiveAction: a.isDestructiveAction,
+            onPressed: () {
+              Navigator.of(ctx).pop();
+              a.onTap?.call();
+            },
+            child: Text(a.label),
+          ),
+      ],
+    ),
+  );
+}
+
+/// iOS 风格轻提示（替换 `ScaffoldMessenger.showSnackBar`）。
+///
+/// Material 的底部黑条在 iOS 上不存在；这里做成**顶部居中的深灰胶囊**，
+/// 2 秒自动消失，点击立即关闭。不阻塞、不打断输入。
+void showIosToast(BuildContext context, String message) {
+  final overlay = Overlay.maybeOf(context);
+  if (overlay == null) {
+    // 没有 Overlay（理论上不会发生）⇒ 退回 SnackBar，**绝不静默丢消息**
+    ScaffoldMessenger.maybeOf(context)
+        ?.showSnackBar(SnackBar(content: Text(message)));
+    return;
+  }
+  late OverlayEntry entry;
+  entry = OverlayEntry(
+    builder: (_) => Positioned(
+      top: MediaQuery.of(context).padding.top + 12,
+      left: 24,
+      right: 24,
+      child: GestureDetector(
+        onTap: () => entry.remove(),
+        child: Container(
+          padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
+          decoration: BoxDecoration(
+            color: const Color(0xE63A3A3C),
+            borderRadius: BorderRadius.circular(20),
+          ),
+          child: Text(
+            message,
+            textAlign: TextAlign.center,
+            style: const TextStyle(
+              fontSize: 13.5,
+              color: CupertinoColors.white,
+            ),
+          ),
+        ),
+      ),
+    ),
+  );
+  overlay.insert(entry);
+  Future<void>.delayed(const Duration(seconds: 2), () {
+    if (entry.mounted) entry.remove();
+  });
+}
+
+/// iOS 主按钮（替换 `FilledButton` / `ElevatedButton`）。
+///
+/// 全圆角胶囊 + 实心主色，正是 iOS 的 prominent action。
+///
+/// ## `busy` 与 `leading`（2026-10-22，设置页迁移时补）
+///
+/// iOS 的按钮在忙态就是**转圈替换文字**（系统"正在检查…"按钮的形态）。
+/// 旧代码三处按钮（Shizuku 授权中 / 编码层自检中 / 测试连接中）内联了
+/// `CircularProgressIndicator`，`FilledButton.icon` 还带前置图标 ——
+/// 没有这两个槽位就会把"按下去了没有"的反馈整个丢掉。
+class IosButton extends StatelessWidget {
+  const IosButton({
+    required this.label,
+    this.onPressed,
+    this.filled = true,
+    this.color,
+    this.dense = false,
+    this.busy = false,
+    this.leading,
+    super.key,
+  });
+
+  final String label;
+  final VoidCallback? onPressed;
+  final bool filled;
+  final Color? color;
+  final bool dense;
+
+  /// 忙态：文字换成小号转圈，且**不可再点**（与旧行为一致）。
+  final bool busy;
+
+  /// 文字前的小图标（`FilledButton.icon` 的对应物）。
+  final Widget? leading;
+
+  @override
+  Widget build(BuildContext context) {
+    final scheme = CupertinoTheme.of(context).primaryColor;
+    return CupertinoButton(
+      padding: EdgeInsets.zero,
+      onPressed: busy ? null : onPressed,
+      child: Container(
+        height: dense ? 30 : 38,
+        alignment: Alignment.center,
+        padding: EdgeInsets.symmetric(horizontal: dense ? 14 : 20),
+        decoration: BoxDecoration(
+          color: filled
+              ? (onPressed == null || busy
+                  ? (color ?? scheme).withValues(alpha: 0.3)
+                  : (color ?? scheme))
+              : null,
+          borderRadius: BorderRadius.circular(dense ? 15 : 19),
+          border: filled ? null : Border.all(color: (color ?? scheme)),
+        ),
+        child: busy
+            ? CupertinoActivityIndicator(
+                radius: 7,
+                color: filled ? CupertinoColors.white : (color ?? scheme),
+              )
+            : Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  if (leading != null) ...[
+                    leading!,
+                    const SizedBox(width: 6),
+                  ],
+                  Text(
+                    label,
+                    style: TextStyle(
+                      fontSize: dense ? 13 : 15,
+                      fontWeight: FontWeight.w600,
+                      color: filled ? CupertinoColors.white : (color ?? scheme),
+                    ),
+                  ),
+                ],
+              ),
+      ),
+    );
+  }
+}

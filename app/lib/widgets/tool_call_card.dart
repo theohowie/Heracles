@@ -5,6 +5,7 @@ import 'package:flutter/material.dart';
 import '../models/message.dart';
 import '../models/settings.dart';
 import '../theme/app_theme.dart';
+import '../theme/cupertino_kit.dart';
 
 /// **工具名 → 人话**（2026-10-13，用户要求）。
 ///
@@ -23,6 +24,70 @@ import '../theme/app_theme.dart';
 /// 语义一致（那里是给模型的正式描述，这里是给用户的短语）。
 /// 未登记的工具名**原样回显** —— 宁可露出 schema 名，
 /// 也不要编一个可能不准的中文说法（诚实优先）。
+/// **工具行的显示名**：`动词 + 目标`（2026-10-22，对齐用户给的参考界面）。
+///
+/// 参考界面里工具行长这样：
+/// ```
+/// >_ 运行命令 · Find prompt insertion point
+///    读取 app/lib/widgets/stream_step.dart
+///    编辑 app/lib/widgets/stream_step.dart 1KB +8 −1
+/// ```
+/// 即：**动词**（运行/读取/编辑）+ **目标**（命令摘要/路径），而不是
+/// 我们原来的「人话名词 + 成功 + N 个参数」（`查看目录文件 成功 · 1 个参数`）。
+///
+/// ## 为什么要改
+///
+/// 用户原话：「你看到我的工具调用是怎么写的展示嘛？你不要忽视这个啊」。
+/// 原来的写法把"做了什么"藏在参数个数后面 —— 一屏十行全是
+/// 「执行命令 成功 · 1 个参数」，看不出到底对**哪个文件**做了什么。
+///
+/// ## 状态怎么表达
+///
+/// 用**动词时态**而不是一个"成功"字样（参考界面就是这样）：
+/// 运行中 → `正在读取 …`；结束后 → `读取了 …`；失败 → 末尾补 `失败`。
+String toolCallLabel(String tool, Map<String, String> args,
+    {required bool running, required bool failed}) {
+  final (run, done) = switch (tool) {
+    'read_file' => ('正在读取', '读取了'),
+    'list_files' => ('正在查看目录', '查看了目录'),
+    'find_files' => ('正在查找', '查找了'),
+    'grep_files' => ('正在搜索', '搜索了'),
+    'write_file' => ('正在写入', '写入了'),
+    'edit' => ('正在编辑', '编辑了'),
+    'apply_patch' => ('正在按补丁修改', '按补丁修改了'),
+    'mkdir' => ('正在创建目录', '创建了目录'),
+    'delete_path' => ('正在删除', '删除了'),
+    'move_path' => ('正在移动', '移动了'),
+    'copy_path' => ('正在复制', '复制了'),
+    'run_shell_command' => ('正在执行命令', '执行了命令'),
+    'web_fetch' => ('正在抓取网页', '抓取了网页'),
+    'check_device_state' => ('正在读取设备状态', '读取了设备状态'),
+    'write_todos' => ('正在更新待办', '更新了待办'),
+    'ask_user' => ('正在向你提问', '向你提了问'),
+    'save_memory' => ('正在记录', '记录了'),
+    'build_apk' => ('正在构建 APK', '构建了 APK'),
+    'apk_decompile' => ('正在反编译', '反编译了'),
+    _ => ('正在调用 $tool', '调用了 $tool'),
+  };
+  final verb = running ? run : done;
+
+  // 目标：优先路径，其次命令/描述/模式
+  final raw = (args['path'] ??
+          args['command'] ??
+          args['description'] ??
+          args['pattern'] ??
+          args['from'] ??
+          args['projectDir'] ??
+          '')
+      .toString()
+      .trim();
+  var target = raw.replaceAll('\n', ' ');
+  if (target.length > 48) target = '${target.substring(0, 48)}…';
+
+  final head = target.isEmpty ? verb : '$verb $target';
+  return failed ? '$head（失败）' : head;
+}
+
 String friendlyToolName(String tool) => switch (tool) {
       'write_file' => '修改文件代码',
       'read_file' => '读取文件',
@@ -287,7 +352,21 @@ class ToolCallCard extends StatefulWidget {
 }
 
 class _ToolCallCardState extends State<ToolCallCard> {
-  bool _expanded = true;
+  /// 是否展开明细。
+  ///
+  /// ## ★ 2026-10-22：默认值随档位走（真机截图驱动的改版）
+  ///
+  /// 用户原话：「我不要调用工具是一个卡片的形式……可以点击展开……」
+  /// 真机截图里他处在**精简档**，而旧实现在精简档下 `_hasBody == false`
+  /// ⇒ **连箭头都不画、点了没反应** ⇒ 用户以为"工具不可查看细节"。
+  ///
+  /// 现在的语义：
+  /// · **精简档** ⇒ 默认**折叠**成一行（清单紧凑），**但可以点开看明细**
+  /// · 其余档位 ⇒ 默认展开（信息本来就该看到）
+  ///
+  /// 为什么用 `late` 而不是在 `build` 里改状态：`build` 里改 state 会触发布局期
+  /// setState（Flutter 会警告）。初始化只发生一次，正是我们要的"默认值"。
+  late bool _expanded = widget.stepDetail.showArgs;
 
   /// **改动详情**是否展开（2026-10-21，BUG-4）。
   ///
@@ -303,99 +382,121 @@ class _ToolCallCardState extends State<ToolCallCard> {
     final call = widget.call;
 
     final (color, icon) = switch (call.status) {
-      ToolStatus.running => (HColors.infoOn(h.dark), Icons.autorenew_rounded),
-      ToolStatus.success => (HColors.successOn(h.dark), Icons.check_rounded),
-      ToolStatus.failure => (HColors.errorOn(h.dark), Icons.close_rounded),
+      ToolStatus.running => (HColors.infoOn(h.dark), AppIcons.refresh),
+      ToolStatus.success => (HColors.successOn(h.dark), AppIcons.check),
+      ToolStatus.failure => (HColors.errorOn(h.dark), AppIcons.close),
     };
-    final statusLabel = switch (call.status) {
-      ToolStatus.running => '执行中',
-      ToolStatus.success => '成功',
-      ToolStatus.failure => '失败',
-    };
+    // 状态词已并入标题（`正在读取…` / `读取了…` / `…（失败）`）——
+    // 参考界面就不单独摆一个"成功"字样，靠动词时态与图标颜色表达。
 
     // 精简档**没有可展开的内容** —— 此时连箭头都不该画，
     // 否则用户点了没反应，会以为界面卡了。
     final hasBody = _hasBody(detail);
 
+    // ★ 2026-10-22：从「卡片」改成「日志行」（真机截图 + 用户明确要求）
+    //
+    // 用户原话：「我不要调用工具是一个卡片的形式……然后可以点击展开成图二」。
+    // 旧样子是一个**带边框+底色的圆角卡片**，占一屏好几张卡；
+    // 现在：
+    // · **折叠态**：无边框、无底色 —— 就是一行紧凑日志（左侧箭头是"可点开"的线索）
+    // · **展开态**：才给一点底色把人车入库，看得清"这块属于这次调用"
+    //
+    // 热区仍 ≥ [kMinTapTarget]（docs/25 §7 第 3 条）—— 用户点的是**整行**。
+    final diffStat = isFileWritingTool(call.tool) ? _stat(call) : null;
+
     return Container(
-      margin: const EdgeInsets.only(bottom: HSpace.md),
-      decoration: BoxDecoration(
-        color: h.surfaceAlt,
-        borderRadius: BorderRadius.circular(HRadius.md),
-        border: Border.all(color: h.border),
-      ),
+      margin: const EdgeInsets.only(bottom: HSpace.xs),
+      decoration: _expanded && hasBody
+          ? BoxDecoration(
+              color: h.surfaceAlt,
+              borderRadius: BorderRadius.circular(HRadius.sm),
+            )
+          : null,
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
-          // ---- 头部：状态图标 + 工具名 + 状态词 + 折叠箭头 ----
-          //
-          // ★ 折叠热区 **≥44px**（`docs/25` §7 第 3 条：移动端触控目标）。
-          //
-          // 原来的内边距是 `vertical: 8+2=10`，行高约 20 —— 总高仅约 40px，
-          // 比 Android 的 48dp 触控建议还小。这里用 `ConstrainedBox`
-          // **把整条头部撑到 44**，而不是只把图标做大：用户点的是"整行"，
-          // 热区必须跟着整行走（只放大箭头会让"看着能点"的地方点不到）。
+          // ---- 头部：折叠箭头 + 状态图标 + 工具名 + 状态词 + 元信息 ----
           InkWell(
             onTap: hasBody ? () => setState(() => _expanded = !_expanded) : null,
-            borderRadius: BorderRadius.circular(HRadius.md),
+            borderRadius: BorderRadius.circular(HRadius.sm),
             child: ConstrainedBox(
               constraints: const BoxConstraints(minHeight: kMinTapTarget),
               child: Padding(
                 padding: const EdgeInsets.symmetric(
-                  horizontal: HSpace.md,
-                  vertical: HSpace.sm + 2,
+                  horizontal: HSpace.sm,
+                  vertical: HSpace.xs,
                 ),
                 child: Row(
                   children: [
-                    Icon(icon, size: 15, color: color),
-                    const SizedBox(width: HSpace.sm),
-                    Flexible(
-                      child: Text(
-                        // ★ 人话标题（2026-10-13 用户要求）：
-                        //   运行中 → 「正在修改文件代码」
-                        //   已结束 → 「修改文件代码」
-                        //   未登记的工具名 → 原样回显（不编中文）
-                        call.status == ToolStatus.running
-                            ? runningToolName(call.tool)
-                            : friendlyToolName(call.tool),
-                        overflow: TextOverflow.ellipsis,
-                        style: TextStyle(
-                          fontSize: 13,
-                          fontWeight: FontWeight.w600,
-                          color: h.text,
-                        ),
-                      ),
-                    ),
-                    const SizedBox(width: HSpace.sm),
-                    // 状态词 —— 精简档只有"工具名 + 状态"，
-                    // 所以状态必须**看得见**，不能只靠一个小图标的颜色
-                    Text(
-                      statusLabel,
-                      style: TextStyle(
-                        fontSize: 11,
-                        fontWeight: FontWeight.w600,
-                        color: color,
-                        letterSpacing: 0.3,
-                      ),
-                    ),
-                    // 参数数量在精简档也有用（一眼看出"这一步有多重"），
-                    // 但不展开具体值
-                    if (detail.statusOnly && call.args.isNotEmpty) ...[
-                      const SizedBox(width: HSpace.xs),
-                      Text(
-                        '· ${call.args.length} 个参数',
-                        style: TextStyle(fontSize: 10.5, color: h.textFaint),
-                      ),
-                    ],
-                    const Spacer(),
+                    // ★ 左侧箭头（用户要的那个"能展开"的样子）
+                    //
+                    // 没有可展开内容时**仍然占位** —— 否则同一列的对齐会跳，
+                    // 一屏工具行左右参差，看着像渲染错。
                     if (hasBody)
                       Icon(
                         _expanded
-                            ? Icons.keyboard_arrow_up_rounded
-                            : Icons.keyboard_arrow_down_rounded,
+                            ? AppIcons.chevronDown
+                            : AppIcons.chevronRight,
                         size: 18,
                         color: h.textFaint,
+                      )
+                    else
+                      const SizedBox(width: 18),
+                    const SizedBox(width: HSpace.xs),
+                    Icon(icon, size: 14, color: color),
+                    const SizedBox(width: 6),
+                    Flexible(
+                      child: Text(
+                        // ★ 2026-10-22：`动词 + 目标`（对齐参考界面）
+                        //   `读取 app/lib/services/local_agent.dart`
+                        //   `执行了命令 echo hi > c.txt`
+                        //   失败时末尾带「（失败）」—— 不再单列一个"成功"字样占宽。
+                        toolCallLabel(
+                          call.tool,
+                          call.args,
+                          running: call.status == ToolStatus.running,
+                          failed: call.status == ToolStatus.failure,
+                        ),
+                        overflow: TextOverflow.ellipsis,
+                        style: TextStyle(
+                          // ★ 2026-10-22：工具行字号**小于正文**（12 vs 15），
+                          //   让"模型说的话"与"工具日志"一眼分开。
+                          fontSize: 12,
+                          fontWeight: FontWeight.w500,
+                          color: call.status == ToolStatus.failure
+                              ? HColors.errorOn(h.dark)
+                              : h.text,
+                        ),
                       ),
+                    ),
+                    // 参数数量退成弱提示（目标已经写进标题了，这里只是"还有几个参数"）
+                    if (call.args.length > 1) ...[
+                      const SizedBox(width: HSpace.xs),
+                      Text(
+                        '+${call.args.length - 1}',
+                        style: TextStyle(fontSize: 10, color: h.textFaint),
+                      ),
+                    ],
+                    // 改动统计：`+N −M` 折叠态也看得见（BUG-4 的"入口永远可见"）
+                    if (diffStat != null && diffStat.isDiff) ...[
+                      const SizedBox(width: HSpace.xs),
+                      Text(
+                        '+${diffStat.added}',
+                        style: TextStyle(
+                          fontSize: 10.5,
+                          fontWeight: FontWeight.w600,
+                          color: HColors.successOn(h.dark),
+                        ),
+                      ),
+                      Text(
+                        ' −${diffStat.removed}',
+                        style: TextStyle(
+                          fontSize: 10.5,
+                          fontWeight: FontWeight.w600,
+                          color: HColors.errorOn(h.dark),
+                        ),
+                      ),
+                    ],
                   ],
                 ),
               ),
@@ -490,8 +591,17 @@ class _ToolCallCardState extends State<ToolCallCard> {
   ///
   /// **必须与 build 里实际渲染的东西一致** —— 否则会出现"有箭头但展开是空的"。
   bool _hasBody(StepDetail detail) {
-    if (!detail.showArgs) return false;
-    return widget.call.args.isNotEmpty || widget.call.result != null;
+    // ★ 2026-10-22：不再因为"精简档"就整条不可展开。
+    //
+    // 旧实现第一行是 `if (!detail.showArgs) return false;` —— 精简档下
+    // 连箭头都不画。用户真机截图正是精简档，于是**以为工具调用查不了细节**。
+    // 现在的分工：
+    // · `showArgs` 只决定**默认是否展开**（见 `_expanded` 的 late 初始化）
+    // · "能不能展开" 只看**有没有东西可展开**
+    return widget.call.args.isNotEmpty ||
+        widget.call.result != null ||
+        (detail.showRawOutput && widget.call.rawOutput != null) ||
+        (isFileWritingTool(widget.call.tool) && _diffText(widget.call).isNotEmpty);
   }
 
   // ============================================================
@@ -569,7 +679,7 @@ class _ToolCallCardState extends State<ToolCallCard> {
             constraints: const BoxConstraints(minHeight: kMinTapTarget),
             child: Row(
               children: [
-                Icon(Icons.difference_outlined, size: 13, color: h.textFaint),
+                Icon(AppIcons.file, size: 14, color: h.textFaint),
                 const SizedBox(width: HSpace.xs + 1),
                 Flexible(
                   child: Text(
@@ -617,9 +727,9 @@ class _ToolCallCardState extends State<ToolCallCard> {
                 const Spacer(),
                 Icon(
                   _diffExpanded
-                      ? Icons.keyboard_arrow_up_rounded
-                      : Icons.keyboard_arrow_down_rounded,
-                  size: 16,
+                      ? AppIcons.chevronUp
+                      : AppIcons.chevronDown,
+                  size: 17,
                   color: h.textFaint,
                 ),
               ],
@@ -699,7 +809,7 @@ class _ToolCallCardState extends State<ToolCallCard> {
         const SizedBox(height: HSpace.sm),
         Row(
           children: [
-            Icon(Icons.psychology_outlined, size: 12, color: h.textFaint),
+            Icon(AppIcons.think, size: 13, color: h.textFaint),
             const SizedBox(width: HSpace.xs + 1),
             Text(
               '模型原始输出',

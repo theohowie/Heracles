@@ -1,8 +1,10 @@
+import 'package:flutter/cupertino.dart';
 import 'package:flutter/material.dart';
 
 import '../models/view_options.dart';
 import '../models/workspace.dart';
 import '../theme/app_theme.dart';
+import '../theme/cupertino_kit.dart';
 
 /// 工作区侧边栏 —— 项目与会话管理。
 ///
@@ -144,7 +146,7 @@ class WorkspaceDrawer extends StatelessWidget {
                     horizontal: HSpace.xl, vertical: HSpace.lg),
                 child: Row(
                   children: [
-                    Icon(Icons.settings_outlined, size: 18, color: h.textDim),
+                    Icon(AppIcons.settings, size: 19, color: h.textDim),
                     const SizedBox(width: HSpace.md + 2),
                     Text('设置',
                         style: TextStyle(fontSize: 14, color: h.textDim)),
@@ -181,7 +183,7 @@ class WorkspaceDrawer extends StatelessWidget {
         child: SizedBox(
           width: 20,
           height: 20,
-          child: CircularProgressIndicator(strokeWidth: 2, color: h.textFaint),
+          child: CupertinoActivityIndicator(radius: 10, color: h.textFaint),
         ),
       );
     }
@@ -293,12 +295,14 @@ class WorkspaceDrawer extends StatelessWidget {
               ),
               if (visible.isNotEmpty) ...[
                 const SizedBox(height: HSpace.md),
-                TextButton(
+                CupertinoButton(
                   onPressed: () => onViewOptionsChanged(
                     viewOptions.copyWith(grouping: SessionGrouping.byWorkspace),
                   ),
-                  child: const Text('切回「按工作区分组」',
-                      style: TextStyle(fontSize: 12.5)),
+                  padding:
+                      const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+                  child: Text('切回「按工作区分组」',
+                      style: TextStyle(fontSize: 12.5, color: h.accent)),
                 ),
               ],
             ],
@@ -363,8 +367,8 @@ class WorkspaceDrawer extends StatelessWidget {
           child: Column(
             mainAxisSize: MainAxisSize.min,
             children: [
-              Icon(Icons.create_new_folder_outlined,
-                  size: 34, color: h.textFaint),
+              Icon(CupertinoIcons.folder_badge_plus,
+                  size: 35, color: h.textFaint),
               const SizedBox(height: HSpace.md),
               Text('还没有工作区',
                   style: TextStyle(
@@ -380,18 +384,10 @@ class WorkspaceDrawer extends StatelessWidget {
                     fontSize: 12.5, height: 1.65, color: h.textFaint),
               ),
               const SizedBox(height: HSpace.xl),
-              FilledButton.icon(
+              IosButton(
+                label: '选择文件夹',
                 onPressed: onAddWorkspace,
-                icon: const Icon(Icons.folder_open_rounded, size: 18),
-                label: const Text('选择文件夹'),
-                style: FilledButton.styleFrom(
-                  backgroundColor: h.accent,
-                  foregroundColor: h.dark
-                      ? const Color(0xFF1A0E08)
-                      : const Color(0xFFFFFFFF),
-                  padding: const EdgeInsets.symmetric(
-                      horizontal: HSpace.xl, vertical: HSpace.md),
-                ),
+                color: h.accent,
               ),
               // ★ 次要入口：内置「应用工作区」（2026-10-17）
               //
@@ -400,15 +396,18 @@ class WorkspaceDrawer extends StatelessWidget {
               // 选了 /sdcard 的项目、构建失败了才去猜。
               if (onAddAppWorkspace != null) ...[
                 const SizedBox(height: HSpace.md),
-                TextButton.icon(
+                CupertinoButton(
                   onPressed: onAddAppWorkspace,
-                  icon: const Icon(Icons.android_rounded, size: 17),
-                  label: const Text('使用默认工作区',
-                      style: TextStyle(fontSize: 12.5)),
-                  style: TextButton.styleFrom(
-                    foregroundColor: h.accent,
-                    padding: const EdgeInsets.symmetric(
-                        horizontal: HSpace.lg, vertical: HSpace.sm),
+                  padding: const EdgeInsets.symmetric(
+                      horizontal: HSpace.lg, vertical: HSpace.sm),
+                  child: Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      Icon(CupertinoIcons.phone, size: 18, color: h.accent),
+                      const SizedBox(width: HSpace.sm),
+                      Text('使用默认工作区',
+                          style: TextStyle(fontSize: 12.5, color: h.accent)),
+                    ],
                   ),
                 ),
               ],
@@ -421,7 +420,7 @@ class WorkspaceDrawer extends StatelessWidget {
         padding: const EdgeInsets.fromLTRB(HSpace.lg, HSpace.md, HSpace.sm, 0),
         child: Row(
           children: [
-            Icon(Icons.bolt_rounded, size: 20, color: h.accent),
+            Icon(AppIcons.bolt, size: 21, color: h.accent),
             const SizedBox(width: HSpace.sm),
             Text(
               'Heracles',
@@ -433,9 +432,10 @@ class WorkspaceDrawer extends StatelessWidget {
               ),
             ),
             const Spacer(),
-            IconButton(
-              icon: Icon(Icons.close_rounded, size: 20, color: h.textFaint),
+            CupertinoButton(
+              padding: const EdgeInsets.all(8),
               onPressed: onClose ?? () => Navigator.of(context).pop(),
+              child: Icon(AppIcons.close, size: 21, color: h.textFaint),
             ),
           ],
         ),
@@ -457,7 +457,7 @@ class WorkspaceDrawer extends StatelessWidget {
               onTap: () => onSearchChanged(''),
               child: Padding(
                 padding: const EdgeInsets.all(4),
-                child: Icon(Icons.close_rounded, size: 14, color: h.textFaint),
+                child: Icon(AppIcons.close, size: 15, color: h.textFaint),
               ),
             ),
           ],
@@ -468,37 +468,42 @@ class WorkspaceDrawer extends StatelessWidget {
 
   Future<void> _openSearch(BuildContext context, Hue h) async {
     final controller = TextEditingController(text: searchQuery);
-    final q = await showDialog<String>(
+    // ⚠️ 没用 showIosDialog：它的 content 只能放一段 String，
+    //   而这里要在弹窗里**放输入框**（并拿回输入的 String）——
+    //   直接手写同款的 CupertinoAlertDialog，视觉与 showIosDialog 一致。
+    final q = await showCupertinoDialog<String>(
       context: context,
-      builder: (ctx) => AlertDialog(
-        backgroundColor: h.surfaceAlt,
-        shape: RoundedRectangleBorder(
-          borderRadius: BorderRadius.circular(HRadius.lg),
-          side: BorderSide(color: h.border),
+      builder: (ctx) => CupertinoTheme(
+        // 弹窗跟随 App 的深浅色（App 是 MaterialApp，没有现成的 CupertinoTheme）
+        data: CupertinoThemeData(
+          brightness: h.dark ? Brightness.dark : Brightness.light,
+          primaryColor: h.accent,
         ),
-        title: Text('搜索会话', style: TextStyle(color: h.text, fontSize: 16)),
-        content: TextField(
-          controller: controller,
-          autofocus: true,
-          style: TextStyle(color: h.text),
-          decoration: InputDecoration(
-            hintText: '输入标题关键词',
-            hintStyle: TextStyle(color: h.textFaint),
+        child: CupertinoAlertDialog(
+          title: Text('搜索会话', style: TextStyle(color: h.text, fontSize: 16)),
+          content: Padding(
+            padding: const EdgeInsets.only(top: HSpace.sm),
+            child: CupertinoTextField(
+              controller: controller,
+              autofocus: true,
+              style: TextStyle(color: h.text),
+              placeholder: '输入标题关键词',
+              placeholderStyle: TextStyle(color: h.textFaint),
+              onSubmitted: (v) => Navigator.of(ctx).pop(v),
+            ),
           ),
-          onSubmitted: (v) => Navigator.of(ctx).pop(v),
+          actions: [
+            CupertinoDialogAction(
+              onPressed: () => Navigator.of(ctx).pop(''),
+              child: Text('清除', style: TextStyle(color: h.textDim)),
+            ),
+            CupertinoDialogAction(
+              isDefaultAction: true,
+              onPressed: () => Navigator.of(ctx).pop(controller.text),
+              child: const Text('搜索'),
+            ),
+          ],
         ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.of(ctx).pop(''),
-            style: TextButton.styleFrom(foregroundColor: h.textDim),
-            child: const Text('清除'),
-          ),
-          FilledButton(
-            onPressed: () => Navigator.of(ctx).pop(controller.text),
-            style: FilledButton.styleFrom(backgroundColor: h.accent),
-            child: const Text('搜索'),
-          ),
-        ],
       ),
     );
     if (q != null) onSearchChanged(q.trim());
@@ -518,8 +523,8 @@ class WorkspaceDrawer extends StatelessWidget {
       builder: (ctx) => StatefulBuilder(
         builder: (ctx, setSheet) {
           Widget check(bool on) => on
-              ? Icon(Icons.check_rounded, size: 18, color: h.accent)
-              : const SizedBox(width: 18);
+              ? Icon(AppIcons.check, size: 19, color: h.accent)
+              : const SizedBox(width: 19);
 
           return SafeArea(
             child: SingleChildScrollView(
@@ -528,12 +533,12 @@ class WorkspaceDrawer extends StatelessWidget {
                 crossAxisAlignment: CrossAxisAlignment.stretch,
                 children: [
                   _groupLabel(h, '分组方式'),
-                  _opt(h, '按工作区', Icons.folder_outlined,
+                  _opt(h, '按工作区', AppIcons.folder,
                       draft.grouping == SessionGrouping.byWorkspace, () {
                     setSheet(() => draft = draft.copyWith(
                         grouping: SessionGrouping.byWorkspace));
                   }, check),
-                  _opt(h, '单列表', Icons.format_list_bulleted_rounded,
+                  _opt(h, '单列表', CupertinoIcons.list_bullet,
                       draft.grouping == SessionGrouping.flatList, () {
                     setSheet(() => draft = draft.copyWith(
                         grouping: SessionGrouping.flatList));
@@ -543,7 +548,7 @@ class WorkspaceDrawer extends StatelessWidget {
                   // ⚠️ 2026-10-19：删掉「按工作区树」（与「按工作区」行为完全相同）
                   //   与「手动排序」（没有拖拽实现）—— 两个**假选项**。
                   _groupLabel(h, '排序方式'),
-                  _opt(h, '最近更新', Icons.schedule_rounded,
+                  _opt(h, '最近更新', AppIcons.clock,
                       draft.sorting == SessionSorting.recent, () {
                     setSheet(() => draft =
                         draft.copyWith(sorting: SessionSorting.recent));
@@ -551,17 +556,17 @@ class WorkspaceDrawer extends StatelessWidget {
 
                   const Divider(height: 1),
                   _groupLabel(h, '筛选会话'),
-                  _opt(h, '隐藏已归档', Icons.archive_outlined,
+                  _opt(h, '隐藏已归档', CupertinoIcons.archivebox,
                       draft.filter == SessionFilter.hideArchived, () {
                     setSheet(() => draft = draft.copyWith(
                         filter: SessionFilter.hideArchived));
                   }, check),
-                  _opt(h, '全部对话（显示已归档）', Icons.forum_outlined,
+                  _opt(h, '全部对话（显示已归档）', CupertinoIcons.chat_bubble_2,
                       draft.filter == SessionFilter.all, () {
                     setSheet(() => draft =
                         draft.copyWith(filter: SessionFilter.all));
                   }, check),
-                  _opt(h, '仅显示已归档', Icons.inventory_2_outlined,
+                  _opt(h, '仅显示已归档', CupertinoIcons.archivebox_fill,
                       draft.filter == SessionFilter.onlyArchived, () {
                     setSheet(() => draft = draft.copyWith(
                         filter: SessionFilter.onlyArchived));
@@ -612,7 +617,7 @@ class WorkspaceDrawer extends StatelessWidget {
               horizontal: HSpace.xl, vertical: HSpace.md),
           child: Row(
             children: [
-              Icon(icon, size: 18, color: selected ? h.text : h.textDim),
+              Icon(icon, size: 19, color: selected ? h.text : h.textDim),
               const SizedBox(width: HSpace.md + 2),
               Expanded(
                 child: Text(
@@ -654,53 +659,57 @@ void _sessionMenu(
       borderRadius: BorderRadius.vertical(top: Radius.circular(HRadius.lg)),
     ),
     builder: (ctx) => SafeArea(
-      child: Column(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          ListTile(
-            leading: Icon(
-              s.starred ? Icons.star_rounded : Icons.star_border_rounded,
-              color: s.starred ? HColors.warnOn(h.dark) : h.textDim,
+      child: CupertinoTheme(
+        data: CupertinoThemeData(
+          brightness: h.dark ? Brightness.dark : Brightness.light,
+          primaryColor: h.accent,
+        ),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            CupertinoListTile(
+              leading: Icon(
+                s.starred ? AppIcons.star : CupertinoIcons.star,
+                color: s.starred ? HColors.warnOn(h.dark) : h.textDim,
+              ),
+              title: Text(s.starred ? '取消收藏' : '收藏',
+                  style: TextStyle(color: h.text)),
+              onTap: () {
+                Navigator.of(ctx).pop();
+                onStar(w.id, s.id);
+              },
             ),
-            title: Text(s.starred ? '取消收藏' : '收藏',
-                style: TextStyle(color: h.text)),
-            onTap: () {
-              Navigator.of(ctx).pop();
-              onStar(w.id, s.id);
-            },
-          ),
-          ListTile(
-            leading: Icon(Icons.drive_file_rename_outline_rounded,
-                color: h.textDim),
-            title: Text('重命名', style: TextStyle(color: h.text)),
-            onTap: () {
-              Navigator.of(ctx).pop();
-              onRename(w.id, s.id);
-            },
-          ),
-          ListTile(
-            leading: Icon(Icons.archive_outlined, color: h.textDim),
-            title: Text(s.archived ? '取消归档' : '归档',
-                style: TextStyle(color: h.text)),
-            subtitle: Text('归档后默认隐藏',
-                style: TextStyle(fontSize: 11, color: h.textFaint)),
-            onTap: () {
-              Navigator.of(ctx).pop();
-              onArchive(w.id, s.id);
-            },
-          ),
-          ListTile(
-            leading:
-                Icon(Icons.delete_outline_rounded, color: HColors.errorOn(h.dark)),
-            title: Text('删除',
-                style: TextStyle(color: HColors.errorOn(h.dark))),
-            onTap: () {
-              Navigator.of(ctx).pop();
-              onDelete(w.id, s.id);
-            },
-          ),
-          const SizedBox(height: HSpace.sm),
-        ],
+            CupertinoListTile(
+              leading: Icon(AppIcons.edit, color: h.textDim),
+              title: Text('重命名', style: TextStyle(color: h.text)),
+              onTap: () {
+                Navigator.of(ctx).pop();
+                onRename(w.id, s.id);
+              },
+            ),
+            CupertinoListTile(
+              leading: Icon(CupertinoIcons.archivebox, color: h.textDim),
+              title: Text(s.archived ? '取消归档' : '归档',
+                  style: TextStyle(color: h.text)),
+              subtitle: Text('归档后默认隐藏',
+                  style: TextStyle(fontSize: 11, color: h.textFaint)),
+              onTap: () {
+                Navigator.of(ctx).pop();
+                onArchive(w.id, s.id);
+              },
+            ),
+            CupertinoListTile(
+              leading: Icon(AppIcons.trash, color: HColors.errorOn(h.dark)),
+              title: Text('删除',
+                  style: TextStyle(color: HColors.errorOn(h.dark))),
+              onTap: () {
+                Navigator.of(ctx).pop();
+                onDelete(w.id, s.id);
+              },
+            ),
+            const SizedBox(height: HSpace.sm),
+          ],
+        ),
       ),
     ),
   );
@@ -730,7 +739,7 @@ class _NewSessionButton extends StatelessWidget {
           child: Row(
             mainAxisAlignment: MainAxisAlignment.center,
             children: [
-              Icon(Icons.add_circle_outline_rounded, size: 18, color: h.text),
+              Icon(CupertinoIcons.plus_circle, size: 19, color: h.text),
               const SizedBox(width: HSpace.sm),
               Text('新会话',
                   style: TextStyle(
@@ -782,13 +791,13 @@ class _SectionHeader extends StatelessWidget {
           ),
           const Spacer(),
           _MiniAction(
-            icon: Icons.search_rounded,
+            icon: AppIcons.search,
             h: h,
             color: searching ? h.accent : null,
             onTap: onSearch,
           ),
           // ★ 视图选项 —— 之前是空实现，现在真的能改分组/排序/筛选
-          _MiniAction(icon: Icons.tune_rounded, h: h, onTap: onViewOptions),
+          _MiniAction(icon: CupertinoIcons.slider_horizontal_3, h: h, onTap: onViewOptions),
           // ★★ ⊕ = **两项菜单**（2026-10-17）★★
           //
           // ## 为什么一项不够
@@ -841,20 +850,20 @@ class _AddWorkspaceMenu extends StatelessWidget {
       itemBuilder: (_) => [
         _item(
           value: 'folder',
-          icon: Icons.folder_open_rounded,
+          icon: CupertinoIcons.folder_open,
           title: '选择文件夹',
         ),
         _item(
           value: 'app',
-          icon: Icons.android_rounded,
+          icon: CupertinoIcons.phone,
           title: '默认工作区',
         ),
       ],
       child: SizedBox(
         width: 36,
         height: 36,
-        child: Icon(Icons.create_new_folder_outlined,
-            size: 17, color: h.textFaint),
+        child: Icon(CupertinoIcons.folder_badge_plus,
+            size: 18, color: h.textFaint),
       ),
     );
   }
@@ -869,7 +878,7 @@ class _AddWorkspaceMenu extends StatelessWidget {
         height: 48,
         child: Row(
           children: [
-            Icon(icon, size: 18, color: h.textDim),
+            Icon(icon, size: 19, color: h.textDim),
             const SizedBox(width: HSpace.sm + 2),
             Expanded(
               child: Text(title,
@@ -905,7 +914,8 @@ class _MiniAction extends StatelessWidget {
         child: InkWell(
           onTap: onTap,
           borderRadius: BorderRadius.circular(HRadius.sm),
-          child: Icon(icon, size: size <= 30 ? 16 : 17, color: color ?? h.textFaint),
+          child: Icon(icon,
+              size: size <= 30 ? 17 : 18, color: color ?? h.textFaint),
         ),
       ),
     );
@@ -951,13 +961,13 @@ class _WorkspaceGroup extends StatelessWidget {
               children: [
                 Icon(
                   workspace.expanded
-                      ? Icons.arrow_drop_down_rounded
-                      : Icons.arrow_right_rounded,
-                  size: 22,
+                      ? AppIcons.chevronDown
+                      : AppIcons.chevronRight,
+                  size: 23,
                   color: h.textFaint,
                 ),
                 const SizedBox(width: 2),
-                Icon(Icons.folder_rounded, size: 17, color: h.accent),
+                Icon(AppIcons.folder, size: 18, color: h.accent),
                 const SizedBox(width: HSpace.sm + 2),
                 Expanded(
                   child: Column(
@@ -976,8 +986,8 @@ class _WorkspaceGroup extends StatelessWidget {
                       if (!workspace.writable)
                         Row(
                           children: [
-                            Icon(Icons.lock_outline_rounded,
-                                size: 11, color: HColors.warnOn(h.dark)),
+                            Icon(CupertinoIcons.lock,
+                                size: 12, color: HColors.warnOn(h.dark)),
                             const SizedBox(width: 3),
                             Flexible(
                               child: Text(
@@ -1016,12 +1026,12 @@ class _WorkspaceGroup extends StatelessWidget {
                   ),
                 ),
                 _MiniAction(
-                  icon: Icons.more_horiz_rounded,
+                  icon: AppIcons.more,
                   h: h,
                   onTap: () => _workspaceMenu(context),
                 ),
                 _MiniAction(
-                    icon: Icons.add_rounded, h: h, onTap: onNewSession),
+                    icon: AppIcons.add, h: h, onTap: onNewSession),
               ],
             ),
           ),
@@ -1076,40 +1086,46 @@ class _WorkspaceGroup extends StatelessWidget {
         borderRadius: BorderRadius.vertical(top: Radius.circular(HRadius.lg)),
       ),
       builder: (ctx) => SafeArea(
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            ListTile(
-              leading: Icon(Icons.folder_open_rounded, color: h.textDim),
-              title: Text(
-                workspace.path,
-                maxLines: 2,
-                overflow: TextOverflow.ellipsis,
-                style: TextStyle(fontSize: 12, color: h.textDim),
+        child: CupertinoTheme(
+          data: CupertinoThemeData(
+            brightness: h.dark ? Brightness.dark : Brightness.light,
+            primaryColor: h.accent,
+          ),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              CupertinoListTile(
+                leading: Icon(CupertinoIcons.folder_open, color: h.textDim),
+                title: Text(
+                  workspace.path,
+                  maxLines: 2,
+                  overflow: TextOverflow.ellipsis,
+                  style: TextStyle(fontSize: 12, color: h.textDim),
+                ),
               ),
-            ),
-            ListTile(
-              leading: Icon(Icons.add_rounded, color: h.accent),
-              title: Text('新建会话', style: TextStyle(color: h.text)),
-              onTap: () {
-                Navigator.of(ctx).pop();
-                onNewSession();
-              },
-            ),
-            ListTile(
-              leading: Icon(Icons.remove_circle_outline_rounded,
-                  color: HColors.errorOn(h.dark)),
-              title: Text('从列表移除',
-                  style: TextStyle(color: HColors.errorOn(h.dark))),
-              subtitle: Text('不会删除文件夹本身',
-                  style: TextStyle(fontSize: 11, color: h.textFaint)),
-              onTap: () {
-                Navigator.of(ctx).pop();
-                onRemove();
-              },
-            ),
-            const SizedBox(height: HSpace.sm),
-          ],
+              CupertinoListTile(
+                leading: Icon(AppIcons.add, color: h.accent),
+                title: Text('新建会话', style: TextStyle(color: h.text)),
+                onTap: () {
+                  Navigator.of(ctx).pop();
+                  onNewSession();
+                },
+              ),
+              CupertinoListTile(
+                leading: Icon(CupertinoIcons.minus_circle,
+                    color: HColors.errorOn(h.dark)),
+                title: Text('从列表移除',
+                    style: TextStyle(color: HColors.errorOn(h.dark))),
+                subtitle: Text('不会删除文件夹本身',
+                    style: TextStyle(fontSize: 11, color: h.textFaint)),
+                onTap: () {
+                  Navigator.of(ctx).pop();
+                  onRemove();
+                },
+              ),
+              const SizedBox(height: HSpace.sm),
+            ],
+          ),
         ),
       ),
     );
@@ -1177,8 +1193,8 @@ class _SessionRow extends StatelessWidget {
                           if (session.archived)
                             Padding(
                               padding: const EdgeInsets.only(right: 4),
-                              child: Icon(Icons.inventory_2_outlined,
-                                  size: 12, color: h.textFaint),
+                              child: Icon(CupertinoIcons.archivebox,
+                                  size: 13, color: h.textFaint),
                             ),
                           Expanded(
                             child: Text(
@@ -1219,21 +1235,21 @@ class _SessionRow extends StatelessWidget {
 
           _MiniAction(
             icon: session.starred
-                ? Icons.star_rounded
-                : Icons.star_border_rounded,
+                ? AppIcons.star
+                : CupertinoIcons.star,
             h: h,
             size: 30,
             color: session.starred ? HColors.warnOn(h.dark) : null,
             onTap: onStar,
           ),
           _MiniAction(
-            icon: Icons.delete_outline_rounded,
+            icon: AppIcons.trash,
             h: h,
             size: 30,
             onTap: onDelete,
           ),
           _MiniAction(
-            icon: Icons.more_horiz_rounded,
+            icon: AppIcons.more,
             h: h,
             size: 30,
             onTap: onMenu,

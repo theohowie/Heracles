@@ -1,0 +1,18 @@
+# ============================================================================
+# backend 的静态检查门禁
+# ============================================================================
+#
+# ## 为什么必须显式写这一行
+#
+# 没有 `analysis_options.yaml` 时，`dart analyze` 只用**默认**规则集
+# （只有 error 级别），`lints` 包里的 recommended 规则**一条都不生效**。
+# 表现是：`dart analyze` 报 "No issues found!"，但代码里藏着
+# `unnecessary_non_null_assertion` / `avoid_print` / 未用变量这类问题 ——
+# 门的规格和门的开关不是一回事（审计 §4.3）。
+#
+# 为什么是 recommended 而不是 all
+#
+# `lints/all` 里有一批与本项目风格冲突的规则（如 `prefer_single_quotes` 与
+# 项目里大量双引号字符串、`public_member_api_docs` 对私有包毫无意义）。
+# recommended 是官方"默认该遵守"的量，先守住它；将来要收紧，在这里追加。
+include: package:lints/recommended.yaml

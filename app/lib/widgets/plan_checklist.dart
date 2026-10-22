@@ -1,6 +1,8 @@
+import 'package:flutter/cupertino.dart';
 import 'package:flutter/material.dart';
 
 import '../theme/app_theme.dart';
+import '../theme/cupertino_kit.dart';
 
 /// **任务计划清单**（2026-10-14，harness 核心机制的 UI）。
 ///
@@ -93,11 +95,11 @@ class PlanChecklist extends StatelessWidget {
                     //   · 全部完成 → ✅
                     //   · 进行中 → 清单图标
                     reachedGoal == false
-                        ? Icons.error_outline_rounded
+                        ? AppIcons.error
                         : (allDone
-                            ? Icons.check_circle_rounded
-                            : Icons.checklist_rounded),
-                    size: 15,
+                            ? CupertinoIcons.checkmark_circle_fill
+                            : CupertinoIcons.list_bullet),
+                    size: 16,
                     color: reachedGoal == false
                         ? HColors.warnOn(h.dark)
                         : (allDone ? HColors.successOn(h.dark) : h.accent),
@@ -130,21 +132,21 @@ class PlanChecklist extends StatelessWidget {
                     height: 3,
                     child: ClipRRect(
                       borderRadius: BorderRadius.circular(2),
-                      child: LinearProgressIndicator(
-                        value: total == 0 ? 0 : doneCount / total,
-                        backgroundColor: h.border,
-                        valueColor: AlwaysStoppedAnimation(
-                          allDone ? HColors.successOn(h.dark) : h.accent,
-                        ),
+                      child: CupertinoLinearActivityIndicator(
+                        progress: total == 0
+                            ? 0
+                            : (doneCount / total).clamp(0.0, 1.0),
+                        height: 3,
+                        color: allDone ? HColors.successOn(h.dark) : h.accent,
                       ),
                     ),
                   ),
                   const SizedBox(width: HSpace.sm),
                   Icon(
                     collapsed
-                        ? Icons.keyboard_arrow_down_rounded
-                        : Icons.keyboard_arrow_up_rounded,
-                    size: 16,
+                        ? AppIcons.chevronDown
+                        : AppIcons.chevronUp,
+                    size: 17,
                     color: h.textFaint,
                   ),
                 ],
@@ -170,8 +172,8 @@ class PlanChecklist extends StatelessWidget {
                     Row(
                       crossAxisAlignment: CrossAxisAlignment.start,
                       children: [
-                        Icon(Icons.info_outline_rounded,
-                            size: 12, color: HColors.warnOn(h.dark)),
+                        Icon(AppIcons.info,
+                            size: 13, color: HColors.warnOn(h.dark)),
                         const SizedBox(width: HSpace.xs),
                         Expanded(
                           child: Text(
@@ -224,11 +226,11 @@ class PlanChecklist extends StatelessWidget {
             padding: const EdgeInsets.only(top: 1),
             child: Icon(
               done
-                  ? Icons.check_rounded
+                  ? AppIcons.check
                   : (active
-                      ? Icons.radio_button_checked_rounded
-                      : Icons.radio_button_unchecked_rounded),
-              size: 13,
+                      ? CupertinoIcons.smallcircle_circle
+                      : CupertinoIcons.circle),
+              size: 14,
               color: color,
             ),
           ),

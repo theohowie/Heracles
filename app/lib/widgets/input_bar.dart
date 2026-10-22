@@ -1,8 +1,10 @@
+import 'package:flutter/cupertino.dart';
 import 'package:flutter/material.dart';
 
 import '../models/attachment.dart';
 import '../models/settings.dart';
 import '../theme/app_theme.dart';
+import '../theme/cupertino_kit.dart';
 
 /// 底部输入区 —— 固定，始终可见。
 ///
@@ -276,7 +278,10 @@ class _InputBarState extends State<InputBar> {
                     //   限高后多行**内部滚动**，容器高度封顶。
                     ConstrainedBox(
                       constraints: const BoxConstraints(maxHeight: 130),
-                      child: TextField(
+                      // ★ borderless：外层容器已有胶囊圆角+边框（iOS Messages 输入条），
+                      //   文本区不再套第二层装饰。Material 的 border:InputBorder.none /
+                      //   isDense 在这里没有对应参数 —— 内边距由 padding 承担。
+                      child: CupertinoTextField.borderless(
                         controller: _controller,
                         focusNode: _focus,
                         enabled: widget.enabled,
@@ -292,7 +297,6 @@ class _InputBarState extends State<InputBar> {
                           height: 1.45,
                           color: h.text,
                         ),
-                        decoration: InputDecoration(
                         // 空态占位（2026-10-12，用户指定）——
                         // 与 llama.cpp Web UI 的 "Type a message..." 同位。
                         // ★ 有排队时的占位（2026-10-13 参考图）：
@@ -300,20 +304,17 @@ class _InputBarState extends State<InputBar> {
                         //   想插队用排队条上的 ↑（打断当前）。
                         //   ⚠️ 措辞按用户反馈修正（"发送消息时引导不是截断"）：
                         //   原文案"继续输入排队"没说清"发送 = 排队"。
-                        hintText: widget.queuedTexts.isEmpty
+                        placeholder: widget.queuedTexts.isEmpty
                             ? '发送消息或点击 + 上传文件或图片'
                             : '发送将排在队尾；↑ 可插队立即发送',
-                        hintStyle:
+                        placeholderStyle:
                             TextStyle(color: h.textFaint, fontSize: 15),
-                        border: InputBorder.none,
-                        isDense: true,
                         // 容器已有圆角与边框 —— 文本区只留内边距
-                        contentPadding: const EdgeInsets.fromLTRB(
+                        padding: const EdgeInsets.fromLTRB(
                           HSpace.lg, HSpace.md, HSpace.lg, HSpace.sm,
                         ),
                       ),
-                      ), // ConstrainedBox
-                    ),
+                    ), // ConstrainedBox
                     // ---- 底部一行（2026-10-12，按用户参考图重排）----
                     //
                     //  (＋)      🛡  [模型 ▾]        (↑ 最右)
@@ -332,7 +333,7 @@ class _InputBarState extends State<InputBar> {
                         children: [
                           // ---- ＋（圆形）----
                           _CircleButton(
-                            icon: Icons.add_rounded,
+                            icon: AppIcons.add,
                             h: h,
                             onTap:
                                 widget.enabled ? widget.onPickAttachment : null,
@@ -441,8 +442,8 @@ class _AttachmentRow extends StatelessWidget {  const _AttachmentRow({
               mainAxisSize: MainAxisSize.min,
               children: [
                 Icon(
-                  a.isImage ? Icons.image_outlined : Icons.description_outlined,
-                  size: 14,
+                  a.isImage ? AppIcons.image : AppIcons.file,
+                  size: 15,
                   color: h.accent,
                 ),
                 const SizedBox(width: 6),
@@ -461,8 +462,8 @@ class _AttachmentRow extends StatelessWidget {  const _AttachmentRow({
                   borderRadius: BorderRadius.circular(HRadius.sm),
                   child: Padding(
                     padding: const EdgeInsets.all(4),
-                    child: Icon(Icons.close_rounded,
-                        size: 13, color: h.textFaint),
+                    child: Icon(AppIcons.close,
+                        size: 14, color: h.textFaint),
                   ),
                 ),
               ],
@@ -531,10 +532,10 @@ class _SendButton extends StatelessWidget {
             //   · 空闲 → 发送
             busy && !hasContent
                 ? (stopLabel
-                    ? Icons.stop_rounded
-                    : Icons.hourglass_top_rounded)
-                : Icons.arrow_upward_rounded,
-            size: 20,
+                    ? AppIcons.stop
+                    : CupertinoIcons.hourglass)
+                : AppIcons.send,
+            size: 21,
             color: active ? const Color(0xFF1A0E08) : h.textFaint,
           ),
         ),
@@ -571,7 +572,7 @@ class _CircleButton extends StatelessWidget {
           customBorder: const CircleBorder(),
           child: Icon(
             icon,
-            size: 22,
+            size: 23,
             color: active ? h.textDim : h.textFaint,
           ),
         ),
@@ -610,37 +611,43 @@ class _PermissionIconButton extends StatelessWidget {
         borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
       ),
       builder: (sheetCtx) => SafeArea(
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            const SizedBox(height: HSpace.sm),
-            for (final v in PermissionMode.values)
-              ListTile(
-                // 三档三枚图标（用户给的三张参考小图）——
-                // 完全访问用警示色，与其余两档区分
-                leading: Icon(v.icon,
-                    size: 22,
-                    color: v.requiresElevation
-                        ? HColors.warnOn(h.dark)
-                        : h.textDim),
-                title: Text(v.label,
-                    style: TextStyle(
-                        fontSize: 15,
-                        fontWeight: v == permission
-                            ? FontWeight.w600
-                            : FontWeight.w400,
-                        color: v == permission ? h.accent : h.text)),
-                subtitle: Text(v.description,
-                    style:
-                        TextStyle(fontSize: 12, color: h.textFaint)),
-                trailing: v == permission
-                    ? Icon(Icons.check_rounded,
-                        size: 18, color: h.accent)
-                    : null,
-                onTap: () => Navigator.of(sheetCtx).pop(v),
-              ),
-            const SizedBox(height: HSpace.sm),
-          ],
+        child: CupertinoTheme(
+          data: CupertinoThemeData(
+            brightness: h.dark ? Brightness.dark : Brightness.light,
+            primaryColor: h.accent,
+          ),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              const SizedBox(height: HSpace.sm),
+              for (final v in PermissionMode.values)
+                CupertinoListTile(
+                  // 三档三枚图标（用户给的三张参考小图）——
+                  // 完全访问用警示色，与其余两档区分
+                  leading: Icon(v.icon,
+                      size: 23,
+                      color: v.requiresElevation
+                          ? HColors.warnOn(h.dark)
+                          : h.textDim),
+                  title: Text(v.label,
+                      style: TextStyle(
+                          fontSize: 15,
+                          fontWeight: v == permission
+                              ? FontWeight.w600
+                              : FontWeight.w400,
+                          color: v == permission ? h.accent : h.text)),
+                  subtitle: Text(v.description,
+                      style:
+                          TextStyle(fontSize: 12, color: h.textFaint)),
+                  trailing: v == permission
+                      ? Icon(AppIcons.check,
+                          size: 19, color: h.accent)
+                      : null,
+                  onTap: () => Navigator.of(sheetCtx).pop(v),
+                ),
+              const SizedBox(height: HSpace.sm),
+            ],
+          ),
         ),
       ),
     );
@@ -652,52 +659,50 @@ class _PermissionIconButton extends StatelessWidget {
     // 随旧类一起删掉了（**安全护栏的回归**，测试抓回来的）。现在它属于
     // 这个图标按钮：**换到 fullAccess 就必须停下来确认，不管入口长什么样**。
     if (picked == PermissionMode.fullAccess) {
-      final confirmed = await showDialog<bool>(
+      // ⚠️ 没用 showIosDialog：它透不出 barrierDismissible:false（这里**必须**
+      //   显式选择，点外面不算确认），也拿不回 bool 结果 —— 手写同款
+      //   CupertinoAlertDialog，视觉与 showIosDialog 一致。
+      final confirmed = await showCupertinoDialog<bool>(
         // 安全理由：本组件无 mounted 可查；回调/主题已在 gap 前抓成局部值，
         // 这个 context 只用来挂载对话框（Navigator 仍持有它）；
         // barrierDismissible:false 保证必须显式选择。
         context: context, // ignore: use_build_context_synchronously
         barrierDismissible: false, // 必须显式选择，点外面不算确认
-        builder: (ctx) => AlertDialog(
-          backgroundColor: h.surfaceAlt,
-          shape: RoundedRectangleBorder(
-            borderRadius: BorderRadius.circular(HRadius.lg),
-            side: BorderSide(color: HColors.warnOn(h.dark)),
+        builder: (ctx) => CupertinoTheme(
+          data: CupertinoThemeData(
+            brightness: h.dark ? Brightness.dark : Brightness.light,
+            primaryColor: h.accent,
           ),
-          title: Row(
-            children: [
-              Icon(Icons.warning_amber_rounded,
-                  size: 22, color: HColors.warnOn(h.dark)),
-              const SizedBox(width: HSpace.sm),
-              Text('确认切换到「完全访问」？',
-                  style: TextStyle(color: h.text, fontSize: 17)),
+          child: CupertinoAlertDialog(
+            // iOS 弹窗标题不带图标 —— 危险语义改由下方红色动作按钮承担
+            // （kit 约定：isDestructiveAction 就是 iOS 的"警告色动作"）。
+            title: Text('确认切换到「完全访问」？',
+                style: TextStyle(color: h.text, fontSize: 17)),
+            content: Text(
+              // ⚠️ 纯 Text 不解析 Markdown —— 强调用措辞，不能写 `**`
+              '选这个档位后，agent 的操作不再逐条询问你：\n\n'
+              '· 它修改文件、执行命令都不会再确认\n'
+              '· 出错或越界时没有拦截点\n'
+              '· 这个选择会持续到你自己改回来\n\n'
+              '${PermissionMode.fullAccess.description}\n\n'
+              '确定要继续吗？',
+              style: TextStyle(fontSize: 13, height: 1.55, color: h.textDim),
+            ),
+            actions: [
+              CupertinoDialogAction(
+                // 危险操作的安全默认是"不做"
+                // （旧版靠 TextButton autofocus 强调；CupertinoDialogAction
+                //   无 autofocus —— 触屏上点「取消」或直接点不动都是"不做"）
+                onPressed: () => navigator.pop(false),
+                child: Text('取消', style: TextStyle(color: h.textDim)),
+              ),
+              CupertinoDialogAction(
+                isDestructiveAction: true, // iOS 惯例：风险动作 = 红字
+                onPressed: () => navigator.pop(true),
+                child: const Text('我已了解风险，继续'),
+              ),
             ],
           ),
-          content: Text(
-            // ⚠️ 纯 Text 不解析 Markdown —— 强调用措辞，不能写 `**`
-            '选这个档位后，agent 的操作不再逐条询问你：\n\n'
-            '· 它修改文件、执行命令都不会再确认\n'
-            '· 出错或越界时没有拦截点\n'
-            '· 这个选择会持续到你自己改回来\n\n'
-            '${PermissionMode.fullAccess.description}\n\n'
-            '确定要继续吗？',
-            style: TextStyle(fontSize: 13, height: 1.55, color: h.textDim),
-          ),
-          actions: [
-            TextButton(
-              autofocus: true, // 危险操作的安全默认是"不做"
-              onPressed: () => navigator.pop(false),
-              style: TextButton.styleFrom(foregroundColor: h.textDim),
-              child: const Text('取消'),
-            ),
-            FilledButton(
-              onPressed: () => navigator.pop(true),
-              style: FilledButton.styleFrom(
-                backgroundColor: HColors.warnOn(h.dark),
-              ),
-              child: const Text('我已了解风险，继续'),
-            ),
-          ],
         ),
       );
       // 取消 = 什么都不改
@@ -721,7 +726,7 @@ class _PermissionIconButton extends StatelessWidget {
             // 三档三枚图标（用户指定）—— 与权限菜单每行的图标一致。
             // 完全访问额外用警示色：一眼看出"当前状态要小心"。
             permission.icon,
-            size: 21,
+            size: 22,
             color: permission.requiresElevation
                 ? HColors.warnOn(h.dark)
                 : h.textDim,
@@ -804,7 +809,13 @@ class _ModelSelector extends StatelessWidget {
         //   + 说明文字，总高超屏就是 BOTTOM OVERFLOWED（用户截图：
         //   BY 59 PIXELS）。整个弹层放进单子项滚动的 Column。
         child: SingleChildScrollView(
-          child: Column(
+          child: CupertinoTheme(
+            // 弹层里的 Cupertino 控件按 App 深浅色解析（默认跟系统，会错）
+            data: CupertinoThemeData(
+              brightness: h2.dark ? Brightness.dark : Brightness.light,
+              primaryColor: h2.accent,
+            ),
+            child: Column(
             mainAxisSize: MainAxisSize.min,
             children: [
               const SizedBox(height: HSpace.sm),
@@ -820,7 +831,7 @@ class _ModelSelector extends StatelessWidget {
               //   选它目录里的具体模型。
               for (final p in providers)
                 if (p.isConfigured || AppSettings.isLocalConfig(p))
-                  ListTile(
+                  CupertinoListTile(
                     title: Text(p.name, style: const TextStyle(fontSize: 15)),
                     subtitle: Text(
                       // 显示当前用的模型（或目录数量）
@@ -855,12 +866,12 @@ class _ModelSelector extends StatelessWidget {
                       mainAxisSize: MainAxisSize.min,
                       children: [
                         if (p.id == activeProviderId)
-                          Icon(Icons.check_rounded, size: 18, color: h2.accent),
+                          Icon(AppIcons.check, size: 19, color: h2.accent),
                         if (p.modelCatalog.isNotEmpty) ...[
                           if (p.id == activeProviderId)
                             const SizedBox(width: HSpace.xs),
-                          Icon(Icons.chevron_right_rounded,
-                              size: 18, color: h2.textFaint),
+                          Icon(AppIcons.chevronRight,
+                              size: 19, color: h2.textFaint),
                         ],
                       ],
                     ),
@@ -886,8 +897,8 @@ class _ModelSelector extends StatelessWidget {
                 children: [
                   Row(
                     children: [
-                      Icon(Icons.psychology_rounded,
-                          size: 20, color: h2.textDim),
+                      Icon(AppIcons.think,
+                          size: 21, color: h2.textDim),
                       const SizedBox(width: HSpace.md),
                       const Text('推理等级', style: TextStyle(fontSize: 15)),
                       const Spacer(),
@@ -902,10 +913,11 @@ class _ModelSelector extends StatelessWidget {
                     runSpacing: HSpace.sm,
                     children: [
                       for (final v in ReasoningLevel.values)
-                        ChoiceChip(
-                          label: Text(v.label),
+                        _PillOption(
+                          label: v.label,
                           selected: v == reasoningLevel,
-                          onSelected: (_) {
+                          h: h2,
+                          onTap: () {
                             Navigator.of(sheetCtx).pop();
                             // ★ 选同一个档位不回调 —— 不产生无意义的写盘
                             //（与旧锚点菜单同语义，测试「同档不回调」钉它）
@@ -956,8 +968,8 @@ class _ModelSelector extends StatelessWidget {
                 children: [
                   Row(
                     children: [
-                      Icon(Icons.repeat_rounded,
-                          size: 20, color: h2.textDim),
+                      Icon(CupertinoIcons.repeat,
+                          size: 21, color: h2.textDim),
                       const SizedBox(width: HSpace.md),
                       const Text('最大轮次', style: TextStyle(fontSize: 15)),
                       const Spacer(),
@@ -971,10 +983,11 @@ class _ModelSelector extends StatelessWidget {
                     runSpacing: HSpace.sm,
                     children: [
                       for (final v in kMaxTurnsOptions)
-                        ChoiceChip(
-                          label: Text(v == 0 ? '自动' : '$v'),
+                        _PillOption(
+                          label: v == 0 ? '自动' : '$v',
                           selected: v == maxTurns,
-                          onSelected: (_) {
+                          h: h2,
+                          onTap: () {
                             Navigator.of(sheetCtx).pop();
                             // ★ 选同一档不回调 —— 与上面推理等级同语义
                             //   （不产生无意义的写盘）
@@ -1003,6 +1016,7 @@ class _ModelSelector extends StatelessWidget {
             const SizedBox(height: HSpace.md),
           ],
         ),
+          ), // CupertinoTheme（弹层内 Cupertino 控件的深浅色）
       ),
       ),
     );
@@ -1073,9 +1087,56 @@ class _ModelSelector extends StatelessWidget {
                   ),
                 ),
                 const SizedBox(width: HSpace.xs),
-                Icon(Icons.expand_more_rounded, size: 17, color: h.textDim),
+                Icon(AppIcons.chevronDown, size: 18, color: h.textDim),
               ],
             ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+/// **iOS 风格单选胶囊**（2026-10-22 Cupertino 化，替换 Material `ChoiceChip`）。
+///
+/// 选中 = 主色实心，未选 = 描边 —— iOS 没有"底色加深+对勾"的 chip，
+/// 用胶囊填充是最接近的视觉语言。排布（Wrap）与语义（点选、
+/// 同档不回调）和旧 ChoiceChip 完全一致。
+class _PillOption extends StatelessWidget {
+  const _PillOption({
+    required this.label,
+    required this.selected,
+    required this.h,
+    required this.onTap,
+  });
+
+  final String label;
+  final bool selected;
+  final Hue h;
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    return GestureDetector(
+      onTap: onTap,
+      child: Container(
+        padding:
+            const EdgeInsets.symmetric(horizontal: HSpace.md, vertical: 7),
+        decoration: BoxDecoration(
+          color: selected ? h.accent : h.surface,
+          borderRadius: BorderRadius.circular(HRadius.pill),
+          border: Border.all(color: selected ? h.accent : h.border),
+        ),
+        child: Text(
+          label,
+          style: TextStyle(
+            fontSize: 13,
+            fontWeight: selected ? FontWeight.w600 : FontWeight.w400,
+            color: selected
+                ? (h.dark
+                    ? const Color(0xFF1A0E08)
+                    : const Color(0xFFFFFFFF))
+                : h.textDim,
           ),
         ),
       ),
@@ -1091,15 +1152,16 @@ class _ModelSelector extends StatelessWidget {
 /// 放展示层而非 `models/`：图标是 UI 概念，
 /// `models/` 不 import Flutter（与 `:core` 不 import android 同理）。
 extension PermissionModeIcon on PermissionMode {
-  /// 用户给的三张参考小图（盾+勾 / 盾+笔 / 盾+叹号）：
-  /// · 手动审批  = gpp_good（盾+勾）—— 逐条人工批准，图形完全一致
-  /// · 工作区内  = admin_panel_settings（盾+管理）—— Material 无"盾+笔"，
+  /// 用户给的三张参考小图（盾+勾 / 盾+管理 / 盾+叹号）——
+  /// Cupertino 化后仍用同族盾牌图形（2026-10-22）：
+  /// · 手动审批  = checkmark_shield（盾+勾）—— 逐条人工批准，图形完全一致
+  /// · 工作区内  = lock_shield（盾+锁）—— Cupertino 无"盾+笔"，
   ///   这是语义最近的（受控放行），已向用户说明是近似
-  /// · 完全访问  = gpp_maybe（盾+叹号）—— 与参考图3完全一致
+  /// · 完全访问  = exclamationmark_shield（盾+叹号）—— 与参考图3完全一致
   IconData get icon => switch (this) {
-        PermissionMode.manual => Icons.gpp_good_outlined,
-        PermissionMode.workspaceAuto => Icons.admin_panel_settings_outlined,
-        PermissionMode.fullAccess => Icons.gpp_maybe_outlined,
+        PermissionMode.manual => CupertinoIcons.checkmark_shield,
+        PermissionMode.workspaceAuto => AppIcons.shield,
+        PermissionMode.fullAccess => CupertinoIcons.exclamationmark_shield,
       };
 }
 
@@ -1163,7 +1225,7 @@ class _QueuedRow extends StatelessWidget {
           children: [
             const SizedBox(width: HSpace.md),
             // 💬 —— 用「排队」语义的图标，不是聊天气泡（避免与消息混淆）
-            Icon(Icons.schedule_send_rounded, size: 15, color: h.textFaint),
+            Icon(AppIcons.clock, size: 16, color: h.textFaint),
             const SizedBox(width: HSpace.sm),
             Expanded(
               child: Padding(
@@ -1177,11 +1239,11 @@ class _QueuedRow extends StatelessWidget {
               ),
             ),
             if (canPin && onPin != null)
-              _iconBtn(Icons.vertical_align_top_rounded, '置顶（下一个发）', onPin!),
+              _iconBtn(CupertinoIcons.arrow_up_to_line, '置顶（下一个发）', onPin!),
             if (onRemove != null)
-              _iconBtn(Icons.delete_outline_rounded, '删除', onRemove!),
+              _iconBtn(AppIcons.trash, '删除', onRemove!),
             if (onSendNow != null)
-              _iconBtn(Icons.arrow_upward_rounded, '立即发送（打断当前任务）',
+              _iconBtn(AppIcons.send, '立即发送（打断当前任务）',
                   onSendNow!, accent: true),
             const SizedBox(width: HSpace.xs),
           ],
@@ -1202,7 +1264,7 @@ class _QueuedRow extends StatelessWidget {
           height: 40,
           child: Icon(
             icon,
-            size: 17,
+            size: 18,
             color: accent ? h.accent : h.textDim,
           ),
         ),

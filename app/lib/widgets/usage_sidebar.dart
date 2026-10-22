@@ -1,7 +1,9 @@
+import 'package:flutter/cupertino.dart';
 import 'package:flutter/material.dart';
 
 import '../models/session_usage.dart';
 import '../theme/app_theme.dart';
+import '../theme/cupertino_kit.dart';
 
 /// **右侧边栏：会话用量与上下文**（2026-10-11，t13；需求见 `docs/24`）。
 ///
@@ -93,7 +95,7 @@ class UsageSidebar extends StatelessWidget {
         padding: const EdgeInsets.fromLTRB(HSpace.lg, HSpace.md, HSpace.sm, HSpace.md),
         child: Row(
           children: [
-            Icon(Icons.insights_rounded, size: 18, color: h.accent),
+            Icon(AppIcons.usage, size: 19, color: h.accent),
             const SizedBox(width: HSpace.sm),
             Text(
               '用量与上下文',
@@ -104,10 +106,13 @@ class UsageSidebar extends StatelessWidget {
               ),
             ),
             const Spacer(),
-            IconButton(
-              tooltip: '关闭',
-              icon: Icon(Icons.close_rounded, size: 20, color: h.textDim),
-              onPressed: onClose ?? () => Navigator.of(context).pop(),
+            Tooltip(
+              message: '关闭',
+              child: CupertinoButton(
+                padding: EdgeInsets.zero,
+                onPressed: onClose ?? () => Navigator.of(context).pop(),
+                child: Icon(AppIcons.close, size: 21, color: h.textDim),
+              ),
             ),
           ],
         ),
@@ -178,30 +183,16 @@ class UsageSidebar extends StatelessWidget {
           '稳态命中率（最近一次·轮次平均）',
           steady == null ? '—' : '${(steady * 100).round()}%',
         ),
-        Padding(
-          padding: const EdgeInsets.only(bottom: HSpace.sm),
-          child: Text(
-            '主标题 = Σ命中 / Σ(命中+未命中)，按 token 加权（对应真实账单）；'
-            '稳态 = 跳过首轮冷启动后各轮命中率的平均（大轮小轮等权，偏乐观）。'
-            '两者口径不同，数值本就不会一致。',
-            style: TextStyle(fontSize: 10.5, height: 1.45, color: h.textFaint),
-          ),
-        ),
+        // ★ 2026-10-22 用户要求：**删掉"主标题 = Σ命中/Σ(命中+未命中)…"这段公式说明**。
+        //   原话：「那些公式给我去掉，不是写给用户看的！！！」
+        //   口径的说明留在本文件 KDoc（第 119 行起）—— 那是给开发者看的，
+        //   本来就该在代码里而不是界面上。
         _kv(h, 'Token 用量', formatTokensFull(usage.totalInputTokens + usage.outputTokens)),
         _kv(h, '未缓存输入', formatTokensFull(usage.reportedPromptTokens + usage.unreportedPromptTokens)),
         _kv(h, '缓存读取', formatTokensFull(usage.cachedTokens)),
         _kv(h, '输出', formatTokensFull(usage.outputTokens)),
-        Padding(
-          padding: const EdgeInsets.only(bottom: HSpace.sm),
-          child: Text(
-            // ★ 输出 token 的口径必须写明：它是 **provider 上报**的
-            //   `usage.completion_tokens` 逐轮累加，**不含**本地估算。
-            //   用户质疑「输出才 476token」时，能据此判断是"额度口径"
-            //   还是"真的没吐字"。
-            '「输出」= provider 上报的 completion_tokens 累加，不含本地估算。',
-            style: TextStyle(fontSize: 10.5, height: 1.45, color: h.textFaint),
-          ),
-        ),
+        // ★ 2026-10-22：删掉「"输出" = provider 上报的 completion_tokens 累加…」
+        //   这句公式说明（用户：不是写给用户看的）。口径留在上面的代码注释里。
         // ★ 分母标注（docs/24 §4.1 硬要求）——
         //   否则用户以为自己被少算了
         if (usage.hasUnreported)
@@ -276,29 +267,20 @@ class UsageSidebar extends StatelessWidget {
             ),
           ],
         ),
-        // ★ 上限来源（2026-10-14）—— 让用户知道这个数字从哪来。
-        //
-        // 为什么必须可见：上限算错会让压缩**过早触发**（丢上下文），
-        // 用户看到"128K"却知道模型是 1M 时，需要能判断是
-        // "服务端没上报"还是"内置表不认识这个模型"。
-        if (contextUsage.limitSource.isNotEmpty) ...[
-          const SizedBox(height: 2),
-          Text(
-            '上限来源：${contextUsage.limitSource}',
-            style: TextStyle(fontSize: 10.5, color: h.textFaint),
-          ),
-        ],
+        // ★ 2026-10-22：删掉界面上的「上限来源：xxx」一行（用户：不是写给
+        //   用户看的）。**判断依据保留在代码里**：上限算错会让压缩过早触发
+        //   （丢上下文）—— 排障时看 `contextUsage.limitSource` 字段即可。
         const SizedBox(height: HSpace.sm),
         if (ratio != null)
           ClipRRect(
             borderRadius: BorderRadius.circular(HRadius.pill),
-            child: LinearProgressIndicator(
-              // clamp：超限时不能把进度条撑出容器
-              value: ratio.clamp(0.0, 1.0),
-              minHeight: 6,
-              backgroundColor: h.surfaceAlt,
-              valueColor: AlwaysStoppedAnimation(
-                over ? HColors.errorOn(h.dark) : h.accent,
+            child: SizedBox(
+              height: 6,
+              child: CupertinoLinearActivityIndicator(
+                // clamp：超限时不能把进度条撑出容器
+                progress: ratio.clamp(0.0, 1.0),
+                height: 6,
+                color: over ? HColors.errorOn(h.dark) : h.accent,
               ),
             ),
           ),
@@ -315,11 +297,8 @@ class UsageSidebar extends StatelessWidget {
             contextUsage.frozenTokens),
         _legend(h, HColors.infoOn(h.dark), '对话消息',
             contextUsage.conversationTokens),
-        const SizedBox(height: HSpace.sm),
-        Text(
-          '均为估算值，非真实 tokenizer',
-          style: TextStyle(fontSize: 10.5, height: 1.4, color: h.textFaint),
-        ),
+        // ★ 2026-10-22：删掉「均为估算值，非真实 tokenizer」这句小字
+        //   （用户：不是写给用户看的）。
       ],
     );
   }
@@ -380,14 +359,9 @@ class UsageSidebar extends StatelessWidget {
         // 恒有 任务总耗时 >= 模型用时。
         _kv(h, '模型用时（不含工具）', _formatDuration(usage.wallMs)),
         _kv(h, '任务总耗时', _formatDuration(usage.taskWallMs)),
-        Padding(
-          padding: const EdgeInsets.only(bottom: HSpace.sm),
-          child: Text(
-            '任务总耗时 = 从开始执行到结束的真实墙钟（含工具执行、审批等待、压缩）；'
-            '模型用时只算模型往返，所以它总是更短。',
-            style: TextStyle(fontSize: 10.5, height: 1.45, color: h.textFaint),
-          ),
-        ),
+        // ★ 2026-10-22：删掉「任务总耗时 = …真实墙钟…」这句公式说明
+        //   （用户：不是写给用户看的）。口径已经写在**标签本身**
+        //   （"模型用时（不含工具）"），不需要再配一段小字。
         _kv(
           h,
           '输出速度',
@@ -550,11 +524,12 @@ class UsageIndicator extends StatelessWidget {
                 ),
                 const SizedBox(width: 2),
               ],
-              Icon(Icons.cached_rounded, size: 13, color: rateColor),
+              Icon(CupertinoIcons.arrow_2_circlepath,
+                  size: 14, color: rateColor),
               const SizedBox(width: 3),
               Text(rateLabel, style: _num(h, rateColor)),
               const SizedBox(width: HSpace.sm),
-              Icon(Icons.donut_large_rounded, size: 12, color: ctxColor),
+              Icon(CupertinoIcons.chart_pie, size: 13, color: ctxColor),
               const SizedBox(width: 3),
               Text(ctxLabel, style: _num(h, ctxColor)),
             ],

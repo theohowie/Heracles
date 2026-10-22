@@ -1,12 +1,14 @@
 import 'dart:convert';
 import 'dart:io';
 
+import 'package:flutter/cupertino.dart';
 import 'package:flutter/material.dart';
 
 import '../models/settings.dart';
 import '../services/agent_bridge.dart';
 import '../services/settings_controller.dart';
 import '../theme/app_theme.dart';
+import '../theme/cupertino_kit.dart';
 
 /// 设置主页 —— 分类列表（对应参考图的侧栏结构）。
 class SettingsScreen extends StatelessWidget {
@@ -19,10 +21,7 @@ class SettingsScreen extends StatelessWidget {
     return Scaffold(
       appBar: AppBar(
         title: Text('设置'),
-        leading: IconButton(
-          icon: Icon(Icons.arrow_back_rounded, size: 20),
-          onPressed: () => Navigator.of(context).pop(),
-        ),
+        leading: _iosBackLeading(context),
       ),
       body: ValueListenableBuilder<AppSettings>(
         valueListenable: controller,
@@ -30,13 +29,13 @@ class SettingsScreen extends StatelessWidget {
           padding: const EdgeInsets.symmetric(vertical: HSpace.sm),
           children: [
             _SettingsTile(
-              icon: Icons.tune_rounded,
+              icon: CupertinoIcons.slider_horizontal_3,
               title: '通用设置',
               subtitle: '权限 · 语言 · 外观 · 字号',
               onTap: () => _push(context, GeneralSettingsPage(controller: controller)),
             ),
             _SettingsTile(
-              icon: Icons.storage_rounded,
+              icon: CupertinoIcons.cube_box,
               title: '模型',
               // ★★ 与聊天页保持一致（2026-10-15 修 BUG-5）★★
               //
@@ -65,7 +64,7 @@ class SettingsScreen extends StatelessWidget {
               onTap: () => _push(context, ModelSettingsPage(controller: controller)),
             ),
             _SettingsTile(
-              icon: Icons.palette_outlined,
+              icon: CupertinoIcons.paintbrush,
               title: 'Theme / 外观',
               subtitle: '强调色 · 玻璃效果',
               onTap: () => _push(context, AppearanceSettingsPage(controller: controller)),
@@ -79,7 +78,7 @@ class SettingsScreen extends StatelessWidget {
             Divider(),
             const SizedBox(height: HSpace.lg),
             _SettingsTile(
-              icon: Icons.info_outline_rounded,
+              icon: AppIcons.info,
               title: '关于',
               subtitle: 'Heracles · 手机上的开发智能体',
               onTap: () => _push(context, const AboutPage()),
@@ -91,7 +90,7 @@ class SettingsScreen extends StatelessWidget {
   }
 
   void _push(BuildContext context, Widget page) {
-    Navigator.of(context).push(MaterialPageRoute(builder: (_) => page));
+    Navigator.of(context).push(CupertinoPageRoute(builder: (_) => page));
   }
 }
 
@@ -139,7 +138,7 @@ class _DevicePermissionEntryState extends State<_DevicePermissionEntry> {
   @override
   Widget build(BuildContext context) {
     return _SettingsTile(
-      icon: Icons.phonelink_setup_rounded,
+      icon: CupertinoIcons.phone,
       title: '设备权限',
       // 状态徽章在副标题位 —— 用户不进二级页也能看到授权状态
       subtitle: _granted == null
@@ -212,11 +211,10 @@ class _DevicePermissionPageState extends State<DevicePermissionPage> {
   Widget build(BuildContext context) {
     final h = Hue.of(context);
     return Scaffold(
-      appBar: AppBar(title: const Text('设备权限')),
+      appBar: AppBar(title: const Text('设备权限'), leading: _iosBackLeading(context)),
       body: _loading
           ? Center(
-              child: CircularProgressIndicator(
-                  strokeWidth: 2, color: h.accent))
+              child: CupertinoActivityIndicator(color: h.accent))
           : ListView(
               padding: const EdgeInsets.all(HSpace.lg),
               children: [
@@ -237,9 +235,9 @@ class _DevicePermissionPageState extends State<DevicePermissionPage> {
                     children: [
                       Icon(
                         _granted == true
-                            ? Icons.check_circle_rounded
-                            : Icons.warning_amber_rounded,
-                        size: 28,
+                            ? CupertinoIcons.checkmark_circle_fill
+                            : AppIcons.warning,
+                        size: 29,
                         color: _granted == true
                             ? HColors.successOn(h.dark)
                             : HColors.warnOn(h.dark),
@@ -306,31 +304,26 @@ class _DevicePermissionPageState extends State<DevicePermissionPage> {
                   // Shizuku 弹授权框 → 同意后自动执行 pm grant。
                   //
                   // 结果在按钮下方显示（成功/失败 + 服务器返回的可读信息）。
-                  FilledButton(
-                    onPressed: _shizukuBusy
-                        ? null
-                        : () async {
-                            setState(() => _shizukuBusy = true);
-                            final r = await AgentBridge().shizukuGrant();
-                            if (!mounted) return;
-                            setState(() => _shizukuMsg =
-                                '${r.success ? "✅" : "❌"} ${r.message}');
-                            await _refresh();
-                            if (!mounted) return;
-                            setState(() => _shizukuBusy = false);
-                          },
-                    style: FilledButton.styleFrom(
-                      backgroundColor: h.accent,
-                      minimumSize: const Size(double.infinity, 44),
+                  SizedBox(
+                    width: double.infinity,
+                    child: IosButton(
+                      label: '通过 Shizuku 一键授权',
+                      color: h.accent,
+                      // ★ 忙态转圈（2026-10-22 补）：iOS 按钮忙态 = 文字换转圈
+                      busy: _shizukuBusy,
+                      onPressed: _shizukuBusy
+                          ? null
+                          : () async {
+                              setState(() => _shizukuBusy = true);
+                              final r = await AgentBridge().shizukuGrant();
+                              if (!mounted) return;
+                              setState(() => _shizukuMsg =
+                                  '${r.success ? "✅" : "❌"} ${r.message}');
+                              await _refresh();
+                              if (!mounted) return;
+                              setState(() => _shizukuBusy = false);
+                            },
                     ),
-                    child: _shizukuBusy
-                        ? SizedBox(
-                            width: 16,
-                            height: 16,
-                            child: CircularProgressIndicator(
-                                strokeWidth: 2, color: Colors.white))
-                        : const Text('通过 Shizuku 一键授权',
-                            style: TextStyle(fontSize: 13)),
                   ),
                   if (_shizukuMsg != null) ...[
                     const SizedBox(height: HSpace.xs),
@@ -348,15 +341,11 @@ class _DevicePermissionPageState extends State<DevicePermissionPage> {
                   const SizedBox(height: HSpace.md),
                   SizedBox(
                     width: double.infinity,
-                    child: OutlinedButton(
+                    child: IosButton(
+                      label: '我已执行授权，刷新状态',
+                      filled: false,
+                      color: h.accent,
                       onPressed: _refresh,
-                      style: OutlinedButton.styleFrom(
-                        foregroundColor: h.accent,
-                        side: BorderSide(color: h.accent),
-                        minimumSize: const Size(0, 44),
-                      ),
-                      child: const Text('我已执行授权，刷新状态',
-                          style: TextStyle(fontSize: 13)),
                     ),
                   ),
                   const SizedBox(height: HSpace.md),
@@ -376,7 +365,12 @@ class _DevicePermissionPageState extends State<DevicePermissionPage> {
                   //   「已授权应用」里就会收录本 App。
                   SizedBox(
                     width: double.infinity,
-                    child: OutlinedButton(
+                    child: IosButton(
+                      label: '重新向 Shizuku 申请授权（让它收录本 App）',
+                      filled: false,
+                      color: h.accent,
+                      dense: true,
+                      busy: _shizukuBusy,
                       onPressed: _shizukuBusy
                           ? null
                           : () async {
@@ -390,13 +384,6 @@ class _DevicePermissionPageState extends State<DevicePermissionPage> {
                               if (!mounted) return;
                               setState(() => _shizukuBusy = false);
                             },
-                      style: OutlinedButton.styleFrom(
-                        foregroundColor: h.accent,
-                        side: BorderSide(color: h.accent),
-                        minimumSize: const Size(0, 44),
-                      ),
-                      child: const Text('重新向 Shizuku 申请授权（让它收录本 App）',
-                          style: TextStyle(fontSize: 12.5)),
                     ),
                   ),
                   if (_shizukuMsg != null) ...[
@@ -509,7 +496,10 @@ class _DevicePermissionPageState extends State<DevicePermissionPage> {
                 const SizedBox(height: HSpace.sm),
                 SizedBox(
                   width: double.infinity,
-                  child: FilledButton(
+                  child: IosButton(
+                    label: '跑一遍编码层自检',
+                    color: h.accent,
+                    busy: _selfCheckBusy,
                     onPressed: _selfCheckBusy
                         ? null
                         : () async {
@@ -524,18 +514,6 @@ class _DevicePermissionPageState extends State<DevicePermissionPage> {
                               _selfCheckBusy = false;
                             });
                           },
-                    style: FilledButton.styleFrom(
-                      backgroundColor: h.accent,
-                      minimumSize: const Size(double.infinity, 44),
-                    ),
-                    child: _selfCheckBusy
-                        ? SizedBox(
-                            width: 16,
-                            height: 16,
-                            child: CircularProgressIndicator(
-                                strokeWidth: 2, color: Colors.white))
-                        : const Text('跑一遍编码层自检',
-                            style: TextStyle(fontSize: 13)),
                   ),
                 ),
                 if (_selfCheckBusy)
@@ -579,8 +557,8 @@ class _DevicePermissionPageState extends State<DevicePermissionPage> {
       child: Row(
         children: [
           Icon(
-            ok ? Icons.check_circle_outline : Icons.remove_circle_outline,
-            size: 14,
+            ok ? CupertinoIcons.checkmark_circle : CupertinoIcons.minus_circle,
+            size: 15,
             color: ok ? HColors.successOn(h.dark) : h.textFaint,
           ),
           const SizedBox(width: HSpace.xs),
@@ -654,53 +632,49 @@ class _SettingsTile extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final h = Hue.of(context);
-    return InkWell(
+    return CupertinoListTile(
       onTap: onTap,
-      child: Padding(
-        padding: const EdgeInsets.symmetric(
-          horizontal: HSpace.lg,
-          vertical: HSpace.md + 2,
-        ),
-        child: Row(
-          children: [
-            Icon(icon, size: 19, color: h.textDim),
-            const SizedBox(width: HSpace.md + 2),
-            Expanded(
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Text(
-                    title,
-                    style: TextStyle(
-                      fontSize: 14.5,
-                      fontWeight: FontWeight.w500,
-                      color: h.text,
-                    ),
-                  ),
-                  const SizedBox(height: 2),
-                  Text(
-                    subtitle,
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
-                    style: TextStyle(
-                      fontSize: 12,
-                      color: h.textFaint,
-                    ),
-                  ),
-                ],
-              ),
-            ),
-            Icon(Icons.chevron_right_rounded,
-                size: 18, color: h.textFaint),
-          ],
+      padding: const EdgeInsets.symmetric(
+        horizontal: HSpace.lg,
+        vertical: HSpace.md + 2,
+      ),
+      leadingSize: 20,
+      leadingToTitle: HSpace.md + 2,
+      // iOS 的按下态：整行浅底（跟随应用配色，不用 Cupertino 的系统灰）
+      backgroundColor: CupertinoColors.transparent,
+      backgroundColorActivated: h.surfaceAlt,
+      leading: Icon(icon, size: 20, color: h.textDim),
+      title: Text(
+        title,
+        style: TextStyle(
+          fontSize: 14.5,
+          fontWeight: FontWeight.w500,
+          color: h.text,
         ),
       ),
+      subtitle: Text(
+        subtitle,
+        maxLines: 1,
+        overflow: TextOverflow.ellipsis,
+        style: TextStyle(
+          fontSize: 12,
+          color: h.textFaint,
+        ),
+      ),
+      trailing: Icon(AppIcons.chevronRight,
+          size: 19, color: h.textFaint),
     );
   }
 }
 
-// ============================================================ 通用设置
+/// iOS 返回键（AppBar 的 leading）—— 用 Cupertino 的 ‹ 而不是 Material 的 ←。
+/// 布局槽位不变，只换视觉语言。
+Widget _iosBackLeading(BuildContext context) => IconButton(
+      icon: const Icon(AppIcons.back, size: 21),
+      onPressed: () => Navigator.of(context).pop(),
+    );
 
+// ============================================================ 通用设置
 class GeneralSettingsPage extends StatelessWidget {
   const GeneralSettingsPage({super.key, required this.controller});
 
@@ -709,7 +683,7 @@ class GeneralSettingsPage extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      appBar: AppBar(title: Text('通用设置')),
+      appBar: AppBar(title: Text('通用设置'), leading: _iosBackLeading(context)),
       body: ValueListenableBuilder<AppSettings>(
         valueListenable: controller,
         builder: (context, s, _) => ListView(
@@ -754,9 +728,9 @@ class GeneralSettingsPage extends StatelessWidget {
               options: AppAppearance.values,
               labelOf: (v) => v.label,
               iconOf: (v) => switch (v) {
-                AppAppearance.light => Icons.light_mode_rounded,
-                AppAppearance.dark => Icons.dark_mode_rounded,
-                AppAppearance.system => Icons.brightness_auto_rounded,
+                AppAppearance.light => CupertinoIcons.sun_max_fill,
+                AppAppearance.dark => CupertinoIcons.moon_fill,
+                AppAppearance.system => CupertinoIcons.brightness,
               },
               onChanged: controller.setAppearance,
             ),
@@ -814,7 +788,7 @@ class ModelSettingsPage extends StatelessWidget {
   Widget build(BuildContext context) {
     final h = Hue.of(context);
     return Scaffold(
-      appBar: AppBar(title: Text('模型')),
+      appBar: AppBar(title: Text('模型'), leading: _iosBackLeading(context)),
       body: ValueListenableBuilder<AppSettings>(
         valueListenable: controller,
         builder: (context, s, _) => ListView(
@@ -843,14 +817,14 @@ class ModelSettingsPage extends StatelessWidget {
 
   Future<void> _edit(BuildContext context, ModelProviderConfig p) async {
     final result = await Navigator.of(context).push<ModelProviderConfig>(
-      MaterialPageRoute(builder: (_) => ProviderEditPage(provider: p)),
+      CupertinoPageRoute(builder: (_) => ProviderEditPage(provider: p)),
     );
     if (result != null) await controller.updateProvider(result);
   }
 
   Future<void> _add(BuildContext context) async {
     final result = await Navigator.of(context).push<ModelProviderConfig>(
-      MaterialPageRoute(
+      CupertinoPageRoute(
         builder: (_) => const ProviderEditPage(
           provider: ModelProviderConfig(
             id: '',
@@ -894,76 +868,50 @@ class _ProviderCard extends StatelessWidget {
   Future<void> _showActions(BuildContext context) async {
     if (onDelete == null) return; // 官方账号不可删
     final h = Hue.of(context);
-    final confirmed = await showModalBottomSheet<bool>(
+    final confirmed = await showCupertinoModalPopup<bool>(
       context: context,
-      backgroundColor: h.surfaceAlt,
-      shape: const RoundedRectangleBorder(
-        borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
-      ),
-      builder: (sheetCtx) => SafeArea(
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            const SizedBox(height: HSpace.sm),
-            Padding(
-              padding: const EdgeInsets.symmetric(horizontal: HSpace.lg),
-              child: Text(
-                provider.name.isEmpty ? '(未命名)' : provider.name,
-                style: TextStyle(fontSize: 14, color: h.textDim),
-              ),
-            ),
-            const SizedBox(height: HSpace.xs),
-            ListTile(
-              leading: Icon(Icons.edit_rounded, size: 20, color: h.textDim),
-              title: Text('编辑', style: TextStyle(fontSize: 15, color: h.text)),
-              onTap: () => Navigator.of(sheetCtx).pop(false),
-            ),
-            ListTile(
-              leading: Icon(Icons.delete_outline_rounded,
-                  size: 20, color: HColors.errorOn(h.dark)),
-              title: Text('删除',
-                  style: TextStyle(
-                      fontSize: 15, color: HColors.errorOn(h.dark))),
-              subtitle: Text(
-                '同时清除已保存的 API Key',
-                style: TextStyle(fontSize: 11.5, color: h.textFaint),
-              ),
-              onTap: () => Navigator.of(sheetCtx).pop(true),
-            ),
-            const SizedBox(height: HSpace.sm),
-          ],
+      builder: (sheetCtx) => CupertinoActionSheet(
+        title: Text(
+          provider.name.isEmpty ? '(未命名)' : provider.name,
+          style: TextStyle(fontSize: 14, color: h.textDim),
         ),
+        actions: [
+          CupertinoActionSheetAction(
+            onPressed: () => Navigator.of(sheetCtx).pop(false),
+            child: const Text('编辑'),
+          ),
+          CupertinoActionSheetAction(
+            isDestructiveAction: true,
+            onPressed: () => Navigator.of(sheetCtx).pop(true),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                const Text('删除'),
+                Text(
+                  '同时清除已保存的 API Key',
+                  style: TextStyle(fontSize: 11.5, color: h.textFaint),
+                ),
+              ],
+            ),
+          ),
+        ],
       ),
     );
     if (!context.mounted) return;
     if (confirmed == true) {
       // ★ 二次确认 —— 删除不可逆（连带清掉 Keystore 里的 Key）
-      final ok = await showDialog<bool>(
-        context: context,
-        builder: (ctx) => AlertDialog(
-          backgroundColor: h.surfaceAlt,
-          title: const Text('删除这个提供商？'),
-          content: Text(
-            '「${provider.name.isEmpty ? "(未命名)" : provider.name}」的配置'
+      await showIosDialog(
+        context,
+        title: '删除这个提供商？',
+        message: '「${provider.name.isEmpty ? "(未命名)" : provider.name}」的配置'
             '与已保存的 API Key 都会被清除，无法恢复。',
-            style: const TextStyle(fontSize: 13.5),
-          ),
-          actions: [
-            TextButton(
-              onPressed: () => Navigator.of(ctx).pop(false),
-              child: const Text('取消'),
-            ),
-            TextButton(
-              onPressed: () => Navigator.of(ctx).pop(true),
-              style: TextButton.styleFrom(
-                  foregroundColor: HColors.errorOn(h.dark)),
-              child: const Text('删除'),
-            ),
-          ],
-        ),
+        actions: [
+          const IosAction('取消'),
+          IosAction('删除',
+              isDestructiveAction: true, onTap: onDelete),
+        ],
       );
-      if (ok == true) onDelete!();
-    } else if (confirmed == false && context.mounted) {
+    } else if (confirmed == false) {
       onEdit();
     }
   }
@@ -1078,22 +1026,18 @@ class _ProviderCard extends StatelessWidget {
               ),
             ),
             if (!provider.isDefault && configured)
-              TextButton(
+              CupertinoButton(
                 onPressed: onSetDefault,
-                style: TextButton.styleFrom(
-                  minimumSize: const Size(0, 36),
-                  padding: const EdgeInsets.symmetric(horizontal: HSpace.sm),
-                  foregroundColor: h.textDim,
-                ),
-                child: Text('设为默认', style: TextStyle(fontSize: 12)),
-              ),
-            TextButton(
-              onPressed: onEdit,
-              style: TextButton.styleFrom(
                 minimumSize: const Size(0, 36),
                 padding: const EdgeInsets.symmetric(horizontal: HSpace.sm),
-                foregroundColor: h.text,
+                foregroundColor: h.textDim,
+                child: Text('设为默认', style: TextStyle(fontSize: 12)),
               ),
+            CupertinoButton(
+              onPressed: onEdit,
+              minimumSize: const Size(0, 36),
+              padding: const EdgeInsets.symmetric(horizontal: HSpace.sm),
+              foregroundColor: h.text,
               child: Text('编辑', style: TextStyle(fontSize: 12.5)),
             ),
           ],
@@ -1112,31 +1056,27 @@ class _AddProviderButton extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final h = Hue.of(context);
-    return Material(
-      color: Colors.transparent,
-      child: InkWell(
-        onTap: onTap,
-        borderRadius: BorderRadius.circular(HRadius.lg),
-        child: Container(
-          height: 52,
-          decoration: BoxDecoration(
-            borderRadius: BorderRadius.circular(HRadius.lg),
-            border: Border.all(
-              color: h.border,
-              style: BorderStyle.solid,
+    return IosTap(
+      onTap: onTap,
+      child: Container(
+        height: 52,
+        decoration: BoxDecoration(
+          borderRadius: BorderRadius.circular(HRadius.lg),
+          border: Border.all(
+            color: h.border,
+            style: BorderStyle.solid,
+          ),
+        ),
+        child: Row(
+          mainAxisAlignment: MainAxisAlignment.center,
+          children: [
+            Icon(AppIcons.add, size: 19, color: h.textDim),
+            SizedBox(width: HSpace.sm),
+            Text(
+              '添加模型提供商',
+              style: TextStyle(fontSize: 13.5, color: h.textDim),
             ),
-          ),
-          child: Row(
-            mainAxisAlignment: MainAxisAlignment.center,
-            children: [
-              Icon(Icons.add_rounded, size: 18, color: h.textDim),
-              SizedBox(width: HSpace.sm),
-              Text(
-                '添加模型提供商',
-                style: TextStyle(fontSize: 13.5, color: h.textDim),
-              ),
-            ],
-          ),
+          ],
         ),
       ),
     );
@@ -1251,15 +1191,10 @@ class _ProviderEditPageState extends State<ProviderEditPage> {
 
       if (!mounted) return;
       final withCaps = caps.values.where((c) => c.contextWindow != null).length;
-      ScaffoldMessenger.maybeOf(context)?.showSnackBar(
-        SnackBar(
-          content: Text(
-            '找到 ${models.length} 个模型'
-            '${withCaps > 0 ? "（$withCaps 个含上下文长度）" : "（服务端未提供上下文长度）"}',
-          ),
-          duration: const Duration(seconds: 2),
-          behavior: SnackBarBehavior.floating,
-        ),
+      showIosToast(
+        context,
+        '找到 ${models.length} 个模型'
+        '${withCaps > 0 ? "（$withCaps 个含上下文长度）" : "（服务端未提供上下文长度）"}',
       );
     } on AgentBridgeException catch (e) {
       if (!mounted) return;
@@ -1343,11 +1278,14 @@ class _ProviderEditPageState extends State<ProviderEditPage> {
     return Scaffold(
       appBar: AppBar(
         title: Text(widget.isNew ? '添加提供商' : '编辑提供商'),
+        leading: _iosBackLeading(context),
         actions: [
-          TextButton(
+          CupertinoButton(
             onPressed: _save,
-            style: TextButton.styleFrom(foregroundColor: h.accent),
-            child: Text('保存'),
+            minimumSize: const Size(0, 44),
+            padding: const EdgeInsets.symmetric(horizontal: HSpace.sm),
+            foregroundColor: h.accent,
+            child: const Text('保存'),
           ),
           const SizedBox(width: HSpace.sm),
         ],
@@ -1382,21 +1320,39 @@ class _ProviderEditPageState extends State<ProviderEditPage> {
                     border: Border.all(color: h.border),
                     borderRadius: BorderRadius.circular(HRadius.sm),
                   ),
-                  child: DropdownButtonHideUnderline(
-                    child: DropdownButton<ProviderProtocol>(
-                      value: _protocol,
-                      isExpanded: true,
-                      items: [
-                        for (final p in ProviderProtocol.values)
-                          DropdownMenuItem(
-                            value: p,
-                            child: Text(p.label,
-                                style: TextStyle(
-                                    fontSize: 14, color: h.text)),
-                          ),
+                  child: CupertinoButton(
+                    padding: EdgeInsets.zero,
+                    minimumSize: const Size(
+                        0, kMinInteractiveDimensionCupertino),
+                    alignment: Alignment.centerLeft,
+                    onPressed: () async {
+                      final p = await showCupertinoModalPopup<ProviderProtocol>(
+                        context: context,
+                        builder: (sheetCtx) => CupertinoActionSheet(
+                          title: const Text('API 协议'),
+                          actions: [
+                            for (final o in ProviderProtocol.values)
+                              CupertinoActionSheetAction(
+                                isDefaultAction: o == _protocol,
+                                onPressed: () =>
+                                    Navigator.of(sheetCtx).pop(o),
+                                child: Text(o.label),
+                              ),
+                          ],
+                        ),
+                      );
+                      if (p != null) setState(() => _protocol = p);
+                    },
+                    child: Row(
+                      children: [
+                        Expanded(
+                          child: Text(_protocol.label,
+                              style: TextStyle(
+                                  fontSize: 14, color: h.text)),
+                        ),
+                        Icon(AppIcons.chevronDown,
+                            size: 17, color: h.textFaint),
                       ],
-                      onChanged: (p) =>
-                          setState(() => _protocol = p ?? _protocol),
                     ),
                   ),
                 ),
@@ -1411,13 +1367,15 @@ class _ProviderEditPageState extends State<ProviderEditPage> {
             controller: _apiKey,
             hint: 'sk-...',
             obscure: _obscure,
-            trailing: IconButton(
-              icon: Icon(
-                _obscure ? Icons.visibility_off_rounded : Icons.visibility_rounded,
-                size: 18,
+            trailing: CupertinoButton(
+              padding: const EdgeInsets.symmetric(horizontal: HSpace.sm),
+              minimumSize: const Size(0, 32),
+              onPressed: () => setState(() => _obscure = !_obscure),
+              child: Icon(
+                _obscure ? CupertinoIcons.eye_slash : AppIcons.eye,
+                size: 19,
                 color: h.textFaint,
               ),
-              onPressed: () => setState(() => _obscure = !_obscure),
             ),
           ),
           // ★ Key 指纹（2026-10-14）—— 判断"填进去的到底是什么"
@@ -1494,16 +1452,13 @@ class _ProviderEditPageState extends State<ProviderEditPage> {
             children: [
               Text('模型目录', style: TextStyle(fontSize: 13, color: h.textDim)),
               const Spacer(),
-              InkWell(
+              IosTap(
                 onTap: _loadingModels ? null : _fetchModels,
                 child: Padding(
                   padding: const EdgeInsets.symmetric(horizontal: HSpace.xs),
                   child: _loadingModels
-                      ? SizedBox(
-                          width: 12,
-                          height: 12,
-                          child: CircularProgressIndicator(
-                              strokeWidth: 1.6, color: h.accent))
+                      ? CupertinoActivityIndicator(
+                          radius: 6, color: h.accent)
                       : Text('获取可用模型',
                           style: TextStyle(fontSize: 12, color: h.accent)),
                 ),
@@ -1546,9 +1501,9 @@ class _ProviderEditPageState extends State<ProviderEditPage> {
                   //   选中的会作为实际发送用的 model（对照参考图：
                   //   「选择基元律动来当模型用是可以点进去选择模型的」）
                   for (final id in _modelCatalog)
-                    ListTile(
-                      dense: true,
-                      visualDensity: VisualDensity.compact,
+                    CupertinoListTile(
+                      padding: const EdgeInsets.symmetric(
+                          horizontal: 14, vertical: 6),
                       title: Text(id,
                           style: TextStyle(
                               fontSize: 13,
@@ -1561,13 +1516,15 @@ class _ProviderEditPageState extends State<ProviderEditPage> {
                                   : FontWeight.w400)),
                       // 选中态对勾
                       trailing: id == _model.text
-                          ? Icon(Icons.check_rounded, size: 16, color: h.accent)
-                          : InkWell(
-                              onTap: () => setState(() =>
+                          ? Icon(AppIcons.check, size: 17, color: h.accent)
+                          : CupertinoButton(
+                              padding: const EdgeInsets.all(6),
+                              minimumSize: const Size(0, 28),
+                              onPressed: () => setState(() =>
                                   _modelCatalog =
                                       [..._modelCatalog]..remove(id)),
-                              child: Icon(Icons.delete_outline_rounded,
-                                  size: 17, color: h.textFaint),
+                              child: Icon(AppIcons.trash,
+                                  size: 18, color: h.textFaint),
                             ),
                       onTap: () => setState(() => _model.text = id),
                     ),
@@ -1579,23 +1536,25 @@ class _ProviderEditPageState extends State<ProviderEditPage> {
           Row(
             children: [
               Expanded(
-                child: TextField(
+                child: CupertinoTextField(
                   controller: _model,
                   style: TextStyle(fontSize: 14, color: h.text),
-                  decoration: InputDecoration(
-                    isDense: true,
-                    hintText: '手填模型 ID（目录外也可直接发送）',
-                    hintStyle: TextStyle(fontSize: 12, color: h.textFaint),
-                    border: OutlineInputBorder(
-                      borderRadius: BorderRadius.circular(HRadius.sm),
-                    ),
-                    contentPadding: const EdgeInsets.symmetric(
-                        horizontal: HSpace.sm, vertical: HSpace.sm),
+                  placeholder: '手填模型 ID（目录外也可直接发送）',
+                  placeholderStyle: TextStyle(fontSize: 12, color: h.textFaint),
+                  padding: const EdgeInsets.symmetric(
+                      horizontal: HSpace.sm, vertical: HSpace.sm),
+                  decoration: BoxDecoration(
+                    borderRadius: BorderRadius.circular(HRadius.sm),
+                    border: Border.all(color: h.border),
                   ),
                 ),
               ),
               const SizedBox(width: HSpace.sm),
-              OutlinedButton(
+              IosButton(
+                label: '+ 添加',
+                filled: false,
+                color: h.accent,
+                dense: true,
                 onPressed: () {
                   final id = _model.text.trim();
                   if (id.isEmpty) return;
@@ -1607,12 +1566,6 @@ class _ProviderEditPageState extends State<ProviderEditPage> {
                     _model.text = id;
                   });
                 },
-                style: OutlinedButton.styleFrom(
-                  foregroundColor: h.accent,
-                  side: BorderSide(color: h.accent),
-                  minimumSize: const Size(0, 44),
-                ),
-                child: const Text('+ 添加', style: TextStyle(fontSize: 13)),
               ),
             ],
           ),
@@ -1759,19 +1712,14 @@ class _TestConnectionButtonState extends State<_TestConnectionButton> {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        OutlinedButton.icon(
-          onPressed: _testing ? null : _test,
-          icon: _testing
-              ? SizedBox(
-                  width: 14,
-                  height: 14,
-                  child: CircularProgressIndicator(strokeWidth: 2, color: h.accent))
-              : const Icon(Icons.network_check_rounded, size: 18),
-          label: Text(_testing ? '测试中…' : '测试连接'),
-          style: OutlinedButton.styleFrom(
-            foregroundColor: h.accent,
-            side: BorderSide(color: h.accent),
-            minimumSize: const Size(140, 44), // 热区达标
+        SizedBox(
+          width: 140, // 热区达标
+          child: IosButton(
+            label: _testing ? '测试中…' : '测试连接',
+            filled: false,
+            color: h.accent,
+            busy: _testing,
+            onPressed: _testing ? null : _test,
           ),
         ),
         if (_result != null) ...[
@@ -1820,33 +1768,23 @@ class _Field extends StatelessWidget {
             style: TextStyle(fontSize: 12.5, color: h.textDim),
           ),
           const SizedBox(height: HSpace.sm),
-          TextField(
+          CupertinoTextField(
             controller: controller,
             keyboardType: keyboard,
             obscureText: obscure,
             style: TextStyle(fontSize: 14, color: h.text),
-            decoration: InputDecoration(
-              hintText: hint,
-              hintStyle: TextStyle(color: h.textFaint, fontSize: 14),
-              suffixIcon: trailing,
-              filled: true,
-              fillColor: h.surface,
-              contentPadding: const EdgeInsets.symmetric(
-                horizontal: HSpace.md,
-                vertical: HSpace.md,
-              ),
-              border: OutlineInputBorder(
-                borderRadius: BorderRadius.circular(HRadius.md),
-                borderSide: BorderSide(color: h.border),
-              ),
-              enabledBorder: OutlineInputBorder(
-                borderRadius: BorderRadius.circular(HRadius.md),
-                borderSide: BorderSide(color: h.border),
-              ),
-              focusedBorder: OutlineInputBorder(
-                borderRadius: BorderRadius.circular(HRadius.md),
-                borderSide: BorderSide(color: h.accent),
-              ),
+            placeholder: hint,
+            placeholderStyle: TextStyle(color: h.textFaint, fontSize: 14),
+            suffix: trailing,
+            cursorColor: h.accent,
+            padding: const EdgeInsets.symmetric(
+              horizontal: HSpace.md,
+              vertical: HSpace.md,
+            ),
+            decoration: BoxDecoration(
+              color: h.surface,
+              borderRadius: BorderRadius.circular(HRadius.md),
+              border: Border.all(color: h.border),
             ),
           ),
         ],
@@ -1866,7 +1804,8 @@ class AppearanceSettingsPage extends StatelessWidget {
   Widget build(BuildContext context) {
     final h = Hue.of(context);
     return Scaffold(
-      appBar: AppBar(title: Text('Theme / 外观')),
+      appBar:
+          AppBar(title: Text('Theme / 外观'), leading: _iosBackLeading(context)),
       body: ValueListenableBuilder<AppSettings>(
         valueListenable: controller,
         builder: (context, s, _) => ListView(
@@ -1893,8 +1832,8 @@ class AppearanceSettingsPage extends StatelessWidget {
                             : null,
                       ),
                       child: selected
-                          ? Icon(Icons.check_rounded,
-                              size: 18, color: Colors.white)
+                          ? const Icon(AppIcons.check,
+                              size: 19, color: CupertinoColors.white)
                           : null,
                     ),
                   );
@@ -1924,7 +1863,7 @@ class AboutPage extends StatelessWidget {
   Widget build(BuildContext context) {
     final h = Hue.of(context);
     return Scaffold(
-      appBar: AppBar(title: Text('关于')),
+      appBar: AppBar(title: Text('关于'), leading: _iosBackLeading(context)),
       body: Padding(
         padding: const EdgeInsets.all(HSpace.xl),
         child: Column(
@@ -2027,39 +1966,10 @@ class _PickerRow<T> extends StatelessWidget {
             ),
           ),
           const SizedBox(width: HSpace.md),
-          PopupMenuButton<T>(
-            initialValue: value,
-            onSelected: onChanged,
-            color: h.surfaceAlt,
-            shape: RoundedRectangleBorder(
-              borderRadius: BorderRadius.circular(HRadius.md),
-              side: BorderSide(color: h.border),
-            ),
-            itemBuilder: (_) => options.map((o) {
-              final desc = descOf?.call(o);
-              return PopupMenuItem<T>(
-                value: o,
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    Text(labelOf(o),
-                        style: TextStyle(fontSize: 13.5, color: h.text)),
-                    if (desc != null && desc.isNotEmpty) ...[
-                      const SizedBox(height: 2),
-                      SizedBox(
-                        width: 190,
-                        child: Text(
-                          desc,
-                          style: TextStyle(
-                              fontSize: 11, color: h.textFaint, height: 1.3),
-                        ),
-                      ),
-                    ],
-                  ],
-                ),
-              );
-            }).toList(),
+          CupertinoButton(
+            padding: EdgeInsets.zero,
+            minimumSize: const Size(0, 34),
+            onPressed: () => _pick(context),
             child: Container(
               padding: const EdgeInsets.symmetric(
                   horizontal: HSpace.md, vertical: HSpace.sm),
@@ -2074,14 +1984,51 @@ class _PickerRow<T> extends StatelessWidget {
                   Text(labelOf(value),
                       style: TextStyle(fontSize: 13, color: h.text)),
                   const SizedBox(width: HSpace.xs),
-                  Icon(Icons.expand_more_rounded,
-                      size: 16, color: h.textFaint),
+                  Icon(AppIcons.chevronDown,
+                      size: 17, color: h.textFaint),
                 ],
               ),
             ),
           ),
         ],
       ),
+    );
+  }
+
+  /// iOS 动作面板（替换 Material 的 `PopupMenuButton`）—— 选中逻辑逐条不变。
+  Future<void> _pick(BuildContext context) async {
+    final h = Hue.of(context);
+    final picked = await showCupertinoModalPopup<T>(
+      context: context,
+      builder: (sheetCtx) => CupertinoActionSheet(
+        title: Text(label),
+        actions: [
+          for (final o in options)
+            CupertinoActionSheetAction(
+              isDefaultAction: o == value,
+              onPressed: () => Navigator.of(sheetCtx).pop(o),
+              child: _optionOf(o, h),
+            ),
+        ],
+      ),
+    );
+    if (picked != null) onChanged(picked);
+  }
+
+  /// 选项内容：名称（+ 可选说明），对应旧的 `PopupMenuItem`。
+  Widget _optionOf(T o, Hue h) {
+    final desc = descOf?.call(o);
+    if (desc == null || desc.isEmpty) return Text(labelOf(o));
+    return Column(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        Text(labelOf(o)),
+        const SizedBox(height: 2),
+        Text(
+          desc,
+          style: TextStyle(fontSize: 11, color: h.textFaint, height: 1.3),
+        ),
+      ],
     );
   }
 }
@@ -2131,7 +2078,7 @@ class _SegmentedRow<T> extends StatelessWidget {
                     mainAxisAlignment: MainAxisAlignment.center,
                     children: [
                       Icon(iconOf(o),
-                          size: 20,
+                          size: 21,
                           color: selected ? h.accent : h.textDim),
                       const SizedBox(height: HSpace.xs + 2),
                       Text(
@@ -2216,21 +2163,13 @@ class _SliderRow extends StatelessWidget {
               ),
             ],
           ),
-          SliderTheme(
-            data: SliderTheme.of(context).copyWith(
-              activeTrackColor: h.accent,
-              inactiveTrackColor: h.border,
-              thumbColor: h.accent,
-              overlayColor: h.accent.withValues(alpha: 0.15),
-              trackHeight: 3,
-            ),
-            child: Slider(
-              value: value,
-              min: min,
-              max: max,
-              divisions: divisions,
-              onChanged: onChanged,
-            ),
+          CupertinoSlider(
+            value: value,
+            min: min,
+            max: max,
+            divisions: divisions,
+            activeColor: h.accent,
+            onChanged: onChanged,
           ),
         ],
       ),
@@ -2275,11 +2214,13 @@ class _SwitchRow extends StatelessWidget {
             ),
           ),
           const SizedBox(width: HSpace.md),
-          Switch(
+          CupertinoSwitch(
             value: value,
             onChanged: onChanged,
-            activeThumbColor: Colors.white,
             activeTrackColor: h.accent,
+            // 关闭态轨道跟随应用配色（Cupertino 的系统灰按平台亮度解析）
+            inactiveTrackColor: h.border,
+            thumbColor: CupertinoColors.white,
           ),
         ],
       ),
@@ -2370,8 +2311,10 @@ class _AlwaysAllowedRowState extends State<_AlwaysAllowedRow> {
             ),
           ),
           if (tools.isNotEmpty)
-            TextButton(
+            CupertinoButton(
               onPressed: _clear,
+              minimumSize: const Size(0, 36),
+              padding: const EdgeInsets.symmetric(horizontal: HSpace.sm),
               child: const Text('清除', style: TextStyle(fontSize: 12)),
             ),
         ],

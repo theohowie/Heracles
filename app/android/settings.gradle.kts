@@ -33,35 +33,19 @@ plugins {
 include(":app")
 
 // ---------------------------------------------------------------------------
-// ★ 把主工程的纯 JVM 模块纳入 Flutter 的 Android 构建
+// ★ 本构建**只**含 `:app`（2026-10-22，Dart 重写）
 //
-// 背景（`15-前端选型与通道协议.md` §5）：Flutter 的 `app/android/` 是
-// **独立的 Gradle 构建**，与仓库根的 `settings.gradle.kts` 互不相识。
-// 要让 Flutter 调用 Kotlin 核心，必须把它们接进来。
+// 原来这里还 include 了 5 个纯 JVM 模块：
+//   :core / :provider-http / :workspace / :agent / :toolchain
+// 它们指向 `app/android/../../core` 等路径。**那些目录已被用户删除**
+// （后端改用 Dart 重写，见 `docs/DART-MIGRATION-AUDIT-2026-10-22.md` §2.1），
+// 于是 Gradle 在**配置阶段**就失败：
 //
-// 路径：`app/android/../../core` = 仓库根的 `core/`
+//   Configuring project ':workspace' without an existing directory is not allowed
 //
-// 只纳入发行版需要的四个模块。**刻意不纳入**：
-//   :cli           —— 开发脚手架，不进 APK
-//   :android-probe —— 兼容性验证模块，用 AGP 8.7.3，与本构建的 9.0.1 冲突
+// ⇒ 不要从 git 恢复那 5 个目录、不要重新 include。Kotlin 侧现在**只有设备能力**
+//   （`heracles/device` 通道：文件 IO / shell / 健康读数 / 选择器 / 构建通知）。
 // ---------------------------------------------------------------------------
-include(":core")
-project(":core").projectDir = file("../../core")
-
-include(":provider-http")
-project(":provider-http").projectDir = file("../../provider-http")
-
-include(":workspace")
-project(":workspace").projectDir = file("../../workspace")
-
-include(":agent")
-project(":agent").projectDir = file("../../agent")
-
-// :toolchain —— 编码层（构建引擎 / APK 逆向 / 工具链定位）。
-// 纯 JVM、不 import android.*，因此可以安全地编进 APK。
-// 它只被 :agent 的编码层工具使用（见 docs/09-决策记录.md ADR-021）。
-include(":toolchain")
-project(":toolchain").projectDir = file("../../toolchain")
 
 // ---------------------------------------------------------------------------
 // ★ 强制所有 Android 子项目 compile against ≥ 36
