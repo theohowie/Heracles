@@ -116,16 +116,29 @@ class LocalProcessShellRunner(
             )
         }
 
-    /** 读回输出并夹到上限（`-v` 类输出能把磁盘/内存打满）。 */
+    /**
+     * 读回输出并夹到上限（`-v` 类输出能把磁盘/内存打满）。
+     *
+     * ## ★ 2026-10-21：改为**流式读取**（旧实现会先 OOM）
+     *
+     * 旧实现（本函数的历史版本）是：
+     *
+     * ```kotlin
+     * val text = String(Files.readAllBytes(p), charset)     // ← 先把整个文件读进内存
+     * return if (size > MAX_CAPTURED_BYTES) { text.take(MAX_CAPTURED_BYTES) … }
+     * ```
+     *
+     * 注释说要防"`-v` 类输出把内存打满"，但 `readAllBytes` **先把整份文件装进内存** ——
+     * 一个 500MB 的日志会先 OOM，然后才轮到那个 `if`。防爆装置本身成了爆点。
+     *
+     * 另外旧代码有两处**单位混用**：`Files.size` 是字节、`text.take` 是字符，
+     * 两者直接比较是错的（中文输出下尤其明显）。
+     *
+     * 现在交给 [BoundedReader]：流式读、按字节判、到上限即停，峰值内存与文件大小无关。
+     */
     private fun readCapped(p: Path): String {
-        if (!Files.exists(p)) return ""
-        val size = Files.size(p)
-        val text = String(Files.readAllBytes(p), charset)
-        return if (size > Contract.Shell.MAX_CAPTURED_BYTES) {
-            text.take(Contract.Shell.MAX_CAPTURED_BYTES) + "\n…（输出过大，已截断）"
-        } else {
-            text
-        }
+        val read = BoundedReader.readFile(p, charset, Contract.Shell.MAX_CAPTURED_BYTES)
+        return read.text + read.truncationNote()
     }
 
     companion object {

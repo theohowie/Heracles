@@ -122,9 +122,25 @@ class SessionStore(private val context: Context) {
 
             val hasSaf = treeUri.isNotBlank()
             val dir = File(path)
-            // POSIX 且目录不存在 -> 用户删了文件夹，跳过
-            // SAF 下 File.isDirectory 恒为 false（权限组不同）—— 不能据此判断
-            if (!hasSaf && !dir.isDirectory) continue
+
+            // ★★ 目录不存在时**不再静默跳过**（2026-10-20 真机 bug）★★
+            //
+            // ## 原来错在哪
+            //
+            // 这里原先写 `if (!hasSaf && !dir.isDirectory) continue` ——
+            // 用户把工作区文件夹删掉后，这条记录被**从列表里丢掉**，
+            // 于是侧边栏里那个工作区**凭空消失**（用户报的"工作区看不到"之一）。
+            // 更糟的是：记录还在 prefs 里，但用户既看不见也没法删它。
+            //
+            // ## 现在
+            //
+            // 保留记录并标记 `exists = false`。UI 据此显示成**失效状态**
+            //（而不是让它隐身）—— 用户能看到它、点它会被明确告知"工作区已失效"、
+            //   也能用菜单把它移除。**看得见的坏状态，好过看不见的坏状态。**
+            //
+            // ⚠️ SAF 下 `File.isDirectory` 恒为 false（权限组不同），
+            //    所以 SAF 一律按"存在"处理 —— 它的失效判定在写入时做（见 `sessionWriteFailure`）。
+            val posixExists = hasSaf || dir.isDirectory
 
             val storage = storageFor(path, treeUri, dir.name)
             out += mapOf(
@@ -133,8 +149,13 @@ class SessionStore(private val context: Context) {
                 "path" to path,
                 "treeUri" to treeUri,
                 "isSaf" to hasSaf,
-                "sessionCount" to sessions(storage).size,
-                "exists" to true,
+                // 失效的工作区不统计会话（读它会抛），也不假装有 0 个
+                "sessionCount" to if (posixExists) {
+                    runCatching { sessions(storage).size }.getOrDefault(0)
+                } else {
+                    0
+                },
+                "exists" to posixExists,
             )
         }
 
@@ -468,10 +489,14 @@ class SessionStore(private val context: Context) {
         if (saf != null) {
             return IllegalStateException(saf.workspaceInvalidMessage())
         }
+        // POSIX（应用私有目录 / 已获全盘权限）：这里的 locationLabel 是**真实路径**
+        // （不像 SAF 是 content:// URI），直接显示反而是有用的信息。
+        // 文案与 SAF 保持同一结构：点名工作区 → 说清原因 → 给可执行动作。
         val where = storage.locationLabel
         return IllegalStateException(
-            "无法保存会话记录到「$where」。\n" +
-                "请检查工作区所指向的文件夹是否可写，然后在侧边栏重新选择一次工作区。\n" +
+            "「$where」工作区已失效：它指向的文件夹不存在或没有写入权限。\n" +
+                "请检查工作区所指向的文件夹是否存在、是否可写，" +
+                "然后在侧边栏重新选择工作区。\n" +
                 "技术细节：$path（${e.message}）"
         )
     }

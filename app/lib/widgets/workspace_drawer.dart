@@ -267,6 +267,46 @@ class WorkspaceDrawer extends StatelessWidget {
         rows.add((w, s));
       }
     }
+
+    // ★ 空列表兜底（2026-10-20）：
+    //
+    // 「单列表」是按**会话**平铺的（每行 = 一个会话，右侧标注它属于哪个工作区），
+    // 所以 0 个会话时它天然就是空列表 —— 这在数据上没错，**但用户会以为工作区丢了**
+    // （和本轮修的那个 bug 同一个症状）。
+    //
+    // 这里给一条**能自救**的提示：告诉他工作区还在、只是这个视图不按工作区列，
+    // 并给一个直接切回分组视图的按钮。**不要让用户自己去猜怎么切回来。**
+    if (rows.isEmpty) {
+      return Center(
+        child: Padding(
+          padding: const EdgeInsets.all(HSpace.xl),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Text(
+                visible.isEmpty
+                    ? '还没有工作区'
+                    : '工作区还在，但「单列表」只按会话铺行，\n现在一个会话都没有。',
+                textAlign: TextAlign.center,
+                style: TextStyle(
+                    fontSize: 12.5, height: 1.6, color: h.textFaint),
+              ),
+              if (visible.isNotEmpty) ...[
+                const SizedBox(height: HSpace.md),
+                TextButton(
+                  onPressed: () => onViewOptionsChanged(
+                    viewOptions.copyWith(grouping: SessionGrouping.byWorkspace),
+                  ),
+                  child: const Text('切回「按工作区分组」',
+                      style: TextStyle(fontSize: 12.5)),
+                ),
+              ],
+            ],
+          ),
+        ),
+      );
+    }
+
     if (viewOptions.sorting == SessionSorting.recent) {
       rows.sort((a, b) {
         // 收藏置顶，然后按时间倒序
@@ -954,12 +994,23 @@ class _WorkspaceGroup extends StatelessWidget {
                       else
                         // 用户选的文件夹没有真实路径可展示时，如实说明来源
                         Text(
-                          workspace.isSaf
-                              ? '已授权文件夹'
-                              : _tail(workspace.path),
+                          // ★ 失效的工作区要**明说**（2026-10-20）：
+                          //   目录被删后这条记录仍留在列表里（不再凭空消失），
+                          //   副标题直接写"工作区已失效"，用户一眼知道发生了什么。
+                          !workspace.exists
+                              ? '工作区已失效 · 文件夹不存在'
+                              : (workspace.isSaf
+                                  ? '已授权文件夹'
+                                  : _tail(workspace.path)),
                           maxLines: 1,
                           overflow: TextOverflow.ellipsis,
-                          style: TextStyle(fontSize: 10.5, color: h.textFaint),
+                          style: TextStyle(
+                            fontSize: 10.5,
+                            // 失效用警示色，与其他状态区分开
+                            color: workspace.exists
+                                ? h.textFaint
+                                : HColors.errorOn(h.dark),
+                          ),
                         ),
                     ],
                   ),

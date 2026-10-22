@@ -174,6 +174,21 @@ class MainActivity : FlutterActivity() {
         maybeRunEncodeSelfCheck()
         // ★ 冷启动：从完成通知点进来（Dart 还没就绪 ⇒ 先存 pending）
         handleNotifyIntent(intent)
+        // ★★ 云端管线开关（2026-10-21）★★
+        //
+        // ## 为什么必须从 Intent 读，而不能只靠环境变量
+        //
+        // `System.getenv` 在 **Android App 进程里读不到**
+        // （Android 不给 App 继承 shell 环境；旧代码 `AgentLoop.kt:1421` 已踩过这个坑）。
+        // ⇒ 真机验证需要一条**能在 adb 上触发**的路径。
+        //
+        // 用法：
+        // ```
+        // adb shell am start -n com.theohowie.heracles/.MainActivity \
+        //   --ez heracles_cloud_pipeline true
+        // ```
+        // 传 `false` 可关掉。不传 = 保持当前值（默认关）。
+        applyCloudPipelineFlag(intent)
         // ★ 运行时请求通知权限（2026-10-19，API 33+）——
         //   不请求的话「任务完成通知」永远发不出去，且用户不知道能开。
         //   只在没授权时请求一次（系统会记住"已拒绝"；下次不重复骚扰）。
@@ -182,6 +197,25 @@ class MainActivity : FlutterActivity() {
         ) {
             requestPermissions(arrayOf(Manifest.permission.POST_NOTIFICATIONS), REQ_POST_NOTIFICATIONS)
         }
+    }
+
+    /**
+     * 从 Intent extra 读云端管线开关（2026-10-21）。
+     *
+     * ## 为什么它必须是独立的、且能被 onNewIntent 复用
+     *
+     * adb 反复 `am start` 时 Activity 已存在 ⇒ 走 `onNewIntent` 不走 `onCreate`。
+     * 两处都必须调，否则"第二次改 flag 不生效"（排查时极容易误判成"开关坏了"）。
+     *
+     * ⚠️ **不传 extra 时不改**（保持当前值）—— 与"传 false 明确关闭"区分开。
+     * 否则每次冷启动都会把用户手动打开的开关重置成默认。
+     */
+    private fun applyCloudPipelineFlag(intent: Intent?) {
+        val i = intent ?: return
+        if (!i.hasExtra(EXTRA_CLOUD_PIPELINE)) return
+        val on = i.getBooleanExtra(EXTRA_CLOUD_PIPELINE, false)
+        dev.heracles.cloud.CloudPipelineFlags.override = on
+        println("[heracles][cloud] pipeline flag = $on (from intent extra)")
     }
 
     /**
@@ -308,6 +342,8 @@ class MainActivity : FlutterActivity() {
         // 让下面的 `intent` 属性读到**这一次**的 extra（否则还是启动时那个）
         setIntent(intent)
         maybeRunEncodeSelfCheck()
+        // ★ 云端管线开关也要在热启动时生效（否则"第二次改 flag 不生效"）
+        applyCloudPipelineFlag(intent)
         // ★ 热启动：直接通知 Dart（它的 handler 已注册）
         handleNotifyIntent(intent)
     }
@@ -395,8 +431,11 @@ class MainActivity : FlutterActivity() {
                 "interruptRun" -> handleInterruptRun(call, result)
                 // ★ ask_user 的回答（2026-10-16）：UI 弹窗提交 → 工具拿到
                 "replyAsk" -> {
-                    val text = call.argument<String>("text").orEmpty()
-                    bridge.replyAsk(text)
+                    // ★ 2026-10-21：改为**选项式**答案（题目 id → 选中的 label 列表）。
+                    //   形状转换收在 `bridge.askAnswersFrom`（单一出处，避免各调用点各转一份）。
+                    @Suppress("UNCHECKED_CAST")
+                    val raw = call.argument<Map<String, Any?>>("answers")
+                    bridge.replyAsk(bridge.askAnswersFrom(raw))
                     result.success(true)
                 }
                 // ★ 危险操作审批（2026-10-19）：UI 点允许/始终允许/拒绝 → 挂起的 AgentLoop 拿到
@@ -974,8 +1013,27 @@ class MainActivity : FlutterActivity() {
                             }
                         }
                     }
-                    if (pairs.size > HISTORY_MAX_TURNS) {
-                        pairs.subList(pairs.size - HISTORY_MAX_TURNS, pairs.size)
+                    // ★★ 2026-10-21：历史截断**按管线区分** ★★
+                    //
+                    // ## 为什么不能一刀切 10 轮
+                    //
+                    // `HISTORY_MAX_TURNS = 10` 是给**旧管线**定的：旧 `AgentLoop`
+                    // 每轮把全量历史重新拼进 prompt，且没有 token 预算概念
+                    // ⇒ 只能靠"砍到 10 轮"控制成本（`docs/27` 记的"没有记忆了"就是它）。
+                    //
+                    // 新管线的 `ContextManager` **按 token 预算装载**
+                    // （128K × 0.8 = 102K，装得下就全装，溢出才摘要）
+                    // ⇒ 在这里再砍到 10 轮等于**把新管线的核心能力废掉一半**。
+                    //
+                    // 所以：新管线走全量（它的预算器会自己决定装多少），
+                    // 旧管线保持 10 轮（它没有预算器，砍轮数就是它唯一的闸）。
+                    val historyCap = if (dev.heracles.cloud.CloudPipelineFlags.isCloudPipeline()) {
+                        Int.MAX_VALUE
+                    } else {
+                        HISTORY_MAX_TURNS
+                    }
+                    if (pairs.size > historyCap) {
+                        pairs.subList(pairs.size - historyCap, pairs.size)
                     } else {
                         pairs
                     }
@@ -1677,5 +1735,15 @@ class MainActivity : FlutterActivity() {
 
         /** 运行时通知权限的 requestCode（与权限名一一对应即可） */
         private const val REQ_POST_NOTIFICATIONS = 1001
+
+    /**
+     * Intent extra 名：启用/关闭云端管线（2026-10-21）。
+     *
+     * 用法：`adb shell am start -n com.theohowie.heracles/.MainActivity --ez heracles_cloud_pipeline true`
+     *
+     * 为什么需要它：`System.getenv` 在 Android App 进程里**读不到**
+     * （见 `CloudPipelineFlags` 的 KDoc）。这是真机上唯一能用 adb 触发的开关。
+     */
+    private const val EXTRA_CLOUD_PIPELINE = "heracles_cloud_pipeline"
     }
 }

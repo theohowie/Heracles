@@ -116,7 +116,20 @@ class UsageSidebar extends StatelessWidget {
   // ---------------------------------------------------------- Token 用量
 
   Widget _tokenSection(Hue h) {
+    // ★★ 三个命中率数字口径不同，**必须各自标注**（2026-10-21，BUG-5）★★
+    //
+    // 用户原话：「会话标题右边的第一个圆圈显示缓存命中率 94%，
+    // 但是下方的显示 96%」—— 那不是两个 bug，是**两个口径共用了同一个名字**：
+    //
+    // | 数 | 算法 | 位置 |
+    // |---|---|---|
+    // | [rate]（累计·加权） | `Σcached / Σ(cached+prompt)`，**全部轮次** | 标题圆圈 + 本组主标题 |
+    // | [steady]（稳态·轮次平均） | `drop(1)` 各轮命中率的**平均** | 本组「稳态命中率」一行 |
+    //
+    // 主标题沿用**累计加权**（它对应真实账单：大轮权重大）。稳态那个数
+    // 单独一行，因为它系统性偏乐观（2026-10-19 实测：轮次平均 90.8% vs 加权 84.6%）。
     final rate = usage.hitRate;
+    final steady = usage.steadyHitRate;
     return _Section(
       h: h,
       title: 'Token 用量',
@@ -138,7 +151,9 @@ class UsageSidebar extends StatelessWidget {
             ),
             const SizedBox(width: HSpace.sm),
             Text(
-              '缓存命中',
+              // ★ 口径写进标签本身。原先只写「缓存命中」，
+              //   与消息下方那个**单轮**命中率同名 ⇒ 94% vs 96% 看起来像 bug。
+              '缓存命中（累计·加权）',
               style: TextStyle(fontSize: 12, color: h.textFaint),
             ),
           ],
@@ -151,11 +166,42 @@ class UsageSidebar extends StatelessWidget {
               style: TextStyle(fontSize: 11, color: h.textFaint),
             ),
           ),
-        const SizedBox(height: HSpace.md),
+        // ★★ 稳态命中率（2026-10-21，BUG-5）★★
+        //
+        // 这个数 Kotlin 侧一直在传（`AgentBridge.toMap` 的 `steadyHitRate`），
+        // Dart 侧只解析不展示 —— 用户因此永远看不到"跳过冷启动后"的口径。
+        // 注意它是**轮次平均**（`turns.drop(1)` 的平均），与上面主标题的
+        // token 加权**不是同一个数**，所以必须单独一行、单独标注。
+        const SizedBox(height: HSpace.sm),
+        _kv(
+          h,
+          '稳态命中率（最近一次·轮次平均）',
+          steady == null ? '—' : '${(steady * 100).round()}%',
+        ),
+        Padding(
+          padding: const EdgeInsets.only(bottom: HSpace.sm),
+          child: Text(
+            '主标题 = Σ命中 / Σ(命中+未命中)，按 token 加权（对应真实账单）；'
+            '稳态 = 跳过首轮冷启动后各轮命中率的平均（大轮小轮等权，偏乐观）。'
+            '两者口径不同，数值本就不会一致。',
+            style: TextStyle(fontSize: 10.5, height: 1.45, color: h.textFaint),
+          ),
+        ),
         _kv(h, 'Token 用量', formatTokensFull(usage.totalInputTokens + usage.outputTokens)),
         _kv(h, '未缓存输入', formatTokensFull(usage.reportedPromptTokens + usage.unreportedPromptTokens)),
         _kv(h, '缓存读取', formatTokensFull(usage.cachedTokens)),
         _kv(h, '输出', formatTokensFull(usage.outputTokens)),
+        Padding(
+          padding: const EdgeInsets.only(bottom: HSpace.sm),
+          child: Text(
+            // ★ 输出 token 的口径必须写明：它是 **provider 上报**的
+            //   `usage.completion_tokens` 逐轮累加，**不含**本地估算。
+            //   用户质疑「输出才 476token」时，能据此判断是"额度口径"
+            //   还是"真的没吐字"。
+            '「输出」= provider 上报的 completion_tokens 累加，不含本地估算。',
+            style: TextStyle(fontSize: 10.5, height: 1.45, color: h.textFaint),
+          ),
+        ),
         // ★ 分母标注（docs/24 §4.1 硬要求）——
         //   否则用户以为自己被少算了
         if (usage.hasUnreported)
@@ -321,7 +367,27 @@ class UsageSidebar extends StatelessWidget {
         _kv(h, '运行次数', '${usage.runs}'),
         _kv(h, '轮次', '${usage.turns}'),
         _kv(h, '工具调用', '${usage.steps}'),
-        _kv(h, '模型用时', _formatDuration(usage.wallMs)),
+        // ★★ 两个耗时并列，且**名字里写清口径**（2026-10-21，BUG-5）★★
+        //
+        // 用户原话：「耗时才 5172ms，改成秒为单位，这个是从开始执行任务到结束
+        // 任务的耗时，你觉得会这么短？」—— 他说得对。5172ms 是**模型往返**的
+        // 累加（`TurnRecord.wallMs`），而工具执行、审批等待、压缩**都不在里面**。
+        //
+        // 所以：
+        //   · 上面一行 = 模型用时（旧的那个 5172ms），标签补上「不含工具」
+        //   · 下面一行 = **任务总耗时**（Kotlin `AgentBridge.lastTaskWallMs`，
+        //     从 run 开始到 run 结束的真实墙钟）
+        // 恒有 任务总耗时 >= 模型用时。
+        _kv(h, '模型用时（不含工具）', _formatDuration(usage.wallMs)),
+        _kv(h, '任务总耗时', _formatDuration(usage.taskWallMs)),
+        Padding(
+          padding: const EdgeInsets.only(bottom: HSpace.sm),
+          child: Text(
+            '任务总耗时 = 从开始执行到结束的真实墙钟（含工具执行、审批等待、压缩）；'
+            '模型用时只算模型往返，所以它总是更短。',
+            style: TextStyle(fontSize: 10.5, height: 1.45, color: h.textFaint),
+          ),
+        ),
         _kv(
           h,
           '输出速度',
@@ -331,9 +397,16 @@ class UsageSidebar extends StatelessWidget {
     );
   }
 
-  /// 毫秒 → `233分55秒` / `1小时2分` （参考图是"233分55秒"这种写法）
+  /// 毫秒 → 秒级人话：`5秒` / `1分2秒` / `1小时2分`
+  ///
+  /// ## 为什么不用「5172 ms」（2026-10-21，BUG-5 用户要求）
+  ///
+  /// 用户原话：「耗时才 5172ms，改成秒为单位」。毫秒对**任务级**耗时没有意义
+  /// （精度远超人能感知的范围），而且会让人误以为那是"精确测量"。
+  /// 低于 1 秒显示 `不到 1 秒`（不显示 `0秒` —— 那会让人以为没花时间）。
   String _formatDuration(int ms) {
     if (ms <= 0) return '—';
+    if (ms < 1000) return '不到 1 秒';
     final totalSec = ms ~/ 1000;
     final h0 = totalSec ~/ 3600;
     final m = (totalSec % 3600) ~/ 60;
@@ -452,7 +525,10 @@ class UsageIndicator extends StatelessWidget {
     }
 
     return Tooltip(
-      message: '用量与上下文\n缓存命中 $rateLabel · 上下文已用 $ctxLabel',
+      // ★ 口径写进 tooltip（2026-10-21，BUG-5）：这个圆圈是**累计·token 加权**
+      //   命中率，与消息下方那个**单轮**命中率不是同一个数
+      //   （用户曾看到 94% vs 96% 以为是 bug —— 其实是两个口径）。
+      message: '用量与上下文\n缓存命中（累计·加权） $rateLabel · 上下文已用 $ctxLabel',
       child: InkWell(
         onTap: onTap,
         borderRadius: BorderRadius.circular(HRadius.pill),

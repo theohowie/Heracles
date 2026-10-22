@@ -63,9 +63,35 @@ internal object NativeToolSchema {
      *
      * 刻意**解析** `canonicalToolJson` 而不是另拼一份：后者迟早与文本轨分叉，
      * 而分叉的表现是"模型按原生 schema 填了参数，校验器却按文本轨判非法"。
+     *
+     * ## ★ 2026-10-21：`jsonSchema` 优先（`CloudAgentPipeline`）
+     *
+     * [ToolSpec.jsonSchema] 非空时，用**它**当 `parameters` —— 那是带真实
+     * `integer` / `boolean` / `array` / `enum` 的标准 JSON Schema。
+     * 旧渲染（`canonicalToolJson`）只能产出全 `string` 的扁平参数，
+     * 云端的类型信息会全丢。
+     *
+     * 为 `null` 时（**所有旧工具**）行为与改动前**逐字节相同**：
+     * 仍然解析 `canonicalToolJson`，一个字段都不改。
      */
-    fun canonicalBody(tool: ToolSpec): JsonObject =
-        JsonParser.parseString(PrefixBuilder.canonicalToolJson(tool)).asJsonObject
+    fun canonicalBody(tool: ToolSpec): JsonObject {
+        val schema = tool.jsonSchema
+        if (schema.isNullOrBlank()) {
+            return JsonParser.parseString(PrefixBuilder.canonicalToolJson(tool)).asJsonObject
+        }
+        return JsonObject().apply {
+            addProperty("name", tool.name)
+            addProperty("description", tool.description)
+            // 解析回来的必须是对象；坏 schema 在装配期就该炸（构造即失败），
+            // 而不是发出一个服务端会 400 的请求体。
+            add(
+                "parameters",
+                JsonParser.parseString(schema).also {
+                    require(it.isJsonObject) { "工具 ${tool.name} 的 jsonSchema 不是 JSON 对象：$schema" }
+                },
+            )
+        }
+    }
 
     /**
      * OpenAI 兼容（`/chat/completions`）：

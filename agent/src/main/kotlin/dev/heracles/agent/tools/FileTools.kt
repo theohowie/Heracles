@@ -408,26 +408,44 @@ class AskUserTool(private val replies: AgentLoop.AskReplyQueue) : AgentTool {
 
     override val spec = ToolSpec(
         name = "ask_user",
-        description = "当你需要用户提供信息、做决策或确认方案时，向用户提问。用于：需求不明确、有多种做法需要用户选择、缺少关键信息无法继续。不要用它询问你已知答案的事情。",
+        description = "当你需要用户做决策、确认方案或补充信息时，向用户提问。" +
+            "**必须给选项**（用户点选，不用手打）。可以一次问多个问题，" +
+            "用户会逐题作答。用于：需求不明确、有多种做法要选、缺少关键信息无法继续。" +
+            "不要问你已经知道答案的事情。",
         parameters = listOf(
             ToolParam(
-                "question", "string",
-                "要问用户的问题，写清楚上下文和选项（如有）。例如：这个文件已存在，要覆盖还是另存为新文件？",
+                "questions", "string",
+                "**JSON 数组字符串**（不是对象）。每项一个题目：" +
+                    """[{"id":"q1","question":"要覆盖还是另存？","multi":false,""" +
+                    """"options":[{"label":"覆盖","description":"旧文件会被替换"},""" +
+                    """{"label":"另存","description":"保留旧文件"}]}]。""" +
+                    "规则：① `id` 每题唯一，回答会按它回填；" +
+                    "② `multi` 决定单选(false)/多选(true)，由你判断；" +
+                    "③ 每题**至少 1 个 option**，同题内 label 不得重复；" +
+                    "④ 用户只会点 label，**不要再让用户打字**。",
             ),
         ),
     )
 
     override suspend fun execute(args: Map<String, String>): ToolOutcome {
-        val question = args["question"].orEmpty()
-        if (question.isBlank()) return ToolOutcome.Failure("question 为空")
+        val raw = args["questions"].orEmpty()
+        if (raw.isBlank()) return ToolOutcome.Failure("questions 为空")
 
-        // 挂起等待用户回答（UI 弹窗 → reply()）
-        val answer = replies.await()
+        // 解析 + 校验 —— 与 `AgentLoop` 发 AskUser 事件**用同一个解析器**
+        //（两处各写一份会让"UI 显示的题"与"工具等的题"漂移，见 AskUserArgs 的 KDoc）
+        val questions = dev.heracles.agent.AskUserArgs.parse(raw)
+        if (questions.isEmpty()) {
+            return ToolOutcome.Failure(dev.heracles.agent.AskUserArgs.explain(raw))
+        }
+
+        // 挂起等待用户逐题作答（UI 弹窗 → reply()）
+        val answers = replies.await()
             ?: return ToolOutcome.Failure(
-                "用户暂时没有回答（等待超时）。请自行决定下一步：换个做法继续，或在 final 里说明你卡在哪里、需要用户提供什么。"
+                "用户暂时没有回答（等待超时）。请自行决定下一步：换个做法继续，" +
+                    "或在 final 里说明你卡在哪里、需要用户提供什么。",
             )
 
-        return ToolOutcome.Success("用户回答：$answer")
+        return ToolOutcome.Success("用户回答：\n" + answers.render(questions))
     }
 }
 

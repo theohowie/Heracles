@@ -81,6 +81,45 @@ import java.time.Duration
  *
  * 原来的 `images.isNotEmpty() ⇒ UnsupportedOperationException` 早退**已删除**：
  * 那条是"还没接通"的诚实声明，接通之后就变成了缺陷（用户带图必然失败）。
+ *
+ * ## 思考（reasoning）通道 —— 2026-10-21 三轨核对里**本文件负责的那一半**
+ *
+ * 用户报「思考过程几乎是英文」。**思考用什么语言由模型决定，代码无法强制** ——
+ * provider 层能做且只该做的两件事：**不丢**（增量到了就转发）与
+ * **不串**（思考绝不混进正文或工具参数）。本文件的现状：
+ *
+ * | 事件 | 字段 | 去向 | 结论 |
+ * |---|---|---|---|
+ * | `content_block_delta` / `thinking_delta` | `delta.thinking` | [StreamChunk.deltaReasoning] | ✅ 已正确 |
+ * | `content_block_delta` / `text_delta` | `delta.text` | [StreamChunk.deltaText] | ✅ 已正确 |
+ * | `content_block_delta` / `input_json_delta` | `delta.partial_json` | 工具调用分片（不向上转发） | ✅ 不交叉 |
+ * | `content_block_start` / `text`·`thinking` 块首段 | 恒为空串（契约） | 不转发 | ✅ 正确（不是丢） |
+ *
+ * ### 「thinking 增量绝不并入 arguments」是**结构性**的，不是靠一个 if 维持的
+ *
+ * 本类唯一能写进工具参数的两个入口是 `AnthropicToolCalls.onJsonDelta` 与
+ * `onBlockStart`，它们的入参分别只有 `partial_json` 一段字符串、`content_block.input`
+ * 一个对象 —— **没有任何参数能接收 `text` / `thinking` 的增量**。想串进去必须先改
+ * `NativeCallAssembler` 的函数签名，那在 review 里一眼可见。
+ * （这条对三条 provider 轨都成立，核对记录见 `NativeToolSchema` 的文件头。）
+ *
+ * ### 三条如实记录的缺口（写"为什么现在不做"，不是"以后再说"）
+ *
+ * 1. **非流式 `parseResponse` 会丢掉 `thinking` 块**：它只拼 `type == "text"` 的块。
+ *    `thinking` 块既**不会**混进正文（这一点是对的），也**没有地方可放** ——
+ *    [GenerateResult] 没有思考字段（契约层缺口，补它要动 `:core`，不属于本文件）。
+ *    ⇒ 想看思考必须走 `generateStream()`；非流式路径**按设计不产生**思考
+ *    （请求侧也不请求，见第 2 条）。
+ * 2. **请求侧从不发 `thinking` 对象**（`buildBody` 里没有这个键）⇒ 本轨的思考
+ *    **默认不会出现**；`thinking_delta` 那条分支只有在中转站**自行默认开思考**时才可达。
+ *    要接「档位 → `thinking.enabled` + `budget_tokens`」，必须先解决三件事，缺一不可：
+ *    ① `budget_tokens` 与 `max_tokens` 的约束（思考预算必须**小于**输出上限）；
+ *    ② 开思考后，带工具调用的助手轮**必须原样回灌 thinking 块（含 `signature`）**，
+ *    否则下一轮会被服务端拒 —— 而 [ChatMessage] 今天**没有**承载 thinking 块的位置；
+ *    ③ 真 Key 验证（硬规则：wire 变更没验证过不算完成）。
+ *    三条都没做 ⇒ 现在接就是发一个**没验证过的 wire**，比"没有思考"更糟。
+ * 3. **`signature_delta` / `redacted_thinking` 不转发**：前者是给"回灌"用的签名，
+ *    后者是加密过的思考（本来就不可读）。两者都不是给人看的文本，也不得进正文。
  */
 class AnthropicProvider(
     override val id: String = "anthropic:claude",
@@ -178,39 +217,74 @@ class AnthropicProvider(
         ).collect { event ->
             val root = runCatching { JsonHolder.parse(event.payload) }.getOrNull()
                 ?: return@collect
-            when (root.get("type")?.asString) {
-                "error" -> error(root.getAsJsonObject("error")?.get("message")?.asString ?: "流错误")
+            when (root.strOrEmpty("type")) {
+                // ★ 判型（2026-10-21）：`{"type":"error","error":null}` 时
+                //   `getAsJsonObject("error")` 会**抛 ClassCastException**（Gson 的
+                //   `JsonNull` 强转行为，与 2026-10-14 OpenAI 轨真机崩溃同一个根因）。
+                //   那样用户看到的是一行 Java 异常，而不是服务端给的**人话**。
+                "error" -> error(
+                    root.objOrNull("error")?.strOrEmpty("message").orEmpty()
+                        .ifEmpty { root.strOrEmpty("message") }
+                        .ifEmpty { "流错误" },
+                )
                 // ★ 工具调用块的开始：这里才有 id / name（与 OpenAI 的"首片"同语义）
                 "content_block_start" -> {
-                    val block = root.getAsJsonObject("content_block") ?: return@collect
-                    if (block.get("type")?.asString == "tool_use") {
+                    val block = root.objOrNull("content_block") ?: return@collect
+                    if (block.strOrEmpty("type") == "tool_use") {
                         toolCalls.onBlockStart(
-                            index = root.get("index")?.takeIf { !it.isJsonNull }?.asInt ?: 0,
-                            id = block.get("id")?.takeIf { !it.isJsonNull }?.asString,
-                            name = block.get("name")?.takeIf { !it.isJsonNull }?.asString,
+                            index = root.intOr("index", 0),
+                            // ★ 用 `strOrEmpty`：`{"id": null}` / `{"id": {…}}` 都不会崩
+                            //   （老写法 `?.takeIf { !it.isJsonNull }?.asString` 只挡住 null，
+                            //   对象/数组照样抛 ClassCastException）。
+                            id = block.strOrEmpty("id").ifEmpty { null },
+                            name = block.strOrEmpty("name").ifEmpty { null },
                             input = block.get("input"),
                         )
                     }
+                    // ★ `text` / `thinking` 块的**首段不转发是对的，不是丢**（2026-10-21 核对）：
+                    //   Anthropic 的契约里这两类块在 `content_block_start` 里
+                    //   **恒为空串**（`{"type":"text","text":""}` / `{"type":"thinking","thinking":""}`），
+                    //   真正的载荷全部走随后的 `content_block_delta`。
+                    //   ⇒ 这里加一个"非空就发"的分支是**投机**：官方契约下它永远不发，
+                    //     而若某中转站**重复**上报同一段（start 给全文 + delta 再给一遍），
+                    //     就会变成"思考在 UI 上出现两遍"—— 那是新缺陷。
+                    //   ⇒ 结论：保持只认 `tool_use`。真的遇到"start 里带载荷"的端点时，
+                    //     必须有抓包证据再改这里（wire 变更不许凭想象做）。
                 }
                 "content_block_delta" -> {
-                    val delta = root.getAsJsonObject("delta") ?: return@collect
+                    // ★ 判型（2026-10-21）：缺键要能跳过（老写法有 `?:`），
+                    //   但 `{"delta":null}` 走不到 `?:` —— 它**先崩在强转上**，
+                    //   然后整条 Flow 异常终止 ⇒ **本轮的思考与正文一起丢**。
+                    //   这类"一个畸形事件杀掉整轮"的缺陷在 OpenAI 轨上修过一次
+                    //   （见 `OpenAiCompatProvider` 的"防御式取值"注释），这里是同一类。
+                    val delta = root.objOrNull("delta") ?: return@collect
                     // ★ 参数分片：**只拼接、不解析**（任一单片都不是合法 JSON）
-                    if (delta.get("type")?.asString == "input_json_delta") {
+                    if (delta.strOrEmpty("type") == "input_json_delta") {
                         toolCalls.onJsonDelta(
-                            index = root.get("index")?.takeIf { !it.isJsonNull }?.asInt ?: 0,
-                            partialJson = delta.get("partial_json")?.takeIf { !it.isJsonNull }?.asString,
+                            index = root.intOr("index", 0),
+                            partialJson = delta.strOrEmpty("partial_json").ifEmpty { null },
                         )
                         return@collect
                     }
-                    // 思考与正文分开（与 OpenAI 路径的双轨同语义）
-                    val text = delta.get("text")?.takeIf { !it.isJsonNull }?.asString ?: ""
-                    val reasoning = delta.get("thinking")?.takeIf { !it.isJsonNull }?.asString ?: ""
+                    // 思考与正文分开（与 OpenAI 路径的双轨同语义）。
+                    //
+                    // | delta.type | 字段 | 去向 |
+                    // |---|---|---|
+                    // | `text_delta` | `text` | 正文 |
+                    // | `thinking_delta` | `thinking` | 思考 |
+                    // | `signature_delta` / 其它 | `signature` / 无 | **不转发**（签名不是给人看的文本） |
+                    //
+                    // 按字段取而不是按 `type` 分支：两者语义等价，而字段式对
+                    // 中转站的"类型写错、字段对"更宽容 —— 但**两个字段各自独立**，
+                    // 所以任何一个都不可能被写进另一个通道（`不串`）。
+                    val text = delta.strOrEmpty("text")
+                    val reasoning = delta.strOrEmpty("thinking")
                     if (text.isNotEmpty() || reasoning.isNotEmpty()) {
                         emit(StreamChunk(deltaText = text, deltaReasoning = reasoning))
                     }
                 }
                 "message_delta" -> {
-                    val stop = root.getAsJsonObject("delta")?.get("stop_reason")?.asString
+                    val stop = root.objOrNull("delta")?.strOrEmpty("stop_reason")?.ifEmpty { null }
                     if (stop != null) {
                         stopReason = when (stop) {
                             // ★ `tool_use` 必须映射（老代码不认它 ⇒ 落到 STOP ⇒
@@ -437,21 +511,56 @@ class AnthropicProvider(
             ?.takeIf { it.isJsonObject }
             ?: JsonObject()
 
+    // ------------------------------------------------------ 防御式取值
+    //
+    // 与 `OpenAiCompatProvider` 的"防御式取值"同一批理由（2026-10-14 真机崩溃）：
+    // Gson 的 `asJsonObject` / `asString` 遇到 `JsonNull` **直接抛**（不是返回 null），
+    // 而 `has()` 对 `"x": null` 返回 true。聚合服务确实会返回这种形状
+    // （`{"delta":null}` / `{"usage":null}` / `{"error":null}`）。
+    //
+    // ⚠️ 对**思考通道**的后果不是"少一个字段"：异常会从 `flow{}` 里抛出去 ⇒
+    //    整条流终止 ⇒ 这一轮**已经收到的思考与正文一起丢**，用户看到"运行失败"。
+    //    所以这里一律先判型再读。
+
+    /** 只在值真的是对象时返回它；`null` / 数组 / 标量都返回 `null`。 */
+    private fun JsonObject.objOrNull(field: String): JsonObject? =
+        get(field)?.takeIf { it.isJsonObject }?.asJsonObject
+
+    /** 字符串字段；缺失 / `null` / **非标量**（对象、数组）一律空串（**不 trim、不猜**）。 */
+    private fun JsonObject.strOrEmpty(field: String): String =
+        get(field)?.takeIf { it.isJsonPrimitive }?.asString.orEmpty()
+
+    /** 整数字段；缺失 / `null` / **非数字**（字符串、布尔、数组）时用 [fallback]。 */
+    private fun JsonObject.intOr(field: String, fallback: Int): Int {
+        val p = get(field)?.takeIf { it.isJsonPrimitive }?.asJsonPrimitive ?: return fallback
+        // ⚠️ 只认数字：`"usage":{"input_tokens":"12"}` 这种字符串形状会**抛
+        //    NumberFormatException**（`JsonPrimitive.asInt` 的行为），
+        //    而那会把整轮响应变成"运行失败" —— 用 fallback 更接近事实（未上报）。
+        return if (p.isNumber) runCatching { p.asInt }.getOrDefault(fallback) else fallback
+    }
+
     private fun parseResponse(resp: String): GenerateResult {
         val root = JsonHolder.parse(resp)
         // ★ 判型（2026-10-14）：`{"error": null}` 时 getAsJsonObject 会崩
-        root.get("error")?.takeIf { it.isJsonObject }?.asJsonObject?.let {
-            error("Anthropic 错误：" + (it.get("message")?.asString ?: it.toString()))
+        root.objOrNull("error")?.let {
+            error("Anthropic 错误：" + it.strOrEmpty("message").ifEmpty { it.toString() })
         }
         // ★ 判型（2026-10-14）：内容块数组里可能有非对象项
         val text = root.getAsJsonArray("content")
-            ?.filter { it.isJsonObject && it.asJsonObject.get("type")?.asString == "text" }
-            ?.joinToString("") { it.asJsonObject.get("text")?.asString ?: "" }
+            ?.filter { it.isJsonObject && it.asJsonObject.strOrEmpty("type") == "text" }
+            ?.joinToString("") { it.asJsonObject.strOrEmpty("text") }
             ?: ""
+        // ⚠️ **思考块在这里被丢掉是已知缺口**（见类 KDoc「三条如实记录的缺口」第 1 条）：
+        //    `type == "thinking"` 的块既不进正文（正确），也没有字段可放
+        //    （`GenerateResult` 没有思考字段）。**不要**把它糊进 `text` ——
+        //    那会让"思考"被当成最终答案写进会话（`25-流式工作步骤.md` §2 错误一）。
+        //    想看思考请走 `generateStream()`。
         // ★ 原生调用（非流式）：`content[]` 里 `type=="tool_use"` 的块
         val calls = NativeCalls.fromAnthropicContent(root)
         // 停止原因映射
-        val finish = when (root.get("stop_reason")?.asString) {
+        // ⚠️ 用 `strOrEmpty(...)` 而不是 `get(...)?.asString`：`"stop_reason": null`
+        //    时后者**直接抛**（JsonNull 强转），整轮变成"运行失败"而不是"正常结束"。
+        val finish = when (root.strOrEmpty("stop_reason").ifEmpty { null }) {
             "end_turn" -> FinishReason.STOP
             "max_tokens" -> FinishReason.LENGTH
             "stop_sequence" -> FinishReason.STOP
@@ -461,15 +570,15 @@ class AnthropicProvider(
             null -> if (calls.isNotEmpty()) FinishReason.TOOL_CALLS else FinishReason.STOP
             else -> FinishReason.ERROR
         }
-        val usage = root.getAsJsonObject("usage")
+        val usage = root.objOrNull("usage")
         return GenerateResult(
             text = text,
             // ★ Anthropic 的 token 字段名与 OpenAI 不同：
             //   input_tokens / output_tokens / cache_read_input_tokens
             cache = CacheStats(
                 cachedTokens = usage?.get("cache_read_input_tokens")?.takeIf { !it.isJsonNull }?.asInt,
-                promptTokens = usage?.get("input_tokens")?.asInt ?: 0,
-                outputTokens = usage?.get("output_tokens")?.asInt ?: 0,
+                promptTokens = usage?.intOr("input_tokens", 0) ?: 0,
+                outputTokens = usage?.intOr("output_tokens", 0) ?: 0,
             ),
             finishReason = finish,
             toolCalls = calls,

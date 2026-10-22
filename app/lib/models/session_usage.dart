@@ -50,6 +50,8 @@ class SessionUsage {
     this.unreportedPromptTokens = 0,
     this.outputTokens = 0,
     this.wallMs = 0,
+    this.taskWallMs = 0,
+    this.steadyHitRate,
   });
 
   /// 零元 —— 新会话（或从未运行过的会话）就是它。
@@ -83,7 +85,44 @@ class SessionUsage {
   final int unreportedPromptTokens;
 
   final int outputTokens;
+
+  /// Σ **模型用时**（毫秒）—— 来自每轮的 `TurnRecord.wallMs`。
+  ///
+  /// ⚠️ 这个数**只含模型往返**（`provider.generate` / 流式收流），
+  /// **不含工具执行、不含压缩、不含审批等待**（见 [taskWallMs]）。
+  /// 用户曾把它当成"任务总耗时"质疑「才 5172ms 怎么可能」——
+  /// 那个质疑是对的，所以 UI 必须把它标注成「模型用时（不含工具）」。
   final int wallMs;
+
+  /// Σ **任务总耗时**（毫秒）—— 每次 run 从开始到结束的**真实墙钟**
+  /// （含工具执行、审批/提问等待、上下文压缩）。
+  ///
+  /// ## 为什么要与 [wallMs] 分开（2026-10-21，BUG-5）
+  ///
+  /// 两者口径完全不同，却曾经被混成一个「耗时」：
+  ///
+  /// | 字段 | 来源 | 含什么 |
+  /// |---|---|---|
+  /// | [wallMs] | Σ `TurnRecord.wallMs` | **只有**模型往返 |
+  /// | [taskWallMs] | Σ `AgentRunResult.taskWallMs` | 模型往返 + **工具执行** + 审批/提问等待 + 压缩 |
+  ///
+  /// 恒有 `taskWallMs >= wallMs`（前者是后者的超集）——
+  /// 这条不变量由 `app/test/usage_metrics_test.dart` 钉住。
+  ///
+  /// `0` = 没有数据（旧版 Kotlin / 还没跑过）—— UI 显示 `—`，**不显示 0 秒**。
+  final int taskWallMs;
+
+  /// **最近一次运行**的稳态命中率（Kotlin `AgentRunResult.steadyHitRate`）。
+  ///
+  /// ## 为什么只保留"最近一次"而不是累加（2026-10-21，BUG-5）
+  ///
+  /// 它是**一次运行内**跳过首轮冷启动后的各轮命中率平均。
+  /// 跨运行求平均需要每轮原始数据（这里只有聚合值），
+  /// 硬凑会造出一个既不是加权也不是轮次平均的**第三种口径** —— 那是假信息。
+  /// 所以如实只显示"最近一次 run"的稳态值，标签里写明「最近一次」。
+  ///
+  /// `null` = 没有数据（还没跑过 / 该 run 只有一轮，无稳态可言）。
+  final double? steadyHitRate;
 
   /// 有没有"未上报"的轮次 —— UI 必须据此**标注**（`docs/24` §4.1）
   bool get hasUnreported => unreportedTurns > 0;
@@ -125,7 +164,16 @@ class SessionUsage {
   ///
   /// 为什么需要它：`ofTurn` 是**逐轮**的，它不知道"这次运行有几轮"；
   /// 而 `runs` 是**每次运行**加一。两者粒度不同，不能混在一个循环里。
-  SessionUsage copyRuns(int r) => SessionUsage(
+  ///
+  /// ## [taskWallMs] 为什么是**运行级**参数（2026-10-21，BUG-5）
+  ///
+  /// 任务总耗时只有 `AgentRunResult` 知道（一次 run 一个数），
+  /// 而 `ofTurn` 是**逐轮**的 —— 拿不到它，也不该拿（逐轮分不到工具执行的时间）。
+  /// 所以它跟着"一次运行 +1"的 [runs] 一起进账，而不是跟着轮次。
+  ///
+  /// 默认 `0` = 不累加（`ofTurn` 路径与既有调用方行为不变）。
+  SessionUsage copyRuns(int r, {int taskWallMs = 0, double? steadyHitRate}) =>
+      SessionUsage(
         runs: r,
         turns: turns,
         steps: steps,
@@ -136,6 +184,9 @@ class SessionUsage {
         unreportedPromptTokens: unreportedPromptTokens,
         outputTokens: outputTokens,
         wallMs: wallMs,
+        taskWallMs: this.taskWallMs + taskWallMs,
+        // null = 这次没有新值 ⇒ **保持原值**（不是清空：切会话不该丢已知的稳态数）
+        steadyHitRate: steadyHitRate ?? this.steadyHitRate,
       );
 
   /// 叠加另一次运行的统计。
@@ -151,6 +202,10 @@ class SessionUsage {
             unreportedPromptTokens + o.unreportedPromptTokens,
         outputTokens: outputTokens + o.outputTokens,
         wallMs: wallMs + o.wallMs,
+        taskWallMs: taskWallMs + o.taskWallMs,
+        // 稳态命中率**不可相加**（它是比率）—— 取"有值的那一边"，
+        // 两边都有值时以新叠加的 `o` 为准（它就是"最近一次 run"）。
+        steadyHitRate: o.steadyHitRate ?? steadyHitRate,
       );
 
   /// 从**一轮**的原始指标构造（`cachedTokens == null` ⇒ 计入"未上报"）。

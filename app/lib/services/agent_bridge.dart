@@ -689,16 +689,21 @@ class AgentBridge {
     }
   }
 
-  /// **ask_user 的回答通道**（2026-10-16 用户需求「ask 功能」）。
+  /// **ask_user 的回答通道**（2026-10-16 引入；**2026-10-21 改为选项式**）。
   ///
   /// 模型调 `ask_user` 工具时会**挂起等待** —— UI 收到 [kAskUser]
-  /// 事件后弹窗，用户提交回答时调用本方法。回答作为工具结果
-  /// 返回给模型，任务继续。
+  /// 事件后弹**选项式**对话框，用户逐题点选后调用本方法。
+  ///
+  /// ## 为什么参数从 `String` 变成 `Map<String, List<String>>`
+  ///
+  /// 用户原话：「ask 要是选项点击的……可以多选，单选，是 LLM 根据任务决定，
+  /// 可以一次发多个 ask，回答完自动下一个问题」。
+  /// 一段文本表达不了"哪一题选了哪些项"，必须按**题目 id → 选中的 label 列表**回传。
   ///
   /// 没有在跑的任务时调用是**无害的**（Kotlin 侧队列已置 null，直接丢弃）。
-  Future<void> replyAsk(String text) async {
+  Future<void> replyAsk(Map<String, List<String>> answers) async {
     try {
-      await _channel.invokeMethod<bool>('replyAsk', {'text': text});
+      await _channel.invokeMethod<bool>('replyAsk', {'answers': answers});
     } on MissingPluginException {
       // 平台未实现（测试环境）—— 静默
     } on PlatformException {
@@ -1088,6 +1093,7 @@ class AgentEvent {
     this.activeIndex,
     this.reachedGoal,
     this.planClosedReason,
+    this.questions,
   });
 
   /// 判别字段：轮级 `turn_started` / `model_output` / `tool_started` /
@@ -1182,6 +1188,13 @@ class AgentEvent {
 
   /// `plan_closed`：收尾原因（中断时显示给用户，如"检测到循环，已强制停止"）
   final String? planClosedReason;
+
+  /// **`ask_user`：模型提的题目列表**（2026-10-21 选项式）。
+  ///
+  /// 每项形状：`{"id","question","multi","options":[{"label","description"}]}`。
+  /// Kotlin 侧已经解析好结构（Dart **不解析 JSON**），UI 只管渲染。
+  /// `null` / 空列表 = 题目格式非法（Kotlin 侧解析失败），UI 应提示而不是弹空窗。
+  final List<Map<String, dynamic>>? questions;
 
   // ------------------------------------------------------------ 判别辅助
 
@@ -1319,6 +1332,11 @@ class AgentEvent {
       //   （按"未知"处理，不改画法），false = 明确的中断。
       reachedGoal: m['reachedGoal'] as bool?,
       planClosedReason: m['reason'] as String?,
+      // ★ ask_user 的题目结构（2026-10-21）：Kotlin 已解析好，这里只做类型转换。
+      //   缺失 = 老版本 Kotlin（只会带 `text`）⇒ 返回 null，UI 走"降级为纯文本"分支。
+      questions: (m['questions'] as List?)
+          ?.map((e) => (e as Map).cast<String, dynamic>())
+          .toList(),
       // ★ token 级字段：**缺失就是 null**，绝不伪造空串 ——
       //   空串 delta 会让 UI 以为"这一步真的吐了个空字"，
       //   而实际是版本不一致（老 Kotlin 不发这些字段）。
@@ -1375,6 +1393,7 @@ class AgentRunResult {
     required this.totalPromptTokens,
     required this.totalOutputTokens,
     this.steadyHitRate,
+    this.taskWallMs = 0,
     this.sessionId,
     this.cancelled = false,
   });
@@ -1388,7 +1407,33 @@ class AgentRunResult {
   final int totalOutputTokens;
 
   /// 稳态命中率（跳过第一轮冷启动）；null = 无法计算
+  ///
+  /// ## 口径（2026-10-21，BUG-5）
+  ///
+  /// Kotlin 侧 `AgentRunResult.steadyHitRate` = **轮次平均**
+  /// （`turns.drop(1).mapNotNull { it.cache.hitRate }.average()`）。
+  ///
+  /// 它与 `SessionUsage.hitRate`（Σcached/Σ(cached+prompt)，**token 加权**、含全部轮次）
+  /// **不是同一个数**，也**不会相等**：轮次平均把小轮与大轮等权，系统性偏乐观
+  /// （2026-10-19 云端实测：轮次平均 90.8%，同样本加权 84.6%）。
+  /// ⇒ UI 必须把两者**分别标注口径**，不能都叫「缓存命中」。
   final double? steadyHitRate;
+
+  /// **任务总耗时（毫秒）** —— 从 run 开始到 run 结束的**真实墙钟**
+  /// （含工具执行、审批/提问等待、上下文压缩）。
+  ///
+  /// ## 为什么必须单独有这个字段（2026-10-21，BUG-5）
+  ///
+  /// 用户原话：「耗时才 5172ms，改成秒为单位，这个是从开始执行任务到结束任务的
+  /// 耗时，你觉得会这么短？」
+  ///
+  /// 他说得对。此前面板显示的"耗时"是 [turns] 里 `wallMs` 的累加，而
+  /// `TurnRecord.wallMs` 只包住 `provider.generate` / 流式往返 ——
+  /// **不含工具执行、不含压缩、不含审批等待**。一个改了三个文件、跑过一次构建的
+  /// 任务，模型往返确实可能只有 5 秒，真实耗时却是几十秒。
+  ///
+  /// `0` = 该后端没提供（旧版 Kotlin / 取消路径）—— UI 显示 `—`，**不显示 0 秒**。
+  final int taskWallMs;
 
   /// 本次运行所属会话。**没传 sessionId 时由 Kotlin 自动创建**。
   final String? sessionId;
@@ -1412,7 +1457,9 @@ class AgentRunResult {
       totalCachedTokens: (m['totalCachedTokens'] as num?)?.toInt() ?? 0,
       totalPromptTokens: (m['totalPromptTokens'] as num?)?.toInt() ?? 0,
       totalOutputTokens: (m['totalOutputTokens'] as num?)?.toInt() ?? 0,
+      // 老后端没有这个字段 ⇒ 0（UI 显示 `—`），不要伪造一个数
       steadyHitRate: (m['steadyHitRate'] as num?)?.toDouble(),
+      taskWallMs: (m['taskWallMs'] as num?)?.toInt() ?? 0,
       sessionId: m['sessionId'] as String?,
       cancelled: (m['cancelled'] as bool?) ?? false,
     );

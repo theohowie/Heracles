@@ -155,19 +155,30 @@ sealed interface AgentEvent {
     ) : AgentEvent
 
     /**
-     * **ask_user：模型向用户提问**（2026-10-16 用户需求「ask 功能」）。
+     * **ask_user：模型向用户提问**（2026-10-16 引入；**2026-10-21 改为选项式**）。
      *
      * 到达时机：模型调了 `ask_user` 工具，**工具正在挂起等待** ——
-     * 此刻用户回答，模型下一轮就能拿到。
+     * 此刻用户作答，模型下一轮就能拿到。
      *
-     * UI 应弹出一个带输入框的对话框（问题 + 回答提交）。
+     * ## UI 该做什么（2026-10-21 用户要求）
      *
-     * @param question 模型的问题（来自工具参数）
+     * 用户原话：
+     * > 「ask 要是选项点击的，不是要我直接在下面输入，一般是 1、2、3、4 等等几个选项，
+     * >   可以多选，单选，是 LLM 根据任务决定，可以一次发多个 ask，回答完自动下一个问题，
+     * >   下面可以点击上一题和下一题。」
+     *
+     * ⇒ UI 弹**选项式**对话框：
+     * · 一次可能有多题（[questions]）⇒ 逐题作答，答完自动跳下一题
+     * · 每题 `multi=false` 单选 / `multi=true` 多选（**由模型决定**，UI 不猜）
+     * · 有「上一题 / 下一题」导航
+     * · 用户点的是 `label`，回传也用 `label`（不要自己拼文案）
+     *
+     * @param questions 题目列表（**至少 1 题**；旧版只有一个字符串，已废弃）
      * @param call 对应的工具调用（UI 可用它关联步骤卡片）
      */
     data class AskUser(
         val index: Int,
-        val question: String,
+        val questions: List<dev.heracles.core.tool.AskQuestion>,
         val call: dev.heracles.core.tool.ToolCall,
         override val ts: Long = System.currentTimeMillis(),
     ) : AgentEvent

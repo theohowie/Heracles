@@ -5,6 +5,7 @@ import 'package:flutter/material.dart';
 import '../models/message.dart';
 import '../models/settings.dart';
 import '../theme/app_theme.dart';
+import 'tool_call_card.dart' show kFileWritingTools, estimatedDiffStatOf, changedFilesOf;
 
 /// **逐字生成中的一个步骤** —— 思考与正文分开渲染。
 ///
@@ -380,6 +381,7 @@ class _ToolSubEntryState extends State<_ToolSubEntry> {
   Widget build(BuildContext context) {
     final h = Hue.of(context);
     final meta = _meta();
+    final change = _fileChange();
     return Padding(
       padding: const EdgeInsets.only(left: HSpace.md),
       child: Container(
@@ -415,6 +417,37 @@ class _ToolSubEntryState extends State<_ToolSubEntry> {
                           color: h.textDim),
                     ),
                   ),
+                  // ★★ 文件改动摘要行（2026-10-21，BUG-4）★★
+                  //
+                  // 用户报的：「调用工具不透明，看不到改了什么代码」。
+                  // 原来这一步只显示「已写入 a.txt」，**没有 +N −M** ——
+                  // 用户无法一眼判断"这一改有多大"，必须点开卡片才知道。
+                  // 这里在**标题行**就把「改了哪个文件、+N −M」摆出来，
+                  // 与 DeepSeek harness / GitHub 的「编辑 · x.dart +12 −3」同一语义。
+                  if (change != null) ...[
+                    const SizedBox(width: HSpace.sm),
+                    Text(
+                      change.label,
+                      style: TextStyle(
+                        fontFamily: kMonoFontFamily,
+                        fontFamilyFallback: kMonoFallback,
+                        fontSize: 11,
+                        fontWeight: FontWeight.w600,
+                        color: HColors.successOn(h.dark),
+                      ),
+                    ),
+                    const SizedBox(width: HSpace.xs),
+                    Text(
+                      change.removedLabel,
+                      style: TextStyle(
+                        fontFamily: kMonoFontFamily,
+                        fontFamilyFallback: kMonoFallback,
+                        fontSize: 11,
+                        fontWeight: FontWeight.w600,
+                        color: HColors.errorOn(h.dark),
+                      ),
+                    ),
+                  ],
                   const SizedBox(width: HSpace.sm),
                   Icon(
                     _expanded
@@ -440,6 +473,45 @@ class _ToolSubEntryState extends State<_ToolSubEntry> {
         ),
       ),
     );
+  }
+
+  /// **文件改动摘要** —— 只对写类工具给值，其余返回 null（不摆空的东西）。
+  ///
+  /// 数据来源分两态（与 `tool_call_card.dart` 的 `diffStatOf` /
+  /// `estimatedDiffStatOf` 同一套语义，但这里流式阶段只有**参数**可用，
+  /// 没有工具结果）：
+  ///
+  /// · 流式中：参数还不完整（JSON 半截）⇒ 只报"已生成 N 字符"
+  /// · 已结束：从完整参数里按 `patch` / `new_string` / `content` 估算
+  ///
+  /// ⚠️ 这是**估算**（流式阶段拿不到原文件，算不出真实删除量）。
+  /// 真实数字以工具卡片（`ToolCallCard`）里从**结果**解析出的 `+N −M` 为准。
+  ({String label, String removedLabel})? _fileChange() {
+    if (!widget.finished) return null;
+    final t = widget.text.trim();
+    if (!t.startsWith('{')) return null;
+    try {
+      final j = jsonDecode(t);
+      if (j is! Map || j['tool'] is! String) return null;
+      final tool = j['tool'] as String;
+      if (!kFileWritingTools.contains(tool)) return null;
+      final rawArgs = j['args'];
+      if (rawArgs is! Map) return null;
+      final args = <String, String>{
+        for (final e in rawArgs.entries)
+          if (e.value is String) e.key as String: e.value as String,
+      };
+      final stat = estimatedDiffStatOf(args);
+      if (!stat.hasChanges) return null;
+      final files = changedFilesOf(args);
+      // label 只放 `+N`，removedLabel 放 `−M` —— 两个 Text 颜色不同（绿/红）
+      return (
+        label: files.isEmpty ? '+${stat.added}' : '${files.first} +${stat.added}',
+        removedLabel: '−${stat.removed}',
+      );
+    } catch (_) {
+      return null;
+    }
   }
 
   /// 从（可能不完整的）流式文本提取工具名 / 文件 / 字数。

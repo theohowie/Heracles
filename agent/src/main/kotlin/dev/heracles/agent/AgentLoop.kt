@@ -28,6 +28,30 @@ import kotlinx.coroutines.runBlocking
  * Agent 循环 —— 把 `:core` 的机制、provider 的后端、workspace 的文件
  * 串成**一次完整的对话轮次**。
  *
+ * ## ⚠️ 已弃用（2026-10-21）—— 新管线是 [dev.heracles.cloud.CloudAgentPipeline]
+ *
+ * 这个类**默认不再运行**，它是新管线的 **fallback**（显式退回才用：
+ * `CloudPipelineFlags.override = false` 或 `HERACLES_CLOUD_PIPELINE=0`）。
+ *
+ * ### 为什么弃用（不是"过时了"，是它在限制强模型）
+ *
+ * 它是为 **4B 本地模型 + GBNF + 4096 上下文** 设计的，那些妥协在大模型上变成**伤害**：
+ *
+ * | 这里留下的 | 当年为什么 | 对强模型的伤害 |
+ * |---|---|---|
+ * | 文本轨协议（`{"tool":…}` / CDATA 标签） | 本地 GBNF 禁转义 | 双轨并存 ⇒ 调用写进正文被忽略 ⇒ 静默失败 |
+ * | `CONSECUTIVE_UNPARSEABLE_LIMIT` 熔断 | 本地"正文恒为空" | 把可自愈的格式漂移判死刑 |
+ * | `mutatingTools` 白名单 | 逐工具判断 | 漏一个就静默放行（`edit` 曾漏） |
+ * | 工具声明全 `string` | GBNF 只能出扁平标量 | 原生 FC 的类型信息全丢 |
+ *
+ * ### 为什么**保留代码**而不是删
+ *
+ * 1. **唯一可回退路径** —— 新管线仍有未验证面（Anthropic / Responses 两轨）
+ * 2. 几百条既有测试钉住它的行为；一次性删会让"改锚点"与"暴露真问题"混在一起
+ * 3. 它里面**对的部分**（配对回填、审批、命令守卫、热熔断）已被新管线复用
+ *
+ * 完整迁移理由与真机证据见 `.audit/REFACTOR-DELIVERY.md` 与 `.audit/REAL-KEY-VERIFICATION.md`。
+ *
  * ## 这个类是之前架构的缺口
  *
  * `12-模块与文件清单.md` 原本**没有 `:agent` 模块** ——
@@ -79,6 +103,11 @@ enum class ApprovalMode {
     }
 }
 
+@Deprecated(
+    message = "旧管线（4B 本地模型时代）。默认已切到 dev.heracles.cloud.CloudAgentPipeline；" +
+        "本类仅作 fallback（CloudPipelineFlags.override=false 时使用）。不要在新代码里引用它。",
+    level = DeprecationLevel.WARNING,
+)
 class AgentLoop(
     private val provider: ModelProvider,
     private val workspace: WorkspaceFs,
@@ -147,7 +176,7 @@ class AgentLoop(
      * **连续工具执行失败上限**（ADR-033 / P0-1，2026-10-18）—— 超限熔断停止。
      * 默认 [Contract.Budget.MAX_CONSECUTIVE_FAILURES]（6）。
      *
-     * ⚠️ 与 [CONSECUTIVE_UNPARSEABLE_LIMIT]（连续**解析**失败，阈值 2）是**两件事**：
+     * ⚠️ 与 [CONSECUTIVE_UNPARSEABLE_LIMIT]（连续**解析**失败，2026-10-21 起阈值 5）是**两件事**：
      * 那个数"模型输不出可解析的东西"，这个数"工具真的执行失败了"。
      * `成功` 会把计数器清零（偶发失败不算系统性问题）；
      * `需要用户确认` **既不增也不清零**（它不是失败，也不代表进展）。
@@ -451,9 +480,23 @@ class AgentLoop(
      * 判据 = 有**文件系统 / 设备副作用**（写、删、移动、执行命令、构建/签名）。
      * 读类工具（read_file / list_files / find_files / grep_files）与元工具
      * （search_tools / update_plan）**不问** —— 问多了就是噪音，用户会条件反射点允许。
+     *
+     * ## ⚠️ 2026-10-21（BUG-1）：**漏了 `edit` 与 `restore_path`**（反向漏洞）
+     *
+     * 这份名单是**白名单**语义：不在里面 = MANUAL 档**不问就执行**。所以漏一个成员
+     * 不是"少问一次"的体验问题，而是**手动审批档下的静默放行**：
+     *
+     * · `edit`（`PatchTools.EditTool`）—— 最常用的**改代码**工具，与 `apply_patch` 同侧；
+     *   `apply_patch` 在名单里、`edit` 不在 ⇒ 换成局部替换就绕过了审批。
+     * · `restore_path`（`PathTools`）—— 从快照**写回**文件，同样是文件系统副作用
+     *   （它会覆盖用户当前内容）。
+     *
+     * 判据本身没错（"有副作用就问"），错在**枚举不全**。以后新增有副作用的工具
+     * 必须同步加进这里 —— `ApprovalModeRegressionTest` 有一条守卫会在"名单少成员"时报红。
      */
     private val mutatingTools = setOf(
-        "write_file", "apply_patch", "delete_path", "move_path", "copy_path", "mkdir",
+        "write_file", "apply_patch", "edit", "restore_path",
+        "delete_path", "move_path", "copy_path", "mkdir",
         "run_shell_command", "scaffold_android", "build_apk", "apk_decompile",
         "apk_recompile", "apk_sign", "d8_convert", "unzip_file", "zip_file",
     )
@@ -867,7 +910,7 @@ class AgentLoop(
     }
 
     /**
-     * **ask_user 工具的回答通道**（2026-10-16，用户需求「ask 功能」）。
+     * **ask_user 的回答通道**（2026-10-16 引入；2026-10-21 改为**选项式**）。
      *
      * ## 它解决什么
      *
@@ -876,16 +919,23 @@ class AgentLoop(
      * **正确反应是问用户**——这正是 `04-抗幻觉设计.md` 的精神：
      * 不确定就问，不要编。
      *
-     * ## 工作流（与 InterruptQueue 相反的方向）
+     * ## 工作流
      *
      * ```
-     * 模型 → {"tool":"ask_user","args":{"question":"…"}} → 工具执行
-     *        工具挂起等待 ←── [AskReplyQueue] ←── UI 弹窗 → 用户输入
+     * 模型 → {"tool":"ask_user","args":{"questions":[…]}} → 工具执行
+     *        工具挂起等待 ←── [AskReplyQueue] ←── UI 弹窗（选项式）
      *        拿到回答 → 作为工具结果返回给模型 → 继续任务
      * ```
      *
-     * `InterruptQueue` 是"用户主动插入"，这个是"模型主动请求"——
-     * 方向相反，但通道模式相同（线程安全队列 + 挂起等待）。
+     * ## 2026-10-21 为什么改形状
+     *
+     * 用户原话：
+     * > 「ask 要是选项点击的，不是要我直接在下面输入……可以多选，单选，
+     * >   是 LLM 根据任务决定，可以一次发多个 ask，回答完自动下一个问题，
+     * >   下面可以点击上一题和下一题。」
+     *
+     * 旧通道只传一个 `String`（用户手打的一段话）⇒ 无法表达"哪一题选了哪些项"。
+     * 现在传 [AskAnswers]（题目 id → 选中的 label 列表），**多题一次回填**。
      *
      * ## 超时
      *
@@ -897,23 +947,23 @@ class AgentLoop(
         /** 等待用户回答的最长时间；超过则放行（不无限挂起）*/
         private val timeout: kotlin.time.Duration = kotlin.time.Duration.parse("10m"),
     ) {
-        private val channel = kotlinx.coroutines.channels.Channel<String>(
+        private val channel = kotlinx.coroutines.channels.Channel<dev.heracles.core.tool.AskAnswers>(
             kotlinx.coroutines.channels.Channel.RENDEZVOUS,
         )
 
-        /** UI 层投递用户的回答（弹窗提交时调用）*/
-        fun reply(text: String) {
-            val t = text.trim()
-            // trySend：RENEZVOUS 模式下无接收者会失败 —— 但工具挂起在
+        /** UI 层投递用户的回答（弹窗提交时调用）。 */
+        fun reply(answers: dev.heracles.core.tool.AskAnswers) {
+            // trySend：RENDEZVOUS 模式下无接收者会失败 —— 但工具挂起在
             // receive 上，正常路径一定有接收者。失败只发生在"运行已结束"
             // （工具已超时放行），此时回答无意义，丢弃即可。
-            channel.trySend(t)
+            channel.trySend(answers)
         }
 
         /** 工具侧挂起等待回答；超时返回 null */
-        suspend fun await(): String? = kotlinx.coroutines.withTimeoutOrNull(timeout) {
-            channel.receive()
-        }
+        suspend fun await(): dev.heracles.core.tool.AskAnswers? =
+            kotlinx.coroutines.withTimeoutOrNull(timeout) {
+                channel.receive()
+            }
 
         /** 无 ask 能力的单例 —— 既有调用方（CLI/测试）零改动 */
         companion object {
@@ -1138,6 +1188,20 @@ class AgentLoop(
 
         /** 询问用户（或按本 run 的白名单直接放行）。 */
         suspend fun approve(turnIndex: Int, call: ToolCall, reason: String): ApprovalResult {
+            // ★★ FULL_ACCESS 档**绝不发** ApprovalRequest（2026-10-21，BUG-1）★★
+            //
+            // ## 为什么这道闸必须在这里，而不是只靠调用方
+            //
+            // 现在 4 个调用点（单调用 needAsk / 单调用 NeedsApproval / 并行 needAsk /
+            // 并行 NeedsApproval）都已经在 FULL_ACCESS 时跳过 `approve()` 了 ——
+            // 也就是说这条早退**今天走不到**。留着它是为了把"不弹窗"变成
+            // **approve() 自己的不变量**：以后新增第 5 个调用点时，忘了判档位
+            // 也不会把「完全访问」档的用户又拽回弹窗。
+            //
+            // 用户报的就是这个症状：「开了完全权限，还要手动点允许」。
+            // 根因在 Dart 侧（`_showApprovalDialog` 无条件弹），但**任何一层漏判**
+            // 都会复现 ⇒ Kotlin 这层也钉一道（测试：`ApprovalModeRegressionTest`）。
+            if (approvalMode == ApprovalMode.FULL_ACCESS) return ApprovalResult.ALLOWED
             val sig = approvalSignature(call)
             if (sig in sessionApprovals) return ApprovalResult.ALLOWED
             // 跨 run 的持久白名单（装配处 seed 进来的）—— 已「始终允许」过的工具不再问。
@@ -1371,6 +1435,37 @@ class AgentLoop(
                 turnIndex = turnIndex,
                 stepId = streamStepId,
                 images = runImages,
+            )
+
+            // ★★ 每轮一行**结构化诊断**（2026-10-21）★★
+            //
+            // ## 位置很关键：必须在**失败分支之前**
+            //
+            // 第一版放在下面 `val result = streamed.result!!` 之后 —— 结果真机上
+            // 一行都没打出来：provider 失败时 `streamed.failure != null` 会**提前 return**，
+            // 根本走不到那里。**"最需要看日志的时候恰恰是失败的时候"**，所以放在这里。
+            //
+            // ## 为什么不能只靠 `debug` 开关
+            //
+            // `debug` 要 `HERACLES_DEBUG=1` 环境变量，**App 里设不了** ⇒
+            // 用户只能看到一句「没有按协议输出」，排查者拿不到任何事实。
+            //
+            // 这行把"到底发生了什么"变成可复核数据：
+            // · `finish` —— STOP / LENGTH / ERROR；**LENGTH = 被输出预算截断**
+            // · `raw`/`reason` —— 正文空 + 思考长 = 模型把预算烧在思考上
+            // · `calls` —— 原生工具调用数
+            // · `fail` —— provider 异常类型与消息（**这是失败路径唯一的线索**）
+            //
+            // ⚠️ 只打长度/枚举/异常类型，**不打正文**（正文可能含用户数据）；
+            //    `fail` 的消息来自 provider，已按既有纪律不含 Key（见 API Key 硬约束）。
+            println(
+                "[heracles][turn] turn=$turnIndex " +
+                    "finish=${streamed.result?.finishReason ?: "FAILED"} " +
+                    "raw=${streamed.result?.text?.length ?: 0} " +
+                    "reasoning=${streamed.reasoningChars} " +
+                    "calls=${streamed.result?.toolCalls?.size ?: 0} " +
+                    "maxOut=${effectiveMaxOutputTokens()} " +
+                    "fail=${streamed.failure?.let { it.javaClass.simpleName + ": " + it.message } ?: "-"}",
             )
 
             if (streamed.failure != null) {
@@ -1663,11 +1758,16 @@ class AgentLoop(
                     // ★ ask_user：工具会**挂起等待用户回答**（2026-10-16）——
                     //   必须在挂起**前**通知 UI 弹窗，否则用户不知道模型在等什么。
                     //   用户在弹窗里提交回答 → AskReplyQueue.reply() → 工具拿到。
+                    //
+                    // ★ 2026-10-21：改为**选项式多题**。这里把模型给的 `questions`
+                    //   JSON 解析成结构体随事件发给 UI（UI 只渲染、不解析 JSON）。
+                    //   解析失败就发空列表 —— UI 会显示"问题格式无法识别"，
+                    //   而**工具自己**也会因为同样的解析失败返回 Failure（两条路一致）。
                     if (call.tool == "ask_user") {
                         emit(
                             AgentEvent.AskUser(
                                 turnIndex,
-                                question = call.args["question"].orEmpty(),
+                                questions = AskUserArgs.parse(call.args["questions"].orEmpty()),
                                 call = call,
                             )
                         )
@@ -1938,7 +2038,9 @@ class AgentLoop(
                             emit(
                                 AgentEvent.AskUser(
                                     turnIndex,
-                                    question = extraCall.args["question"].orEmpty(),
+                                    questions = AskUserArgs.parse(
+                                        extraCall.args["questions"].orEmpty(),
+                                    ),
                                     call = extraCall,
                                 )
                             )
@@ -2116,15 +2218,16 @@ class AgentLoop(
                     // 用户实测：正文恒为空、连续 4 轮「输出无法解析」，
                     // 每轮 100+ 秒（本地 llama.cpp 在思考上烧光 max_tokens，
                     // `content` 为空 —— 根因是请求没带
-                    // `enable_thinking=false`，见 `docs/25` §12.1）。
+                    // `enable_thinking=false`）。
                     //
                     // **重试救不了这种情况**：模型每一轮都在做同一件事
                     // （把预算全花在思考上），再给 8 轮也是一样的结果，
                     // 只是让用户多等十几分钟。
                     //
-                    // 熔断阈值取 2：第一次失败值得重试（可能是偶发的
-                    // 格式漂移）；连续两次同样的失败说明是**系统性**问题，
-                    // 立刻停下并如实说明，让用户能去查配置。
+                    // ★ 2026-10-21（BUG-2）：阈值从 2 放宽到 5 —— 理由与代价
+                    //   全部写在 `CONSECUTIVE_UNPARSEABLE_LIMIT` 的 KDoc 里
+                    //   （一句话：云端大模型会**看到错误回执后自我纠错**，阈值 2
+                    //   会把"正要改对"的那一轮掐掉，症状与本地 4B 那次一样但原因相反）。
                     val consecutiveUnparseable = records
                         .takeLast(CONSECUTIVE_UNPARSEABLE_LIMIT)
                         .count { it.verdict.startsWith("输出无法解析") }
@@ -2510,6 +2613,10 @@ class AgentLoop(
                 finishReason = terminalReason ?: FinishReason.STOP,
                 toolCalls = terminalCalls,
             ),
+            // ★ 思考长度随结果带出来（2026-10-21）：
+            //   它是诊断"正文为空"的关键量 —— 正文 0 + 思考很长 = 模型把预算烧在思考上。
+            //   `reasoning` 原本只是本函数的局部变量，外层完全看不到。
+            reasoningChars = reasoning.length,
         )
     }
 
@@ -2517,6 +2624,8 @@ class AgentLoop(
     private class StreamedTurn(
         val result: GenerateResult? = null,
         val failure: Throwable? = null,
+        /** 本轮思考（`reasoning_content`）的字符数；**只用于诊断**，不参与任何决策。 */
+        val reasoningChars: Int = 0,
     )
 
     /**
@@ -2665,26 +2774,64 @@ class AgentLoop(
         const val MAX_IDENTICAL_TOOL_CALLS = 2
 
         /**
-         * **连续解析失败的熔断阈值**（2026-10-14）。
+         * **连续解析失败的熔断阈值**（2026-10-14 引入；2026-10-21 由 2 放宽到 5）。
+         *
+         * ## 为什么原来是 2
          *
          * 用户真机实测：正文恒为空、连续 4 轮「输出无法解析」，
          * 每轮 100+ 秒（本地 llama.cpp 把 max_tokens 全烧在思考上，
-         * `content` 为空 —— 根因是请求没带 `enable_thinking=false`，
-         * 见 `docs/25` §12.1 与 `实测-03` 坑 16）。
+         * `content` 为空 —— 根因是请求没带 `enable_thinking=false`）。
+         * 那种情况下重试救不了**系统性**失败：模型每一轮都在重复同一件事，
+         * 给满 8 轮只是让用户多等十几分钟。所以取 2：首次失败值得重试，第二次同样失败就停。
          *
-         * **重试救不了系统性失败**：模型每一轮都在重复同一件事，
-         * 给满 8 轮只是让用户多等十几分钟，结果一样。
+         * ## 2026-10-21 为什么必须放宽到 5（BUG-2）
          *
-         * 取 2 的依据：首次失败值得重试（可能是偶发格式漂移）；
-         * 连续两次**同样的**失败说明是配置/系统性问题，应立刻停下
-         * 并如实说明，让用户能去查后端配置。
+         * 那个"2"是**本地 4B 时代**的调参，前提是"模型输不出协议 = 系统性坏掉"。
+         * 换成云端大模型后前提变了：**它会自我纠错**。真机上抓到的典型链路是
+         *
+         * ```
+         * 第 1 轮：模型输出了一个不合法/被校验器拦下的调用
+         * 第 2 轮：模型看到错误回执，调整了格式 —— 但还差一点
+         * 第 3 轮：调对了 ⇒ 任务继续
+         * ```
+         *
+         * 阈值 2 会**在第 3 轮之前就熔断**，把"模型正要改对"的那一轮掐掉。
+         * 用户看到的是「输出无法解析」—— 与 4B 那次的症状一样，但**原因完全相反**：
+         * 那次是模型不会改；这次是模型会改，而**熔断器不给它机会**。
+         *
+         * 取 5 的依据：一次真机失败通常伴随 2–3 轮"看到错误 → 调整"的往返；
+         * 5 给足余量（且与 [Contract.Budget.MAX_CONSECUTIVE_FAILURES] = 6 的
+         * "工具执行失败"阈值同量级），同时仍能在**真的坏掉**时停下（不会白烧 40 轮）。
+         *
+         * ⚠️ **代价（不许淡化）**：真正系统性坏掉时用户要多等 3 轮。
+         * 每一轮都有 `[heracles][turn]` 结构化诊断日志（`finish`/`raw`/`reasoning`/`calls`/`fail`）
+         * ⇒ 排查者仍能立刻看出"这 5 轮到底在干什么"，不是盲等。
          */
-        const val CONSECUTIVE_UNPARSEABLE_LIMIT = 2
+        const val CONSECUTIVE_UNPARSEABLE_LIMIT = 5
 
+        /**
+         * 身份与边界声明 —— 进冻结前缀。
+         *
+         * ## ★ 2026-10-21：加了一句**语言约束**
+         *
+         * 用户报「思考过程几乎是英文」。根因是**模型的 reasoning 通道行为**
+         * （GPT 系与多数中转站在思考通道里默认说英文），不是代码缺陷 ——
+         * 代码无法强制模型用哪种语言思考。
+         *
+         * 但提示词能**提高概率**：明确要求"用用户使用的语言思考与回答"。
+         * ⚠️ **不要夸大效果**：它只是把概率往上推，不保证。
+         *
+         * ## 代价（必须知道）
+         *
+         * 改这个常量 = **改冻结前缀的 hash** ⇒ 跨构建首次请求 prefix cache
+         * **必然 miss 一次**（预期代价，`02-契约规范.md` §1.2）。
+         * 不要为了"测试好看"把它改回去。
+         */
         const val DEFAULT_SYSTEM_PROMPT =
             "你是 Heracles，一个运行在手机上的开发助手。" +
                 "你可以读写工作区里的文件来帮用户完成开发任务。" +
-                "先看清现状再动手；不确定项目结构时先用 list_files。"
+                "先看清现状再动手；不确定项目结构时先用 list_files。" +
+                "务必用**用户使用的语言**思考与回答（用户说中文就用中文，包括思考过程）。"
 
         /**
          * **文本轨**的工具调用协议。

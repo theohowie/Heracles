@@ -399,8 +399,33 @@ class TurnMetrics {
   final int? cachedTokens;
   final int promptTokens;
   final int outputTokens;
+
+  /// 本轮的**模型用时**（毫秒）—— `TurnRecord.wallMs`，只包住模型往返。
+  ///
+  /// ⚠️ **不含工具执行 / 审批等待 / 压缩**（那些发生在 generate 之外）。
+  /// 所以它**不是**"这一轮花了多久" —— 想看任务总耗时用
+  /// `SessionUsage.taskWallMs`（run 级真实墙钟）。UI 上必须标注「模型」。
   final int wallMs;
 
+  /// **单轮**缓存命中率 —— **与累计命中率口径不同，两者不可互相替代**。
+  ///
+  /// ## 口径（2026-10-21，BUG-5）
+  ///
+  /// 本 getter = **这一轮**的 `cached / (cached + prompt)`。
+  /// 它**不是**会话累计命中率：
+  ///
+  /// | 数 | 算法 | 展示位置 |
+  /// |---|---|---|
+  /// | 本 getter（单轮） | 本轮的 `cached / (cached + prompt)` | 消息下方「本次用量」 |
+  /// | `SessionUsage.hitRate`（累计·加权） | `Σcached / Σ(cached+prompt)`，**全部轮次** | 标题栏圆圈 + 侧栏主标题 |
+  /// | `AgentRunResult.steadyHitRate`（稳态·轮次平均） | `turns.drop(1)` 各轮命中率的**平均** | 侧栏「稳态命中率」 |
+  ///
+  /// ## 曾经的事故（用户原话）
+  ///
+  /// > "会话标题右边的第一个圆圈显示缓存命中率 94%，但是下方的显示 96%"
+  ///
+  /// 这不是两个 bug，是**两个口径不同的数共用了同一个名字**。
+  /// 现在三处各自带口径标签，不再都叫「缓存命中」。
   double? get hitRate {
     final c = cachedTokens;
     if (c == null) return null;

@@ -653,38 +653,18 @@ private fun isUnsafeEntryPath(relativePath: String): Boolean {
 /**
  * glob → 正则。
  *
- * 只支持三种通配（见 [FindFilesTool] 的类注释）。`**` 后面紧跟 `/` 时表示
- * "任意层目录（含 0 层）"，所以 `**` + `/` + `*.kt` 也能匹配根目录下的 `*.kt`。
+ * ## ★ 2026-10-21：改用 [CloudGlob]（支持 `[abc]` / `{b,c}`）
  *
- * 其余字符一律当字面量 —— 模型写 `a+b.kt` 时不该被解释成正则。
+ * 旧实现只支持 `*` / `?` / `**`，类注释写着「不支持 `[abc]` / `{a,b}` …
+ * 4B 模型不需要更多语法」。那是**能力裁剪**，而后果是
+ * `*.{kt,java}` 被当字面量 ⇒ **0 命中** ⇒ 模型以为文件不存在。
+ *
+ * 现在委托给 [CloudGlob]：语法完整，且**未闭合括号会记 warning**
+ * （由调用方如实回给模型，而不是静默 0 命中）。
+ *
+ * 其余字符仍然一律当字面量 —— 模型写 `a+b.kt` 时不该被解释成正则。
  */
-private fun globToRegex(pattern: String): Regex {
-    val regex = StringBuilder()
-    var index = 0
-    while (index < pattern.length) {
-        when (val ch = pattern[index]) {
-            '*' -> {
-                val doubleStar = index + 1 < pattern.length && pattern[index + 1] == '*'
-                if (doubleStar) {
-                    index += 2
-                    if (index < pattern.length && pattern[index] == '/') {
-                        // `**` + `/` = 任意层目录（含直接命中）
-                        regex.append("(?:.*/)?")
-                        index += 1
-                    } else {
-                        regex.append(".*")
-                    }
-                    continue
-                }
-                regex.append("[^/]*")
-            }
-            '?' -> regex.append("[^/]")
-            else -> regex.append(Regex.escape(ch.toString()))
-        }
-        index += 1
-    }
-    return Regex(regex.toString())
-}
+private fun globToRegex(pattern: String): Regex = CloudGlob.compile(pattern).regex
 
 private fun dirLabel(dir: String): String = if (dir.isEmpty()) "工作区根" else dir
 

@@ -147,7 +147,33 @@ class OpenAiResponsesProvider(
         ).collect { event ->
             val root = runCatching { JsonHolder.parse(event.payload) }.getOrNull()
                 ?: return@collect
-            when (root.get("type")?.asString) {
+            val eventType = root.get("type")?.asString
+            // ★★ 2026-10-21：**思考增量**（本轨此前完全没接 ⇒ 思考在 provider 层全丢）
+            //
+            // ## 为什么是两个事件名
+            //
+            // Responses API 的 reasoning 有两种承载：
+            // - `response.reasoning_summary_text.delta` —— 官方给的**可读摘要**
+            //   （模型自己提炼的"我在想什么"），适合给用户看
+            // - `response.reasoning_text.delta` —— 原始思考流，部分端点才发
+            //
+            // 两个都接到 `deltaReasoning`：
+            // - 只接 summary ⇒ 端点只发 reasoning_text 时思考还是没有
+            // - 只接 reasoning_text ⇒ 多数端点只发 summary 时思考还是没有
+            // - 都接 ⇒ 若某端点**同时**发两种，思考会显示两遍
+            //
+            // ⚠️ 后者是真实风险，但"不显示"是确定的损失，"显示两遍"是特定端点的
+            //    边缘情况 —— 选择先不丢。若真机发现重复，再按端点分派
+            //    （那时会有真 Key 证据，符合"wire 变更必须真 Key 验证"的纪律）。
+            //
+            // ⚠️ 判定收在 [isReasoningDeltaEvent] 里：**可单测**（见 `ReasoningChannelTest`），
+            //    不要在这种分支里散写字符串比较。
+            if (isReasoningDeltaEvent(eventType)) {
+                val t = root.get("delta")?.takeIf { !it.isJsonNull }?.asString ?: ""
+                if (t.isNotEmpty()) emit(StreamChunk(deltaReasoning = t))
+                return@collect
+            }
+            when (eventType) {
                 // 流式正文增量
                 "response.output_text.delta" -> {
                     val t = root.get("delta")?.takeIf { !it.isJsonNull }?.asString ?: ""
@@ -416,5 +442,30 @@ class OpenAiResponsesProvider(
          * **让请求合法的那一半**。与另两轨同义（三轨对模型说的是同一句话）。
          */
         const val IMAGE_LEAD_IN = "（用户附上了下面的图片，请结合图片内容作答）"
+
+        /**
+         * 这个事件是不是**思考增量**（2026-10-21）。
+         *
+         * ## 为什么单独抽出来
+         *
+         * 它必须**可单测** —— 思考在 provider 层被丢掉是"静默损失"（UI 永远看不到，
+         * 正文照常，用户只会觉得"模型没思考"）。这类缺陷不能靠读代码发现，
+         * 必须有断言盯着（见 `ReasoningChannelTest`）。
+         *
+         * ## 两个事件名（都要接）
+         *
+         * | 事件 | 是什么 | 谁发 |
+         * |---|---|---|
+         * | `response.reasoning_summary_text.delta` | 模型提炼的**可读摘要** | 多数官方端点 |
+         * | `response.reasoning_text.delta` | **原始思考流** | 部分端点/中转站 |
+         *
+         * 只接一个 ⇒ 另一类端点的思考全丢。
+         */
+        internal fun isReasoningDeltaEvent(eventType: String?): Boolean = when (eventType) {
+            "response.reasoning_summary_text.delta",
+            "response.reasoning_text.delta",
+            -> true
+            else -> false
+        }
     }
 }
