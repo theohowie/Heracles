@@ -588,14 +588,24 @@ class _AnswerActionsState extends State<_AnswerActions> {
 
   /// 本轮用量明细 —— 数据来自 [TurnMetrics]（与右上角会话平均不同：
   /// 这里是**这一轮**的数字）。
+  ///
+  /// ## 两处口径必须写在标签里（2026-10-21，BUG-5）
+  ///
+  /// 1. **耗时 = 模型用时**，不是"这一轮花了多久"。`TurnMetrics.wallMs` 只包住
+  ///    模型往返（`provider.generate` / 流式收流），**不含工具执行、审批等待、压缩**。
+  ///    用户曾拿这里的数当任务耗时质疑「才 5172ms 怎么可能」—— 那是口径被隐藏的错。
+  ///    现在标签写「模型」并**改成秒**（毫秒对任务级耗时既不准读也没意义）。
+  /// 2. **缓存命中 = 单轮**，与侧栏的累计·加权命中率**不是同一个数**
+  ///    （用户看到 94% vs 96% 以为是 bug）。这里标签写「本轮」。
   Widget _usagePanel(Hue h, TurnMetrics m) {
     final rate = m.hitRate;
     String row(String k, String v) => '$k：$v';
     final lines = <String>[
-      if (rate != null) row('缓存命中', '${(rate * 100).round()}%'),
+      if (rate != null) row('本轮缓存命中', '${(rate * 100).round()}%'),
       // ⚠️ 未上报时**不写 0%** —— null 不是 0（契约 §3.4）
-      if (rate == null) '缓存命中：本次未上报',
-      row('耗时', '${m.wallMs} ms'),
+      if (rate == null) '本轮缓存命中：本次未上报',
+      // ★ 秒级（用户要求）+ 标注「模型」+ 写明不含工具
+      row('模型耗时（不含工具）', '${(m.wallMs / 1000).toStringAsFixed(1)} 秒'),
       if (m.outputTokens > 0) row('输出', '${m.outputTokens} tokens'),
     ];
     return Container(

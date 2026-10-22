@@ -254,45 +254,126 @@ class HarnessMechanismTest {
         assertTrue(text.contains("只做"), "要提示只做当前那一步：$text")
     }
 
-    // ============================================ ask_user（2026-10-16）
+    // ============================================ ask_user（2026-10-16 / 2026-10-21 选项式）
 
     /**
      * **ask_user 工具的行为门禁**（用户需求「ask 功能」）。
      *
      * 修的是模型面对信息不足时的三种坏反应：
      * 瞎猜 / 放弃 / 谎称完成（`实测-08`）。正确反应：问用户。
+     *
+     * ## 2026-10-21 形状变了
+     *
+     * 用户要求「选项点击、单选/多选、可一次多题、上一题/下一题」⇒
+     * 参数从 `question: string` 变成 `questions: JSON 数组`，
+     * 回答从一段文本变成 `AskAnswers`（题目 id → 选中的 label 列表）。
+     * 这一组测试全部按新形状重写。
      */
+
+    /** 一条合法的单题参数（单选）。 */
+    private val oneQuestionJson = """
+        [{"id":"q1","question":"文件已存在，覆盖吗？","multi":false,
+          "options":[{"label":"覆盖","description":"旧文件会被替换"},
+                     {"label":"另存","description":"保留旧文件"}]}]
+    """.trimIndent()
+
     @Test
-    @DisplayName("★★ ask_user：用户回答后工具返回回答内容")
-    fun askUserReturnsUserAnswer() {
+    @DisplayName("★★ ask_user：用户选中选项后，工具把「问→答」原样回给模型")
+    fun askUserReturnsPickedOptions() {
         val queue = AgentLoop.AskReplyQueue()
         val tool = dev.heracles.agent.tools.AskUserTool(queue)
 
         val outcome = runBlocking {
-            // 模拟 UI：工具挂起后 100ms，回答到达（真实时序）
+            // 模拟 UI：工具挂起后 100ms，用户点了「覆盖」
             launch {
                 kotlinx.coroutines.delay(100)
-                queue.reply("覆盖原文件")
+                queue.reply(dev.heracles.core.tool.AskAnswers(mapOf("q1" to listOf("覆盖"))))
             }
-            tool.execute(mapOf("question" to "文件已存在，覆盖吗？"))
+            tool.execute(mapOf("questions" to oneQuestionJson))
         }
 
-        assertTrue(
-            outcome is ToolOutcome.Success &&
-                outcome.detail.contains("覆盖原文件"),
-            "用户的回答必须原样回到模型：$outcome",
-        )
+        assertTrue(outcome is ToolOutcome.Success, "必须成功：$outcome")
+        val detail = (outcome as ToolOutcome.Success).detail
+        assertTrue(detail.contains("覆盖"), "选中的 label 必须回到模型：$detail")
+        assertTrue(detail.contains("问："), "结果要带题干（模型才知道答的是哪题）：$detail")
+        assertTrue(detail.contains("答："), "结果要带答案：$detail")
     }
 
     @Test
-    @DisplayName("★★ ask_user：问题为空 → 失败（不挂起）")
-    fun askUserRejectsBlankQuestion() {
-        val tool = dev.heracles.agent.tools.AskUserTool(AgentLoop.AskReplyQueue())
-        val outcome = runBlocking { tool.execute(mapOf("question" to "  ")) }
+    @DisplayName("★★ ask_user：**多题一次问**，回答按 id 回填，不会串题")
+    fun askUserHandlesMultipleQuestions() {
+        val queue = AgentLoop.AskReplyQueue()
+        val tool = dev.heracles.agent.tools.AskUserTool(queue)
+        val two = """
+            [{"id":"q1","question":"用哪个框架？","options":[{"label":"Compose"},{"label":"XML"}]},
+             {"id":"q2","question":"要哪些功能？","multi":true,
+              "options":[{"label":"登录"},{"label":"支付"},{"label":"搜索"}]}]
+        """.trimIndent()
+
+        val outcome = runBlocking {
+            launch {
+                kotlinx.coroutines.delay(100)
+                queue.reply(dev.heracles.core.tool.AskAnswers(
+                    mapOf("q1" to listOf("Compose"), "q2" to listOf("登录", "搜索")),
+                ))
+            }
+            tool.execute(mapOf("questions" to two))
+        }
+
+        assertTrue(outcome is ToolOutcome.Success, "必须成功：$outcome")
+        val d = (outcome as ToolOutcome.Success).detail
+        // 两题都要在结果里，且各自答案对得上（这是"不许串题"的核心断言）
+        assertTrue(d.contains("用哪个框架？") && d.contains("Compose"), "第 1 题答案错位：$d")
         assertTrue(
-            outcome is ToolOutcome.Failure,
-            "空问题不该挂起等回答 —— 立即失败让模型修正",
+            d.contains("要哪些功能？") && d.contains("登录") && d.contains("搜索"),
+            "第 2 题多选答案错位：$d",
         )
+        assertTrue(!d.contains("XML"), "没选的选项不该出现在结果里：$d")
+    }
+
+    @Test
+    @DisplayName("★★ ask_user：**跳过某题**要如实标「未回答」，不能假装答了")
+    fun askUserReportsSkippedQuestion() {
+        val queue = AgentLoop.AskReplyQueue()
+        val tool = dev.heracles.agent.tools.AskUserTool(queue)
+
+        val outcome = runBlocking {
+            launch {
+                kotlinx.coroutines.delay(100)
+                // 用户两题只答了第一题
+                queue.reply(dev.heracles.core.tool.AskAnswers(mapOf("q1" to listOf("覆盖"))))
+            }
+            tool.execute(mapOf("questions" to """
+                [{"id":"q1","question":"覆盖吗？","options":[{"label":"覆盖"},{"label":"另存"}]},
+                 {"id":"q2","question":"要备份吗？","options":[{"label":"要"},{"label":"不要"}]}]
+            """.trimIndent()))
+        }
+
+        val d = (outcome as ToolOutcome.Success).detail
+        assertTrue(d.contains("未回答"), "跳过的题必须标出来：$d")
+    }
+
+    @Test
+    @DisplayName("★★ ask_user：参数为空 / 形状不对 → **立即失败**（不挂起等 10 分钟）")
+    fun askUserRejectsBadShape() {
+        val tool = dev.heracles.agent.tools.AskUserTool(AgentLoop.AskReplyQueue())
+
+        listOf(
+            "" to "空",
+            "  " to "空白",
+            "not json" to "不是 JSON",
+            """[{"id":"q1","question":"题","options":[]}]""" to "没有选项",
+            """[{"id":"q1","question":"题","options":[{"label":"A"},{"label":"A"}]}]"""
+                to "同题选项重名",
+            """[{"id":"q1","question":"题","options":[{"label":"A"}]},
+                {"id":"q1","question":"另一题","options":[{"label":"B"}]}]""" to "id 重复",
+        ).forEach { (raw, why) ->
+            val outcome = runBlocking { tool.execute(mapOf("questions" to raw)) }
+            assertTrue(
+                outcome is ToolOutcome.Failure,
+                "「$why」必须立即失败（不挂起）：$outcome",
+            )
+        }
     }
 
     @Test
@@ -301,11 +382,27 @@ class HarnessMechanismTest {
         // 用极短超时的队列模拟"用户一直不回答"
         val queue = AgentLoop.AskReplyQueue(timeout = kotlin.time.Duration.parse("100ms"))
         val tool = dev.heracles.agent.tools.AskUserTool(queue)
-        val outcome = runBlocking { tool.execute(mapOf("question" to "在吗？")) }
+        val outcome = runBlocking { tool.execute(mapOf("questions" to oneQuestionJson)) }
         assertTrue(
             outcome is ToolOutcome.Failure && outcome.reason.contains("超时"),
             "超时必须返回**可读的失败**并指引模型自行决定，而不是无限挂起：$outcome",
         )
+    }
+
+    @Test
+    @DisplayName("★ ask_user：`options` 允许裸字符串简写（模型常见写法）")
+    fun askUserAcceptsBareStringOptions() {
+        val queue = AgentLoop.AskReplyQueue()
+        val tool = dev.heracles.agent.tools.AskUserTool(queue)
+        val outcome = runBlocking {
+            launch {
+                kotlinx.coroutines.delay(100)
+                queue.reply(dev.heracles.core.tool.AskAnswers(mapOf("q1" to listOf("B"))))
+            }
+            // 裸字符串数组 + 省掉 id（自动补 q1）
+            tool.execute(mapOf("questions" to """[{"question":"选哪个？","options":["A","B"]}]"""))
+        }
+        assertTrue(outcome is ToolOutcome.Success, "裸字符串选项也要认：$outcome")
     }
 
     // ============================================================

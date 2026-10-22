@@ -95,6 +95,7 @@ class HWorkspace {
     this.expanded = false,
     this.writable = true,
     this.treeUri = '',
+    this.exists = true,
   });
 
   final String id;
@@ -127,6 +128,19 @@ class HWorkspace {
   /// 空字符串表示走 POSIX（应用私有目录 / 已获全盘权限）。
   final String treeUri;
 
+  /// **工作区指向的文件夹是否还在**（2026-10-20）。
+  ///
+  /// ## 为什么要有它
+  ///
+  /// 用户在文件管理器里把工作区文件夹删掉后，原来那条 `listWorkspaces` 会
+  /// **静默跳过**这类记录 ⇒ 侧边栏里工作区**凭空消失**，而且用户既看不到、
+  /// 也没法把它移除（记录还留在 prefs 里）。
+  ///
+  /// ⇒ Kotlin 侧现在保留记录并标 `exists=false`，UI 显示成**失效状态**：
+  ///   看得见、点它会被明确告知"工作区已失效"、也能从菜单移除。
+  ///   **看得见的坏状态，好过看不见的坏状态。**
+  final bool exists;
+
   /// 是否走 SAF 路径
   bool get isSaf => treeUri.isNotEmpty;
 
@@ -139,6 +153,7 @@ class HWorkspace {
     bool? expanded,
     bool? writable,
     String? treeUri,
+    bool? exists,
   }) =>
       HWorkspace(
         id: id,
@@ -148,6 +163,7 @@ class HWorkspace {
         expanded: expanded ?? this.expanded,
         writable: writable ?? this.writable,
         treeUri: treeUri ?? this.treeUri,
+        exists: exists ?? this.exists,
       );
 }
 

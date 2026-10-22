@@ -43,6 +43,25 @@ object PathGuard {
     fun resolve(workspaceRoot: Path, requested: String): Path {
         val root = workspaceRoot.toAbsolutePath().normalize()
 
+        // ★★ 先确认工作区根**还在**（2026-10-20 真机修）★★
+        //
+        // ## 修的是什么
+        //
+        // 工作区目录被外部删除后，用户看到的错误是：
+        //   `路径被拒绝（符号链接指向工作区外：/storage/emulated/0/Android/data/…/files）`
+        // —— 那是**误报**：没有任何符号链接问题，真实原因是**工作区根不存在**。
+        //
+        // 根因就在下面的 `resolveSymlinksSafely`：它"向上找到最近的已存在祖先再解析"，
+        // 而根被删掉时，那个祖先会一路落到**根之外**（如 `…/files`），
+        // 于是 `real` 当然不以 `root` 开头 ⇒ 抛出"符号链接指向工作区外"。
+        // 这个判定对本意（防 `link -> /etc`）是对的，但**用错了场景**。
+        //
+        // ⇒ 根不存在时，先说清是"工作区没了"，别让用户去怀疑符号链接。
+        //   这也是用户明确要求的口径：「此时输出：xxx 工作区已失效」。
+        if (!Files.exists(root)) {
+            throw PathEscapeException(requested, "工作区已失效：它指向的文件夹不存在")
+        }
+
         val cleaned = requested.trim()
         if (cleaned.isEmpty()) {
             throw PathEscapeException(requested, "路径为空")

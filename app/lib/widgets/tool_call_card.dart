@@ -1,3 +1,5 @@
+import 'dart:convert';
+
 import 'package:flutter/material.dart';
 
 import '../models/message.dart';
@@ -29,6 +31,11 @@ String friendlyToolName(String tool) => switch (tool) {
       //   `update_plan` / `run_shell_command` / `apply_patch` —— 那是给模型看的）
       'update_plan' => '更新任务计划',
       'apply_patch' => '局部修改代码',
+      // ★ 2026-10-21（BUG-4）：`edit` / `restore_path` 此前**没登记**
+      //   ⇒ 卡片顶部露出的是 schema 名 `edit` / `restore_path`（给模型看的）。
+      //   它们都是写类工具，必须和 `apply_patch` 同一档人话。
+      'edit' => '局部修改代码',
+      'restore_path' => '恢复文件到快照',
       'find_files' => '查找文件',
       'grep_files' => '搜索代码',
       'run_shell_command' => '执行命令',
@@ -61,6 +68,8 @@ String runningToolName(String tool) => switch (tool) {
       'list_files' => '正在查看目录文件',
       'update_plan' => '正在更新任务计划',
       'apply_patch' => '正在局部修改代码',
+      'edit' => '正在局部修改代码',
+      'restore_path' => '正在恢复文件',
       'find_files' => '正在查找文件',
       'grep_files' => '正在搜索代码',
       'run_shell_command' => '正在执行命令',
@@ -84,6 +93,160 @@ String runningToolName(String tool) => switch (tool) {
       'search' => '正在搜索内容',
       _ => '正在执行 $tool',
     };
+
+/// **会改文件系统的工具** —— 这些工具的卡片**必须**给「完整改动」入口
+/// （2026-10-21，BUG-4）。
+///
+/// ## 为什么需要这个集合
+///
+/// 用户原话：「调用工具不透明，看不到改了什么代码」。
+///
+/// Kotlin 侧的写类工具（`write_file` / `edit` / `apply_patch` …）在**结果里**
+/// 已经带了 `DiffReceipt` 渲染的 diff（`FileTools.DiffReceipt`：
+/// `@@ 第 N 行 @@` + `- 旧行` / `+ 新行`），但**卡片只显示摘要** ——
+/// 标准档把结果截到 80 字符，用户看到的就只剩一行 `@@ 第 3 行 @@…`。
+///
+/// 所以这里给写类工具单独开一个**默认折叠、一点就开**的「改动详情」区块，
+/// 里面渲染**完整** diff（不受档位截断）+ 等宽字体 + `+N −M` 统计。
+/// **不动 `StepDetail.summaryChars`** —— 那是全局设置，改它会波及所有卡片。
+const Set<String> kFileWritingTools = {
+  'write_file',
+  'edit',
+  'apply_patch',
+  'delete_path',
+  'move_path',
+  'copy_path',
+  'restore_path',
+};
+
+/// 这次调用是否"会改文件"（决定要不要给 diff 入口）。
+bool isFileWritingTool(String tool) => kFileWritingTools.contains(tool);
+
+/// 把改动统计成 `+N −M`（2026-10-21，BUG-4）。
+///
+/// ## 数据从哪来
+///
+/// **Kotlin 侧已经算好了**：`DiffReceipt.render(...)` 的输出形如
+///
+/// ```text
+/// @@ 第 4 行 @@
+/// - 旧的一行
+/// + 新的一行
+/// ```
+///
+/// 界面上**不再做一次真正的 diff 计算**（那要拿到改前/改后全文，UI 没有；
+/// 真做出来还可能与后端不一致）。这里只是**数行号前缀**：
+/// 以 `+ ` 开头的算新增，以 `- ` 开头的算删除。
+///
+/// ⚠️ 只对**写类工具的 result** 用（`call.result`）。别拿它去数普通文本 ——
+/// Markdown 列表里的 `- ` 会被误算成删除。
+class DiffStat {
+  const DiffStat({required this.added, required this.removed, required this.isDiff});
+
+  final int added;
+  final int removed;
+
+  /// 结果里到底有没有 diff 结构（没有 ⇒ 不显示"+0 −0"这种假统计）。
+  final bool isDiff;
+
+  bool get hasChanges => added > 0 || removed > 0;
+
+  /// `+12 −3`（用真正的减号 U+2212，不是连字符 —— 与 GitHub / DeepSeek harness 一致）。
+  String get label => '+$added −$removed';
+
+  @override
+  String toString() => 'DiffStat($label, isDiff=$isDiff)';
+}
+
+/// 从写类工具的**结果文本**里数 `+N −M`。
+///
+/// ## 为什么必须有"锚"
+///
+/// 只按 `+ ` / `- ` 前缀数行是**不可靠**的：任意 Markdown 列表（`- 某一项`）
+/// 都会被误算成"删了一行"。所以先要求出现一个 **diff 锚**：
+/// `@@ 第 N 行 @@`（改内容）或 `（新建文件` / `（内容未变化）`（`DiffReceipt`
+/// 的另两种形态）。没有锚 ⇒ `isDiff = false`，卡片**不显示**统计
+/// （宁可不显示，也不显示一个假数字）。
+DiffStat diffStatOf(String? resultText) {
+  if (resultText == null || resultText.isEmpty) {
+    return const DiffStat(added: 0, removed: 0, isDiff: false);
+  }
+  final lines = const LineSplitter().convert(resultText);
+  final anchored = lines.any(
+    (l) =>
+        l.startsWith('@@') ||
+        l.startsWith('（新建文件') ||
+        l.startsWith('（内容未变化'),
+  );
+  if (!anchored) return const DiffStat(added: 0, removed: 0, isDiff: false);
+
+  var added = 0;
+  var removed = 0;
+  for (final line in lines) {
+    if (line.startsWith('+ ') || line.startsWith('+\t')) {
+      added++;
+    } else if (line.startsWith('- ') || line.startsWith('-\t')) {
+      removed++;
+    }
+  }
+  return DiffStat(added: added, removed: removed, isDiff: true);
+}
+
+/// 这次调用**动了哪些文件**（用于「文件改动摘要」行）。
+///
+/// 按工具语义取参数：写/改取 `path`，移动取 `from`→`to`，删除取 `path`。
+/// **拿不到就返回空列表**（不编造文件名 —— 那比不显示更糟）。
+List<String> changedFilesOf(Map<String, String> args) {
+  final from = (args['from'] ?? '').trim();
+  final to = (args['to'] ?? '').trim();
+  final path = (args['path'] ?? '').trim();
+  if (from.isNotEmpty && to.isNotEmpty) return ['$from → $to'];
+  if (path.isNotEmpty) return [path];
+  if (to.isNotEmpty) return [to];
+  return const [];
+}
+
+/// 写类工具这次**预计**新增/删除多少行（流式阶段用 —— 那时还没有 result）。
+///
+/// 依据按可靠性排序：
+/// 1. `patch` / `diff`（`apply_patch`）—— 正文里**自带** `+`/`-` 行前缀，最准
+/// 2. `new_string` / `old_string`（`edit`）—— 两个片段的行数即增删量
+/// 3. `content`（`write_file`）—— 只能数出"写入 N 行"，删除量未知（给 0）
+///
+/// ⚠️ 第 3 种是**下界不是真值**：整文件重写时真实删除量取决于原文件。
+/// 所以流式摘要只是"让人看见改了哪、大概多少"，最终数字以工具结果的
+/// [diffStatOf] 为准。
+DiffStat estimatedDiffStatOf(Map<String, String> args) {
+  final patch = args['patch'] ?? args['diff'];
+  if (patch != null && patch.isNotEmpty) {
+    var a = 0;
+    var d = 0;
+    for (final line in const LineSplitter().convert(patch)) {
+      if (line.startsWith('+') && !line.startsWith('+++')) a++;
+      if (line.startsWith('-') && !line.startsWith('---')) d++;
+    }
+    return DiffStat(added: a, removed: d, isDiff: true);
+  }
+  final newString = args['new_string'];
+  final oldString = args['old_string'];
+  if (newString != null || oldString != null) {
+    return DiffStat(
+      added: newString == null || newString.isEmpty ? 0 : const LineSplitter().convert(newString).length,
+      removed: oldString == null || oldString.isEmpty ? 0 : const LineSplitter().convert(oldString).length,
+      isDiff: true,
+    );
+  }
+  final content = args['content'];
+  if (content != null && content.isNotEmpty) {
+    return DiffStat(
+      added: const LineSplitter().convert(content).length,
+      removed: 0,
+      isDiff: true,
+    );
+  }
+  return const DiffStat(added: 0, removed: 0, isDiff: false);
+}
+
 
 /// 工具调用卡片 —— 可折叠，按「工作步骤展示」档位分级渲染。
 ///
@@ -125,6 +288,13 @@ class ToolCallCard extends StatefulWidget {
 
 class _ToolCallCardState extends State<ToolCallCard> {
   bool _expanded = true;
+
+  /// **改动详情**是否展开（2026-10-21，BUG-4）。
+  ///
+  /// 独立于 [_expanded]：卡片整体展开 ≠ 要看 diff。
+  /// diff 可能几十行，默认收起才不会把一屏塞满 ——
+  /// 但**入口必须永远看得见**（"点击查看改动" + `+N −M`）。
+  bool _diffExpanded = false;
 
   @override
   Widget build(BuildContext context) {
@@ -239,6 +409,12 @@ class _ToolCallCardState extends State<ToolCallCard> {
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
+                  // ---- 文件改动详情（2026-10-21，BUG-4）----
+                  //
+                  // 放在参数**之前**：用户最想看的是"改了什么代码"，
+                  // 而不是"调用时传了哪几个参数名"。
+                  if (isFileWritingTool(call.tool)) _diffSection(h, call),
+
                   // ---- 参数 ----
                   if (detail.showArgs)
                     ...call.args.entries.map(
@@ -316,6 +492,186 @@ class _ToolCallCardState extends State<ToolCallCard> {
   bool _hasBody(StepDetail detail) {
     if (!detail.showArgs) return false;
     return widget.call.args.isNotEmpty || widget.call.result != null;
+  }
+
+  // ============================================================
+  // ★★ 文件改动详情（2026-10-21，BUG-4）★★
+  //
+  // ## 用户报的症状
+  //
+  // > 「调用工具不透明，看不到改了什么代码」
+  //
+  // ## 根因（两端各一半）
+  //
+  // · **Kotlin 侧没问题**：`DiffReceipt.render(...)` 已经把 diff 放进工具结果
+  //   （`FileTools.DiffReceipt` → `@@ 第 N 行 @@` / `- 旧行` / `+ 新行`）。
+  // · **UI 侧把它截没了**：标准档用 `StepDetail.summaryChars`（80）截结果，
+  //   一整段 diff 到用户眼前只剩一行 `@@ 第 3 行 @@…`。
+  //
+  // ## 修法边界（**不许**动 summaryChars）
+  //
+  // `summaryChars` 是**全局设置**，改它会波及所有卡片（包括非写类）。
+  // 所以这里只给写类工具开一个**自己的**入口：
+  //   · 默认**折叠**（diff 几十行，全展开会淹掉回答）
+  //   · 折叠态就显示 `+N −M` 统计与「点击查看改动」——**入口永远可见**
+  //   · 展开后渲染**完整** diff（不受档位截断） + 等宽字体 + 行级配色
+  // ============================================================
+
+  /// 这次的统计：优先用**工具结果**里的真 diff（权威），
+  /// 拿不到才用参数估算（流式阶段 / 结果还没到）。
+  DiffStat _stat(HToolCall call) {
+    final fromResult = diffStatOf(call.result);
+    if (fromResult.isDiff) return fromResult;
+    return estimatedDiffStatOf(call.args);
+  }
+
+  /// 展开后要显示的**完整**改动文本。
+  ///
+  /// 优先用结果的 diff（Kotlin 算好的、与实际写入一致）；
+  /// 没有就退回参数里的 `patch` / `new_string` / `content`。
+  String _diffText(HToolCall call) {
+    final r = call.result;
+    if (r != null && diffStatOf(r).isDiff) return r;
+    final args = call.args;
+    for (final key in const ['patch', 'diff', 'new_string', 'content']) {
+      final v = args[key];
+      if (v != null && v.isNotEmpty) return v;
+    }
+    return '';
+  }
+
+  Widget _diffSection(Hue h, HToolCall call) {
+    final stat = _stat(call);
+    final text = _diffText(call);
+    final files = changedFilesOf(call.args);
+    // 没有任何改动线索 ⇒ 不摆一个空区块。
+    //
+    // 判据是**有没有可看的正文**（text），而不是"参数里有没有 path"：
+    // 只有 path 的调用（被拦截 / 还没开始）没有任何"改了什么"可展示，
+    // 这时给一个「点击查看改动」是**假入口** —— 点开是空的，比不显示更糟。
+    if (text.isEmpty) {
+      return const SizedBox.shrink();
+    }
+
+    final addedColor = HColors.successOn(h.dark);
+    final removedColor = HColors.errorOn(h.dark);
+
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        // ---- 折叠头：文件名 + `+N −M` + 「点击查看改动」----
+        //
+        // 热区 ≥44px（与卡片头部同一纪律：移动端触控目标）
+        InkWell(
+          onTap: () => setState(() => _diffExpanded = !_diffExpanded),
+          borderRadius: BorderRadius.circular(HRadius.sm),
+          child: ConstrainedBox(
+            constraints: const BoxConstraints(minHeight: kMinTapTarget),
+            child: Row(
+              children: [
+                Icon(Icons.difference_outlined, size: 13, color: h.textFaint),
+                const SizedBox(width: HSpace.xs + 1),
+                Flexible(
+                  child: Text(
+                    files.isEmpty ? '文件改动' : files.join('、'),
+                    overflow: TextOverflow.ellipsis,
+                    style: TextStyle(
+                      fontFamily: kMonoFontFamily,
+                      fontFamilyFallback: kMonoFallback,
+                      fontSize: 11.5,
+                      color: h.textDim,
+                    ),
+                  ),
+                ),
+                const SizedBox(width: HSpace.sm),
+                // ---- `+N −M` 统计（等宽，绿/红）----
+                if (stat.hasChanges) ...[
+                  Text(
+                    '+${stat.added}',
+                    style: TextStyle(
+                      fontFamily: kMonoFontFamily,
+                      fontFamilyFallback: kMonoFallback,
+                      fontSize: 11.5,
+                      fontWeight: FontWeight.w600,
+                      color: addedColor,
+                    ),
+                  ),
+                  const SizedBox(width: HSpace.xs),
+                  Text(
+                    '−${stat.removed}',
+                    style: TextStyle(
+                      fontFamily: kMonoFontFamily,
+                      fontFamilyFallback: kMonoFallback,
+                      fontSize: 11.5,
+                      fontWeight: FontWeight.w600,
+                      color: removedColor,
+                    ),
+                  ),
+                  const SizedBox(width: HSpace.sm),
+                ],
+                // ---- 入口提示（用户要的就是"知道哪能点"）----
+                Text(
+                  _diffExpanded ? '收起' : '点击查看改动',
+                  style: TextStyle(fontSize: 10.5, color: h.textFaint),
+                ),
+                const Spacer(),
+                Icon(
+                  _diffExpanded
+                      ? Icons.keyboard_arrow_up_rounded
+                      : Icons.keyboard_arrow_down_rounded,
+                  size: 16,
+                  color: h.textFaint,
+                ),
+              ],
+            ),
+          ),
+        ),
+
+        // ---- 展开后的完整 diff ----
+        if (_diffExpanded && text.isNotEmpty) ...[
+          const SizedBox(height: HSpace.xs),
+          Container(
+            width: double.infinity,
+            padding: const EdgeInsets.all(HSpace.sm),
+            decoration: BoxDecoration(
+              color: h.bg,
+              borderRadius: BorderRadius.circular(HRadius.sm),
+              border: Border.all(color: h.border),
+            ),
+            // 完整 diff 可能很长 —— 内部滚动 + 限高，避免把整页撑爆
+            child: ConstrainedBox(
+              constraints: const BoxConstraints(maxHeight: 420),
+              child: SingleChildScrollView(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    for (final line in const LineSplitter().convert(text))
+                      Text(
+                        line.isEmpty ? ' ' : line,
+                        style: TextStyle(
+                          fontFamily: kMonoFontFamily,
+                          fontFamilyFallback: kMonoFallback,
+                          fontSize: 11.5,
+                          height: 1.45,
+                          // 行级配色：`+` 绿、`-` 红、`@@` 淡、上下文默认
+                          color: line.startsWith('+') && !line.startsWith('+++')
+                              ? addedColor
+                              : line.startsWith('-') && !line.startsWith('---')
+                                  ? removedColor
+                                  : line.startsWith('@@')
+                                      ? h.textFaint
+                                      : h.textDim,
+                        ),
+                      ),
+                  ],
+                ),
+              ),
+            ),
+          ),
+        ],
+        const SizedBox(height: HSpace.sm),
+      ],
+    );
   }
 
   /// 按档位截断。

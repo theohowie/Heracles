@@ -519,4 +519,54 @@ class WorkspaceFsDeleteTest {
         }
         assertTrue(e.message!!.contains("删除"), "消息必须点明缺的是什么：${e.message}")
     }
+
+    // ---------------------------------------------------------------- 工作区失效
+
+    @Test
+    @DisplayName("★★ 工作区根不存在 ⇒ 说「工作区已失效」，**不许**误报成符号链接越界")
+    fun missingRootIsNotReportedAsSymlinkEscape() {
+        // ## 这条钉的是什么（2026-10-20 真机 bug）
+        //
+        // 用户在文件管理器里把工作区文件夹删掉后，App 报的是：
+        //   `路径被拒绝（符号链接指向工作区外：…/files）：.heracles/sessions/x.jsonl`
+        // —— **误报**。没有任何符号链接问题，真实原因是根不存在。
+        //
+        // 机理：`resolveSymlinksSafely` 为了处理"新建文件尚不存在"，
+        // 会"向上找到最近的已存在祖先再 `toRealPath()`"。根被删时，
+        // 那个祖先会落到**根之外**（如 `…/files`），于是当然不以 root 开头
+        // ⇒ 撞上"符号链接指向工作区外"那条判定。
+        //
+        // ⇒ 根不存在时必须**先**给出准确原因，别让用户去查符号链接。
+        val goneRoot = root.resolve("deleted-workspace") // 故意不创建
+        val e = assertThrows(PathEscapeException::class.java) {
+            PathGuard.resolve(goneRoot, ".heracles/sessions/a.jsonl")
+        }
+        assertTrue(
+            e.reason.contains("工作区已失效"),
+            "必须是「工作区已失效」：${e.reason}",
+        )
+        assertTrue(
+            !e.reason.contains("符号链接"),
+            "不许误报成符号链接问题：${e.reason}",
+        )
+    }
+
+    @Test
+    @DisplayName("★ 根存在时，符号链接越界的判定**仍然生效**（不能为了修上面的 bug 把防护拆了）")
+    fun symlinkEscapeStillRejectedWhenRootExists() {
+        // 在 root 内建一个指向 root **外部**的符号链接，必须仍被拒。
+        // 这条是上一条的**护栏** —— 防止有人为了让"根不存在"不提符号链接，
+        // 把整段符号链接检查删掉。
+        val outside = root.parent.resolve("outside-target-${System.nanoTime()}")
+        java.nio.file.Files.createDirectories(outside)
+        val link = root.resolve("evil-link")
+        java.nio.file.Files.createSymbolicLink(link, outside)
+        val e = assertThrows(PathEscapeException::class.java) {
+            PathGuard.resolve(root, "evil-link/secret.txt")
+        }
+        assertTrue(
+            e.reason.contains("符号链接"),
+            "真越界时仍要明确说是符号链接：${e.reason}",
+        )
+    }
 }

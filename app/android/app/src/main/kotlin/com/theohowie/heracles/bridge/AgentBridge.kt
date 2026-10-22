@@ -189,7 +189,25 @@ class AgentBridge(private val context: Context) {
          * 不传 = 无插话能力（与旧行为一致）。
          */
         interruptQueue: AgentLoop.InterruptQueue = AgentLoop.InterruptQueue.EMPTY,
-    ): AgentRunResult = withContext(Dispatchers.IO) {
+    ): AgentRunResult = withContext(Dispatchers.IO) run@{
+
+        // ★★ 任务总耗时（2026-10-21，BUG-5）★★
+        //
+        // 量的是**整个 run 的墙钟**：包含 provider 装配/探活、每一轮的模型往返、
+        // **工具执行**、审批/提问等待、上下文压缩、以及收尾落盘之前的全部等待。
+        //
+        // 为什么不能用 `TurnRecord.wallMs` 累加（那就是用户看到「5172 ms」的来源）：
+        // 那个数只包住 `provider.generate` / 流式往返（`AgentLoop` 里 started 在
+        // generate 之前、wallMs 在 generate 之后算），**不含工具执行与审批等待**。
+        // 一个"改 3 个文件、跑一次构建"的任务，模型往返可能只有 5 秒，
+        // 真实耗时却是几十秒 —— 拿累加的 5 秒当"任务耗时"就是假信息。
+        //
+        // ⚠️ `TurnRecord.wallMs` 的语义**不改**（那是"模型用时"，有测试钉住）；
+        //    两个数一起给，界面上分别叫「模型用时（不含工具）」与「任务总耗时」。
+        val taskStartedAtNanos = System.nanoTime()
+        // 先清零：万一在进 try 之前就抛了（provider 装配/探活失败），
+        // 面板拿到的是 0（"未知"）而不是**上一次 run 的**耗时 —— 那是假信息。
+        lastTaskWallMs = 0
 
         val provider: ModelProvider = when (backend) {
             "anthropic" -> AnthropicProvider(
@@ -449,6 +467,51 @@ class AgentBridge(private val context: Context) {
         // 让它能检索到自己会形成"永远能搜到"的循环。
         val toolsWithMeta = tools + SearchToolsTool(registry, disclosed)
 
+        // ==================== ★★ 云端管线分流（2026-10-21）★★ ====================
+        //
+        // ## 为什么在这里分流，而不是在两个管线的内部加 if
+        //
+        // 旧 `AgentLoop` 与新 `CloudAgentPipeline` 是**两条独立的执行路径**（隔离重建）。
+        // 装配层是唯一该知道"用哪条"的地方 —— 管线内部不该有 `if (useCloud)`。
+        //
+        // ## 分工
+        //
+        // · **新管线**：拿到 `candidateTools` 的**全量**（常驻 + 长尾一体，它自己的
+        //   `CloudToolRegistry` 负责"高频全发 / 低频可检索"，不再有"披露才可用"）
+        // · **旧管线**：照旧用 `toolsWithMeta`（常驻 + search_tools 元工具）
+        //
+        // ## ★★ 2026-10-21 默认已翻转为**新管线**；旧管线是 fallback
+        //
+        // `isCloudPipelineForBackend` 里有两道闸：
+        // 1. 总开关（`override` / `HERACLES_CLOUD_PIPELINE=0` 退回）
+        // 2. **未验证 wire 的轨自动退回**（`anthropic` / `responses`）
+        //
+        // 第 2 道闸的理由见 `CloudPipelineFlags.UNVERIFIED_BACKENDS` 的 KDoc：
+        // 新管线会让这三轨发出**类型化** JSON Schema，而只有 OpenAI 兼容那条真机验过。
+        // ⇒ 拿未验证的 wire 赌用户是违反仓库硬规矩的（`AGENTS.md`：wire 变更必须真 Key 验证）。
+        if (dev.heracles.cloud.CloudPipelineFlags.isCloudPipelineForBackend(backend)) {
+            return@run runCloudPipeline(
+                provider = provider,
+                candidateTools = candidateTools,
+                fs = fs,
+                request = request,
+                attachments = attachments,
+                memoryNote = runCatching {
+                    if (fs.exists(".heracles/memory.md")) {
+                        val m = fs.readText(".heracles/memory.md")
+                        if (m.isNotBlank()) "\n\n【长期记忆（跨会话保留的项目知识与用户偏好）】\n$m" else ""
+                    } else ""
+                }.getOrDefault(""),
+                history = history,
+                sessionId = sessionId,
+                approvalMode = approvalMode,
+                approvalQueue = approvalQueue,
+                askQueue = askQueue,
+                onEvent = onEvent,
+            )
+        }
+        // ==================== 云端管线分流结束 ====================
+
         // ★ 计划落盘（2026-10-19）：按会话存 `.heracles/plans/<sid>.json`。
         //   · 读回失败（首次 / 损坏）⇒ null，行为与改动前一致
         //   · 写入失败**不能**影响运行（计划是记忆增强，不是硬依赖）
@@ -564,6 +627,16 @@ class AgentBridge(private val context: Context) {
                 images = imageDataUrls(attachments),
             )
         } finally {
+            // ★★ 任务总耗时落账（2026-10-21，BUG-5）★★
+            //
+            // 放在 finally 的**第一句**：这里正是"这次 run 的所有真实工作都做完了"的时刻
+            // （模型往返 + 工具执行 + 审批等待 + 压缩都在 try 里）。
+            // 之后的代码是本 finally 自己的收尾（存白名单、清队列）——
+            // 那不属于"任务执行"，量进来会让面板的数比用户感知略大。
+            //
+            // 失败/取消时同样落账：那种 run 的耗时也是真的（而且正是要排查的对象）。
+            lastTaskWallMs = (System.nanoTime() - taskStartedAtNanos) / 1_000_000
+
             // ★ 记下冻结区规模，供"用量与上下文"面板展示（2026-10-11，t13）
             //
             // 放在 finally：**失败也要记** —— 面板要能解释"这次为什么贵/满了"，
@@ -595,6 +668,151 @@ class AgentBridge(private val context: Context) {
     }
 
     /**
+     * **跑一次云端管线**（`CloudAgentPipeline`，2026-10-21）。
+     *
+     * ## 为什么要单独一个方法而不是塞进 `run()`
+     *
+     * `run()` 已经有 190+ 行（provider 装配 / 存储选择 / 工具构造 / 旧 Loop 装配）。
+     * 把新管线的装配也塞进去会让那个方法不可读，且**两个管线的装配细节会互相干扰**
+     * （变量名重叠、approval 队列用法不同）。
+     *
+     * ⇒ 分流点只做一件事：`if (flag) return runCloudPipeline(...)`。
+     * 新管线的全部装配在本方法内，与旧路径**物理隔离**。
+     *
+     * ## 与旧路径的差异（**如实记录**）
+     *
+     * | 能力 | 旧 `AgentLoop` | 本方法 |
+     * |---|---|---|
+     * | 工具声明 | 全 string 参数 | 类型化 JSON Schema（integer/boolean/array/enum） |
+     * | 历史 | `HISTORY_MAX_TURNS=10` 硬切（在 `MainActivity`） | 传进来什么就装什么，由 `ContextManager` 按 token 预算裁 |
+     * | 披露 | `search_tools` 两段式 | 高频全发 + 低频可检索（检索当轮可用） |
+     * | 计划 | `update_plan` 由 AgentLoop 拦截 | **暂不支持**（`CloudEvent` 里没有 Plan 事件） |
+     * | 审批 | 4 个调用点各自判 | 收成一条 gate，见 `CloudBridgeAdapters` |
+     *
+     * ⚠️ **计划（`update_plan`）与 ask_user 在新管线里尚未接线** ——
+     * 它们的事件类型（`PlanCreated`/`AskUser`）还没翻译。写在这里，避免被当成"已支持"。
+     * 目前新管线里这两个工具**能调但不会弹 UI**（会被当普通工具执行/失败回填）。
+     */
+    private suspend fun runCloudPipeline(
+        provider: dev.heracles.core.provider.ModelProvider,
+        candidateTools: List<AgentTool>,
+        fs: dev.heracles.workspace.WorkspaceFs,
+        request: String,
+        attachments: List<Map<String, String>>,
+        memoryNote: String,
+        history: List<Pair<String, String>>,
+        sessionId: String?,
+        approvalMode: ApprovalMode,
+        approvalQueue: AgentLoop.ApprovalQueue,
+        askQueue: AgentLoop.AskReplyQueue,
+        onEvent: ((AgentEvent) -> Unit)?,
+    ): AgentRunResult {
+        val taskStartedAtNanos = System.nanoTime()
+
+        // ② 装配（复用旧工具执行体，重建类型化声明）
+        //
+        // ★ 计划落盘（2026-10-21 补）—— 与旧管线写**同一个文件**，
+        //   这样新旧切换时计划互通（不会因为切换而丢计划）。
+        //   ⚠️ 格式转换收在 `CloudBridgeAdapters`（纯 JVM 可测），这里只做 IO。
+        val planPath = sessionId?.takeIf { it.isNotBlank() }?.let { ".heracles/plans/$it.json" }
+        val persistPlan: (suspend (List<dev.heracles.cloud.PlanStepView>) -> Unit)? =
+            planPath?.let { p ->
+                { steps: List<dev.heracles.cloud.PlanStepView> ->
+                    runCatching {
+                        fs.mkdirs(".heracles/plans")
+                        fs.writeText(
+                            p,
+                            dev.heracles.cloud.CloudBridgeAdapters.toTaskPlan(steps).toJson(),
+                        )
+                    }
+                }
+            }
+        // 读回落盘的计划（与旧管线同一个文件）
+        val restoredPlan: List<dev.heracles.cloud.PlanStepView> = planPath?.let { p ->
+            runCatching { fs.readText(p) }.getOrNull()
+                ?.let { dev.heracles.agent.TaskPlan.fromJson(it) }
+                ?.let { dev.heracles.cloud.CloudBridgeAdapters.toPlanStepViews(it) }
+        }.orEmpty()
+        if (restoredPlan.isNotEmpty()) {
+            println("[heracles][cloud] plan restored: ${restoredPlan.size} steps from $planPath")
+        }
+
+        // ★ 事件桥**直接**作为 `onEvent` 传入：管线内部每发一个 `CloudEvent`，
+        //   这里立刻翻成 0..n 个旧 `AgentEvent` 交给 UI。
+        //   用 `toLegacyEvents`（复数）因为 `PlanUpdated` 要翻成两条旧事件。
+        val pipeline = dev.heracles.cloud.CloudPipelineAssembler.build(
+            provider = provider,
+            tools = candidateTools,
+            modelContextWindow = dev.heracles.cloud.CloudPipelineAssembler.defaultWindowFor(provider),
+            // ★ 审批门禁：**必须传**（不传 = 危险操作永不被问）
+            approval = dev.heracles.cloud.CloudBridgeAdapters.approvalGate(
+                mode = approvalMode,
+                queue = approvalQueue,
+                emitEvent = { ev -> onEvent?.invoke(ev) },
+            ),
+            // ★ 提问门禁：不传 = ask_user 永远返回"用户没回答"
+            askGate = dev.heracles.cloud.CloudBridgeAdapters.askGate(askQueue),
+            onPlanChanged = persistPlan,
+            onEvent = { ce ->
+                dev.heracles.cloud.CloudBridgeAdapters.toLegacyEvents(ce).forEach { ev ->
+                    onEvent?.invoke(ev)
+                }
+            },
+        )
+
+        // ③ 跑
+        val result = try {
+            pipeline.run(
+                userRequest = buildPrompt(request, attachments, memoryNote),
+                history = dev.heracles.cloud.CloudBridgeAdapters.toAgentMessages(history),
+                initialPlan = restoredPlan,
+            )
+        } finally {
+            lastTaskWallMs = (System.nanoTime() - taskStartedAtNanos) / 1_000_000
+            runCatching { saveAlwaysAllowed(approvalQueue.alwaysAllowed) }
+            activeApprovalQueue = null
+            activeAskQueue = null
+            provider.release()
+        }
+
+        // ④ 回填成旧 `AgentRunResult`（`MainActivity` 只认这个类型）
+        //
+        // ⚠️ **转换是信息有损的**：新管线的 `CloudTurnRecord` 比旧 `TurnRecord` 少
+        //    几个字段（toolResult / toolSucceeded）。这里**不伪造**它们 ——
+        //    `toolSucceeded` 留 null 会让 UI 显示"未执行"，而实际执行了，
+        //    所以这里用 `toolNames` 是否为空来判：
+        //    · 有工具调用 ⇒ 视为"请求过工具"（但不声称成功）
+        //    · 无工具调用 ⇒ 纯回答
+        val turns = result.records.map { r ->
+            dev.heracles.agent.TurnRecord(
+                index = r.turnIndex,
+                userText = r.userRequest,
+                rawOutput = r.modelText,
+                toolCall = r.toolNames.firstOrNull()?.let {
+                    dev.heracles.core.tool.ToolCall(it, emptyMap())
+                },
+                toolResult = null,
+                verdict = if (r.verdict == dev.heracles.cloud.CloudTurnVerdict.FINAL_ANSWER) {
+                    "最终回答"
+                } else {
+                    "工具调用：${r.toolNames.joinToString()}"
+                },
+                cache = r.cache,
+                wallMs = 0,
+                // ⚠️ null = "不知道成功与否"。**不许**写成 true —— 那会在 UI 上
+                //    画出绿色成功卡，而新管线的记录里确实没有这个事实。
+                toolSucceeded = null,
+            )
+        }
+
+        return AgentRunResult(
+            turns = turns,
+            finalText = result.finalText,
+            stopReason = result.stopReason,
+        )
+    }
+
+    /**
      * 上一次 `run()` 的**冻结区** token 估算（系统提示词 + 工具定义 + 工具协议）。
      *
      * ## 为什么用"上一次"而不是现算
@@ -613,6 +831,26 @@ class AgentBridge(private val context: Context) {
         private set
 
     /**
+     * **上一次 `run()` 的任务总耗时（毫秒）**（2026-10-21，BUG-5）。
+     *
+     * = 从 `run()` 进入（provider 装配/探活之前）到 `finally` 的第一句 ——
+     * **真实墙钟**，含模型往返 + 工具执行 + 审批/提问等待 + 上下文压缩。
+     *
+     * 与 `TurnRecord.wallMs`（模型往返）**不是一回事**：后者被 `AgentRunResult` 累加成
+     * 各轮的"模型用时"，**不含**工具执行。用户看到的「5172 ms」正是那个累加值 ——
+     * 一个跑了几十秒、执行过工具的任务，模型往返确实可能只有 5 秒。
+     *
+     * 恒有 `lastTaskWallMs >= Σ TurnRecord.wallMs`（后者是前者的子集）。
+     * `0` = 还没跑过任何一次（面板据此显示 `—` 而不是 `0 秒`）。
+     *
+     * ⚠️ 与 [lastFrozenTokens] 同一个生命周期理由：`toMap` 在 `run()` 返回后由
+     * `MainActivity` 调用，那时局部变量已经出了作用域 —— 记在实例上是唯一不重复计算的办法。
+     */
+    @Volatile
+    var lastTaskWallMs: Long = 0
+        private set
+
+    /**
      * **当前 run 的 ask_user 回答队列**（2026-10-16）。
      *
      * run 期间非 null；`MainActivity` 的 `replyAsk` 通道往里投用户回答。
@@ -622,8 +860,33 @@ class AgentBridge(private val context: Context) {
     var activeAskQueue: AgentLoop.AskReplyQueue? = null
 
     /** 用户回答了 ask_user 的提问（UI 弹窗提交时调用）。 */
-    fun replyAsk(text: String) {
-        activeAskQueue?.reply(text)
+    fun replyAsk(answers: dev.heracles.core.tool.AskAnswers) {
+        activeAskQueue?.reply(answers)
+    }
+
+    /**
+     * **把 Dart 传来的 `{题目 id: [选中的 label…]}` 转成 [AskAnswers]**（2026-10-21）。
+     *
+     * ## 为什么放在装配层
+     *
+     * MethodChannel 只能传基础类型 ⇒ Dart 把 `Map<String, List<String>>` 直接投过来，
+     * Kotlin 在**一个地方**转成契约类型。让每个调用点各自转，迟早有一处漏
+     * —— 这轮已经踩过"两处错误文案改一处漏一处"的同类坑。
+     *
+     * @param raw MethodChannel 的 `answers` 参数；形状不对 ⇒ 返回空答案
+     *   （工具把它当"用户未回答"，模型据此自行决定 —— **绝不编造答案**）
+     */
+    fun askAnswersFrom(raw: Map<*, *>?): dev.heracles.core.tool.AskAnswers {
+        if (raw == null) return dev.heracles.core.tool.AskAnswers(emptyMap())
+        val out = mutableMapOf<String, List<String>>()
+        for ((k, v) in raw) {
+            val id = (k as? String)?.takeIf { it.isNotBlank() } ?: continue
+            val picks = (v as? List<*>)
+                ?.mapNotNull { (it as? String)?.takeIf { s -> s.isNotBlank() } }
+                ?: continue
+            if (picks.isNotEmpty()) out[id] = picks
+        }
+        return dev.heracles.core.tool.AskAnswers(out)
     }
 
     /**
@@ -953,6 +1216,16 @@ class AgentBridge(private val context: Context) {
         "totalPromptTokens" to result.totalPromptTokens,
         "totalOutputTokens" to result.totalOutputTokens,
         "steadyHitRate" to result.steadyHitRate,
+        // ★★ 任务总耗时（2026-10-21，BUG-5）★★
+        //
+        // 取实例字段而不是 `result` 的字段：`AgentRunResult` 是 `:agent` 的契约类型，
+        // 而"整段 run 的墙钟"只有装配层（本类）量得到 —— 加进 `:agent` 的契约会
+        // 强迫 CLI / 测试也去量一个它们并不需要的数。
+        // 所以由 `run()` 记在 [lastTaskWallMs] 上，这里读出来。
+        //
+        // ⚠️ 它**不是** `turns.sumOf { wallMs }` —— 那个只含模型往返（用户看到的
+        //    「5172 ms」就是它）。两者都发，UI 分别标注口径。
+        "taskWallMs" to lastTaskWallMs,
         "turns" to result.turns.map { it.toMap() },
     )
 
@@ -1080,14 +1353,27 @@ class AgentBridge(private val context: Context) {
             "text" to event.text,
         )
 
-        // ★ ask_user：模型向用户提问（2026-10-16）——
-        //   工具已挂起等待，Dart 收到后弹窗收集回答。
-        //   问题文本放进 "text"（Dart 侧 fromMap 统一用 message 承载人读文本）
+        // ★ ask_user：模型向用户提问（2026-10-16 引入；**2026-10-21 选项式多题**）——
+        //   工具已挂起等待，Dart 收到后弹**选项式**对话框（逐题点选 + 上一题/下一题）。
+        //
+        //   题目结构随事件带走（`questions`），Dart **只渲染、不解析 JSON** ——
+        //   解析在 Kotlin 侧一次完成（`AskUserArgs`），避免两处口径漂移。
         is AgentEvent.AskUser -> mapOf(
             "type" to "ask_user",
             "ts" to event.ts,
             "index" to event.index,
-            "text" to event.question,
+            // 兼容字段：把第一题题干也放进 text（旧 UI / 日志可读）
+            "text" to (event.questions.firstOrNull()?.question ?: ""),
+            "questions" to event.questions.map { q ->
+                mapOf(
+                    "id" to q.id,
+                    "question" to q.question,
+                    "multi" to q.multi,
+                    "options" to q.options.map { o ->
+                        mapOf("label" to o.label, "description" to o.description)
+                    },
+                )
+            },
         )
 
         // ★ 危险工具需要用户确认（2026-10-19，三态门禁的 UI 闭环）——

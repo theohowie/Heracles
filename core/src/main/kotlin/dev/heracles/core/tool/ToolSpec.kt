@@ -92,4 +92,32 @@ data class ToolSpec(
     val name: String,
     val description: String,
     val parameters: List<ToolParam> = emptyList(),
+
+    /**
+     * **预渲染的完整 JSON Schema**（`CloudAgentPipeline`，2026-10-21）。
+     *
+     * ## 为什么需要它（[parameters] 表达不了的东西）
+     *
+     * [parameters] + [ToolParam.type] 是**文本轨时代的形状**：`type` 只有一个字符串，
+     * 全仓 55 个参数因此全是 `"string"`。它无法表达：
+     * - `integer` / `boolean`（`max_results`、`replace_all`）
+     * - `array of objects`（`update_plan.steps`、`ask_user.questions`）
+     * - `enum`（`status` 只能是 pending/active/done）
+     *
+     * 而云端原生 `tools` 吃的就是**标准 JSON Schema** ——
+     * 只要把这份字符串原样当 `parameters` 发出去，模型就能按真实类型填参数。
+     *
+     * ## 零回退保证（结构性，不是靠调用方自觉）
+     *
+     * 默认 `null` ⇒ **所有既有 ToolSpec 构造点一个字节都不用改**，
+     * 而 Provider 侧的逻辑是"有就用、没有就退回旧渲染"
+     * （见 `NativeToolSchema.canonicalBody`）⇒ 旧路径请求体逐字节不变。
+     *
+     * ## 什么时候该填
+     *
+     * 只有**声明了真实类型**的工具才填（`CloudToolSchema.cloudToolSpec` 会填）。
+     * 手写这个字符串是**错误做法**：键序/转义/`required` 都容易写歪，
+     * 而它直接影响请求体与缓存前缀 —— 请走 `renderObjectSchema`。
+     */
+    val jsonSchema: String? = null,
 )

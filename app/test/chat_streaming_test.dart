@@ -391,14 +391,17 @@ void main() {
       await tester.pump();
 
       // 展开前没有明细
-      expect(find.textContaining('耗时：1500 ms'), findsNothing);
+      expect(find.textContaining('不含工具'), findsNothing);
 
       await tester.tap(find.byIcon(Icons.data_usage_rounded));
       await tester.pump();
 
-      expect(find.textContaining('耗时：1500 ms'), findsOneWidget,
-          reason: '用量面板要显示本轮耗时');
-      expect(find.textContaining('缓存命中：90%'), findsOneWidget,
+      // ★ 2026-10-21（BUG-5）：耗时改成**秒级**并标注「模型 / 不含工具」。
+      //   1500 ms → "1.5 秒"。毫秒对任务级耗时没有意义，且用户明确要求改秒。
+      expect(find.textContaining('模型耗时（不含工具）：1.5 秒'), findsOneWidget,
+          reason: '用量面板要显示本轮**模型**耗时（秒级，不含工具）');
+      // ★ 单轮命中率口径写明「本轮」—— 与侧栏的累计·加权命中率不是同一个数
+      expect(find.textContaining('本轮缓存命中：90%'), findsOneWidget,
           reason: '本轮命中率 = 90/(90+10)');
     });
 

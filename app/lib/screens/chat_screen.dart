@@ -471,8 +471,15 @@ class _ChatScreenState extends State<ChatScreen> {
         final path = (m['path'] as String?) ?? '';
         if (path.isEmpty) continue;
         final treeUri = (m['treeUri'] as String?) ?? '';
+        // ★ 失效的工作区**照样列出来**（2026-10-20）：
+        //   Kotlin 侧保留了记录并标 exists=false，这里只读它、不再自行过滤。
+        //   原来"目录不在就整条跳过"会让工作区在侧边栏凭空消失（用户报的 bug）。
+        final exists = (m['exists'] as bool?) ?? true;
         // 读该工作区里的真实会话（必须带 treeUri，否则 SAF 下读不到）
-        final sessions = await _bridge.listSessions(path, treeUri: treeUri);
+        // 失效的就不去读了 —— 读它必然抛，且没有意义
+        final sessions = exists
+            ? await _bridge.listSessions(path, treeUri: treeUri)
+            : const <HSession>[];
         list.add(HWorkspace(
           id: path,
           name: (m['name'] as String?) ?? path.split('/').last,
@@ -481,6 +488,7 @@ class _ChatScreenState extends State<ChatScreen> {
           expanded: prevExpanded[path] ?? list.isEmpty,
           writable: (m['writable'] as bool?) ?? true,
           treeUri: treeUri,
+          exists: exists,
           sessions: _markActive(sessions),
         ));
       }
@@ -1641,7 +1649,9 @@ class _ChatScreenState extends State<ChatScreen> {
       // 提问是**模态**的：任务停在这里等回答（有超时兜底）。
       // 弹窗明确了"现在需要你回答"，比混进消息流更不易被忽略。
       case AgentEvent.kAskUser:
-        unawaited(_showAskDialog(context, e.message ?? ''));
+        // ★ 2026-10-21：选项式多题 —— 题目结构由 Kotlin 解析好随事件带来。
+        //   第三参数 `message` 只作**降级**用（老版本 Kotlin 没有 questions）。
+        unawaited(_showAskDialog(context, e.questions, e.message ?? ''));
 
       // ---- ★ 危险工具审批（2026-10-19）----
       //
@@ -1773,7 +1783,13 @@ class _ChatScreenState extends State<ChatScreen> {
       for (final msgId in ids) {
         final i = _stepIndexOf(msgId);
         if (i < 0) continue;
-        final cur = _messages[i] as HStepStream;
+        // ⚠️ 用 `as?` 而不是 `as`（2026-10-21）：本方法现在会被
+        //    `_stopRun` 直接调用，而 `_streamStepIds` 与实际 `_messages`
+        //    在异常路径上可能**不同步**（例如步骤已被移除、或列表被换掉）。
+        //    硬转会在"点停止"这个动作上抛异常 ⇒ 用户看到的是"点了没反应"，
+        //    正是本 bug 最糟的失败模式。**收尾是尽力而为，不能反过来搞崩 UI。**
+        final cur = _messages[i] as HStepStream?;
+        if (cur == null) continue;
         _messages[i] = cur.copyWith(
           finished: true,
           status: failed ? AgentEvent.kStatusError : AgentEvent.kStatusOk,
@@ -1878,8 +1894,17 @@ class _ChatScreenState extends State<ChatScreen> {
         requestedTool: t.tool != null,
       ));
     }
-    // runs 是"运行次数"，逐轮累加里不含它，单独加
-    final next = acc.add(const SessionUsage().copyRuns(1));
+    // runs 是"运行次数"，逐轮累加里不含它，单独加。
+    //
+    // ★ 2026-10-21（BUG-5，Lead 授权跨 scope 的唯一一行）：把这次 run 的
+    //   **任务总耗时**与**稳态命中率**一起记进来。
+    //   两者都是**运行级**数据（`AgentRunResult` 一次 run 一个），
+    //   而上面那个循环是逐轮的 —— 放到循环里会算错（重复累加 / 分不到工具时间）。
+    final next = acc.add(SessionUsage().copyRuns(
+      1,
+      taskWallMs: result.taskWallMs,
+      steadyHitRate: result.steadyHitRate,
+    ));
 
     // 自动建会话的就地迁移：这次运行刚拿到 sessionId
     final created = result.sessionId;
@@ -2421,6 +2446,29 @@ class _ChatScreenState extends State<ChatScreen> {
       // 没停到（刚好跑完 / 连点两下）—— 幂等，不报错也不写消息
       return;
     }
+
+    // ★★ 先收尾**残留步骤**，再停订阅（2026-10-21 真机 bug，反复出现）★★
+    //
+    // ## 用户反复报的现象
+    //
+    // 「点击暂停之后还是会有『正在生成』」—— 输入框确实复位了、也出现了
+    // 「已停止」，但**上面那张步骤卡片仍然停在"正在生成 10050ms"并转圈**。
+    //
+    // ## 根因（这次查清了）
+    //
+    // 收尾逻辑 `_settleOrphanSteps()` 只在收到 `Finished` / `Failed` **事件**时触发。
+    // 而本方法紧接着调 `_stopLive()` **取消事件订阅** —— 取消之后那两个事件
+    // **永远收不到** ⇒ 收尾永远不执行 ⇒ 步骤卡片永远"正在生成"。
+    //
+    // 原来那句 `_messages.removeWhere((m) => m is HProgress)` **清错了对象**：
+    // `HProgress` 是旧的「正在生成…」占位行，而真机上显示的是
+    // `HStepStream`（逐字步骤卡片）—— 它不在 `HProgress` 的判定里，所以没被清掉。
+    //
+    // ⇒ 在取消订阅**之前**主动调 `_settleOrphanSteps(true)`（true = 按中断收尾，
+    //   卡片会显示成"已中断"而不是"成功"——**不许把中断画成完成**）。
+    _settleOrphanSteps(true);
+    _messages.removeWhere((m) => m is HProgress);
+
     setState(() {
       // ★ 2026-10-13 修：**必须立刻复位 `_busy`**
       //
@@ -2436,10 +2484,6 @@ class _ChatScreenState extends State<ChatScreen> {
       _busy = false;
       _inflightRun = null;
       _stopLive();
-      // ★ 清掉被中断那轮的"正在生成"占位 —— 否则它挂着
-      //   （`HProgress` 没有 finished 状态可置，直接移除最干净：
-      //   那一轮没有产出任何最终内容，占位没有存在价值）
-      _messages.removeWhere((m) => m is HProgress);
       if (!silent) {
         _messages.add(HAssistantMessage(
           id: _nextId(),
@@ -2457,6 +2501,31 @@ class _ChatScreenState extends State<ChatScreen> {
     //   · 工具执行期间 → `ToolSpec.execute` 是 **suspend** 函数，
     //     取消同样在挂起点生效
     // 所以这里不需要额外做"后台回收"。
+  }
+
+  /// 取某会话的当前标题（找不到返回 null）。
+  ///
+  /// 用于"只在标题还是默认值时才自动改名" —— 用户手动改过的名字不许被覆盖。
+  String? _sessionTitleOf(HWorkspace ws, String sessionId) {
+    for (final s in ws.sessions) {
+      if (s.id == sessionId) return s.title;
+    }
+    return null;
+  }
+
+  /// 从**第一条用户消息**推导会话标题（2026-10-21）。
+  ///
+  /// 与 Kotlin 侧 `MainActivity.deriveTitle` **同一口径**（前 24 字、换行压成空格、
+  /// 纯附件时用文件名）。之所以在 Dart 侧再写一份：标题改名要在"发消息的瞬间"
+  /// 由 UI 触发，而那条路不经过 Kotlin 的自动建会话分支。
+  /// ⚠️ 两处口径必须一致 —— 改一处就要改另一处（都带同样的注释指路）。
+  String _deriveTitle(String request, List<HAttachment> attachments) {
+    final t = request.trim().replaceAll(RegExp(r'\s+'), ' ');
+    if (t.isNotEmpty) {
+      return t.length <= 24 ? t : '${t.substring(0, 24)}…';
+    }
+    final f = attachments.isNotEmpty ? attachments.first.name : '';
+    return f.isNotEmpty ? '关于 $f' : '新会话';
   }
 
   /// 取一条回答的时间（没有就返回 null —— 操作行会省略时间）。
@@ -2608,6 +2677,41 @@ class _ChatScreenState extends State<ChatScreen> {
     _startLive(origin);
 
     final snapshot = List<HAttachment>.of(_attachments);
+
+    // ★★ 用第一句话当会话标题（2026-10-21 用户报的 bug）★★
+    //
+    // ## 现象
+    //
+    // 侧边栏里**每一条都是「新会话」**。用户原话：
+    // 「怎么全是新会话，不是该会话的第一句话作为默认标题？」
+    //
+    // ## 根因
+    //
+    // Kotlin 侧**有** `deriveTitle(request, attachments)`（取前 24 字），
+    // 但它只在 `handleRunAgent` 的"**没有 sessionId ⇒ 自动建会话**"那条路上生效。
+    // 而 UI 走的是另一条路：`_newSession()` 先 `createSession(path, '新会话')` 建好会话，
+    // 再带着 sessionId 发消息 ⇒ **`deriveTitle` 永远不会被调用**，
+    // 标题就一直是硬编码的「新会话」。
+    //
+    // ## 修法
+    //
+    // 在"发第一条消息"这个时机改标题：
+    // · 只在标题**仍是默认值**时改 —— 用户手动改过的名字不许被覆盖
+    // · 不 await：改标题失败不该阻塞发送（最差就是标题不变）
+    final sid0 = _activeSessionId;
+    if (sid0 != null) {
+      final cur = _sessionTitleOf(ws, sid0);
+      if (cur == null || cur.isEmpty || cur == '新会话') {
+        final newTitle = _deriveTitle(request, snapshot);
+        if (newTitle.isNotEmpty && newTitle != '新会话') {
+          unawaited(_bridge
+              .renameSession(ws.id, sid0, newTitle, treeUri: ws.treeUri)
+              .then((_) {
+            if (mounted) unawaited(_reload(silent: true));
+          }).catchError((_) {}));
+        }
+      }
+    }
     // ★★ 附件在**发出的那一刻**就清空（2026-10-13 修用户报的 bug）★★
     //
     // 用户原话：「文件发送出去了，输入框上还有文件在输入框上，图片也是，
@@ -3260,102 +3364,307 @@ class _ChatScreenState extends State<ChatScreen> {
     );
   }
 
-  /// **ask_user 弹窗**（2026-10-16）—— 模型提问，用户回答。
+  /// **ask_user 弹窗**（2026-10-16 引入；**2026-10-21 改为选项式多题**）。
   ///
-  /// ## 交互
+  /// ## 用户要求（原话）
   ///
-  /// ```
-  /// ┌─ 模型需要你的回答 ─────────┐
-  /// │                            │
-  /// │ 「这个文件已存在，要覆盖     │
-  /// │   还是另存为新文件？」       │
-  /// │                            │
-  /// │ [你的回答____________]      │
-  /// │                            │
-  /// │        [跳过]  [提交回答]   │
-  /// └────────────────────────────┘
-  /// ```
+  /// > 「ask 要是选项点击的，不是要我直接在下面输入，一般是 1、2、3、4 等等几个选项，
+  /// >   可以多选，单选，是 LLM 根据任务决定，可以一次发多个 ask，回答完自动下一个问题，
+  /// >   下面可以点击上一题和下一题。」
   ///
-  /// · **提交回答** → `replyAsk` → 工具拿到 → 模型继续
-  /// · **跳过** → 也发一条（"（用户未回答）"）—— 让模型明确知道
-  ///   用户没答，而不是干等超时（10 分钟）
-  /// · **关弹窗（点外面）** → 同跳过
-  Future<void> _showAskDialog(BuildContext context, String question) async {
-    final ctrl = TextEditingController();
+  /// ## 实现要点（逐条对上）
+  ///
+  /// | 要求 | 落点 |
+  /// |---|---|
+  /// | 点选项，不手打 | 每题渲染**可点的选项卡片**，没有输入框 |
+  /// | 1/2/3/4 编号 | 每个选项前显示序号 |
+  /// | 单选 / 多选 | `multi` 由**模型**给，UI 只是照着渲染（不猜） |
+  /// | 一次多个 ask | `questions` 是**列表**，逐题作答 |
+  /// | 答完自动下一个 | 单选选中后**自动跳下一题**（多选要手动点"下一题"，因为可能要选多个） |
+  /// | 上一题 / 下一题 | 底部导航按钮，带进度指示（`2/5`） |
+  ///
+  /// ## 边界（安全默认）
+  ///
+  /// · **跳过** ⇒ 该题不进答案 map（模型看到「未回答」），而不是编一个答案
+  /// · **关弹窗（点外面）** ⇒ 同跳过，但**已答的题仍然回传**（别浪费用户已做的选择）
+  /// · 题目结构非法（`questions` 为空）⇒ 走**降级**：把 `text` 当纯文本问题展示，
+  ///   只给一个"知道了"按钮 —— 至少让用户知道模型在等什么，不能弹个空窗
+  Future<void> _showAskDialog(
+    BuildContext context,
+    List<Map<String, dynamic>>? questions,
+    String fallbackText,
+  ) async {
     final h = Hue.of(context);
-    String? answer;
-    try {
-      answer = await showDialog<String>(
+
+    // 降级：老版本 Kotlin / 解析失败 —— 只显示题干，没有选项可点
+    if (questions == null || questions.isEmpty) {
+      // 只有一个"知道了"按钮；关掉后回传空答案（= 全部未回答，绝不编造）
+      await showDialog<bool>(
         context: context,
         barrierDismissible: true,
         builder: (dlgCtx) => AlertDialog(
           backgroundColor: h.surfaceAlt,
-          title: Row(
-            children: [
-              Icon(Icons.help_outline_rounded, size: 20, color: h.accent),
-              const SizedBox(width: HSpace.sm),
-              const Text('模型需要你的回答',
-                  style: TextStyle(fontSize: 16)),
-            ],
-          ),
-          content: Column(
-            mainAxisSize: MainAxisSize.min,
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Text(
-                question,
-                style: TextStyle(
-                    fontSize: 14, height: 1.5, color: h.text),
-              ),
-              const SizedBox(height: HSpace.md),
-              TextField(
-                controller: ctrl,
-                autofocus: true,
-                maxLines: 3,
-                minLines: 1,
-                style: TextStyle(fontSize: 14, color: h.text),
-                decoration: InputDecoration(
-                  hintText: '你的回答…',
-                  hintStyle: TextStyle(
-                      fontSize: 13, color: h.textFaint),
-                  border: OutlineInputBorder(
-                    borderRadius: BorderRadius.circular(HRadius.sm),
-                  ),
-                  contentPadding: const EdgeInsets.symmetric(
-                      horizontal: HSpace.sm, vertical: HSpace.sm),
-                ),
-              ),
-            ],
+          title: Row(children: [
+            Icon(Icons.help_outline_rounded, size: 20, color: h.accent),
+            const SizedBox(width: HSpace.sm),
+            const Text('模型需要你的回答', style: TextStyle(fontSize: 16)),
+          ]),
+          content: SingleChildScrollView(
+            child: Text(
+              fallbackText.isEmpty ? '（模型提了一个问题，但内容为空）' : fallbackText,
+              style: TextStyle(fontSize: 14, height: 1.5, color: h.text),
+            ),
           ),
           actions: [
-            TextButton(
-              onPressed: () => Navigator.of(dlgCtx).pop(''),
-              child: Text('跳过',
-                  style: TextStyle(
-                      fontSize: 13, color: h.textDim)),
-            ),
             FilledButton(
-              onPressed: () =>
-                  Navigator.of(dlgCtx).pop(ctrl.text.trim()),
-              style: FilledButton.styleFrom(
-                backgroundColor: h.accent,
-              ),
-              child: const Text('提交回答',
-                  style: TextStyle(fontSize: 13)),
+              onPressed: () => Navigator.of(dlgCtx).pop(true),
+              style: FilledButton.styleFrom(backgroundColor: h.accent),
+              child: const Text('知道了', style: TextStyle(fontSize: 13)),
             ),
           ],
         ),
       );
-    } finally {
-      // 无论提交、跳过还是点外面 —— 都要让工具拿到**确定的结果**：
-      // · 有回答 → 原文
-      // · 无回答 → 明确的"未回答"标记（模型不会干等超时）
-      // finally 保证弹窗因任何原因关闭都会走到（包括 dispose）。
-      final text = (answer == null || answer.isEmpty)
-          ? '（用户未回答，请自行决定下一步）'
-          : answer;
-      await _bridge.replyAsk(text);
+      await _bridge.replyAsk(const {});
+      return;
     }
+
+    // ★ 逐题作答的状态：题目 id → 已选 label 集合
+    final picked = <String, Set<String>>{};
+    var page = 0;
+    final total = questions.length;
+
+    final result = await showDialog<Map<String, List<String>>?>(
+      context: context,
+      barrierDismissible: true,
+      builder: (dlgCtx) {
+        return StatefulBuilder(
+          builder: (ctx, setDlgState) {
+            final q = questions[page];
+            final id = (q['id'] as String?) ?? 'q${page + 1}';
+            final title = (q['question'] as String?) ?? '';
+            final multi = (q['multi'] as bool?) ?? false;
+            final options = (q['options'] as List?) ?? const [];
+            final sel = picked.putIfAbsent(id, () => <String>{});
+            final isLast = page == total - 1;
+
+            void toggle(String label) {
+              setDlgState(() {
+                if (multi) {
+                  // 多选：点了就切换
+                  if (!sel.remove(label)) sel.add(label);
+                } else {
+                  // ★ 单选：替换，并**自动跳下一题**（用户要求"答完自动下一个"）
+                  sel
+                    ..clear()
+                    ..add(label);
+                  if (!isLast) {
+                    // 让当前帧先画出来再跳，避免"点完看不到选中态"
+                    Future.microtask(() => setDlgState(() => page++));
+                  }
+                }
+              });
+            }
+
+            return AlertDialog(
+              backgroundColor: h.surfaceAlt,
+              title: Row(
+                children: [
+                  Icon(Icons.help_outline_rounded, size: 20, color: h.accent),
+                  const SizedBox(width: HSpace.sm),
+                  const Expanded(
+                    child: Text('模型需要你的回答',
+                        style: TextStyle(fontSize: 16)),
+                  ),
+                  // 进度：多题时必须让用户知道还有几题
+                  if (total > 1)
+                    Text('${page + 1}/$total',
+                        style: TextStyle(fontSize: 12, color: h.textFaint)),
+                ],
+              ),
+              content: ConstrainedBox(
+                constraints: BoxConstraints(
+                  maxHeight: MediaQuery.sizeOf(context).height * 0.55,
+                ),
+                child: SingleChildScrollView(
+                  child: Column(
+                    mainAxisSize: MainAxisSize.min,
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(title,
+                          style: TextStyle(
+                              fontSize: 14, height: 1.5, color: h.text)),
+                      const SizedBox(height: HSpace.xs),
+                      Text(
+                        multi ? '可多选' : '单选',
+                        style: TextStyle(fontSize: 11, color: h.textFaint),
+                      ),
+                      const SizedBox(height: HSpace.md),
+                      // ★ 选项：编号 + label + description，整块可点
+                      for (var i = 0; i < options.length; i++)
+                        _askOptionTile(
+                          h: h,
+                          index: i + 1,
+                          label: (options[i] as Map)['label'] as String? ?? '',
+                          description:
+                              (options[i] as Map)['description'] as String? ?? '',
+                          selected: sel.contains(
+                              (options[i] as Map)['label'] as String? ?? ''),
+                          multi: multi,
+                          onTap: () => toggle(
+                              (options[i] as Map)['label'] as String? ?? ''),
+                        ),
+                    ],
+                  ),
+                ),
+              ),
+              actions: [
+                // 上一题 / 下一题（用户明确要求）
+                if (page > 0)
+                  TextButton(
+                    onPressed: () => setDlgState(() => page--),
+                    child: Text('上一题',
+                        style: TextStyle(fontSize: 13, color: h.textDim)),
+                  ),
+                if (!isLast)
+                  TextButton(
+                    onPressed: () => setDlgState(() => page++),
+                    child: Text('下一题',
+                        style: TextStyle(fontSize: 13, color: h.textDim)),
+                  ),
+                TextButton(
+                  // 跳过 = 已答的仍然回传（别浪费用户已做的选择）
+                  onPressed: () => Navigator.of(dlgCtx).pop(
+                    picked.map((k, v) => MapEntry(k, v.toList())),
+                  ),
+                  child: Text('跳过',
+                      style: TextStyle(fontSize: 13, color: h.textDim)),
+                ),
+                if (isLast)
+                  FilledButton(
+                    onPressed: () => Navigator.of(dlgCtx).pop(
+                      picked.map((k, v) => MapEntry(k, v.toList())),
+                    ),
+                    style: FilledButton.styleFrom(backgroundColor: h.accent),
+                    child: const Text('提交', style: TextStyle(fontSize: 13)),
+                  ),
+              ],
+            );
+          },
+        );
+      },
+    );
+
+    // 提交 / 跳过 / 点外面 —— 都回传**确定的结果**（null ⇒ 空 map = 全部未回答）
+    await _bridge.replyAsk(result ?? const {});
+  }
+
+  /// 一条可点击的 ask 选项（编号 + 标题 + 说明 + 选中态）。
+  ///
+  /// 抽成独立 widget 是为了让"选中态"的视觉在同一处定义 ——
+  /// 单选/多选只是圆/方的区别，其余一致。
+  Widget _askOptionTile({
+    required Hue h,
+    required int index,
+    required String label,
+    required String description,
+    required bool selected,
+    required bool multi,
+    required VoidCallback onTap,
+  }) {
+    return Padding(
+      padding: const EdgeInsets.only(bottom: HSpace.sm),
+      // ★★ 必须包 `Material`（2026-10-21 真机 bug：选项点不动）★★
+      //
+      // ## 现象
+      //
+      // 弹窗能正常显示，「下一题」「跳过」也都能点 —— **唯独选项卡片点不动**：
+      // 点下去没有选中态、也不会自动跳下一题。用户会以为 App 卡死了。
+      //
+      // ## 根因
+      //
+      // `InkWell` 的水波纹与**命中测试**都依赖祖先 `Material`。
+      // 这里原来是 `Padding → InkWell → Container` —— **没有 Material 祖先**
+      //（`AlertDialog` 的 content 在 `SingleChildScrollView` 里，
+      //  那层不提供 Material）。于是 `InkWell` 的 `onTap` **根本不触发**，
+      //  而旁边的 `TextButton` 自带 Material ⇒ 能点。
+      //  这正是"同一个弹窗里有的能点、有的不能点"的原因。
+      //
+      // 修法：`Material(transparent) → InkWell → 内容`。
+      // 用 `type: MaterialType.transparency` 是为了不改变既有的 `Container`
+      // 背景色/边框（外观零变化）。
+      child: Material(
+        type: MaterialType.transparency,
+        child: InkWell(
+          onTap: onTap,
+          borderRadius: BorderRadius.circular(HRadius.sm),
+          child: Container(
+            padding: const EdgeInsets.symmetric(
+                horizontal: HSpace.sm, vertical: HSpace.sm),
+            decoration: BoxDecoration(
+              color: selected ? h.accent.withValues(alpha: 0.12) : h.surface,
+              borderRadius: BorderRadius.circular(HRadius.sm),
+              border: Border.all(
+                color: selected ? h.accent : h.border,
+                width: selected ? 1.5 : 1,
+              ),
+            ),
+            child: Row(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              // 序号（1/2/3/4 —— 用户要求"一般是 1、2、3、4 等等几个选项"）
+              Container(
+                width: 20,
+                height: 20,
+                alignment: Alignment.center,
+                decoration: BoxDecoration(
+                  color: selected ? h.accent : h.surfaceAlt,
+                  shape: multi ? BoxShape.rectangle : BoxShape.circle,
+                  borderRadius:
+                      multi ? BorderRadius.circular(HRadius.sm) : null,
+                ),
+                child: Text(
+                  '$index',
+                  style: TextStyle(
+                    fontSize: 11,
+                    fontWeight: FontWeight.w600,
+                    color: selected
+                        ? (h.dark ? const Color(0xFF1A0E08) : Colors.white)
+                        : h.textDim,
+                  ),
+                ),
+              ),
+              const SizedBox(width: HSpace.sm),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(label,
+                        style: TextStyle(
+                            fontSize: 13.5,
+                            height: 1.3,
+                            fontWeight:
+                                selected ? FontWeight.w600 : FontWeight.w400,
+                            color: h.text)),
+                    if (description.isNotEmpty)
+                      Padding(
+                        padding: const EdgeInsets.only(top: 2),
+                        child: Text(description,
+                            style: TextStyle(
+                                fontSize: 11.5,
+                                height: 1.35,
+                                color: h.textFaint)),
+                      ),
+                  ],
+                ),
+              ),
+              if (selected)
+                Icon(Icons.check_rounded, size: 16, color: h.accent),
+            ],
+          ),
+          ),
+        ),
+      ),
+    );
   }
 
   /// **危险操作审批弹窗**（2026-10-19）。
@@ -3374,15 +3683,76 @@ class _ChatScreenState extends State<ChatScreen> {
     required Map<String, String>? args,
     required String reason,
   }) async {
+    // ★★ 2026-10-21（BUG-1）：**完全访问档绝不弹窗** ★★
+    //
+    // ## 用户报的症状
+    //
+    // > 「开了完全权限，还要手动点允许」
+    //
+    // ## 根因
+    //
+    // 这个函数**无条件弹窗** —— 它只看"收到了一条 `approval_request` 事件"，
+    // 从不看当前的 `PermissionMode`。于是只要 Kotlin 侧任何一条路径发出了事件
+    // （漏判档位、装配处没把档位传下去、老版本 Kotlin……），用户就被拽回弹窗。
+    //
+    // ## 为什么修在 Dart 侧（明知 Kotlin 侧也修了）
+    //
+    // 这是**报症状的那一层**：用户看到的是弹窗，不是事件。Kotlin 侧的
+    // `approve()` 已经加了 `FULL_ACCESS` 早退（`ApprovalModeRegressionTest` 钉住），
+    // 但两端各钉一道才叫"防御到位" —— 跨进程的字符串握手（`fullaccess` ↔
+    // `FULL_ACCESS`）历史上就是这类 bug 的高发区。
+    //
+    // ## 为什么是「直接回允许」而不是「什么都不做」
+    //
+    // 不回复 = Kotlin 侧挂在队列上等满 10 分钟（用户看到"任务卡死"）。
+    // 用户既然选了「完全访问」，语义就是"这类事不用问我" ⇒ **回允许**才是忠实执行。
+    // ⚠️ 只在这一档短路；`manual` / `workspaceAuto` 照旧弹窗。
+    final mode = widget.settings.value.permission;
+    if (mode == PermissionMode.fullAccess) {
+      // 与文件里其它诊断日志同一写法（真机排障要看 logcat）
+      // ignore: avoid_print
+      print('[heracles][approval] 完全访问档收到审批请求（tool=$tool）'
+          '⇒ 直接放行、不弹窗（Kotlin 侧漏判档位时由这里兜住）');
+      await _bridge.replyApproval('allow');
+      return;
+    }
+
     final h = Hue.of(context);
-    // 只展示最有信息量的一段：命令原文 / 路径；太长截断（弹窗不是日志）
+    // ★★ 2026-10-21：**不再截断**审批内容 ★★
+    //
+    // ## 修的是什么
+    //
+    // 这里原本是：
+    //
+    // ```dart
+    // final shownDetail =
+    //     detail.length > 500 ? '${detail.substring(0, 500)}…' : detail;
+    // ```
+    //
+    // 而**同一个函数**下面（3699-3714）记录了 2026-10-20 的修复注释：
+    // 「用户看不到完整的 patch，却在被要求对这次修改签字。那不是『观感问题』：
+    //  审批的全部意义就是『看清楚再点允许』」。
+    //
+    // 那次只修了 **overflow**（可滚动 + 限高），**500 字符的硬剪留在原地** ——
+    // 用户现在能滚动了，但滚到底仍然只有 500 字符。修的是物理截断，不是逻辑截断。
+    //
+    // ## 现在怎么做
+    //
+    // · **正文给全文** —— 已经可滚动，不会溢出
+    // · 只在**摘要行**（弹窗顶部那一行）保留短预览
+    //
+    // 审批弹窗不是日志，但也不是摘要：它要求用户**对一个不可逆操作负责**，
+    // 那么它必须看到全部内容。
     final detail = (args ?? const <String, String>{})
         .entries
         .map((e) => '${e.key}: ${e.value}')
         .join('\n')
         .trim();
-    final shownDetail =
-        detail.length > 500 ? '${detail.substring(0, 500)}…' : detail;
+    final shownDetail = detail;
+    // 摘要行用的短预览（只在正文过长时显示，帮用户判断"这次改的是哪一块"）
+    final summaryLine = detail.length > 160
+        ? '${detail.substring(0, 160).replaceAll('\n', ' ')}…'
+        : '';
 
     final decision = await showDialog<String>(
       context: context,
@@ -3425,6 +3795,16 @@ class _ChatScreenState extends State<ChatScreen> {
                   reason.isEmpty ? '这个操作需要你确认后才会执行。' : reason,
                   style: TextStyle(fontSize: 14, height: 1.5, color: h.text),
                 ),
+                // ★ 摘要行：给一个"这次改的是哪一块"的短预览。
+                //   正文在下面给**全文**（可滚动）—— 摘要行只是为了快速定位，
+                //   绝不替代正文。
+                if (summaryLine.isNotEmpty) ...[
+                  const SizedBox(height: 4),
+                  Text(
+                    summaryLine,
+                    style: TextStyle(fontSize: 12, color: h.textFaint),
+                  ),
+                ],
                 if (shownDetail.isNotEmpty) ...[
                   const SizedBox(height: HSpace.sm),
                   Container(

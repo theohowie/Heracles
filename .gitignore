@@ -45,3 +45,13 @@ phone/
 
 # 2026-10-20 真 Key 探针临时目录（本地材料，不入库）
 .tmp-probe/
+
+# 2026-10-22 audit dir: keep the Markdown reports, ignore debug artifacts
+.audit/*.log
+.audit/*.png
+.audit/*.ps1
+.audit/*.xml
+
+# 2026-10-22 tool output / private resume material (local only)
+.dsh-acl-out/
+.resume/

@@ -98,28 +98,42 @@ object ToolValidator {
     /**
      * 每个参数的长度上限。
      *
-     * `content` 类参数天然很长（一个源文件几千字符），
-     * `path` 类天然很短。用同一个上限会导致**要么放行危险输入，要么拦死合法输入**。
+     * ## 2026-10-21（BUG-2）：**按参数名的白名单已删除**，改为统一上限
      *
-     * ⚠️ 2026-10-16 新增 `patch` / `command`（阶段二工具链）：
-     * `apply_patch` 的 diff 天然超过 500 字符，`run_shell_command` 的
-     * 复合命令行也会超 —— 若不在这里放行，这两个工具会**每次都失败**，
-     * 而症状是"模型反复重试直到谎称完成"（同 2026-10-14 的 `list_files.dir`）。
+     * 原先这里是 `"content"/"text"/"body"/"code"/"patch"/"diff" -> 100KB，其余 -> 500`。
+     * 那份白名单是**本地 4B 时代**的产物（小模型失控的表现是无限续写同一个参数），
+     * 但它漏了一个致命成员：`edit` 的 `new_string` / `old_string`，以及 `steps`、
+     * `content` 之外的任何新长参数（`write_file` 之外还有 `apply_patch` 的局部替换）。
+     *
+     * 真机症状：模型给 `edit` 一个 800 字符的 `new_string` ⇒ 被这里判超长 ⇒
+     * `ToolValidator` 拦下 ⇒ 模型重试（还是那么长）⇒ 连续两轮解析失败 ⇒
+     * `CONSECUTIVE_UNPARSEABLE` 熔断 ⇒ 用户看到「输出无法解析」。
+     * **校验器自己成了故障源**，与 2026-10-14 的 `list_files.dir` 是同一类错误。
+     *
+     * 结论：**长度门禁只该防"失控续写"，不该背负"猜哪些参数该长"的知识**。
+     * 所以默认分支直接给 [MAX_CONTENT_LENGTH]（100 KB）—— 那是"任何正常源文件 /
+     * 补丁都放得下"的量级，同时仍能拦住模型失控。唯一保留的例外是
+     * [MAX_COMMAND_LENGTH]：命令行有**物理**上限（内核 `ARG_MAX` 与 shell 解析），
+     * 与"内容多长"无关。
      */
     private fun limitFor(paramName: String): Int = when (paramName) {
-        "content", "text", "body", "code" -> MAX_CONTENT_LENGTH
-        // 补丁正文与源码正文同量级
-        "patch", "diff" -> MAX_CONTENT_LENGTH
+        // 命令行不许无限长 —— 这是内核 / shell 的真实限制，不是经验值
         "command" -> MAX_COMMAND_LENGTH
-        else -> MAX_ARG_VALUE_LENGTH
+        // 其余一律按"内容类"对待（含 content / patch / new_string / old_string / steps …）
+        else -> MAX_CONTENT_LENGTH
     }
 
     /**
-     * 普通参数值长度上限。
+     * **【已弃用 · 2026-10-21】** 普通参数值长度上限（500）。
      *
-     * 500 是个经验值：联系人名、搜索关键词、应用名都远短于它；
-     * 而模型失控时最容易的表现就是无限续写同一个参数。
+     * 500 是本地 4B 时代的经验值：那时"模型失控"最常见的形式就是无限续写一个短参数。
+     * 它作为 [limitFor] 的默认分支的直接后果是 `edit.new_string`、`update_plan.steps`
+     * 这类**天然很长**的参数被拦（见 [limitFor] 的 KDoc，真机 BUG-2）。
+     *
+     * **常量本身保留**（对外兼容：可能有测试 / 文档引用这个数），但**不再参与默认分支**。
+     * 新代码不要用它当长度门禁 —— 要限长请用 [MAX_CONTENT_LENGTH]。
      */
+    @Deprecated("默认分支已改为 MAX_CONTENT_LENGTH（BUG-2，2026-10-21）；保留常量仅为兼容引用")
     const val MAX_ARG_VALUE_LENGTH = 500
 
     /**
