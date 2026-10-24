@@ -253,18 +253,23 @@ class HeraclesAgent {
   LLMClient _buildClient() {
     final injected = _injectedClient;
     if (injected != null) return injected;
-    return switch (_config.provider) {
+    return buildClientFor(_config);
+  }
+
+  /// 按 [BackendConfig] 建 client（静态：/compact 的摘要调用也用它）。
+  static LLMClient buildClientFor(BackendConfig config) {
+    return switch (config.provider) {
       BackendProvider.openAiCompatible => OpenAIClient(
-          apiKey: _config.apiKey,
-          baseUrl: _config.baseUrl,
+          apiKey: config.apiKey,
+          baseUrl: config.baseUrl,
         ),
       BackendProvider.anthropic => ClaudeClient(
-          apiKey: _config.apiKey,
-          baseUrl: _config.baseUrl,
+          apiKey: config.apiKey,
+          baseUrl: config.baseUrl,
         ),
       BackendProvider.openAiResponses => ResponsesClient(
-          apiKey: _config.apiKey,
-          baseUrl: _config.baseUrl,
+          apiKey: config.apiKey,
+          baseUrl: config.baseUrl,
         ),
     };
   }
@@ -278,6 +283,53 @@ class HeraclesAgent {
             ? null
             : <String, dynamic>{'reasoning_effort': _config.reasoningEffort},
       );
+
+  /// **会话摘要**（/compact 用，2026-10-24）—— 一次性 LLM 调用，不进 agent 循环。
+  ///
+  /// ## 为什么是静态独立方法
+  ///
+  /// /compact 发生在**两次 run 之间**（用户在输入框敲 /compact）：
+  /// 此刻没有 agent 实例、没有 state，只有会话文件里的文本。
+  /// 摘要只需要"一段文本进、一段文本出"，走一次裸 `generate` 最省。
+  ///
+  /// ## 摘要什么（给摘要器的指令要点）
+  ///
+  /// 保留：用户目标与约束 / 改过的文件与内容 / 关键结论（文件名、行号、
+  /// 报错原文、命令返回值）/ 未完成事项。丢弃：寒暄、过程叙述、重复。
+  /// 这与压缩摘要的 [summaryEmphasis] 同一立场：**工具的具体结论不能丢**。
+  ///
+  /// 失败（网络/超时）向上抛，由宿主决定怎么告知 —— **绝不静默返回空**：
+  /// 空摘要写进标记行 = 用户以为压了、实际全丢了。
+  static Future<String> summarizeTranscript({
+    required BackendConfig config,
+    required String transcript,
+    int maxChars = 4000,
+    LLMClient? client,
+  }) async {
+    // `client` 注入点（测试替身用）；生产不传 ⇒ 按配置现建。
+    final llm = client ?? buildClientFor(config);
+    final system = '你是开发会话的摘要器。把用户给出的会话记录压缩成要点摘要，'
+        '供智能体下次继续工作使用。\n'
+        '必须保留：\n'
+        '1. 用户的目标与约束；\n'
+        '2. 已修改/创建的文件，各自改了什么；\n'
+        '3. 关键结论（文件名、行号、报错原文、命令返回值）；\n'
+        '4. 未完成事项与卡点。\n'
+        '丢弃：寒暄、重复、与任务无关的过程叙述。\n'
+        '直接输出摘要正文，不要开场白和标题，全文不超过 $maxChars 字符。';
+    final msg = await llm.generate(
+      [
+        SystemMessage(system),
+        UserMessage.text(transcript),
+      ],
+      modelConfig: ModelConfig(
+        model: config.modelName,
+        maxTokens: 2048,
+        temperature: 0.2,
+      ),
+    );
+    return (msg.textOutput ?? '').trim();
+  }
 
   /// **上下文构成**（C5，2026-10-24）—— 三块的**估算** token。
   ///
