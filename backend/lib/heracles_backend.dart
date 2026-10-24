@@ -41,6 +41,8 @@ export 'src/capability/capabilities.dart';
 export 'src/context/deterministic_json.dart';
 export 'src/context/window_ratio_compressor.dart';
 export 'src/prompt/system_prompt.dart';
+// 内置技能（S1/S2/S3 的 Skill 层，2026-10-24）。宿主开 RunOptions.enableSkills 后进目录。
+export 'src/prompt/builtin_skills.dart';
 export 'src/agent/tools/apk_tools.dart';
 export 'src/agent/tools/file_manage_tools.dart';
 export 'src/agent/tools/file_tools.dart';

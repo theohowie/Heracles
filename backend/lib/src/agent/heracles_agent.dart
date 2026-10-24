@@ -44,6 +44,7 @@ import '../capability/capabilities.dart';
 import '../contract/contract.dart';
 import '../context/window_ratio_compressor.dart';
 import '../prompt/system_prompt.dart';
+import '../prompt/builtin_skills.dart';
 import '../tools/tool_factory.dart';
 import 'multimodal.dart';
 import 'tools/apk_tools.dart';
@@ -137,6 +138,7 @@ class RunOptions {
     this.memoryNote,
     this.approvalMode = ApprovalMode.fullAccess,
     this.enableSubAgents = false,
+    this.enableSkills = false,
   });
 
   final int maxTurns;
@@ -217,6 +219,13 @@ class RunOptions {
   ///   预算"）；
   /// · worker 禁止再派生（`disableSubAgents`）—— 深度恒为 1。
   final bool enableSubAgents;
+
+  /// **内置技能**（2026-10-24 接线，S1/S2/S3 的 Skill 层）。
+  ///
+  /// 开启后系统提示里有技能目录（一行一条），模型按任务用
+  /// activate_skills 按需加载全文（渐进披露）—— 平时只花目录的成本。
+  /// 库默认关（旧行为）；App 显式开启。清单见 [builtinSkills]。
+  final bool enableSkills;
 }
 
 /// **组装好的 Agent**。
@@ -843,6 +852,9 @@ class HeraclesAgent {
       // ★ disableSubAgents 才是真正的开关（框架在 !disableSubAgents 时
       //   无条件追加 delegate_task，不看 subAgents 是否为空）。
       subAgents: _options.enableSubAgents ? [_workerSubAgent()] : null,
+      // ★ 技能目录（S1/S2，2026-10-24）：非空时框架追加 activate/deactivate
+      //   工具 + 目录系统提示（渐进披露）。
+      skills: _options.enableSkills ? builtinSkills() : null,
       disableSubAgents: !_options.enableSubAgents,
       // 框架自带循环检测（相同调用重复 + 周期性 LLM 诊断）。
       // 旧实现只有"相同调用重复"且阈值 2；这里用框架默认（5），
