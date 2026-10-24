@@ -148,6 +148,8 @@ class RunOptions {
     /// 可回放”的那一半（工具级 trace 已在会话 .jsonl）。CLI 用 --trace 开；
     /// App 默认关（文件量大，排障时才开）。
     this.traceDir,
+    this.autoExtract = false,
+    this.verifyCommand,
   });
 
   final int maxTurns;
@@ -238,6 +240,20 @@ class RunOptions {
 
   /// 见 [RunOptions.traceDir] 的 KDoc（E4）。
   final String? traceDir;
+
+  /// **自动提炼记忆**（M5，2026-10-25；默认 false）。
+  ///
+  /// 开启后任务收尾时用一次**摘要调用**从对话中提炼"值得跨会话保留的
+  /// 事实"并写入长期记忆。代价 = 每 run 一次小模型调用 —— opt-in，
+  /// 由宿主决定是否承担。失败静默（记忆是锦上添花）。
+  final bool autoExtract;
+
+  /// **自验证命令**（H3/K2，2026-10-25；默认 null = 不验证）。
+  ///
+  /// 设置后：文件写/编辑**成功**时自动经 shell 执行该命令，输出附在
+  /// 工具结果里回给模型 —— 模型看到失败立刻修，形成 改→验→修 闭环
+  /// （架构级自验证，不靠提示词劝）。无 shell 能力时静默跳过。
+  final String? verifyCommand;
 }
 
 /// **组装好的 Agent**。
@@ -372,6 +388,38 @@ class HeraclesAgent {
     return (msg.textOutput ?? '').trim();
   }
 
+  /// **自动提炼记忆**（M5，2026-10-25）—— 任务收尾时从对话中提炼事实。
+  ///
+  /// 每行一条事实（只收"跨会话有用"的：约定/偏好/踩坑），最多 [max] 条；
+  /// 没有值得记的就返回空 —— **绝不硬凑**。解析容错：剥 '- ' 与序号前缀。
+  static Future<List<String>> extractMemories({
+    required BackendConfig config,
+    required String transcript,
+    LLMClient? client,
+    int max = 3,
+  }) async {
+    final llm = client ?? buildClientFor(config);
+    final msg = await llm.generate(
+      [
+        SystemMessage('你是记忆提炼器。从开发会话记录里提炼"值得跨会话保留的'
+            '事实"（项目约定、用户偏好、踩过的坑），每行一条、以 "- " 开头，'
+            '最多 $max 条。只收确定性结论，不收过程叙述；'
+            '没有值得记的就输出空。不要输出任何其他内容。'),
+        UserMessage.text(transcript),
+      ],
+      modelConfig: ModelConfig(model: config.modelName, maxTokens: 512),
+    );
+    final out = <String>[];
+    for (var line in (msg.textOutput ?? '').split('\n')) {
+      line = line.trim();
+      if (line.startsWith('- ')) line = line.substring(2);
+      line = line.replaceAll(RegExp(r'^\d+\.\s*'), '');
+      if (line.length >= 6) out.add(line);
+      if (out.length >= max) break;
+    }
+    return out;
+  }
+
   /// **上下文构成**（C5，2026-10-24）—— 三块的**估算** token。
   ///
   /// ## 为什么是估算
@@ -443,12 +491,30 @@ class HeraclesAgent {
   /// 分组顺序即日志阅读顺序：**高频基础 → 危险手段 → 长耗时 → 交互**。
   List<Tool> _buildTools() {
     final factory = ToolFactory(_caps);
+    // ★ H3/K2（2026-10-25）：verifyCommand 配置后，写/编辑成功自动跑
+    //   验证命令（经 shell 能力），输出附在工具结果里回给模型。
+    final shellForVerify = _caps.shell;
+    final Future<String> Function()? verify =
+        (_options.verifyCommand != null && shellForVerify != null)
+            ? () async {
+                final r = await shellForVerify.run(
+                  _options.verifyCommand!,
+                  timeout: const Duration(minutes: 10),
+                );
+                return switch (r) {
+                  CapabilitySuccess(:final data) =>
+                    '通过。输出尾部：${data.length > 800 ? data.substring(data.length - 800) : data}',
+                  CapabilityFailure(:final reason) => '失败：$reason',
+                  _ => '通过（无输出）',
+                };
+              }
+            : null;
     // ★ "先读再改"记账（K1，2026-10-24）：与工具列表同生命周期 ——
     //   App 每次 run 新建 agent ⇒ 恰好 run 级；CLI/测试复用实例 ⇒ 会话级
     //   （从宽取向：读过的文件跨 run 仍算读过）。
     final tracker = EditReadTracker();
     return [
-      ...buildFileTools(factory, _caps, tracker: tracker),        // 8 个：读/写/编辑/补丁/列/建目录/找/搜
+      ...buildFileTools(factory, _caps, tracker: tracker, verify: verify),        // 8 个：读/写/编辑/补丁/列/建目录/找/搜
       ...buildShellTools(factory, _caps),       // 1 个：run_shell_command
       ...buildFileManageTools(factory, _caps, tracker: tracker),  // 3 个：删除/移动/复制（有破坏性）
       ...buildInfoTools(factory, _caps),        // 2 个：web_fetch / check_device_state
@@ -968,6 +1034,47 @@ class HeraclesAgent {
               for (final m in _state!.history.messages) m.toJson(),
             ],
           }));
+        } catch (_) {
+          // 静默
+        }
+      }
+      // ★ M5（2026-10-25）：autoExtract 开启 ⇒ 收尾提炼事实入长期记忆。
+      //   失败静默（锦上添花不搞崩主链路）；无记忆能力跳过。
+      if (_options.autoExtract && _caps.memory != null) {
+        try {
+          final transcript = StringBuffer();
+          for (final m in _state!.history.messages) {
+            final ut = switch (m) {
+              UserMessage() => m.contents
+                  .whereType<TextPart>()
+                  .map((p) => p.text)
+                  .join(),
+              ModelMessage() => m.textOutput ?? '',
+              FunctionExecutionResultMessage() => m.results
+                  .expand((r) => r.content.whereType<TextPart>())
+                  .map((p) => p.text)
+                  .join('；'),
+              _ => '',
+            };
+            if (ut.trim().isEmpty) continue;
+            final who = switch (m) {
+              UserMessage() => '用户',
+              ModelMessage() => '助手',
+              FunctionExecutionResultMessage() => '工具',
+              _ => '',
+            };
+            transcript.writeln('$who：${ut.trim()}');
+          }
+          if (transcript.toString().trim().isNotEmpty) {
+            final facts = await extractMemories(
+              config: _config,
+              transcript: transcript.toString(),
+              client: _injectedClient,
+            );
+            for (final f in facts) {
+              await _caps.memory!.append('[auto] $f');
+            }
+          }
         } catch (_) {
           // 静默
         }
