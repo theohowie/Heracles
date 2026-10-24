@@ -311,7 +311,222 @@ void main() {
       expect(state.toolsHistory, hasLength(1));
     });
   });
+
+  // ==========================================================================
+  // 三级压缩（2026-10-24）：micro(40%) / auto(60%) / full(80% 强制)
+  // ==========================================================================
+  group('三级 —— 第一级 micro（≥40% 且 <60%）：无 LLM 清理老工具结果', () {
+    /// 造一个估算值落在 [4000, 6000) 的 state：一条大工具结果 + 30 条小消息。
+    ///（消息总数 32 > 保护窗 24 ⇒ 大结果落在保护窗外，micro 才碰得到它。）
+    AgentState stateForMicro({int resultChars = 4500}) => AgentState(
+          sessionId: 's-micro',
+          history: AgentMessageHistory(messages: [
+            UserMessage.text('读文件' * 5), // 10 token
+            FunctionExecutionResultMessage(results: [
+              FunctionExecutionResult(
+                id: 'c1',
+                name: 'read_file',
+                isError: false,
+                arguments: '{"path":"a.txt"}',
+                content: [TextPart('内' * resultChars)], // CJK 1 字 = 1 token
+              ),
+            ]),
+            for (var i = 0; i < 30; i++) UserMessage.text('字' * 20),
+          ]),
+        );
+
+    test('★★★ 老工具结果被换成占位符，正文一字不动，零 LLM 调用', () async {
+      final client = _RecordingClient();
+      var notified = 0;
+      final c = WindowRatioCompressor(
+        client: client,
+        modelConfig: ModelConfig(model: 'stub'),
+        modelWindowTokens: 10000, // micro 线 4000 / auto 线 6000
+        onCompressed: (_, __, ___, ____) => notified++,
+      );
+      final state = stateForMicro();
+      final before = c.estimateUsage(state);
+      expect(before, inExclusiveRange(4000, 6000),
+          reason: '构造必须落在 micro 区间，实际 $before');
+
+      await c.compress(state);
+
+      expect(client.calls, 0, reason: '★ micro 是确定性的，一次 LLM 都不该调');
+      expect(notified, 1, reason: '确有清理 ⇒ 要播事件');
+      final results = state.history.messages
+          .whereType<FunctionExecutionResultMessage>()
+          .single;
+      final text = results.results.single.content
+          .whereType<TextPart>()
+          .map((p) => p.text)
+          .join();
+      expect(text, contains('microcompact'));
+      expect(text, contains('4500'), reason: '占位符要如实报原大小');
+      expect(c.estimateUsage(state), lessThan(before),
+          reason: 'token 必须真的省下来了');
+    });
+
+    test('★★ 保护窗内的工具结果绝不清理；小结果也不清理', () async {
+      final client = _RecordingClient();
+      final c = WindowRatioCompressor(
+        client: client,
+        modelConfig: ModelConfig(model: 'stub'),
+        modelWindowTokens: 10000,
+      );
+      // 大结果放最后一条（保护窗内）⇒ micro 无事可做
+      final state = AgentState(
+        sessionId: 's-tail',
+        history: AgentMessageHistory(messages: [
+          for (var i = 0; i < 31; i++) UserMessage.text('字' * 20),
+          FunctionExecutionResultMessage(results: [
+            FunctionExecutionResult(
+              id: 'c1',
+              name: 'read_file',
+              isError: false,
+              arguments: '{}',
+              content: [TextPart('内' * 4500)],
+            ),
+          ]),
+        ]),
+      );
+      final before = c.estimateUsage(state);
+      await c.compress(state);
+      expect(c.estimateUsage(state), before, reason: '保护窗内的不许动');
+      expect(client.calls, 0);
+    });
+
+    test('★★ 40% 以下 ⇒ 什么都不做（能装下就全装）', () async {
+      final client = _RecordingClient();
+      var notified = 0;
+      final c = WindowRatioCompressor(
+        client: client,
+        modelConfig: ModelConfig(model: 'stub'),
+        modelWindowTokens: 100000,
+        onCompressed: (_, __, ___, ____) => notified++,
+      );
+      final state = stateForMicro(); // 5110 token << 40000
+      await c.compress(state);
+      expect(notified, 0);
+      expect(client.calls, 0);
+    });
+  });
+
+  group('三级 —— 第三级 full（摘要失败/不够时，确定性强制重置）', () {
+    test('★★★ 摘要静默失败 + 估算 ≥80% ⇒ 整批丢弃老轮次 + 插如实说明', () async {
+      final client = _RecordingClient();
+      var notified = 0;
+      final c = WindowRatioCompressor(
+        client: client,
+        modelConfig: ModelConfig(model: 'stub'),
+        modelWindowTokens: 10000,
+        onCompressed: (_, __, ___, ____) => notified++,
+      );
+      // 90 批 × 90 token = 8100 ≥ 8000（强制线）。
+      // 真框架 delegate 因 usages 为空会静默早退 ⇒ 只能靠第三级。
+      final state = AgentState(
+        sessionId: 's-full',
+        history: AgentMessageHistory(
+          messages: [
+            for (var i = 0; i < 90; i++) UserMessage.text('字' * 90),
+          ],
+        ),
+      );
+
+      await c.compress(state);
+
+      expect(state.history.messages.length, 7,
+          reason: '说明 1 条 + 最近 6 批');
+      final note = state.history.messages.first as UserMessage;
+      expect(_text(note), contains('[系统维护]'));
+      expect(_text(note), contains('84'),
+          reason: '如实报丢弃条数，绝不假装"已摘要"');
+      expect(c.estimateUsage(state), lessThan(8000),
+          reason: '★ 重置后必须低于强制线 —— 这就是"80% 必压缩"的兜底');
+      expect(notified, 1, reason: '第二级没生效不播；第三级生效播一次');
+    });
+
+    test('★★ 无 user 边界的历史也能重置（切点不拆工具批）', () async {
+      final client = _RecordingClient();
+      final c = WindowRatioCompressor(
+        client: client,
+        modelConfig: ModelConfig(model: 'stub'),
+        modelWindowTokens: 10000,
+      );
+      // 纯 assistant 历史（长工具链）：66 号位置放一对调用+结果
+      final msgs = <LLMMessage>[
+        for (var i = 0; i < 90; i++)
+          ModelMessage(textOutput: '字' * 90, model: 'm'),
+      ];
+      msgs[66] = ModelMessage(
+        textOutput: '字' * 90,
+        model: 'm',
+        functionCalls: [FunctionCall(id: 'c1', name: 't', arguments: '{}')],
+      );
+      msgs[67] = FunctionExecutionResultMessage(results: [
+        FunctionExecutionResult(
+          id: 'c1',
+          name: 't',
+          isError: false,
+          arguments: '{}',
+          content: [TextPart('ok')],
+        ),
+      ]);
+      final state = AgentState(
+        sessionId: 's-nouser',
+        history: AgentMessageHistory(messages: msgs),
+      );
+
+      await c.compress(state);
+
+      final kept = state.history.messages;
+      expect(kept.first, isA<UserMessage>(), reason: '说明被插到头部');
+      // 保留区若以"带调用的 assistant"开头，其后必须紧跟它的结果（成对）
+      final first = kept[1];
+      if (first is ModelMessage && first.functionCalls.isNotEmpty) {
+        expect(kept[2], isA<FunctionExecutionResultMessage>(),
+            reason: '★ 切点不许拆散调用与结果 —— 拆散就是 400');
+      }
+      expect(c.estimateUsage(state), lessThan(8000));
+    });
+  });
+
+  group('C5 —— 上下文构成估算（静态入口，2026-10-24）', () {
+    test('★★ 消息与工具定义分开估，合计 = 总估算', () {
+      final c = compressor(modelWindowTokens: 128000);
+      final state = stateWithTools({'name': 'read_file', 'description': '读文件' * 50});
+      final msgs = WindowRatioCompressor.estimateMessagesUsage(state);
+      final tools = WindowRatioCompressor.estimateToolDefinitions(state);
+      expect(msgs, greaterThan(0));
+      expect(tools, greaterThan(0));
+      expect(msgs + tools, c.estimateUsage(state), reason: '两块相加必须对得上总账');
+    });
+
+    test('★★ estimateText：CJK 1 字/token，ASCII 4 字符/token', () {
+      expect(WindowRatioCompressor.estimateText('字' * 10), 10);
+      expect(WindowRatioCompressor.estimateText('a' * 8), 2);
+      expect(WindowRatioCompressor.estimateText(''), 0);
+    });
+
+    test('★★ HeraclesAgent.contextBreakdown()：跑一轮后三块齐全且 > 0', () async {
+      final agent = HeraclesAgent(
+        config: const BackendConfig(apiKey: 'k', modelName: 'm'),
+        capabilities: const Capabilities(),
+        client: _RecordingClient(),
+      );
+      await agent.run('问一句').drain<void>();
+      final b = agent.contextBreakdown();
+      expect(b.keys, containsAll(['system', 'tools', 'history']));
+      expect(b['system']!, greaterThan(0), reason: 'system 提示必有');
+      expect(b['history']!, greaterThan(0), reason: '跑过一轮必有历史');
+      expect(b['tools']!, greaterThan(0),
+          reason: '发过请求就有工具面快照（21 个工具定义是常驻开销）');
+    });
+  });
 }
+
+/// 取 UserMessage 的文本（断言用）。
+String _text(UserMessage m) =>
+    m.contents.whereType<TextPart>().map((p) => p.text).join();
 
 /// 记录调用次数的 client 替身 —— **绝不联网**。
 ///

@@ -62,6 +62,7 @@ class HeraclesApp extends StatelessWidget {
             accentHex: s.accentHex,
             dark: dark,
             fontSize: s.fontSize,
+            themeStyle: s.themeStyle,
           ),
           // ★ 2026-10-22 Cupertino 化：iOS 转场（CupertinoPageTransitionsBuilder）
           //   配在 `buildHeraclesTheme` 的 ThemeData.pageTransitionsTheme 里 ——
@@ -70,7 +71,7 @@ class HeraclesApp extends StatelessWidget {
           //   体系都挂在 Material 上，换 `CupertinoApp` 会整树崩 ——
           //   设计语言由**控件与转场**决定，不由根件名字决定。
           builder: (context, child) => HueScope(
-            hue: Hue.forDark(dark, s.accentHex),
+            hue: Hue.forTheme(s.themeStyle, dark),
             // ★ 字号设置的真实落点：MediaQuery.textScaler
             //
             // 不用 textTheme.apply(fontSizeFactor:) —— 真机崩溃：

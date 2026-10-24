@@ -3,6 +3,7 @@ import 'dart:convert';
 import 'dart:io';
 
 import 'package:flutter/services.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 
 import '../models/attachment.dart';
 import '../models/message.dart';
@@ -175,6 +176,9 @@ class AgentBridge {
   ///
   /// 静态：`AgentBridge` 会被多处 new，用量必须全局唯一（与 `_localEvents` 同理）。
   static int _lastFrozenTokens = -1;
+
+  /// 上一次 run 的上下文构成（C5，2026-10-24；估算）。空 = 没有 run 过。
+  static Map<String, int> _lastContextBreakdown = const <String, int>{};
   static int _lastContextLimit = -1;
 
   /// 上一次运行的**冻结区** token；`-1` = 还没跑过任何一次。
@@ -186,6 +190,11 @@ class AgentBridge {
   /// 首轮历史只有这一条用户消息，所以它 ≈ 冻结区 + 一句用户输入 ——
   /// 比旧实现的 `TextMath` 估算**更真**（估算曾 40% 高估）。
   Future<int> lastFrozenTokens() async => _lastFrozenTokens;
+
+  /// **上下文构成**（C5，2026-10-24）：system / tools / history（估算 token）。
+  /// 空 map = 还没跑过 —— 调用方退回旧图例，不得显示 0。
+  Future<Map<String, int>> lastContextBreakdown() async =>
+      _lastContextBreakdown;
 
   /// 上下文上限（token）。`<= 0` = 未知（不画进度条）。
   ///
@@ -477,6 +486,13 @@ class AgentBridge {
     // `_currentAskGate` 找到它（`AgentBridge` 会被多处置新，与事件流同理，
     // 实例字段会找错对象）。
     final askGate = LocalAskGate();
+    // ★ 审批白名单（2026-10-24 接线）：
+    //   · 种子 = 持久化的「始终允许」名单（SharedPreferences，跨启动有效）；
+    //   · run 中用户点「本会话始终允许」⇒ [onAlwaysAllow] 立刻持久化 +
+    //     gate 内部记账（同一 run 的后续调用不再问）。
+    //   白名单在宿主侧（gate）判定，backend 的 `_ApprovalHook` 只管"要批谁"。
+    askGate.seedAllowed(await alwaysAllowedTools());
+    askGate.onAlwaysAllow = _rememberAlwaysAllow;
     final executor = LocalAgentExecutor(
       workspacePath: workspacePath,
       settings: settings,
@@ -505,6 +521,8 @@ class AgentBridge {
         //   冻结区 = 首轮 promptTokens（provider 真实上报）；
         //   上限 = 用户配置的模型上下文长度（`fetchModels` 从服务端读到的）。
         _lastFrozenTokens = executor.lastFrozenTokens;
+        // ★ C5（2026-10-24）：构成统计供侧栏"构成"行使用（估算）。
+        _lastContextBreakdown = executor.lastBreakdown;
         _lastContextLimit = provider.contextLength > 0
             ? provider.contextLength
             : -1;
@@ -759,46 +777,69 @@ class AgentBridge {
     return gate.replyAsk(answers);
   }
 
-  /// **危险操作审批通道**（2026-10-19）。
+  /// **危险操作审批通道**（2026-10-19 引入；**2026-10-24 改回进程内**）。
   ///
-  /// 工具返回 `NeedsApproval` 时 Kotlin 侧会发 [kApprovalRequest] 并**挂起**；
-  /// UI 弹窗让用户选「允许 / 本会话始终允许 / 拒绝」，然后调用本方法。
-  /// `decision` 取值：`allow` / `allow_always` / `deny`。
-  /// 没有在跑的任务时调用无害（Kotlin 侧队列已置 null）。
-  Future<void> replyApproval(String decision) async {
+  /// backend 的 `_ApprovalHook` 在工具执行前调用 `AskGate.requestApproval`
+  /// **挂起**等待；`LocalAskGate` 发 [kApprovalRequest] 事件，UI 弹窗让用户选
+  /// 「允许 / 本会话始终允许 / 拒绝」，然后调用本方法完成挂起。
+  /// `decision` 取值：`allow` / `allow_always` / `deny`（其它值按拒绝计）。
+  ///
+  /// ## ★ 2026-10-24：不再走 MethodChannel
+  ///
+  /// 旧实现打 `replyApproval` 通道 —— 那个 Kotlin handler 已随旧后端删除
+  /// （`MainActivity` 只剩工作区/选择器/健康读数），调用必然失败 ⇒
+  /// 审批决定永远回不到挂起的 hook，只能等 10 分钟超时。
+  /// 现在直接完成本轮 `LocalAskGate` 上挂起的 completer（与 `replyAsk` 同形）。
+  ///
+  /// 返回 `true` = 确实交到了一个正在等待的审批；`false` = 没有挂起的审批
+  /// （run 已结束/超时/先点了停止）—— **如实告知，不静默成功**。
+  Future<bool> replyApproval(String decision) async {
+    final gate = _currentAskGate;
+    if (gate == null) return false;
+    return gate.replyApproval(decision);
+  }
+
+  /// **「始终允许」白名单**（2026-10-19 引入；2026-10-24 改存 Flutter 侧）。
+  ///
+  /// 用户在审批弹窗点了「本会话始终允许」后，那个工具名会被记住，
+  /// **下次启动仍然生效**。存 `SharedPreferences`（键 `heracles.approvals`，
+  /// StringList）—— 旧的原生键 `heracles_approvals.xml` 所在的 handler 已删，
+  /// 新键从空开始（旧记录自然作废：工具集在内核重构后也变了，重批一次更安全）。
+  ///
+  /// 这份白名单不放进 `AppSettings`：它是**安全决定**，不该被"恢复默认设置"顺手清掉。
+  static const _approvalsKey = 'heracles.approvals';
+
+  Future<List<String>> alwaysAllowedTools() async {
     try {
-      await _channel.invokeMethod<bool>('replyApproval', {'decision': decision});
-    } on MissingPluginException {
-      // 平台未实现（测试环境）—— 静默
-    } on PlatformException {
-      // 队列已作废（run 已结束）—— 决定无意义，丢弃
+      final prefs = await SharedPreferences.getInstance();
+      return prefs.getStringList(_approvalsKey) ?? const [];
+    } catch (_) {
+      // 存储不可用（测试环境等）—— 当没有白名单，审批照常走弹窗。
+      return const [];
     }
   }
 
-  /// **「始终允许」白名单**（2026-10-19）—— 跨 run 持久，存在原生侧。
-  ///
-  /// 用户在审批弹窗点了「本会话始终允许」后，那个工具名会被记住（原生侧
-  /// `SharedPreferences("heracles_approvals")`），**下次启动仍然生效**。
-  /// 这份白名单不放进 `AppSettings`：它是**安全决定**，不该被"恢复默认设置"顺手清掉。
-  Future<List<String>> alwaysAllowedTools() async {
+  /// 白名单追加一条（`allow_always` 的持久化回调，见 `LocalAskGate.onAlwaysAllow`）。
+  Future<void> _rememberAlwaysAllow(String tool) async {
     try {
-      final list = await _channel.invokeListMethod<String>('alwaysAllowedTools');
-      return list ?? const [];
-    } on MissingPluginException {
-      return const [];
-    } on PlatformException {
-      return const [];
+      final prefs = await SharedPreferences.getInstance();
+      final cur = prefs.getStringList(_approvalsKey) ?? <String>[];
+      if (!cur.contains(tool)) {
+        await prefs.setStringList(_approvalsKey, [...cur, tool]);
+      }
+    } catch (_) {
+      // 持久化失败：本次 run 内 gate 已记账（仍放行），只是重启后要重批 ——
+      // 这是可接受的退化，不该让审批流程失败。
     }
   }
 
   /// 清空「始终允许」白名单（设置页「清除」按钮）。
   Future<void> clearAlwaysAllowed() async {
     try {
-      await _channel.invokeMethod<bool>('clearAlwaysAllowed');
-    } on MissingPluginException {
-      // 测试环境 —— 静默
-    } on PlatformException {
-      // 清空失败不影响使用（下次写入会覆盖）—— 静默
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.remove(_approvalsKey);
+    } catch (_) {
+      // 清空失败：下次审批会继续弹窗（比"清不掉旧白名单"安全得多）。
     }
   }
 

@@ -285,6 +285,135 @@ void main() {
       expect(m.thought, isNull, reason: 'thought 不许回填');
     });
   });
+
+  // ==========================================================================
+  // 工具历史回填（2026-10-24）：tool_call / tool(带 id) 行 → 配对重建
+  // ==========================================================================
+  group('工具历史 —— tool_call/tool 行按 id 配对回填（取舍① 的解除）', () {
+    test('★★★ 单个调用：tool_call + tool ⇒ 一对消息，结果进上下文', () {
+      final h = sessionRowsToHistory([
+        {'role': 'user', 'text': '读一下 a.txt'},
+        {
+          'role': 'tool_call',
+          'id': 'c1',
+          'tool': 'read_file',
+          'args': {'path': 'a.txt'},
+        },
+        {
+          'role': 'tool',
+          'id': 'c1',
+          'tool': 'read_file',
+          'result': '1| hello',
+          'ok': true,
+        },
+        {'role': 'assistant', 'text': '文件内容是 hello。'},
+      ]);
+
+      // user, assistant(functionCalls), results, assistant(正文)
+      expect(h, hasLength(4));
+      final calls = h[1] as ModelMessage;
+      expect(calls.functionCalls, hasLength(1));
+      expect(calls.functionCalls.single.id, 'c1');
+      expect(calls.functionCalls.single.name, 'read_file');
+      expect(calls.functionCalls.single.arguments, '{"path":"a.txt"}');
+      final results = h[2] as FunctionExecutionResultMessage;
+      expect(results.results.single.id, 'c1');
+      expect(_textOfAny(results), '1| hello');
+      expect(results.results.single.isError, isFalse);
+    });
+
+    test('★★★ 并行批乱序完成 ⇒ 按 id 配对（不按到达顺序）', () {
+      final h = sessionRowsToHistory([
+        {'role': 'tool_call', 'id': 'c1', 'tool': 'list_files', 'args': {}},
+        {'role': 'tool_call', 'id': 'c2', 'tool': 'list_files', 'args': {}},
+        // c2 先完成 —— 结果行顺序与发起顺序相反
+        {
+          'role': 'tool',
+          'id': 'c2',
+          'tool': 'list_files',
+          'result': 'batch-2',
+          'ok': true,
+        },
+        {
+          'role': 'tool',
+          'id': 'c1',
+          'tool': 'list_files',
+          'result': 'batch-1',
+          'ok': false,
+        },
+      ]);
+
+      expect(h, hasLength(2), reason: '凑齐才发：一个 assistant 调用批 + 一个结果批');
+      final calls = h[0] as ModelMessage;
+      expect(calls.functionCalls.map((c) => c.id).toList(), ['c1', 'c2'],
+          reason: '调用的顺序保持发起顺序（模型写的顺序）');
+      final results = h[1] as FunctionExecutionResultMessage;
+      // 结果按调用顺序排（framework 按 id 关联，顺序稳定便于人读）
+      expect(results.results.map((r) => r.id).toList(), ['c1', 'c2']);
+      expect(results.results.where((r) => r.id == 'c1').single.isError, isTrue,
+          reason: '失败状态要如实回填');
+      expect(_textOfAny(results), contains('batch-1'));
+    });
+
+    test('★★ 旧格式（tool 行无 id / 没有 tool_call 行）⇒ 照旧跳过，不产生孤立结果', () {
+      final h = sessionRowsToHistory([
+        {'role': 'user', 'text': '老会话'},
+        {
+          'role': 'tool',
+          'tool': 'read_file',
+          'args': {'path': 'a.txt'},
+          'result': '1| hello',
+          'ok': true,
+        },
+        {'role': 'assistant', 'text': '老回答'},
+      ]);
+      expect(h.map(_textOfAny).toList(), ['老会话', '老回答'],
+          reason: '旧行为：没有 id 的工具行无法配对，跳过');
+    });
+
+    test('★★ 尾部残批（只有调用、没有结果 —— 进程被杀）整体丢弃', () {
+      final h = sessionRowsToHistory([
+        {'role': 'user', 'text': '问'},
+        {'role': 'tool_call', 'id': 'c9', 'tool': 'build_apk', 'args': {}},
+        // 没有 c9 的结果 —— 崩在这里
+      ]);
+      expect(h, hasLength(1), reason: '发不出去的半批宁可丢弃，不能 400');
+    });
+
+    test('★★ 裁剪后开头孤立的结果消息被清理（配对的调用被裁掉了）', () {
+      final rows = <Map<String, dynamic>>[
+        {'role': 'tool_call', 'id': 'c0', 'tool': 't', 'args': {}},
+        {'role': 'tool', 'id': 'c0', 'tool': 't', 'result': 'x', 'ok': true},
+        for (var i = 0; i < 60; i++)
+          {'role': i.isEven ? 'user' : 'assistant', 'text': 'm$i'},
+      ];
+      final h = sessionRowsToHistory(rows, maxMessages: 40);
+      expect(h.first, isNot(isA<FunctionExecutionResultMessage>()),
+          reason: '开头不能是孤立的结果 —— 那会 400');
+    });
+
+    test('★★ 失败的工具调用（审批拒绝）也回填，isError 如实', () {
+      final h = sessionRowsToHistory([
+        {
+          'role': 'tool_call',
+          'id': 'c1',
+          'tool': 'run_shell_command',
+          'args': {'command': 'rm -rf /'},
+        },
+        {
+          'role': 'tool',
+          'id': 'c1',
+          'tool': 'run_shell_command',
+          'result': '未执行：用户拒绝了这次调用…',
+          'ok': false,
+          'state': 'failed',
+        },
+      ]);
+      final results = h.whereType<FunctionExecutionResultMessage>().single;
+      expect(results.results.single.isError, isTrue,
+          reason: '拒绝要如实回填 —— 模型才知道上一次被拒了，别再撞同一个弹窗');
+    });
+  });
 }
 
 /// 取任意消息的正文（断言用）。

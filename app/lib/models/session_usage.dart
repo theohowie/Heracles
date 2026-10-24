@@ -298,6 +298,7 @@ class ContextUsage {
     required this.conversationTokens,
     required this.limit,
     this.limitSource = '',
+    this.breakdown,
   });
 
   /// 冻结区（系统提示词 + 工具定义）token —— 来自 Kotlin 侧估算
@@ -308,6 +309,11 @@ class ContextUsage {
 
   /// 上下文上限（**自动解析**：服务端上报 > 内置模型表 > 后端默认）
   final int limit;
+
+  /// **上下文构成**（C5，2026-10-24）：system / tools / history 三块的
+  /// **估算** token。null = 没有数据（还没跑过一次 run）—— 侧栏退回
+  /// 两行旧图例（冻结区合计 / 对话），**不得显示 0**。
+  final Map<String, int>? breakdown;
 
   /// 上限的**来源说明**（2026-10-14，诊断用）。
   ///
