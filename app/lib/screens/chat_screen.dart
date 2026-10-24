@@ -3,6 +3,10 @@ import 'dart:convert';
 
 import 'package:flutter/cupertino.dart';
 import 'package:flutter/material.dart';
+// 只为 `ScrollPosition.userScrollDirection` 的类型（[ScrollDirection]）——
+// 判断"用户手势是否在途"用（见 [_ChatScreenState._scrollToBottom]）。
+// material/cupertino 都不导出它，不 import 就是 undefined_identifier。
+import 'package:flutter/rendering.dart' show ScrollDirection;
 import 'package:shared_preferences/shared_preferences.dart';
 
 import '../models/attachment.dart';
@@ -20,6 +24,15 @@ import 'settings_screen.dart';
 import '../widgets/input_bar.dart';
 import '../widgets/message_row.dart';
 import '../widgets/plan_checklist.dart';
+import '../widgets/tool_call_card.dart'
+    show
+        ToolGroupRow,
+        kStepRowArrowGap,
+        kStepRowArrowSize,
+        kStepRowHPad,
+        kStepRowStatusGap,
+        kStepRowStatusSize,
+        kStepRowVPad;
 import '../widgets/usage_sidebar.dart';
 import '../widgets/workspace_drawer.dart';
 
@@ -61,6 +74,21 @@ class _ChatScreenState extends State<ChatScreen> {
   /// 只存内存：这是**本条会话内的一次性态度**，不落盘也不上报。
   /// 发行版若要接云端评价，在写这个 Map 的地方加一次网络调用即可。
   final Map<String, AnswerFeedback?> _feedback = {};
+
+  /// **已展开的工具折叠组**（2026-10-23）。
+  ///
+  /// ## 为什么默认是"收起"
+  ///
+  /// 用户原话：「调用工具太多了，我往下翻全是调用工具，导致观感不好，
+  /// 所以要你做一个折叠。**就是默认是图片这样合并**」——
+  /// 默认合并是这条需求的**主体**，展开是补充。
+  ///
+  /// ## 存的是"锚点下标"
+  ///
+  /// 值 = 该组**第一条消息在 `_messages` 里的下标**。
+  /// 会话严格 append-only ⇒ 老消息的下标不会变，所以这个 key 在会话内稳定；
+  /// 换会话/重载消息时清空（展开态本来就只对当前视图有意义）。
+  final Set<int> _expandedToolGroups = <int>{};
 
   /// 每条回答的时间戳 —— 操作行右侧那个 `14:32`。
   /// 消息模型本身没带时间（`HAssistantMessage` 只有 id/text），
@@ -178,6 +206,43 @@ class _ChatScreenState extends State<ChatScreen> {
 
   /// 正在从磁盘读会话历史
   bool _loadingHistory = false;
+
+  // ---- 会话列表缓存（2026-10-23）----
+  //
+  // ## 为什么需要（task 3：减少 `_reload` 的串行 IPC）
+  //
+  // `_reload` 原来对**每个**工作区串行 `await listSessions()`；而抽屉每次
+  // 打开都会 `_reload(silent: true)` ⇒ N 个工作区 = N 次串行 MethodChannel
+  // 往返，工作区一多，侧边栏明显变慢。
+  //
+  // 现在：reload 仍先打一次 `listWorkspaces`（工作区本身很轻，且
+  // `exists` / `writable` 必须实时），会话列表能命中缓存就不再发请求。
+  // **任何会话变更路径都会清空缓存**（见 [_invalidateSessionCache]），
+  // 所以侧边栏不会读到旧数据。
+
+  /// `工作区路径\u0000treeUri` → 该工作区的会话列表（**不含 active 标记**）。
+  ///
+  /// ⚠️ 不缓存 active：active 是"当前视图"的投影，由 [_markActive]
+  /// 在每次读取时按 `_activeSessionId` 重算 —— 缓存了会在切会话后高亮错。
+  final Map<String, List<HSession>> _sessionCache = {};
+
+  String _sessionCacheKey(String path, String treeUri) => '$path\u0000$treeUri';
+
+  /// 缓存代次 —— 每次失效 +1（2026-10-23）。
+  ///
+  /// 防一种竞态：`_reload` 正在逐个 `await listSessions()` 时，用户删/建了会话
+  /// ⇒ 失效清空；旧 `_reload` 随后把**变更前**拿到的列表写回缓存 ⇒ 之后抽屉
+  /// 一直读到脏数据。写缓存前比对代次，变了就**不写**。
+  int _sessionCacheEpoch = 0;
+
+  /// 清空会话列表缓存 —— **所有会话增删改、以及换上下文之后必须调**。
+  ///
+  /// 宁可多清一次（下次多一次 IPC），也不允许侧边栏读到旧列表：
+  /// 用户看到"刚建的会话没出现 / 删掉的还在"会直接判定功能坏了。
+  void _invalidateSessionCache() {
+    _sessionCacheEpoch++;
+    _sessionCache.clear();
+  }
 
   // ---- 实时流式状态（2026-10-10）----
 
@@ -345,19 +410,58 @@ class _ChatScreenState extends State<ChatScreen> {
   bool get hasActiveStreamStep =>
       _streamStepIds.values.any((id) => _stepIndexOf(id) >= 0);
 
-  /// ★ 用户是否**手动上滑过** —— 上滑即暂停自动滚动（`docs/25` §5.3 第 3 条）。
+  /// ★ **是否跟随底部** —— 新内容到达时要不要自动滚到最新（2026-10-23 修）。
   ///
-  /// 用户往上拉，通常是想回看上面的内容 / 复制一段文本。
-  /// 这时如果还硬把视口拽到底，他**根本读不了** —— 手指一松就被拖回去。
+  /// ## 用户报的现象（原话）
   ///
-  /// 由 [_onScroll] 置位；由"回到底部"或下一次发送复位。
-  bool _autoScrollPaused = false;
+  /// > 「我在往上滑的时候，下方输出了新内容，就会立马回到新内容位置」
+  ///
+  /// ## 根因
+  ///
+  /// 旧实现有一个 `_autoScrollPaused`，但**只有逐字增量（[_flushDeltas]）那条路**
+  /// 看它；工具卡片 / 拦截 / 插话 / 运行收尾等 8 处仍然无条件 `_scrollToBottom()`
+  /// —— 用户上滑回看时，下面一有事件，视口立刻被拽回底部。
+  ///
+  /// ## 现在的语义（唯一的自动滚动判据）
+  ///
+  /// · `true`  = 视口贴着底部 → 新内容到达自动跟随（默认）
+  /// · `false` = 用户上滑离开了底部（离底超过 [_followBottomSlack]）
+  ///   ⇒ **不再自动滚**，右下角出现「回到底部」按钮
+  ///
+  /// 由 [_onScroll] 维护；用户回到底部附近、发送新消息、点「回到底部」时恢复。
+  /// **所有流式/新消息路径都必须走 [_followBottomIfNeeded]**，不得直接调
+  /// [_scrollToBottom] —— 否则这条规则又会被绕过去。
+  bool _stickToBottom = true;
 
-  /// 暂停自动滚动期间是否来了新内容 —— 决定要不要显示「有新内容」按钮。
+  /// 不跟随时是否**确实**来了新内容 —— 只影响「回到底部」按钮的文案。
   ///
-  /// **只在暂停时才有意义**：没暂停时视口本来就在底部，
-  /// 显示一个"有新内容"按钮只会让人以为漏看了什么。
+  /// **只在 [`_stickToBottom`] == false 时才有意义**：跟随时视口本来就在底部，
+  /// 提示"有新内容"只会让人以为漏看了什么。
   bool _hasNewContent = false;
+
+  /// **「上下文已压缩」提示**（2026-10-23，用户要求压缩机制可见）。
+  ///
+  /// ## 为什么是独立列表，而不是往 `_messages` 里插一条
+  ///
+  /// `_messages` 里每一条都会被 `MessageRow` 渲染成**对话内容**（气泡 / 工具卡 /
+  /// 步骤卡）。压缩提示是"系统刚做过什么"的**轻量告知**，不是对话的一部分 ——
+  /// 塞进去会抢"最终回答"的视觉权重，也会进 `_estimateConversationTokens`
+  /// 之类的上下文估算里。
+  ///
+  /// ## 为什么不落盘（本轮的明确选择）
+  ///
+  /// 它是**实时流里的一次系统动作**，不是历史事实：
+  /// · 落盘后重开会话会看到一条"曾压缩过"的提示，用户会以为**现在**也在压缩；
+  /// · 而压缩前后 token 数都是当时的估算值，隔天再看毫无意义。
+  /// 所以它跟着实时流走：切会话/换上下文即丢弃（见 [_switchContext]），
+  /// **重载后历史里没有它** —— 不会误导。
+  ///
+  /// ## 顺序
+  ///
+  /// 事件在 run 的**中间**随时可能到达（框架在每轮循环开头检查），
+  /// 所以按到达顺序插在"当时的对话末尾" —— 用 [anchor]（事件到达时
+  /// `_messages.length`）定位，见 [_displayRows]。
+  final List<_ContextCompressedNote> _compressedNotes = [];
 
   int _seq = 0;
   String _nextId() => 'm${_seq++}';
@@ -459,8 +563,17 @@ class _ChatScreenState extends State<ChatScreen> {
   ///
   /// @param silent true = 不显示加载圈（用于抽屉打开时的静默刷新）。
   ///   不静默的话，每次滑出侧边栏都会闪一下转圈，很难看。
+  ///
+  /// ## 会话列表走内存缓存（2026-10-23）
+  ///
+  /// 之前每个工作区都 `await listSessions()` —— N 个工作区 = N 次**串行**
+  /// IPC，抽屉每次打开都跑一遍。现在命中 [_sessionCache] 就直接用，
+  /// 只有首次/失效后才读。缓存失效点见 [_invalidateSessionCache] 的调用处。
   Future<void> _reload({bool silent = false}) async {
     if (mounted && !silent) setState(() => _loading = true);
+    // 本轮开始时记下缓存代次：遍历途中若有失效（用户删/建会话），
+    // 本次读到的东西就不要再写进缓存了（见 [_sessionCacheEpoch]）。
+    final epoch = _sessionCacheEpoch;
     try {
       final raw = await _bridge.listWorkspaces();
       if (!mounted) return;
@@ -477,11 +590,25 @@ class _ChatScreenState extends State<ChatScreen> {
         //   Kotlin 侧保留了记录并标 exists=false，这里只读它、不再自行过滤。
         //   原来"目录不在就整条跳过"会让工作区在侧边栏凭空消失（用户报的 bug）。
         final exists = (m['exists'] as bool?) ?? true;
-        // 读该工作区里的真实会话（必须带 treeUri，否则 SAF 下读不到）
-        // 失效的就不去读了 —— 读它必然抛，且没有意义
-        final sessions = exists
-            ? await _bridge.listSessions(path, treeUri: treeUri)
-            : const <HSession>[];
+        // 读该工作区里的真实会话（必须带 treeUri，否则 SAF 下读不到）。
+        // 失效的不去读（读它必然抛，且没有意义），也**不缓存空结果** ——
+        // 目录之后可能恢复，下次应重新探测。
+        List<HSession> sessions;
+        if (!exists) {
+          sessions = const <HSession>[];
+        } else {
+          final key = _sessionCacheKey(path, treeUri);
+          final cached = _sessionCache[key];
+          if (cached != null) {
+            sessions = cached;
+          } else {
+            sessions = await _bridge.listSessions(path, treeUri: treeUri);
+            // 代次没变才写缓存 —— 变了说明遍历途中发生过失效
+            if (epoch == _sessionCacheEpoch) {
+              _sessionCache[key] = sessions;
+            }
+          }
+        }
         list.add(HWorkspace(
           id: path,
           name: (m['name'] as String?) ?? path.split('/').last,
@@ -554,11 +681,38 @@ class _ChatScreenState extends State<ChatScreen> {
     Navigator.of(context).pop(); // 关抽屉
     await Future<void>.delayed(const Duration(milliseconds: 260));
     if (!mounted) return;
+    await _openWorkspacePicker();
+  }
+
+  /// **真正拉起 SAF 选择器并处理结果**（2026-10-23 从 [_pickWorkspace] 拆出）。
+  ///
+  /// ## 为什么要拆成两层
+  ///
+  /// 选到受限目录后的提示弹窗里，「改选子文件夹」要**再拉一次选择器** ——
+  /// 而那时抽屉早已关闭。若直接再调 [_pickWorkspace]，它会再
+  /// `Navigator.pop()` 一次，把**聊天页本身**弹掉。
+  /// 所以「关抽屉 + 让出一帧」与「拉选择器 + 处理结果」必须分开。
+  ///
+  /// ## 结果三态（2026-10-23 设备组新契约）
+  ///
+  /// | `pickWorkspace()` 返回 | 处理 |
+  /// |---|---|
+  /// | `null` | 用户取消（旧行为：一句错误提示，不改工作区） |
+  /// | `{ok:false, error, reasonCode, suggest?}` | 弹**可操作的失败提示**（见 [_showPickWorkspaceFailure]） |
+  /// | 其它（旧成功 Map，没有 `ok` 键） | **行为一字不变**：切上下文 + 重新加载 |
+  Future<void> _openWorkspacePicker() async {
     try {
       final ws = await _bridge.pickWorkspace();
       if (!mounted) return;
       if (ws == null) {
         setState(() => _error = '未选择文件夹（或这个位置无法读写，请换一个）');
+        return;
+      }
+      // ★★ 2026-10-23：设备组新契约 —— 受限目录/网盘不再回 null 装没事，
+      //   而是回 `ok:false` + 人话原因 + 两条出路。UI 必须把原因与出路
+      //   都摆出来，否则用户只会再撞一次同样的墙。
+      if (ws['ok'] == false) {
+        await _showPickWorkspaceFailure(ws);
         return;
       }
       // ★ 换工作区 = 换上下文 —— 必须让在途运行的结果失效，
@@ -569,6 +723,216 @@ class _ChatScreenState extends State<ChatScreen> {
     } catch (e) {
       if (!mounted) return;
       setState(() => _error = '$e');
+    }
+  }
+
+  /// **「这个文件夹用不了」的可操作提示**（2026-10-23，设备组新契约）。
+  ///
+  /// ## 输入形状（Kotlin `FolderPickerBridge` / `MainActivity`）
+  ///
+  /// ```json
+  /// {"ok": false,
+  ///  "reasonCode": "restricted" | "no_local_path",
+  ///  "error": "中文解释（可含 \n）",
+  ///  "suggest": [{"action":"pick_subfolder","title":"…","detail":"…"},
+  ///              {"action":"use_app_workspace","title":"…","detail":"…"}]}
+  /// ```
+  ///
+  /// ## 为什么必须做成"可点的出路"
+  ///
+  /// 这是 **Android 11+ 的系统限制**（根目录 / Download / Android 目录不给
+  /// 授权），系统自己弹的三行字没有任何指导性。只回一句"请换一个"，
+  /// 用户只会再撞一次；把"下一步该点什么"直接做成按钮才是有效提示。
+  ///
+  /// 两条出路都是**真的能用**：
+  /// 1. 改选**子文件夹** ⇒ 重新拉起选择器（走 [_openWorkspacePicker]）
+  /// 2. 「默认工作区」⇒ App 私有目录（[ensureAppWorkspace]，完全不经过 SAF）
+  ///
+  /// 视觉与 [_editQueued] 同一套宽弹窗规格：屏宽 88% / 圆角 16 / surfaceAlt /
+  /// 左对齐 —— 不让长解释再被 iOS alert 挤成又高又窄的一条。
+  Future<void> _showPickWorkspaceFailure(Map<String, dynamic> ws) async {
+    final error = (ws['error'] as String?)?.trim() ?? '';
+    final reason = (ws['reasonCode'] as String?)?.trim() ?? '';
+    // 标题按原因分：网盘（无本地路径）与系统受限是两回事，措辞要准。
+    final title = reason == 'no_local_path' ? '这个位置没有本地文件夹' : '这个文件夹不能用作工作区';
+
+    // Kotlin 给的出路；老版本/`no_local_path` 分支没带 ⇒ 用同样的两条兜底。
+    final suggestions = <({String action, String title, String detail})>[];
+    final raw = ws['suggest'];
+    if (raw is List) {
+      for (final it in raw) {
+        if (it is! Map) continue;
+        final t = (it['title'] as String?)?.trim() ?? '';
+        if (t.isEmpty) continue;
+        suggestions.add((
+          action: (it['action'] as String?)?.trim() ?? '',
+          title: t,
+          detail: (it['detail'] as String?)?.trim() ?? '',
+        ));
+      }
+    }
+    if (suggestions.isEmpty) {
+      suggestions.addAll(const [
+        (
+          action: 'pick_subfolder',
+          title: '改选子文件夹',
+          detail: '点进去选一个具体的项目文件夹（子文件夹可以正常授权）。',
+        ),
+        (
+          action: 'use_app_workspace',
+          title: '使用「默认工作区」',
+          detail: 'App 自带的目录，不受这个限制，创建后可以直接开始干活。',
+        ),
+      ]);
+    }
+
+    /// 第 [i] 条出路对应哪个动作（Kotlin 没给 action 时按位置兜底）。
+    String actionOf(int i) {
+      final a = suggestions[i].action;
+      if (a.isNotEmpty) return a;
+      return i == 0 ? 'pick_subfolder' : 'use_app_workspace';
+    }
+
+    final action = await showCupertinoDialog<String>(
+      context: context,
+      builder: (dlgCtx) {
+        final h = Hue.of(dlgCtx);
+        // 键盘此时一般不在，但仍按"剩余高度"算，避免大字号时溢出
+        final insets = MediaQuery.viewInsetsOf(dlgCtx).bottom;
+        final available = MediaQuery.sizeOf(dlgCtx).height - insets;
+        return Padding(
+          padding: EdgeInsets.only(
+              left: HSpace.lg, right: HSpace.lg, bottom: insets),
+          child: Center(
+            child: Container(
+              width: MediaQuery.sizeOf(dlgCtx).width * 0.88,
+              padding: const EdgeInsets.fromLTRB(
+                  HSpace.lg, HSpace.lg, HSpace.lg, HSpace.md),
+              decoration: BoxDecoration(
+                color: h.surfaceAlt,
+                borderRadius: BorderRadius.circular(16),
+                border: Border.all(color: h.border),
+              ),
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Row(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Icon(AppIcons.warning,
+                          size: 20, color: HColors.warnOn(h.dark)),
+                      const SizedBox(width: HSpace.sm),
+                      Expanded(
+                        child: Text(
+                          title,
+                          textAlign: TextAlign.left,
+                          style: TextStyle(
+                            color: h.text,
+                            fontSize: 16,
+                            fontWeight: FontWeight.w600,
+                          ),
+                        ),
+                      ),
+                    ],
+                  ),
+                  const SizedBox(height: HSpace.md),
+                  // 原因正文：左对齐、行高 1.5、不截断；过长时内部滚动
+                  // （错误文案由 Kotlin 给定，可能带换行 —— 原样展示，不裁剪）
+                  ConstrainedBox(
+                    constraints: BoxConstraints(maxHeight: available * 0.35),
+                    child: SingleChildScrollView(
+                      child: Text(
+                        error.isEmpty ? '这个位置不能用作工作区。' : error,
+                        textAlign: TextAlign.left,
+                        style: TextStyle(
+                          fontSize: 14.5,
+                          height: 1.5,
+                          color: h.textDim,
+                        ),
+                      ),
+                    ),
+                  ),
+                  // 出路：纵向排列的可点按钮（标题 + 一句说明）
+                  if (suggestions.isNotEmpty) ...[
+                    const SizedBox(height: HSpace.lg),
+                    for (var i = 0; i < suggestions.length; i++)
+                      Padding(
+                        padding: const EdgeInsets.only(bottom: HSpace.sm),
+                        child: CupertinoButton(
+                          padding: EdgeInsets.zero,
+                          onPressed: () =>
+                              Navigator.of(dlgCtx).pop(actionOf(i)),
+                          child: Container(
+                            width: double.infinity,
+                            padding: const EdgeInsets.symmetric(
+                                horizontal: HSpace.md, vertical: HSpace.sm + 2),
+                            decoration: BoxDecoration(
+                              color: h.surface,
+                              borderRadius: BorderRadius.circular(HRadius.md),
+                              border: Border.all(color: h.border),
+                            ),
+                            child: Column(
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              children: [
+                                Text(
+                                  suggestions[i].title,
+                                  textAlign: TextAlign.left,
+                                  style: TextStyle(
+                                    fontSize: 14.5,
+                                    fontWeight: FontWeight.w600,
+                                    color: h.accent,
+                                  ),
+                                ),
+                                if (suggestions[i].detail.isNotEmpty) ...[
+                                  const SizedBox(height: 2),
+                                  Text(
+                                    suggestions[i].detail,
+                                    textAlign: TextAlign.left,
+                                    style: TextStyle(
+                                      fontSize: 11.5,
+                                      height: 1.35,
+                                      color: h.textFaint,
+                                    ),
+                                  ),
+                                ],
+                              ],
+                            ),
+                          ),
+                        ),
+                      ),
+                  ],
+                  // 关掉 = 什么都不改（安全默认）
+                  Align(
+                    alignment: Alignment.centerRight,
+                    child: CupertinoButton(
+                      padding: const EdgeInsets.symmetric(
+                          horizontal: HSpace.lg, vertical: 6),
+                      onPressed: () => Navigator.of(dlgCtx).pop(),
+                      child: Text('取消',
+                          style: TextStyle(fontSize: 15, color: h.textDim)),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ),
+        );
+      },
+    );
+
+    if (!mounted || action == null) return;
+    if (action == 'pick_subfolder') {
+      // ★ 等弹窗退场再拉系统选择器（同 [_pickWorkspace] 对抽屉的处理）。
+      //   `startActivityForResult` 在 route 过渡的那一帧发起有被系统吞掉
+      //   的历史（2026-10-20 真机 bug）—— 这里让出 ~0.2s，成本可忽略。
+      await Future<void>.delayed(const Duration(milliseconds: 180));
+      if (!mounted) return;
+      // 抽屉已关，不能再走 _pickWorkspace（那会多 pop 一次聊天页）
+      await _openWorkspacePicker();
+    } else if (action == 'use_app_workspace') {
+      // 直接走拆分出来的内层（不 pop 路由）—— 语义与 _addAppWorkspace 一致
+      await _ensureAppWorkspace();
     }
   }
 
@@ -601,6 +965,15 @@ class _ChatScreenState extends State<ChatScreen> {
     Navigator.of(context).pop(); // 关抽屉
     await Future<void>.delayed(const Duration(milliseconds: 260));
     if (!mounted) return;
+    await _ensureAppWorkspace();
+  }
+
+  /// **真正登记默认工作区**（2026-10-23 从 [_addAppWorkspace] 拆出）。
+  ///
+  /// 拆出的原因与 [_openWorkspacePicker] 相同：选文件夹失败的提示弹窗里，
+  /// 「使用「默认工作区」」要**直接调它** —— 那时抽屉已关，
+  /// 不能再 `Navigator.pop()` 一次（会把聊天页弹掉）。
+  Future<void> _ensureAppWorkspace() async {
     try {
       final ws = await _bridge.ensureAppWorkspace();
       if (!mounted) return;
@@ -754,7 +1127,8 @@ class _ChatScreenState extends State<ChatScreen> {
         });
       }
 
-      _scrollToBottom();
+      // 切会话 = 显式动作：直接贴底（不与用户手势/动画协商）
+      _scrollToBottom(force: true);
     } catch (e) {
       if (!mounted) return;
       setState(() {
@@ -963,6 +1337,8 @@ class _ChatScreenState extends State<ChatScreen> {
     if (name == null || name.isEmpty) return;
     await _bridge.renameSession(workspaceId, sessionId, name,
         treeUri: _treeUriOf(workspaceId));
+    // 改了会话标题 ⇒ 缓存失效，否则侧边栏还显示旧名
+    _invalidateSessionCache();
     await _reload();
   }
 
@@ -994,6 +1370,8 @@ class _ChatScreenState extends State<ChatScreen> {
 
     await _bridge.deleteSession(workspaceId, sessionId,
         treeUri: _treeUriOf(workspaceId));
+    // 会话被删 ⇒ 缓存失效（删的可能是**非当前**会话，不会经过 _switchContext）
+    _invalidateSessionCache();
     if (sessionId == _activeSessionId) {
       // ★ 删掉的正是当前会话 = 换上下文：
       //   在途运行的结果绝不能插进"已经不存在的会话"的列表
@@ -1022,6 +1400,8 @@ class _ChatScreenState extends State<ChatScreen> {
     });
     await _bridge.toggleStar(workspaceId, sessionId,
         treeUri: _treeUriOf(workspaceId));
+    // 星标改了会话字段 ⇒ 缓存失效（侧边栏"收藏"筛选依赖它）
+    _invalidateSessionCache();
     await _reload(silent: true);
   }
 
@@ -1040,6 +1420,8 @@ class _ChatScreenState extends State<ChatScreen> {
     });
     await _bridge.toggleArchive(workspaceId, sessionId,
         treeUri: _treeUriOf(workspaceId));
+    // 归档改了会话字段 ⇒ 缓存失效（侧边栏"已归档"筛选依赖它）
+    _invalidateSessionCache();
     await _reload(silent: true);
   }
 
@@ -1237,12 +1619,10 @@ class _ChatScreenState extends State<ChatScreen> {
       });
     });
 
-    // 新内容到了 —— 仅在暂停自动滚动时提示（见 _onScroll 的说明）
-    if (_autoScrollPaused) {
-      _hasNewContent = true;
-    } else {
-      _scrollToBottom();
-    }
+    // 新内容到了 —— 由**跟随状态**决定滚不滚（2026-10-23）。
+    // 注意这里**不能**无条件 `_scrollToBottom()`：那正是「用户上滑回看时
+    // 被拽回底部」的根因（用户原话见 [_stickToBottom]）。
+    _followBottomIfNeeded();
   }
 
   /// 缓冲 key 的两条轨。
@@ -1382,39 +1762,65 @@ class _ChatScreenState extends State<ChatScreen> {
 
   // ------------------------------------------------------------ 自动滚动
 
-  /// 监听用户手动滚动 —— 上滑即**暂停**自动滚动（`docs/25` §5.3 第 3 条）。
+  /// 监听滚动 —— 离底部超过阈值即**停止跟随**；回到阈值内恢复跟随。
   ///
-  /// ## 判据：`pixels < maxScrollExtent - 阈值`
+  /// ## 判据：`maxScrollExtent - pixels > 阈值`
   ///
   /// 不用 `userScrollDirection`：那个字段在惯性与回弹期间会乱跳，
   /// 会把"贴底但正在回弹"误判成上滑，于是**一直暂停**，用户再也看不到新内容。
   /// 比位置更稳，且语义直白：**离底部够远 = 用户在看上面的东西**。
   ///
-  /// 阈值 24px：小于一行的点击抖动，大于惯性回弹的过冲。
+  /// ## 阈值为什么是 80（2026-10-23）
+  ///
+  /// 原来是 24px，只够覆盖惯性回弹：一行内容（约 70–90px）就能让跟随
+  /// 误停/误开，用户手指稍微动一下，"跟/不跟"就来回抖。
+  /// 80 ≈ 一行多一点：**还停在最后一行时仍算在看最新内容**，
+  /// 真的往上翻了一屏才停 —— 与用户「往回看别被打断」的意图一致。
   void _onScroll() {
     if (!_scroll.hasClients) return;
     final pos = _scroll.position;
     final away = pos.maxScrollExtent - pos.pixels;
-    final paused = away > _autoScrollSlack;
+    final stick = away <= _followBottomSlack;
 
-    if (paused != _autoScrollPaused) {
+    if (stick != _stickToBottom) {
       setState(() {
-        _autoScrollPaused = paused;
+        _stickToBottom = stick;
         // 回到底部 = 用户重新跟上了，提示按钮该消失
-        if (!paused) _hasNewContent = false;
+        if (stick) _hasNewContent = false;
       });
     }
   }
 
-  /// "离底部多远算用户在看上面"的阈值（px）
-  static const _autoScrollSlack = 24.0;
+  /// 「离底部多近仍算跟随」的阈值（px）。
+  ///
+  /// **只在这一个地方定义** —— 判定与按钮显示都读它，避免两处阈值漂移。
+  static const _followBottomSlack = 80.0;
 
-  /// 用户点了「有新内容」→ 回到底部并恢复自动滚动。
+  /// 用户点了「回到底部」→ 回到底部并恢复自动跟随。
   void _resumeAutoScroll() {
     setState(() {
-      _autoScrollPaused = false;
+      _stickToBottom = true;
       _hasNewContent = false;
     });
+    // 用户已明确点击「回到底部」⇒ 强制贴底
+    _scrollToBottom(force: true);
+  }
+
+  /// 有新内容到达时，**按跟随状态**决定滚不滚（2026-10-23）。
+  ///
+  /// 所有「流式增量 / 新消息 / 工具事件」触发的滚动都必须走这里，
+  /// **不要**再直接调 [_scrollToBottom] —— 那正是「上滑回看时被拽回底部」
+  /// 的根因（用户原话见 [_stickToBottom] 的 KDoc）。
+  ///
+  /// · 跟随中 ⇒ 滚到底（视口始终贴着最新内容）
+  /// · 不跟随 ⇒ **绝不碰滚动位置**，只亮「回到底部」按钮
+  void _followBottomIfNeeded() {
+    if (!_stickToBottom) {
+      // 不跟随：只亮按钮。用 setState 而不是裸赋值 —— 否则这一帧
+      // 不会重建，按钮要等下一次别的 setState 才冒出来。
+      if (!_hasNewContent && mounted) setState(() => _hasNewContent = true);
+      return;
+    }
     _scrollToBottom();
   }
 
@@ -1541,7 +1947,8 @@ class _ChatScreenState extends State<ChatScreen> {
             rawOutput: _pendingRaw.remove(e.index ?? -1),
           ));
         });
-        _scrollToBottom();
+        // ★ 跟随时才滚（2026-10-23）—— 用户上滑回看时不许被拽回底部
+        _followBottomIfNeeded();
 
       // ---- 工具结束：把那张卡片改成成功/失败 ----
       case AgentEvent.kToolFinished:
@@ -1560,7 +1967,7 @@ class _ChatScreenState extends State<ChatScreen> {
             }
           }
         });
-        _scrollToBottom();
+        _followBottomIfNeeded();
 
       // ---- 被拦截：**不是**工具失败，单独一类 ----
       case AgentEvent.kBlocked:
@@ -1585,7 +1992,7 @@ class _ChatScreenState extends State<ChatScreen> {
             index: e.index,
           ));
         });
-        _scrollToBottom();
+        _followBottomIfNeeded();
 
       // ★ 思考间隙引导（2026-10-13）——
       //   到达时机 = 上一轮已完整结束、插话刚被 append。
@@ -1601,21 +2008,35 @@ class _ChatScreenState extends State<ChatScreen> {
           }
           _messages.add(HUserMessage(id: _nextId(), text: e.message ?? ''));
         });
-        _scrollToBottom();
+        _followBottomIfNeeded();
 
       // ---- ★ 任务计划（2026-10-14，harness）----
       //
       // 用户原话：「先拿到问题先分析，做一个待办，按照待办完成任务」
       //          「顶部显示任务计划（1.查看结构 ✓ 2.写HTML ←进行中 3.验证）」
       //
-      // 两个事件：产生（steps）与推进（doneCount / activeIndex）。
-      // 推进由 Kotlin 侧依据**真实工具执行记录**推导 ——
-      // UI 只管显示，不自己猜进度。
+      // 两个事件：产生/变化（`plan_created`：steps + **真实进度**）与
+      // 推进（`plan_advanced`：doneCount / activeIndex）。
+      // 进度由后端依据**真实工具执行记录**推导 —— UI 只管显示，不自己猜。
+      //
+      // ★ 2026-10-23（「待办不更新」）：Dart 后端**只发 `plan_created`**
+      //   （每次 `write_todos` 重发计划时把 doneCount / activeIndex 一起带上），
+      //   所以主路径是下面 `kPlanCreated` 分支；`kPlanAdvanced` 分支
+      //   保留只为兼容仍会发它的老后端（不要删）。
       case AgentEvent.kPlanCreated:
         setState(() {
           _planSteps = e.planSteps;
-          _planDone = 0;
-          _planActive = 0;
+          // ★ 2026-10-23 修「待办不更新」：
+          //   后端每次 `write_todos` **重发计划**时是带着真实进度
+          //   （`doneCount` / `activeIndex`）的 —— 必须采用事件里的值。
+          //   原来这里硬清 0：重发一次计划，进度条就退回去，
+          //   「已完成 / 进行中」看起来永远不刷新。
+          //   老版本后端不带这两个字段 ⇒ 按 0 兜底（与旧行为一致，向后兼容）。
+          final total = e.planSteps?.length ?? 0;
+          final done = e.doneCount ?? 0;
+          _planDone =
+              done < 0 ? 0 : (total > 0 && done > total ? total : done);
+          _planActive = e.activeIndex ?? 0;
         });
 
       case AgentEvent.kPlanAdvanced:
@@ -1649,6 +2070,33 @@ class _ChatScreenState extends State<ChatScreen> {
             _planClosedReason = e.planClosedReason;
           }
         });
+
+      // ---- ★ 上下文压缩（2026-10-23，用户要求「压缩机制要可见」）----
+      //
+      // 用户原话：「上下文压缩机制这个要做一下，如果上下文达到了 80% 必须先
+      // 自动压缩，然后继续任务，哪怕任务跑到了一半」。
+      //
+      // ## 为什么必须让用户看见
+      //
+      // 压缩是**有损**的（老消息被摘要、细节丢了）。静默发生的后果只有两种：
+      // 模型"突然忘了前面说的事"，或者用户压根不知道发生过 —— 前者会被当成
+      // "模型变笨"。如实回告是本仓库的一贯做法。
+      //
+      // ## 到达时机
+      //
+      // 框架在**每一轮循环的最开头、请求发出之前**检查并压缩 ⇒ 事件可能出现在
+      // 一次 run 的**中间**。所以按到达位置插进对话流（锚点 = 当时消息数），
+      // 不堆到最后。数字字段可能缺失/为 0（老后端）⇒ [_compressedText] 降级。
+      case AgentEvent.kContextCompressed:
+        setState(() {
+          _compressedNotes.add(_ContextCompressedNote(
+            anchor: _messages.length,
+            beforeTokens: e.beforeTokens,
+            afterTokens: e.afterTokens,
+          ));
+        });
+        // 提示也是"新内容"：跟随状态下滚到底；用户上滑回看时不许拽回去
+        _followBottomIfNeeded();
 
       // ---- ★ ask_user：模型向用户提问（2026-10-16）----
       //
@@ -2146,6 +2594,11 @@ class _ChatScreenState extends State<ChatScreen> {
   void _switchContext() {
     _ctxGen++;
     _stopLive();
+    // ★ 2026-10-23：换上下文后会话列表缓存一律作废。
+    //   切会话/新建/换工作区/删会话/分支都汇聚到这里 —— 侧边栏下一次
+    //   reload 必须看到当前真实列表（尤其"刚新建的会话"必须出现）。
+    //   宁可多一次 IPC，也不让用户看到过期列表。
+    _invalidateSessionCache();
     // ★★ 清空任务计划（2026-10-15 真机实测修复，BUG-2）★★
     //
     // ## 修的是什么
@@ -2182,6 +2635,14 @@ class _ChatScreenState extends State<ChatScreen> {
       _planActive = 0;
       _planReachedGoal = null;
       _planClosedReason = null;
+      // ★ 2026-10-23：换上下文 = 换了一份消息列表 —— 「是否跟随底部」与
+      //   「有新内容」都属于**旧列表**的状态。不复位的话，新会话一进来
+      //   就可能顶着「回到底部」按钮，或者明明在底部却不跟随。
+      _stickToBottom = true;
+      _hasNewContent = false;
+      // 压缩提示是**实时流**的瞬态提示（不落盘）：换会话后不该残留 ——
+      // 它是"那个会话当时发生过"的事，锚点也属于旧列表。
+      _compressedNotes.clear();
     });
   }
 
@@ -2406,6 +2867,10 @@ class _ChatScreenState extends State<ChatScreen> {
   void _sendQueuedNow(int index) {
     if (index < 0 || index >= _queue.length) return;
     final item = _queue.removeAt(index);
+    // ★ 2026-10-23：立刻刷新一次 —— 队列条要**马上**少一条。
+    //   原来只改列表不 setState，插话分支还要等 `interrupted` 事件回来
+    //   才重建，期间输入框上方仍显示已发出的那条（看着像没发出去）。
+    if (mounted) setState(() {});
     unawaited(() async {
       if (_busy) {
         final accepted = await _bridge.interruptRun(item.text);
@@ -2437,6 +2902,304 @@ class _ChatScreenState extends State<ChatScreen> {
       final item = _queue.removeAt(index);
       _queue.insert(0, item);
     });
+  }
+
+  /// **编辑一条排队消息**（2026-10-23，用户原话：「排队的对话……不能编辑」）。
+  ///
+  /// ## 交互
+  ///
+  /// 点排队项 → `showCupertinoDialog` + `CupertinoTextField`（预填原文，
+  /// 占位符也是原文，清空后仍能看到原话）→ 保存后**替换这条的文本**。
+  /// 附件与它在队列里的位置都保持不变（只改用户要改的那句话）。
+  ///
+  /// ## 为什么用自绘宽弹窗而不是 `CupertinoAlertDialog`
+  ///
+  /// 排队内容常常是整段任务描述。iOS alert 只有约 270dp 宽，长文案会被
+  /// 挤成又高又窄的一条 —— 与用户对「权限二次确认框」的抱怨（同一类
+  /// iOS alert 通病）是同一个问题。这里按屏宽 88% 自绘：左对齐、行高 1.5。
+  Future<void> _editQueued(int index) async {
+    if (index < 0 || index >= _queue.length) return;
+    final original = _queue[index].text;
+    final ctrl = TextEditingController(text: original);
+    ctrl.selection = TextSelection.collapsed(offset: original.length);
+    final h = Hue.of(context);
+
+    String? edited;
+    try {
+      edited = await showCupertinoDialog<String>(
+        context: context,
+        builder: (dlgCtx) {
+          // 键盘占掉的底部高度：弹窗整体上移，输入区才不会被盖住。
+          final insets = MediaQuery.viewInsetsOf(dlgCtx).bottom;
+          // 键盘弹起后**剩余**的高度 —— 输入框上限按它算。直接用"屏高 35%"
+          // 的话，键盘一弹出来总高度就会超过可用空间（BOTTOM OVERFLOWED）。
+          final available = MediaQuery.sizeOf(dlgCtx).height - insets;
+          return Padding(
+            padding: EdgeInsets.only(
+              left: HSpace.xl,
+              right: HSpace.xl,
+              bottom: insets,
+            ),
+            child: Center(
+            child: Container(
+              width: MediaQuery.sizeOf(dlgCtx).width * 0.88,
+              padding: const EdgeInsets.fromLTRB(
+                  HSpace.lg, HSpace.lg, HSpace.lg, HSpace.md),
+              decoration: BoxDecoration(
+                color: h.surfaceAlt,
+                borderRadius: BorderRadius.circular(16),
+                border: Border.all(color: h.border),
+              ),
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    '编辑排队消息',
+                    style: TextStyle(
+                      fontSize: 16,
+                      fontWeight: FontWeight.w600,
+                      color: h.text,
+                    ),
+                  ),
+                  const SizedBox(height: 3),
+                  Text(
+                    '保存后替换这条排队内容；附件与队列位置不变。',
+                    style: TextStyle(
+                      fontSize: 12,
+                      height: 1.5,
+                      color: h.textFaint,
+                    ),
+                  ),
+                  const SizedBox(height: HSpace.md),
+                  ConstrainedBox(
+                    constraints: BoxConstraints(
+                      maxHeight: available * 0.35,
+                    ),
+                    child: CupertinoTextField(
+                      controller: ctrl,
+                      autofocus: true,
+                      maxLines: null,
+                      minLines: 2,
+                      // 原文占位 —— 清空输入框后仍能看到原来那句话
+                      placeholder: original,
+                      padding: const EdgeInsets.all(HSpace.sm + 2),
+                      style: TextStyle(
+                        fontSize: 14,
+                        height: 1.45,
+                        color: h.text,
+                      ),
+                      decoration: BoxDecoration(
+                        color: h.surface,
+                        borderRadius: BorderRadius.circular(HRadius.md),
+                        border: Border.all(color: h.border),
+                      ),
+                    ),
+                  ),
+                  const SizedBox(height: HSpace.md),
+                  Row(
+                    mainAxisAlignment: MainAxisAlignment.end,
+                    children: [
+                      CupertinoButton(
+                        padding: const EdgeInsets.symmetric(
+                            horizontal: HSpace.md, vertical: 4),
+                        onPressed: () => Navigator.of(dlgCtx).pop(),
+                        child: Text('取消',
+                            style: TextStyle(fontSize: 15, color: h.textDim)),
+                      ),
+                      CupertinoButton(
+                        padding: const EdgeInsets.symmetric(
+                            horizontal: HSpace.md, vertical: 4),
+                        onPressed: () =>
+                            Navigator.of(dlgCtx).pop(ctrl.text.trim()),
+                        child: Text(
+                          '保存',
+                          style: TextStyle(
+                            fontSize: 15,
+                            fontWeight: FontWeight.w600,
+                            color: h.accent,
+                          ),
+                        ),
+                      ),
+                    ],
+                  ),
+                ],
+              ),
+            ),
+          ),
+        );
+        },
+      );
+    } finally {
+      ctrl.dispose();
+    }
+
+    // 取消（null）/ 清空 = 不改。删除有专门的「删除」动作，
+    // 不做"空文本 ⇒ 删除"这种会让人误删的歧义操作。
+    final text = edited;
+    if (!mounted || text == null || text.isEmpty) return;
+    // await 期间队列可能已经出队（用户刚发了 / 跑完了）—— 下标先复核
+    if (index >= _queue.length) return;
+    setState(() {
+      _queue[index] = _QueuedMsg(
+        text: text,
+        attachments: _queue[index].attachments,
+      );
+    });
+  }
+
+  /// **排队消息管理面板**（2026-10-23）。
+  ///
+  /// ## 为什么是"另一个入口"而不是直接改排队条
+  ///
+  /// 排队条由 `InputBar`（`app/lib/widgets/input_bar.dart` 的 `_QueuedRow`）
+  /// 渲染，它只暴露「置顶 / 删除 / 立即发送」三个回调，**没有编辑入口**；
+  /// 而本屏只允许改 `chat_screen.dart`。所以这里给排队消息一个**本屏自有**
+  /// 的管理面板：列表左下角「排队 N」胶囊 → 逐条编辑 / 置顶 / 删除 / 立即发送。
+  ///
+  /// ⚠️ 后续如果给 `_QueuedRow` 加了「编辑」按钮（`onQueuedEdit`），
+  ///    这个面板可以退化成可选入口，[_editQueued] 的逻辑可原样复用。
+  Future<void> _openQueueManager() async {
+    if (_queue.isEmpty) return;
+    await showCupertinoModalPopup<void>(
+      context: context,
+      builder: (sheetCtx) {
+        final h = Hue.of(sheetCtx);
+        return StatefulBuilder(
+          builder: (ctx, setSheetState) {
+            // 面板与主屏要**一起**刷新：队列是主屏 State 的字段，
+            // 只 setSheetState 会让背后的输入条排队行留在旧状态。
+            void sync() {
+              if (mounted) setState(() {});
+              if (ctx.mounted) setSheetState(() {});
+            }
+
+            // 每一行在**构建时**抓住自己那条排队对象，动作执行时按对象
+            // 重新定位下标 —— 面板是活的（运行结束会自动出队、用户也可能
+            // 在别处删过），拿构建时的旧下标会改到/删掉别的条。
+            // `_QueuedMsg` 没有重载 `==`，indexOf 走的就是对象身份。
+            Widget rowFor(int i) {
+              final item = _queue[i];
+              int indexOfItem() => _queue.indexOf(item);
+              return _QueueManageRow(
+                h: h,
+                text: item.text,
+                canPin: i > 0,
+                onTap: () async {
+                  final k = indexOfItem();
+                  if (k >= 0) await _editQueued(k);
+                  sync();
+                },
+                onPin: () {
+                  final k = indexOfItem();
+                  if (k > 0) _pinQueued(k);
+                  sync();
+                },
+                onRemove: () {
+                  final k = indexOfItem();
+                  if (k >= 0) _removeQueued(k);
+                  // 删光了就没有面板可看 —— 直接收起
+                  if (_queue.isEmpty && ctx.mounted) {
+                    Navigator.of(ctx).pop();
+                  }
+                  sync();
+                },
+                onSendNow: () {
+                  final k = indexOfItem();
+                  // 立即发送会起新一轮运行/插话 —— 先收面板，
+                  // 别让它挡着用户看结果。
+                  if (ctx.mounted) Navigator.of(ctx).pop();
+                  if (k >= 0) _sendQueuedNow(k);
+                },
+              );
+            }
+
+            return Container(
+              decoration: BoxDecoration(
+                color: h.surfaceAlt,
+                borderRadius: const BorderRadius.vertical(
+                  top: Radius.circular(HRadius.xl),
+                ),
+              ),
+              child: SafeArea(
+                top: false,
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    // iOS 风格抓手
+                    Container(
+                      width: 36,
+                      height: 5,
+                      margin: const EdgeInsets.only(top: HSpace.sm),
+                      decoration: BoxDecoration(
+                        color: h.border,
+                        borderRadius: BorderRadius.circular(HRadius.pill),
+                      ),
+                    ),
+                    Padding(
+                      padding: const EdgeInsets.fromLTRB(
+                          HSpace.lg, HSpace.md, HSpace.xs, HSpace.xs),
+                      child: Row(
+                        children: [
+                          Expanded(
+                            child: Column(
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              children: [
+                                Text(
+                                  '排队待发（${_queue.length}）',
+                                  style: TextStyle(
+                                    fontSize: 15,
+                                    fontWeight: FontWeight.w600,
+                                    color: h.text,
+                                  ),
+                                ),
+                                const SizedBox(height: 2),
+                                Text(
+                                  '点一条可编辑；跑完当前任务会自动发出',
+                                  style: TextStyle(
+                                      fontSize: 11.5, color: h.textFaint),
+                                ),
+                              ],
+                            ),
+                          ),
+                          CupertinoButton(
+                            padding: const EdgeInsets.all(HSpace.sm),
+                            onPressed: () => Navigator.of(ctx).pop(),
+                            child: Icon(AppIcons.close,
+                                size: 20, color: h.textDim),
+                          ),
+                        ],
+                      ),
+                    ),
+                    // 队列可能很长 —— **限高 + 内部滚动**（抓手/标题不被挤掉）。
+                    // 用 ConstrainedBox 而不是 Flexible：即使弹层给的约束是
+                    // 无界的，也不会触发"非零 flex + 无界高度"的断言。
+                    ConstrainedBox(
+                      constraints: BoxConstraints(
+                        maxHeight: MediaQuery.sizeOf(ctx).height * 0.5,
+                      ),
+                      child: SingleChildScrollView(
+                        padding: const EdgeInsets.fromLTRB(
+                            HSpace.md, 0, HSpace.md, HSpace.md),
+                        child: Column(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            for (var i = 0; i < _queue.length; i++) ...[
+                              if (i > 0) const SizedBox(height: HSpace.sm),
+                              rowFor(i),
+                            ],
+                          ],
+                        ),
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            );
+          },
+        );
+      },
+    );
   }
 
   /// ★ **用户点了停止**（2026-10-13）。
@@ -2518,7 +3281,8 @@ class _ChatScreenState extends State<ChatScreen> {
         ));
       }
     });
-    _scrollToBottom();
+    // 「已停止」是**新消息**：跟随时才滚过去（不跟随时别打断阅读）
+    _followBottomIfNeeded();
 
     // ⚠️ 关于"后端是不是还在跑"（用户的原话疑问）
     //
@@ -2633,6 +3397,8 @@ class _ChatScreenState extends State<ChatScreen> {
         ],
       );
       if (!mounted || newId == null) return;
+      // 刚 seed 出一个新会话 ⇒ 缓存失效，否则侧边栏看不到这个分支
+      _invalidateSessionCache();
       await _reload();          // 让新会话出现在列表里
       _switchContext();         // 换上下文（t7 的守卫：结果不会串）
       setState(() {
@@ -2646,7 +3412,8 @@ class _ChatScreenState extends State<ChatScreen> {
           if (t != null) _answerTs[old.id] = t;
         }
       });
-      _scrollToBottom();
+      // 新分支 = 显式换上下文：直接贴底
+      _scrollToBottom(force: true);
     } catch (e) {
       if (!mounted) return;
       setState(() => _error = '建立分支失败：$e');
@@ -2665,8 +3432,14 @@ class _ChatScreenState extends State<ChatScreen> {
           : '${request.isEmpty ? '（仅附件）' : request}\n\n📎 $names';
       _messages.add(HUserMessage(id: _nextId(), text: label));
       _error = null;
+      // ★ 用户刚按下发送 = 明确想看最新内容：恢复跟随（2026-10-23）。
+      //   用户可能是先上滑翻记录、再直接在输入框里发的 —— 发送本身就是
+      //   「回到最新」的意图，不能因为旧列表处于"不跟随"就不滚。
+      _stickToBottom = true;
+      _hasNewContent = false;
     });
-    _scrollToBottom();
+    // 用户刚按下发送 = 显式动作：强制贴底（即使列表还带着惯性）
+    _scrollToBottom(force: true);
 
     final ws = _activeWorkspace;
     if (ws == null) {
@@ -2679,7 +3452,7 @@ class _ChatScreenState extends State<ChatScreen> {
               '点左上角菜单 → ⊕ 选择工作区。',
         ));
       });
-      _scrollToBottom();
+      _followBottomIfNeeded();
       return;
     }
 
@@ -2734,7 +3507,11 @@ class _ChatScreenState extends State<ChatScreen> {
           unawaited(_bridge
               .renameSession(ws.id, sid0, newTitle, treeUri: ws.treeUri)
               .then((_) {
-            if (mounted) unawaited(_reload(silent: true));
+            if (mounted) {
+              // 标题在后台改了 ⇒ 侧边栏缓存必须作废（否则名字仍是「新会话」）
+              _invalidateSessionCache();
+              unawaited(_reload(silent: true));
+            }
           }).catchError((_) {}));
         }
       }
@@ -2753,6 +3530,11 @@ class _ChatScreenState extends State<ChatScreen> {
     // 正确语义：附件**已经随这次请求提交了**，就该立刻从输入区消失 ——
     // 与"运行成功与否"无关。快照 `snapshot` 已抓住内容，界面可以放手。
     setState(_attachments.clear);
+
+    // ★ 2026-10-23：运行可能**当场新建会话 / 改标题**（后端在 run 开始时
+    //   就建会话）。先作废列表缓存：用户运行中拉开抽屉也应看到新会话，
+    //   而不是上一份缓存。
+    _invalidateSessionCache();
 
     try {
       final result = await _bridge.run(
@@ -2882,6 +3664,8 @@ class _ChatScreenState extends State<ChatScreen> {
         if (_activeSessionId == null && result.sessionId != null) {
           _activeSessionId = result.sessionId;
         }
+        // 一轮跑完：可能新建了会话 / 改了标题 / 追加了消息 ⇒ 列表缓存作废
+        _invalidateSessionCache();
         await _reload();
       } else {
         // 用户看着**别的会话** —— 结果**不渲染**（t7 的成果，必须保持）。
@@ -2966,7 +3750,9 @@ class _ChatScreenState extends State<ChatScreen> {
         _drawnBlockedKeys.clear();
       }
     }
-    _scrollToBottom();
+    // ★ 运行收尾的兜底滚动也**按跟随状态**（2026-10-23）：
+    //   用户中途上滑回看时，任务结束时不许把视口拽回底部。
+    _followBottomIfNeeded();
   }
 
   /// 丢弃某次运行的结果时的诊断日志。
@@ -3022,14 +3808,38 @@ class _ChatScreenState extends State<ChatScreen> {
     _logDroppedRun(origin);
   }
 
-  void _scrollToBottom() {
+  /// 滚到底部（**显式动作**与跟随共用）。
+  ///
+  /// ## 为什么从 220ms 动画改成 `jumpTo`（2026-10-23）
+  ///
+  /// 流式输出时每 16ms 就可能来一次新内容，`animateTo` 会被下一帧的跟随
+  /// **反复打断**（每次都从当前位置重新起一段动画 ⇒ 永远追不上新内容）；
+  /// 更糟的是动画**途中**的位置会被 [_onScroll] 当成"用户上滑了"
+  ///（离底 > 阈值）⇒ 跟随把自己关掉，用户刚发完消息就不再自动滚。
+  ///
+  /// `jumpTo` 是幂等的：到位即贴底，监听器看到 `away == 0` 只会维持跟随；
+  /// 下一帧重建后跟随还会再校准一次。
+  ///
+  /// [force] = **显式动作**（发送 / 切会话 / 点「回到底部」）时为 true：
+  /// 用户明确要求回到底部，即使列表还在惯性滚动也要执行；
+  /// 跟随路径（[_followBottomIfNeeded]）保持 false —— 用户手指在途时
+  /// 不许抢滚动权（见下面的说明）。
+  void _scrollToBottom({bool force = false}) {
     WidgetsBinding.instance.addPostFrameCallback((_) {
-      if (!_scroll.hasClients) return;
-      _scroll.animateTo(
-        _scroll.position.maxScrollExtent,
-        duration: const Duration(milliseconds: 220),
-        curve: Curves.easeOut,
-      );
+      if (!mounted || !_scroll.hasClients) return;
+      final pos = _scroll.position;
+      // ★ 用户手指正按着 / 列表还在惯性滚动 ⇒ **不抢滚动权**。
+      //   `jumpTo` 内部会 `goIdle()` 打断当前活动（拖拽控制器会被 dispose），
+      //   手指就"滑不动"了 —— 那比"被拽回底部"更难受。
+      //   `isScrollingNotifier` 在"用户拖动"与"惯性滚动"期间都是 true；
+      //   `userScrollDirection` 再兜一道（活动结束但方向未复位的边界）。
+      //   `jumpTo` 自己会把两者复位，所以下一次新内容到达仍能正常跟随。
+      if (!force &&
+          (pos.isScrollingNotifier.value ||
+              pos.userScrollDirection != ScrollDirection.idle)) {
+        return;
+      }
+      pos.jumpTo(pos.maxScrollExtent);
     });
   }
 
@@ -3270,48 +4080,43 @@ class _ChatScreenState extends State<ChatScreen> {
                           controller: _scroll,
                           padding: const EdgeInsets.fromLTRB(
                               HSpace.lg, HSpace.lg, HSpace.lg, HSpace.sm),
-                          itemCount: _messages.length,
-                          itemBuilder: (_, i) {
-                            final m = _messages[i];
-                            return MessageRow(
-                              message: m,
-                              metrics: m is HAssistantMessage
-                                  ? _metrics[m.id]
-                                  : null,
-                              // ★ 工作步骤展示档位 —— 直接驱动工具卡片的渲染密度
-                              stepDetail: widget.settings.value.stepDetail,
-                              // ★ 回答末尾的操作行（2026-10-13）
-                              timestamp:
-                                  m is HAssistantMessage ? _tsOf(m.id) : null,
-                              feedback: _feedback[m.id],
-                              // ★ 2026-10-22 用户要求：**再点一次要能取消**。
-                              //   以前点了就锁死（`= f`），点错改不回来。
-                              //   现在：点同一个 ⇒ 置空取消；点另一个 ⇒ 切换。
-                              onFeedback: (f) => setState(() {
-                                _feedback[m.id] =
-                                    _feedback[m.id] == f ? null : f;
-                              }),
-                              onBranch: () => unawaited(_branchFrom(m)),
-                              // ★ 编辑重发（2026-10-13，DeepSeek 移动端同款）：
-                              //   原文放回输入框 + 聚焦 —— 用户改完自己点发送。
-                              //   不做历史改写（append-only）
-                              onEdit: (text) {
-                                _inputCtrl.text = text;
-                                _inputCtrl.selection = TextSelection.fromPosition(
-                                    TextPosition(offset: text.length));
-                              },
-                            );
-                          },
+                          // ★ 2026-10-23：不再直接遍历 `_messages` —— 中间插了一层
+                          //   **折叠**（连续工具行合并成一行，用户要求见 `_displayRows`）。
+                          itemCount: _displayRows.length,
+                          itemBuilder: (_, i) =>
+                              _buildDisplayRow(_displayRows[i], h),
                         ),
                 ),
+                // ---- 排队管理入口（2026-10-23 用户报「排队不能编辑」）----
+                //   排队条由 `InputBar` 渲染（本屏不能改那个文件），
+                //   它只有「置顶 / 删除 / 立即发送」，**没有编辑** ⇒ 这里给
+                //   一个本屏自有的入口：列表左下角「排队 N」胶囊 → 面板里
+                //   逐条编辑 / 置顶 / 删除 / 立即发送。只在有排队消息时出现。
+                if (_queue.isNotEmpty)
+                  Positioned(
+                    left: HSpace.lg,
+                    bottom: HSpace.md,
+                    child: _QueueChip(
+                      count: _queue.length,
+                      h: h,
+                      onTap: () => unawaited(_openQueueManager()),
+                    ),
+                  ),
                 // ---- 悬浮的「有新内容」小圆圈 ----
                 //   用户原话：「应该变成一个小圆圈按钮在右侧」。
                 //   叠在列表**右下角**（避开输入框），不占任何布局高度。
-                if (_autoScrollPaused && _hasNewContent)
+                //   ★ 2026-10-23：显示条件从「暂停 + 有新内容」改成
+                //     「非跟随」—— 用户单纯想回到底部也走这个按钮；
+                //     `_hasNewContent` 只决定 Tooltip 文案。
+                if (!_stickToBottom)
                   Positioned(
                     right: HSpace.lg,
                     bottom: HSpace.md,
-                    child: _NewContentButton(onTap: _resumeAutoScroll, h: h),
+                    child: _NewContentButton(
+                      onTap: _resumeAutoScroll,
+                      h: h,
+                      hasNewContent: _hasNewContent,
+                    ),
                   ),
               ],
                   ),
@@ -3403,6 +4208,213 @@ class _ChatScreenState extends State<ChatScreen> {
     );
   }
 
+  /// **单条消息的渲染** —— 从 `ListView.builder` 里抽出来（2026-10-23）。
+  ///
+  /// 抽出来的唯一原因：[_buildDisplayRow] 有**两个**分支（单条 / 折叠组展开），
+  /// 两边都要渲染同一种 `MessageRow`。复制一份参数表就等于制造第二份真相 ——
+  /// 以后加一个回调（比如"重试"）必然漏掉一边。
+  Widget _messageRow(HMessage m) => MessageRow(
+        message: m,
+        metrics: m is HAssistantMessage ? _metrics[m.id] : null,
+        // ★ 工作步骤展示档位 —— 直接驱动工具卡片的渲染密度
+        stepDetail: widget.settings.value.stepDetail,
+        // ★ 回答末尾的操作行（2026-10-13）
+        timestamp: m is HAssistantMessage ? _tsOf(m.id) : null,
+        feedback: _feedback[m.id],
+        // ★ 2026-10-22 用户要求：**再点一次要能取消**。
+        //   以前点了就锁死（`= f`），点错改不回来。
+        //   现在：点同一个 ⇒ 置空取消；点另一个 ⇒ 切换。
+        onFeedback: (f) => setState(() {
+          _feedback[m.id] = _feedback[m.id] == f ? null : f;
+        }),
+        onBranch: () => unawaited(_branchFrom(m)),
+        // ★ 编辑重发（2026-10-13，DeepSeek 移动端同款）：
+        //   原文放回输入框 + 聚焦 —— 用户改完自己点发送。
+        //   不做历史改写（append-only）
+        onEdit: (text) {
+          _inputCtrl.text = text;
+          _inputCtrl.selection =
+              TextSelection.fromPosition(TextPosition(offset: text.length));
+        },
+      );
+
+  /// **折叠后的显示行**（2026-10-23，用户要求）。
+  ///
+  /// ## 用户原话
+  ///
+  /// > 「调用工具太多了，我往下翻全是调用工具，导致观感不好，所以要你做一个折叠。
+  /// >   就是默认是图片这样合并」
+  ///
+  /// ## 规则
+  ///
+  /// · **只合并工具行**（`HToolCall`），且必须**连续**；
+  /// · 连续 **≥2** 条才折叠 —— 单独一条工具行信息量正好，折起来反而多点一次；
+  /// · 「分析 / 思考」行（`HStepStream`）**不参与**合并：它是正文汇报的载体，
+  ///   折进去会让"每轮都有汇报"这件事看不见；
+  /// · 其它任何消息（用户 / 回答 / 变更卡 / 被拦截）都是**边界**，会打断一组。
+  List<_DisplayRow> get _displayRows {
+    final out = <_DisplayRow>[];
+
+    // ★ 2026-10-23：压缩提示插在"事件到达时"的对话位置（不能堆到最后）。
+    //   `anchor` = 事件到达时 `_messages.length` ⇒ 提示出现在消息 `anchor-1` 之后。
+    //   事件可能在 run 中间到达（框架每轮循环开头检查），所以必须按到达位置插。
+    var note = 0;
+    void flushNotes(int at) {
+      while (note < _compressedNotes.length &&
+          _compressedNotes[note].anchor <= at) {
+        out.add(_ContextCompressedRow(_compressedNotes[note]));
+        note++;
+      }
+    }
+
+    var i = 0;
+    while (i < _messages.length) {
+      flushNotes(i);
+      final m = _messages[i];
+      if (m is HToolCall) {
+        var j = i;
+        while (j < _messages.length && _messages[j] is HToolCall) {
+          j++;
+        }
+        final run = _messages.sublist(i, j).cast<HToolCall>();
+        if (run.length >= 2) {
+          // key 用"这一组第一条在 `_messages` 里的下标"：会话是 append-only 的，
+          // 这个下标在同一个会话里稳定（重进会话时展开态本来就该重置）。
+          out.add(_ToolGroupRow(anchor: i, calls: run));
+        } else {
+          out.add(_SingleRow(run.single));
+        }
+        i = j;
+      } else {
+        out.add(_SingleRow(m));
+        i++;
+      }
+    }
+    // 兜底：消息可能被删过（进度占位行等）⇒ 锚点可能 ≥ 当前长度，
+    // 剩下的提示补在末尾，**绝不静默丢**（用户看不到 = 等于没做）。
+    while (note < _compressedNotes.length) {
+      out.add(_ContextCompressedRow(_compressedNotes[note]));
+      note++;
+    }
+    return out;
+  }
+
+  Widget _buildDisplayRow(_DisplayRow row, Hue h) {
+    switch (row) {
+      case _SingleRow(:final message):
+        return _messageRow(message);
+      case _ToolGroupRow(:final anchor, :final calls):
+        final expanded = _expandedToolGroups.contains(anchor);
+        return Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            ToolGroupRow(
+              tools: [for (final c in calls) c.tool],
+              expanded: expanded,
+              // 组里只要有一条失败，整行按失败色 —— 合并视图不许把失败藏起来
+              failed: calls.any((c) => c.status == ToolStatus.failure),
+              onToggle: () => setState(() {
+                if (expanded) {
+                  _expandedToolGroups.remove(anchor);
+                } else {
+                  _expandedToolGroups.add(anchor);
+                }
+              }),
+            ),
+            // 展开后就是**原来的**单条工具行（一点没变），用户能看参数与结果
+            if (expanded) ...[
+              for (final c in calls) _messageRow(c),
+              // 展开态给一条淡淡的收束线，视觉上说明"这组到此为止"
+              Padding(
+                padding: const EdgeInsets.only(
+                    left: kStepRowHPad + kStepRowArrowSize + kStepRowArrowGap),
+                child: Container(height: 1, color: h.border),
+              ),
+            ],
+          ],
+        );
+      case _ContextCompressedRow(:final note):
+        return _contextCompressedRow(h, note);
+    }
+  }
+
+  /// **「上下文已压缩」轻量提示行**（2026-10-23，用户要求压缩机制可见）。
+  ///
+  /// ## 为什么必须让用户看见
+  ///
+  /// 压缩是**有损**的（老消息被摘要，细节丢了）。静默压缩的后果只有两种：
+  /// 模型"突然忘了前面说的事"，或者用户压根不知道发生过 —— 前者会被当成
+  /// "模型变笨"。所以这里明确写一句"压缩了 + 任务继续"。
+  ///
+  /// ## 视觉：轻量，不抢"最终回答"的权重
+  ///
+  /// 不是卡片、不可点、单行小字弱色 —— 只告知，不打断阅读。
+  /// 用 `FittedBox(scaleDown)` 保证**永远单行**：窄屏/大数字时整体缩一点，
+  /// 而不是折行或省略掉"任务继续"。
+  ///
+  /// ## 左侧几何：与「分析/思考」行逐像素对齐（用户专门报过对齐问题）
+  ///
+  /// 分析行 = `kStepRowHPad` + 箭头槽（`kStepRowArrowSize` + `kStepRowArrowGap`）
+  /// + 状态槽（`kStepRowStatusSize` + `kStepRowStatusGap`）+ 文字。
+  /// 本行不需要展开（没有箭头），所以先用**空白**占掉箭头槽，小图标放进状态槽
+  /// ⇒ 文字起点与分析行完全一致。
+  Widget _contextCompressedRow(Hue h, _ContextCompressedNote note) {
+    return Padding(
+      padding: const EdgeInsets.symmetric(
+          horizontal: kStepRowHPad, vertical: kStepRowVPad),
+      child: Row(
+        children: [
+          // 占掉箭头槽 —— 本行不可展开，但文字必须与分析行对齐
+          const SizedBox(width: kStepRowArrowSize + kStepRowArrowGap),
+          SizedBox(
+            width: kStepRowStatusSize,
+            height: kStepRowStatusSize,
+            child: Icon(
+              // 图标语义 = "老历史被收起来了"。AppIcons 里没有压缩/归档类图标，
+              // 按项目规则直接用 `CupertinoIcons`（名字已核对 SDK：`archivebox`）。
+              CupertinoIcons.archivebox,
+              size: kStepRowStatusSize,
+              color: h.textFaint,
+            ),
+          ),
+          const SizedBox(width: kStepRowStatusGap),
+          Expanded(
+            child: FittedBox(
+              fit: BoxFit.scaleDown,
+              alignment: Alignment.centerLeft,
+              child: Text(
+                _compressedText(note),
+                maxLines: 1,
+                style: TextStyle(
+                  fontSize: 12,
+                  height: 1.3,
+                  color: h.textDim,
+                ),
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  /// 压缩提示文案：**有 token 数字就带上，缺失/为 0 就降级成不带数字**。
+  ///
+  /// 数字用现成的 [formatTokensCompact]（`models/session_usage.dart`）——
+  /// 不另写一套格式化：两套迟早漂移（本仓库的老教训）。
+  ///
+  /// ⚠️ `afterTokens` **可能 ≥ `beforeTokens`**（摘要文本本身也占 token），
+  /// 这是就事论事的展示，不做"一定变少"的假设（见事件字段 KDoc）。
+  String _compressedText(_ContextCompressedNote note) {
+    final before = note.beforeTokens;
+    final after = note.afterTokens;
+    if (before != null && after != null && before > 0 && after > 0) {
+      return '上下文已达 80%，已压缩历史'
+          '（${formatTokensCompact(before)} → ${formatTokensCompact(after)} tokens），任务继续';
+    }
+    return '上下文已达 80%，已压缩历史，任务继续';
+  }
+
   /// **ask_user 弹窗**（2026-10-16 引入；**2026-10-21 改为选项式多题**）。
   ///
   /// ## 用户要求（原话）
@@ -3415,12 +4427,21 @@ class _ChatScreenState extends State<ChatScreen> {
   ///
   /// | 要求 | 落点 |
   /// |---|---|
-  /// | 点选项，不手打 | 每题渲染**可点的选项卡片**，没有输入框 |
+  /// | 点选项（或自填） | 每题渲染**可点的选项卡片**；末尾固定一个「其他…」可自填 |
   /// | 1/2/3/4 编号 | 每个选项前显示序号 |
   /// | 单选 / 多选 | `multi` 由**模型**给，UI 只是照着渲染（不猜） |
   /// | 一次多个 ask | `questions` 是**列表**，逐题作答 |
   /// | 答完自动下一个 | 单选选中后**自动跳下一题**（多选要手动点"下一题"，因为可能要选多个） |
   /// | 上一题 / 下一题 | 底部导航按钮，带进度指示（`2/5`） |
+  ///
+  /// ## ★「其他…」+ 自填（2026-10-23，用户原话）
+  ///
+  /// > 「单选或多选，**或者选其他，然后自己填**」
+  ///
+  /// · 每题选项**末尾**追加「其他…」；选中后展开 `CupertinoTextField`
+  /// · 提交时把**用户填的原文**作为该题答案（不是"其他"两个字）；留空 = 未作答
+  /// · 多选时「其他」可与普通选项**共存**；单选时它与普通选项互斥
+  ///   （选「其他」不自动跳题 —— 用户还没填）
   ///
   /// ## 边界（安全默认）
   ///
@@ -3454,6 +4475,38 @@ class _ChatScreenState extends State<ChatScreen> {
 
     // ★ 逐题作答的状态：题目 id → 已选 label 集合
     final picked = <String, Set<String>>{};
+
+    // ★ 2026-10-23：每题「其他…」的自填状态（用户原话「或者选其他，然后自己填」）。
+    //
+    // 用 controller（按题目 id）：用户可能选「其他」后翻到下一题、再翻回来 ——
+    // 若只把文本存在 map 里，来回翻页时 TextField 会被销毁重建，
+    // 结果就是"界面显示空、提交却带着旧文本"（自相矛盾）。
+    //
+    // ⚠️ 不主动 dispose：弹窗退场动画期间 TextField 还在树上，立刻 dispose
+    //   会撞 "A TextEditingController was used after being disposed"；
+    //   这里与 `_renameSession` 的既有处理一致（controller 无原生资源，
+    //   弹窗 State 卸载后随 GC 回收）。
+    final customOn = <String>{};
+    final customCtl = <String, TextEditingController>{};
+
+    /// 合成回传答案（题目 id → 答案列表）：点选的 label + 自填**原文**。
+    ///
+    /// · 只收非空项；**留空的自填框 = 未作答**（不编答案，该题不进 map）
+    /// · 自填的是用户原文，**不是**"其他…"两个字
+    Map<String, List<String>> collect() {
+      final out = <String, List<String>>{};
+      for (final e in picked.entries) {
+        final list = e.value.toList();
+        if (list.isNotEmpty) out[e.key] = list;
+      }
+      for (final id in customOn) {
+        final raw = (customCtl[id]?.text ?? '').trim();
+        if (raw.isEmpty) continue;
+        (out[id] ??= <String>[]).add(raw);
+      }
+      return out;
+    }
+
     var page = 0;
     final total = questions.length;
 
@@ -3474,17 +4527,37 @@ class _ChatScreenState extends State<ChatScreen> {
             void toggle(String label) {
               setDlgState(() {
                 if (multi) {
-                  // 多选：点了就切换
+                  // 多选：点了就切换；「其他…」可与普通选项**共存**，不动它
                   if (!sel.remove(label)) sel.add(label);
                 } else {
                   // ★ 单选：替换，并**自动跳下一题**（用户要求"答完自动下一个"）
                   sel
                     ..clear()
                     ..add(label);
+                  // 单选里普通选项与「其他…」互斥 —— 选普通项就收起自填
+                  customOn.remove(id);
+                  customCtl[id]?.clear();
                   if (!isLast) {
                     // 让当前帧先画出来再跳，避免"点完看不到选中态"
                     Future.microtask(() => setDlgState(() => page++));
                   }
+                }
+              });
+            }
+
+            /// ★「其他…」：选中后展开自填框。
+            ///
+            /// · 单选：与普通选项互斥；**不自动跳题**（用户还没填）
+            /// · 多选：只切换自己，普通选项保持不变
+            void toggleCustom() {
+              setDlgState(() {
+                if (customOn.remove(id)) {
+                  // 取消选中 ⇒ 清空已填内容（否则隐藏的文本会被一起提交）
+                  customCtl[id]?.clear();
+                } else {
+                  customOn.add(id);
+                  customCtl.putIfAbsent(id, () => TextEditingController());
+                  if (!multi) sel.clear();
                 }
               });
             }
@@ -3518,7 +4591,7 @@ class _ChatScreenState extends State<ChatScreen> {
                               fontSize: 14, height: 1.5, color: h.text)),
                       const SizedBox(height: HSpace.xs),
                       Text(
-                        multi ? '可多选' : '单选',
+                        multi ? '可多选（也可选「其他」自己填）' : '单选（也可选「其他」自己填）',
                         style: TextStyle(fontSize: 11, color: h.textFaint),
                       ),
                       const SizedBox(height: HSpace.md),
@@ -3535,6 +4608,41 @@ class _ChatScreenState extends State<ChatScreen> {
                           multi: multi,
                           onTap: () => toggle(
                               (options[i] as Map)['label'] as String? ?? ''),
+                        ),
+                      // ★ 2026-10-23：每题末尾固定一个「其他…」——
+                      //   用户原话「或者选其他，然后自己填」。
+                      _askOptionTile(
+                        h: h,
+                        index: options.length + 1,
+                        label: '其他…',
+                        description: '自己填写',
+                        selected: customOn.contains(id),
+                        multi: multi,
+                        onTap: toggleCustom,
+                      ),
+                      // 选中「其他…」才展开自填框；**留空 = 该题未作答**
+                      // （不编答案，collect() 里会跳过空串）
+                      if (customOn.contains(id))
+                        Padding(
+                          padding: const EdgeInsets.only(bottom: HSpace.sm),
+                          child: CupertinoTextField(
+                            // controller 跨"上一题/下一题"保留用户输入
+                            controller: customCtl.putIfAbsent(
+                                id, () => TextEditingController()),
+                            autofocus: true,
+                            placeholder: '在这里填写你的回答…',
+                            minLines: 1,
+                            maxLines: 3,
+                            padding: const EdgeInsets.all(HSpace.sm + 2),
+                            style: TextStyle(
+                                fontSize: 13.5, height: 1.4, color: h.text),
+                            decoration: BoxDecoration(
+                              color: h.surfaceAlt,
+                              borderRadius: BorderRadius.circular(HRadius.sm),
+                              border: Border.all(
+                                  color: h.accent.withValues(alpha: 0.5)),
+                            ),
+                          ),
                         ),
                     ],
                   ),
@@ -3554,17 +4662,13 @@ class _ChatScreenState extends State<ChatScreen> {
                   ),
                 CupertinoDialogAction(
                   // 跳过 = 已答的仍然回传（别浪费用户已做的选择）
-                  onPressed: () => Navigator.of(dlgCtx).pop(
-                    picked.map((k, v) => MapEntry(k, v.toList())),
-                  ),
+                  onPressed: () => Navigator.of(dlgCtx).pop(collect()),
                   child: const Text('跳过'),
                 ),
                 if (isLast)
                   CupertinoDialogAction(
                     isDefaultAction: true,
-                    onPressed: () => Navigator.of(dlgCtx).pop(
-                      picked.map((k, v) => MapEntry(k, v.toList())),
-                    ),
+                    onPressed: () => Navigator.of(dlgCtx).pop(collect()),
                     child: const Text('提交'),
                   ),
               ],
@@ -4041,15 +5145,25 @@ class _ChatScreenState extends State<ChatScreen> {
 ///   · 由调用方用 `Align(centerRight)` 叠在列表右下角 —— **不占布局高度**
 ///   · 语义靠图标 + Tooltip（无障碍仍可读）
 class _NewContentButton extends StatelessWidget {
-  const _NewContentButton({required this.onTap, required this.h});
+  const _NewContentButton({
+    required this.onTap,
+    required this.h,
+    required this.hasNewContent,
+  });
 
   final VoidCallback onTap;
   final Hue h;
 
+  /// 不跟随期间是否真的来了新内容 —— **只决定 Tooltip 文案**（2026-10-23）。
+  ///
+  /// 按钮本身的显示条件已改为「非跟随」（用户可能只是上滑回看、
+  /// 没有新内容也想一键回到底部）。文案分开才不会撒谎。
+  final bool hasNewContent;
+
   @override
   Widget build(BuildContext context) {
     return Tooltip(
-      message: '有新内容，点击回到底部',
+      message: hasNewContent ? '有新内容，点击回到底部' : '回到底部',
       child: Material(
         color: h.accent,
         shape: const CircleBorder(),
@@ -4068,6 +5182,197 @@ class _NewContentButton extends StatelessWidget {
               color: h.dark ? const Color(0xFF1A0E08) : Colors.white,
             ),
           ),
+        ),
+      ),
+    );
+  }
+}
+
+/// **排队管理入口胶囊**（2026-10-23，用户报「排队的对话不能编辑」）。
+///
+/// 显示在消息列表**左下角**（与右下角的「回到底部」圆钮对称），
+/// 只在有排队消息时出现；点开 [_ChatScreenState._openQueueManager]。
+///
+/// 不占布局高度（由调用方放在 `Stack` 里）—— 与「回到底部」按钮同一原则：
+/// 悬浮覆盖层不该把列表可视区挤矮。
+class _QueueChip extends StatelessWidget {
+  const _QueueChip({
+    required this.count,
+    required this.onTap,
+    required this.h,
+  });
+
+  final int count;
+  final VoidCallback onTap;
+  final Hue h;
+
+  @override
+  Widget build(BuildContext context) {
+    return Semantics(
+      label: '排队 $count 条，点击管理',
+      button: true,
+      child: IosTap(
+        onTap: onTap,
+        child: Container(
+          height: 38,
+          padding: const EdgeInsets.symmetric(horizontal: HSpace.md),
+          decoration: BoxDecoration(
+            color: h.surface,
+            borderRadius: BorderRadius.circular(HRadius.pill),
+            border: Border.all(color: h.border),
+            boxShadow: [
+              // 与输入容器同款投影 —— 看起来是输入区的一部分
+              BoxShadow(
+                color: Colors.black.withValues(alpha: h.dark ? 0.30 : 0.08),
+                blurRadius: 10,
+                offset: const Offset(0, 3),
+              ),
+            ],
+          ),
+          child: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Icon(AppIcons.clock, size: 15, color: h.accent),
+              const SizedBox(width: 6),
+              Text(
+                '排队 $count · 管理',
+                style: TextStyle(
+                  fontSize: 12.5,
+                  fontWeight: FontWeight.w600,
+                  color: h.text,
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+/// **排队管理面板里的一行**（2026-10-23）。
+///
+/// 整行可点 = 编辑；右侧四个动作：置顶 / 编辑 / 删除 / 立即发送。
+/// 动作语义与 `InputBar` 的排队条**保持一致**（见 `_QueuedRow` 的说明）：
+/// · 置顶 ⇒ 下一个发，不打断当前运行
+/// · 立即发送 ⇒ 插话（当前在跑就 `interruptRun`），不是排队
+class _QueueManageRow extends StatelessWidget {
+  const _QueueManageRow({
+    required this.h,
+    required this.text,
+    required this.canPin,
+    required this.onTap,
+    required this.onPin,
+    required this.onRemove,
+    required this.onSendNow,
+  });
+
+  final Hue h;
+  final String text;
+
+  /// 已在队首时「置顶」没有意义 —— 不画那个按钮
+  final bool canPin;
+
+  final VoidCallback onTap;
+  final VoidCallback onPin;
+  final VoidCallback onRemove;
+  final VoidCallback onSendNow;
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      decoration: BoxDecoration(
+        color: h.surface,
+        borderRadius: BorderRadius.circular(HRadius.lg),
+        border: Border.all(color: h.border),
+      ),
+      child: IosTap(
+        onTap: onTap,
+        child: Padding(
+          padding: const EdgeInsets.fromLTRB(
+              HSpace.md, HSpace.sm, HSpace.xs, HSpace.sm),
+          child: Row(
+            children: [
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      text,
+                      maxLines: 2,
+                      overflow: TextOverflow.ellipsis,
+                      style: TextStyle(
+                        fontSize: 13.5,
+                        height: 1.35,
+                        color: h.text,
+                      ),
+                    ),
+                    const SizedBox(height: 2),
+                    Text(
+                      '点这一行编辑',
+                      style: TextStyle(fontSize: 10.5, color: h.textFaint),
+                    ),
+                  ],
+                ),
+              ),
+              if (canPin)
+                _QueueIconButton(
+                  icon: CupertinoIcons.arrow_up_to_line,
+                  label: '置顶（下一个发）',
+                  color: h.textDim,
+                  onTap: onPin,
+                ),
+              _QueueIconButton(
+                icon: AppIcons.edit,
+                label: '编辑',
+                color: h.accent,
+                onTap: onTap,
+              ),
+              _QueueIconButton(
+                icon: AppIcons.trash,
+                label: '删除',
+                color: h.textDim,
+                onTap: onRemove,
+              ),
+              _QueueIconButton(
+                icon: AppIcons.send,
+                label: '立即发送（插话）',
+                color: h.accent,
+                onTap: onSendNow,
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+/// 排队管理面板里的图标按钮 —— 44×44 热区 + 无障碍标签（2026-10-23）。
+class _QueueIconButton extends StatelessWidget {
+  const _QueueIconButton({
+    required this.icon,
+    required this.label,
+    required this.color,
+    required this.onTap,
+  });
+
+  final IconData icon;
+  final String label;
+  final Color color;
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    return Semantics(
+      label: label,
+      button: true,
+      child: IosTap(
+        onTap: onTap,
+        child: SizedBox(
+          width: kMinTapTarget,
+          height: kMinTapTarget,
+          child: Icon(icon, size: 18, color: color),
         ),
       ),
     );
@@ -4377,4 +5682,56 @@ class _RunOrigin {
 
   /// 发起时的工作区 id
   final String workspaceId;
+}
+
+/// **折叠后的显示行**（2026-10-23）—— `ListView` 现在按它渲染，不再直接按 `_messages`。
+///
+/// 目前三种：单条消息、一组**连续**的工具调用、一条「上下文已压缩」提示。
+/// 用 sealed 是为了让 `switch` 穷尽 —— 以后再加一种行，编译器会强制处理，
+/// 不会静默漏画。
+sealed class _DisplayRow {
+  const _DisplayRow();
+}
+
+/// 一条普通消息（原样走 `MessageRow`）。
+class _SingleRow extends _DisplayRow {
+  const _SingleRow(this.message);
+  final HMessage message;
+}
+
+/// 一组连续工具调用（≥2 条）压缩成一行，点击展开。
+class _ToolGroupRow extends _DisplayRow {
+  const _ToolGroupRow({required this.anchor, required this.calls});
+
+  /// 该组第一条消息在 `_messages` 里的下标（展开态的 key）。
+  final int anchor;
+
+  final List<HToolCall> calls;
+}
+
+/// **一条「上下文已压缩」提示的数据**（2026-10-23）。
+///
+/// 只活在内存里（不落盘，理由见 `_ChatScreenState._compressedNotes` 的 KDoc）。
+class _ContextCompressedNote {
+  const _ContextCompressedNote({
+    required this.anchor,
+    required this.beforeTokens,
+    required this.afterTokens,
+  });
+
+  /// 插在 `_messages` 第 [anchor] 条**之前**（= 事件到达时消息列表的长度）。
+  final int anchor;
+
+  /// 压缩前后**估算** token；`null`/`0` = 事件没带（老后端）⇒ 文案降级。
+  ///
+  /// ⚠️ 可能 `after >= before`（摘要本身占 token），展示时不做"一定变少"的假设。
+  final int? beforeTokens;
+  final int? afterTokens;
+}
+
+/// 「上下文已压缩」提示行（显示行的第三种）。渲染见
+/// `_ChatScreenState._contextCompressedRow`。
+class _ContextCompressedRow extends _DisplayRow {
+  const _ContextCompressedRow(this.note);
+  final _ContextCompressedNote note;
 }

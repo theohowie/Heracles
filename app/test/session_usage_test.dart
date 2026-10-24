@@ -1,3 +1,4 @@
+import 'package:flutter/cupertino.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:shared_preferences/shared_preferences.dart';
@@ -36,17 +37,20 @@ void main() {
   group('SessionUsage 累计', () {
     test('★ 单轮：已上报 → 进分子分母', () {
       final u = SessionUsage.ofTurn(
+        // ★ 2026-10-23 语义：`promptTokens` = **整段**（含命中部分），
+        //   所以 900 必须 ⊆ 1000。旧用例写的是 `prompt: 100`（= 未命中部分），
+        //   那是 2026-10-23 之前的口径，已随 backend 规范化退场。
         cachedTokens: 900,
-        promptTokens: 100,
+        promptTokens: 1000,
         outputTokens: 20,
         wallMs: 1000,
       );
       expect(u.reportedTurns, 1);
       expect(u.unreportedTurns, 0);
       expect(u.cachedTokens, 900);
-      expect(u.reportedPromptTokens, 100);
+      expect(u.reportedPromptTokens, 1000);
       expect(u.hasCacheData, isTrue);
-      // 900 / (900+100) = 90%
+      // 900 / 1000 = 90%（**分母是整段，不再加一次 cached**）
       expect(u.hitRate, closeTo(0.9, 1e-9));
     });
 
@@ -77,9 +81,9 @@ void main() {
       // 3 轮：2 轮上报（各 90%），1 轮未上报
       var u = SessionUsage.empty;
       u = u.add(SessionUsage.ofTurn(
-          cachedTokens: 900, promptTokens: 100, outputTokens: 10, wallMs: 100));
+          cachedTokens: 900, promptTokens: 1000, outputTokens: 10, wallMs: 100));
       u = u.add(SessionUsage.ofTurn(
-          cachedTokens: 900, promptTokens: 100, outputTokens: 10, wallMs: 100));
+          cachedTokens: 900, promptTokens: 1000, outputTokens: 10, wallMs: 100));
       u = u.add(SessionUsage.ofTurn(
           cachedTokens: null, promptTokens: 5000, outputTokens: 10, wallMs: 100));
 
@@ -88,15 +92,22 @@ void main() {
       expect(u.unreportedTurns, 1);
       expect(u.hasUnreported, isTrue);
 
-      // 1800 / (1800 + 200) = 90%
+      // 3600 / 4000 = 90%（分子分母都只用**已上报**的两轮；分母是整段）
       //
       // 若错误地把未上报轮次的 5000 prompt 也算进分母，会得到
-      // 1800/(1800+200+5000) ≈ 25.7% —— **用户会以为缓存坏了**。
+      // 3600/(4000+5000) = 40% —— **用户会以为缓存坏了**。
       expect(u.hitRate, closeTo(0.9, 1e-9),
           reason: '未上报轮次不得稀释命中率');
 
       // 而"输入量"要如实包含那 5000（那是真花掉的）
-      expect(u.totalInputTokens, 1800 + 200 + 5000);
+      //
+      // 报告口径（2026-10-23 修正）：`totalInputTokens` = 已上报整段 + 未上报
+      //   = (1000 + 1000) + 5000 = 7000。
+      // ⚠️ 数值与旧口径（cached + prompt + unreported = 1800+200+5000）**恰好相同**，
+      //    所以这条断言以前"看起来是对的"—— 但那是巧合，两套语义不同。
+      expect(u.totalInputTokens, 1000 + 1000 + 5000);
+      // 未命中 = 整段 − 命中（这才是侧栏「· 未命中」该显示的数）
+      expect(u.uncachedInputTokens, 7000 - 1800);
     });
 
     test('★ 全部未上报 → hitRate 为 null（不是 0）', () {
@@ -116,17 +127,47 @@ void main() {
     });
 
     test('★ 命中率是**加权**的：大轮次权重大', () {
-      // 小轮 100% 命中（1 token），大轮 0% 命中（1000 token）
+      // 小轮 100% 命中（1000 token 里命中 1000），大轮 0% 命中（100000 token）
       var u = SessionUsage.empty;
       u = u.add(SessionUsage.ofTurn(
-          cachedTokens: 1, promptTokens: 0, outputTokens: 0, wallMs: 0));
+          cachedTokens: 1000, promptTokens: 1000, outputTokens: 0, wallMs: 0));
       u = u.add(SessionUsage.ofTurn(
-          cachedTokens: 0, promptTokens: 1000, outputTokens: 0, wallMs: 0));
+          cachedTokens: 0, promptTokens: 100000, outputTokens: 0, wallMs: 0));
 
-      // 加权：1 / (1 + 1000) ≈ 0.1%
-      expect(u.hitRate, closeTo(1 / 1001, 1e-9));
+      // 加权：1000 / 101000 ≈ 0.99%
+      expect(u.hitRate, closeTo(1000 / 101000, 1e-9));
       // 若按"各轮命中率取平均"会得到 50% —— 与"整体省了多少"的直觉不符
       expect(u.hitRate, isNot(closeTo(0.5, 0.01)));
+    });
+
+    test('★★ 回归：用户那组真机数字必须自洽（16128 / 16690 ⇒ 97%）', () {
+      // 用户原话：「未命中缓存16690，命中缓存16128，结果缓存命中率有97%？？」
+      //
+      // 他按**侧栏标签**算是 49%，是对的算术、错的标签：
+      // 16,690 是**整段输入**（已含命中的 16,128），真正的未命中是 562。
+      //
+      // 这组数来自真机侧栏（设备 e35e48c6，2026-10-23 14:08）。
+      final u = SessionUsage(
+        turns: 3,
+        reportedTurns: 3,
+        cachedTokens: 16128,
+        reportedPromptTokens: 16690,
+        outputTokens: 339,
+      );
+
+      // 命中率按**整段**做分母 ⇒ 96.6% ⇒ 显示 97%（与侧栏主标题一致）
+      expect(u.hitRate, closeTo(16128 / 16690, 1e-9));
+      expect((u.hitRate! * 100).round(), 97);
+
+      // 三项必须能**加回来**（这是这组回归的核心：数字自洽）
+      expect(u.uncachedInputTokens, 562, reason: '16690 − 16128');
+      expect(
+        u.cachedTokens + u.uncachedInputTokens,
+        u.totalInputTokens,
+        reason: '命中 + 未命中 必须等于整段输入',
+      );
+      expect(u.totalInputTokens, 16690,
+          reason: '★ 不能是 cached + prompt（那会得到 32818，虚高一倍）');
     });
 
     test('★ 步数只统计"请求了工具"的轮次', () {
@@ -278,7 +319,7 @@ void main() {
       await tallViewport(tester);
       var u = SessionUsage.empty;
       u = u.add(SessionUsage.ofTurn(
-          cachedTokens: 900, promptTokens: 100, outputTokens: 10, wallMs: 100));
+          cachedTokens: 900, promptTokens: 1000, outputTokens: 10, wallMs: 100));
       u = u.add(SessionUsage.ofTurn(
           cachedTokens: null, promptTokens: 500, outputTokens: 10, wallMs: 100));
 
@@ -310,10 +351,25 @@ void main() {
       expect(find.textContaining('~388.2K'), findsOneWidget);
       expect(find.text('~5.2K'), findsOneWidget);
       expect(find.text('~383.0K'), findsOneWidget);
-      // 并明确它是估算
-      expect(find.textContaining('估算值'), findsOneWidget);
+      // ★ 2026-10-23：这里原来断言界面上有「估算值」三个字 —— **已过期**。
+      //   2026-10-22 用户明确要求删掉这类解释性小字：
+      //   「那些公式给我去掉，不是写给用户看的！！！」
+      //   ⇒ 估算的标记方式就是数字前的 `~`（下面这条断言把它钉住），
+      //     而不是再写一句"这是估算"。口径说明留在 `usage_sidebar.dart` 的 KDoc。
+      expect(
+        find.textContaining('~'),
+        findsWidgets,
+        reason: '★ `~` 是"估算值"的唯一界面标记（解释性文字已被用户要求删除）',
+      );
+      expect(find.textContaining('估算值'), findsNothing,
+          reason: '用户要求：不要把这些口径说明画到界面上');
       // 进度条存在
-      expect(find.byType(LinearProgressIndicator), findsOneWidget);
+      //
+      // ★ 2026-10-23：这条原来断言 `LinearProgressIndicator` —— **已过期**。
+      //   Material → Cupertino 迁移后，进度条换成了自绘的
+      //   `CupertinoLinearActivityIndicator`（`theme/cupertino_kit.dart`），
+      //   Material 控件在这个 App 里已经一个都不剩。
+      expect(find.byType(CupertinoLinearActivityIndicator), findsOneWidget);
     });
 
     testWidgets('★ 三组标题都在（Token 用量 / 上下文已用 / 会话统计）',
@@ -383,7 +439,7 @@ void main() {
       //   命中率就消失了** —— 而用户原话第一句就是要在固定位置看到命中率。
       var u = SessionUsage.empty;
       u = u.add(SessionUsage.ofTurn(
-          cachedTokens: 900, promptTokens: 100, outputTokens: 10, wallMs: 100));
+          cachedTokens: 900, promptTokens: 1000, outputTokens: 10, wallMs: 100));
 
       await tester.pumpWidget(wrap(UsageIndicator(
         usage: u,
@@ -401,7 +457,7 @@ void main() {
     testWidgets('★ 无上限时命中率仍在', (tester) async {
       var u = SessionUsage.empty;
       u = u.add(SessionUsage.ofTurn(
-          cachedTokens: 900, promptTokens: 100, outputTokens: 10, wallMs: 100));
+          cachedTokens: 900, promptTokens: 1000, outputTokens: 10, wallMs: 100));
       await tester.pumpWidget(wrap(UsageIndicator(
         usage: u,
         contextUsage: const ContextUsage(

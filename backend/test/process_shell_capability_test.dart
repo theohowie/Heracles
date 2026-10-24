@@ -127,7 +127,30 @@ void main() {
     });
 
     tearDown(() async {
-      if (await tmp.exists()) await tmp.delete(recursive: true);
+      // ## 为什么要重试 + 吞掉删除失败（2026-10-23 修）
+      //
+      // "超时能被中止"那条测试会起一个 `ping` / `sleep` 子进程，并把
+      // `tmp.path` 设为它的**工作目录**。Windows 上只要那个进程还持有 cwd，
+      // 就**删不掉这个目录**（`errno 32` 文件被占用）—— 于是 tearDown 抛
+      // `PathAccessException`，**整条测试被标记为失败**。
+      //
+      // 但被测的行为（超时中止）其实是对的：`_terminate` 杀的是 shell 本身，
+      // 子进程（`ping`）可能比它多活几十毫秒。
+      //
+      // ⇒ 这里给最多 1 秒的宽限重试，仍删不掉就**放弃**（临时目录留给系统清）。
+      //    **绝不**因为"清理没成功"就把一条通过的测试判成失败。
+      for (var attempt = 0; attempt < 10; attempt++) {
+        try {
+          if (await tmp.exists()) {
+            await tmp.delete(recursive: true);
+          }
+          return;
+        } catch (_) {
+          // 被占用 ⇒ 等一会儿再试（子进程退出后会释放）
+          await Future<void>.delayed(const Duration(milliseconds: 100));
+        }
+      }
+      // 实在删不掉就留着 —— 这是临时目录，不影响测试结论。
     });
 
     test('★★★ 正常命令：退出码 0、输出回得来', () async {

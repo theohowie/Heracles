@@ -5,6 +5,8 @@ import 'dart:io';
 import 'package:flutter/services.dart';
 import 'package:heracles_backend/heracles_backend.dart';
 
+import 'global_memory.dart';
+
 // ============================================================================
 // 能力契约 —— 直接来自 `backend`（不再是镜像）
 // ============================================================================
@@ -51,9 +53,6 @@ abstract final class _Limits {
 
   /// `ContractWorkspace.grepPerFileBytes`（1 MB）。
   static const int grepPerFileBytes = ContractWorkspace.grepPerFileBytes;
-
-  /// `ContractMemory.maxBytes`（256 KB）。记忆整段进 system prompt ⇒ 直接等于每轮固定开销。
-  static const int memoryMaxBytes = ContractMemory.maxBytes;
 
   /// `ContractTools.maxEntries`（200）。
   static const int defaultMaxEntries = ContractTools.maxEntries;
@@ -2038,77 +2037,68 @@ class _FetchedPage {
 // 6. 长期记忆
 // ============================================================================
 
-/// **记忆能力 → 工作区里的 `.heracles/memory.md`**。
+/// **记忆能力 → App 全局 `memory.md`**（2026-10-23 从"工作区"搬到"App"）。
 ///
-/// ## 为什么放在工作区里（而不是 App 私有目录）
+/// ## 为什么改了存储位置（用户报的两个缺陷）
 ///
-/// 记忆是**项目知识**（这个项目怎么构建、用户偏好什么风格），它应该跟着
-/// 项目走：换设备、同步目录、用别的工具打开都能看到。App 私有目录里的
-/// 记忆只在"这台设备 + 这个 App 没被卸载"时存在，换个工作区就全丢。
+/// 原来写 `<工作区>/.heracles/memory.md`，带来两个**功能性**问题：
 ///
-/// ## 260 KB 上限的意义（`Contract.Memory.maxBytes` = 256 KB）
+/// | 缺陷 | 后果 |
+/// |---|---|
+/// | 存工作区里 | 换个工作区 ⇒ 记忆全没了 |
+/// | 只写不读 | `renderMemory()` 全仓 0 处调用 ⇒ 记了也用不上，换会话必失忆 |
 ///
-/// 记忆会**整段进 system prompt** ⇒ 它的大小直接等于每轮的固定开销。
-/// 超限**如实拒绝**（append 失败并说明当前大小），不做"默默只存前面一半"
-/// —— 静默截断会让用户以为记下了。
+/// 现在统一走 [GlobalMemory]（`<getExternalFilesDir>/heracles/memory.md`）：
+/// **与工作区无关、跨会话共享**，也正是用户在设置页能看到的同一份数据
+/// （一份真相，不是两处各存一份）。
 ///
-/// ## 追加 = 读 + 拼 + 写
+/// ## 为什么构造参数还留着 `workspaceRoot`
 ///
-/// 通道没有 append 原语（见 `SessionStore.appendMessage` 的同款说明）。
-/// 记忆文件小（≤256 KB）且写入频率低（一轮最多一次），这个代价可以接受。
+/// **不用了，但保留**（标了 `@Deprecated` 意图）。理由：
+///
+/// - 调用点（`buildDeviceCapabilities`）一直在传它；
+/// - 位置决策从"每个工作区一份"变成"App 一份"之后，`workspaceRoot`
+///   对记忆已无意义 —— 但**删参数会让所有调用点编译失败**，
+///   而记忆不是本轮唯一在动的地方（并行改动的文件多），少一个回归面更划算。
+///
+/// 传什么都不会影响行为。**新代码请用无参构造**。
+///
+/// ## 256 KB 上限在哪挡
+///
+/// 在 **Kotlin**（`MemoryStore.MAX_BYTES`，它是唯一写入口）——
+/// 那才是不可绕过的地方。这里只负责把 Kotlin 的 `error` 原文透传：
+/// 那句话已含"当前多大 / 加完多大 / 上限多少 / 该怎么办"，
+/// 在这里重写一遍只会丢信息。
 class FileMemoryCapability implements MemoryCapability {
-  /// [workspaceRoot] 是工作区根的绝对路径；记忆文件固定为
-  /// `<root>/.heracles/memory.md`。
+  /// [workspaceRoot] **已不参与记忆路径**（保留仅为兼容旧调用点，见类注释）。
   FileMemoryCapability({
-    required String workspaceRoot,
+    @Deprecated('记忆已改为 App 全局，workspaceRoot 不再影响存储位置')
+    String? workspaceRoot,
+    GlobalMemory? memory,
     DeviceChannelClient? channel,
-  })  : _path = '${_normalizeRoot(workspaceRoot)}/.heracles/memory.md',
-        _ch = channel ?? const DeviceChannelClient();
+  }) : _memory = memory ?? GlobalMemory(channel: channel);
 
-  final String _path;
-  final DeviceChannelClient _ch;
+  final GlobalMemory _memory;
 
-  static String _normalizeRoot(String raw) {
-    final t = raw.trim().replaceAll('\\', '/');
-    if (t.isEmpty || !t.startsWith('/')) {
-      throw ArgumentError('workspaceRoot 必须是设备上的绝对路径（收到 `$raw`）。');
-    }
-    final cleaned = t.replaceAll(RegExp('/{2,}'), '/');
-    if (cleaned.length > 1 && cleaned.endsWith('/')) {
-      return cleaned.substring(0, cleaned.length - 1);
-    }
-    return cleaned;
-  }
+  /// 记忆客户端（设置页用的是同一个实现，只是一次性构造）。
+  GlobalMemory get client => _memory;
 
-  /// 记忆文件在工作区里的固定位置。
-  String get memoryPath => _path;
+  /// 记忆文件的概念位置（**由 Kotlin 决定**，这里给排障用）。
+  ///
+  /// ⚠️ 这是**展示用**的示意路径，Dart 侧拿不到 `getExternalFilesDir` 的
+  /// 真实值。要精确路径请看 `memory.read` 的返回或 logcat。
+  String get memoryPath => '<externalFilesDir>/heracles/memory.md';
 
   /// 读记忆。
   ///
   /// ⚠️ 接口签名是 `Future<String>`（**没有失败通道**）—— 读不到只能返回空串，
-  /// 而"空串"与"读失败"在调用方看起来一样。想区分就用 [readResult]。
+  /// 而"空串"与"读失败"在调用方看起来一样。想在界面上区分就用 [readResult]。
   /// 这是 [MemoryCapability.read] 的签名缺陷，本轮不改（已报告）。
   @override
-  Future<String> read() async {
-    final r = await readResult();
-    return r is CapabilitySuccess ? r.data : '';
-  }
+  Future<String> read() => _memory.read();
 
-  /// 带失败信息的读（熔断 / 排障用）。
-  Future<CapabilityResult> readResult() async {
-    final raw = await _ch.call('fs.readText', <String, Object?>{
-      'path': _path,
-      'offsetLine': 1,
-      'maxLines': 0,
-    });
-    final err = errorOf(raw);
-    if (err != null) {
-      // 文件不存在是**正常状态**（第一次用还没有记忆），不是错误
-      if (err.contains('不存在')) return const CapabilitySuccess('');
-      return CapabilityFailure(err);
-    }
-    return CapabilitySuccess((raw['text'] as String?) ?? '');
-  }
+  /// 带失败信息的读（设置页 / 排障用）。
+  Future<MemoryReadResult> readResult() => _memory.readResult();
 
   @override
   Future<CapabilityResult> append(String note) async {
@@ -2120,43 +2110,31 @@ class FileMemoryCapability implements MemoryCapability {
       );
     }
 
-    final current = await readResult();
-    if (current is CapabilityFailure) return current;
-    final existing = (current as CapabilitySuccess).data;
-
-    final separator = existing.isEmpty
-        ? ''
-        : (existing.endsWith('\n') ? '\n' : '\n\n');
-    final updated = '$existing$separator$n\n';
-    final bytes = utf8.encode(updated).length;
-
-    if (bytes > _Limits.memoryMaxBytes) {
-      final currentBytes = utf8.encode(existing).length;
+    final r = await _memory.appendResult(n);
+    if (!r.ok) {
+      // ★ Kotlin 写的人话**原样透传**（含"当前多大 / 上限多少 / 怎么办"）。
+      //   超限属"这条路暂时走不通"而非"参数错"⇒ isRetryable: false，
+      //   否则模型会换个说法反复重试同一件注定失败的事。
       return CapabilityFailure(
-        '记忆文件已达上限，**没有写入**：'
-        '当前 ${_formatSize(currentBytes)}，加上这条会变成 ${_formatSize(bytes)}，'
-        '上限是 ${_formatSize(_Limits.memoryMaxBytes)}。\n'
-        '记忆会整段进 system prompt，所以必须有上限。'
-        '请先合并/删掉旧条目（用 write_file 重写 `$_path`）再追加。',
+        r.error ?? '写入长期记忆失败（原因未知）',
+        isRetryable: false,
       );
     }
 
-    final raw = await _ch.call('fs.writeText', <String, Object?>{
-      'path': _path,
-      'text': updated,
-    });
-    final err = errorOf(raw);
-    if (err != null) return CapabilityFailure(err);
-
+    final bytes = r.bytes ?? 0;
     return CapabilitySuccess(
-      '已记入长期记忆（$_path，现在 ${_formatSize(bytes)}）。',
+      '已记入长期记忆（App 全局，现在 ${_formatSize(bytes)}）。'
+      '这条记忆**跨会话、跨工作区**都有效。',
       metadata: <String, dynamic>{
         'bytes': bytes,
         'addedChars': n.length,
-        'limitBytes': _Limits.memoryMaxBytes,
+        'limitBytes': GlobalMemory.maxBytes,
       },
     );
   }
+
+  /// 清空全部记忆（**设置页用**，不在 backend 的 `MemoryCapability` 里）。
+  Future<bool> clear() => _memory.clear();
 }
 
 // ============================================================================
@@ -2198,7 +2176,7 @@ Capabilities buildDeviceCapabilities({
     apk: includeApk ? const DeviceApkCapability() : null,
     web: includeWeb ? const DeviceWebCapability() : null,
     memory:
-        includeMemory ? FileMemoryCapability(workspaceRoot: workspaceRoot, channel: ch) : null,
+        includeMemory ? FileMemoryCapability(channel: ch) : null,
   );
 }
 

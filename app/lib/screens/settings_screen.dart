@@ -6,6 +6,7 @@ import 'package:flutter/material.dart';
 
 import '../models/settings.dart';
 import '../services/agent_bridge.dart';
+import '../services/global_memory.dart';
 import '../services/settings_controller.dart';
 import '../theme/app_theme.dart';
 import '../theme/cupertino_kit.dart';
@@ -74,6 +75,11 @@ class SettingsScreen extends StatelessWidget {
             _DevicePermissionEntry(
               onOpen: () => _push(context, const DevicePermissionPage()),
             ),
+            // ★ 全局记忆（2026-10-23）—— **二级页面**：看全文 + 看规模 + 能清空
+            //   记忆是跨会话的，用户必须能看见"App 到底记住了多少"。
+            _GlobalMemoryEntry(
+              onOpen: () => _push(context, const GlobalMemoryPage()),
+            ),
             const SizedBox(height: HSpace.lg),
             Divider(),
             const SizedBox(height: HSpace.lg),
@@ -89,8 +95,15 @@ class SettingsScreen extends StatelessWidget {
     );
   }
 
-  void _push(BuildContext context, Widget page) {
-    Navigator.of(context).push(CupertinoPageRoute(builder: (_) => page));
+  /// 二级页统一入口（iOS 侧滑路由）。
+  ///
+  /// 返回的是**这条路由的 Future**（pop 时才完成）—— 调用方不 `await`
+  /// 就照旧是"点火即忘"，行为不变；`_GlobalMemoryEntry` 需要**从二级页
+  /// 返回后**再刷新徽章，所以要等它。（旧写法 `void _push` 让
+  /// 「返回后刷新」在 push 的那一刻就跑了 —— 那是假刷新。）
+  Future<void> _push(BuildContext context, Widget page) async {
+    await Navigator.of(context)
+        .push(CupertinoPageRoute(builder: (_) => page));
   }
 }
 
@@ -673,6 +686,283 @@ Widget _iosBackLeading(BuildContext context) => IconButton(
       icon: const Icon(AppIcons.back, size: 21),
       onPressed: () => Navigator.of(context).pop(),
     );
+
+// ============================================================ 全局记忆
+
+/// **全局记忆入口**（2026-10-23）—— 主页一行 + 规模徽章，详情在二级页。
+///
+/// 与「设备权限」同一形态：主页只给"看一眼"的规模，全文与清空在二级页。
+/// 从二级页返回后**重新读一次**（用户可能刚点了清空 —— 徽章得跟着变）。
+class _GlobalMemoryEntry extends StatefulWidget {
+  const _GlobalMemoryEntry({required this.onOpen});
+
+  /// 打开二级页；**返回后**才完成（徽章据此刷新）。
+  final Future<void> Function() onOpen;
+
+  @override
+  State<_GlobalMemoryEntry> createState() => _GlobalMemoryEntryState();
+}
+
+class _GlobalMemoryEntryState extends State<_GlobalMemoryEntry> {
+  final _memory = const GlobalMemory();
+
+  /// null = 还没读到。加载中显示 '…' —— 一闪而过的"暂无记忆"比不显示更骗人。
+  String? _badge;
+
+  @override
+  void initState() {
+    super.initState();
+    _reload();
+  }
+
+  Future<void> _reload() async {
+    final r = await _memory.readResult();
+    if (!mounted) return;
+    // 读不出来**不说**"暂无记忆" —— 那是两句话，说错就骗人
+    setState(() => _badge = r.error != null
+        ? '读取失败'
+        : (r.isEmpty
+            ? '暂无记忆'
+            : '${_entryCount(r.text)} 条 · ${_fmtBytes(r.bytes)}'));
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return _SettingsTile(
+      icon: AppIcons.think,
+      title: '全局记忆',
+      // 规模徽章在副标题位 —— 不进二级页也知道记了多少
+      subtitle: _badge ?? '…',
+      onTap: () async {
+        await widget.onOpen();
+        // 从二级页返回后再读一次（用户可能刚点了清空）—— 这次是真等 pop
+        await _reload();
+      },
+    );
+  }
+}
+
+/// **全局记忆二级页**（2026-10-23）—— 全文查看 + 清空。
+///
+/// 记忆存在 App 全局（不在工作区），每轮系统提示都会把它带回去；
+/// 这一页只管两件事：**看得见**、**能清掉**。
+class GlobalMemoryPage extends StatefulWidget {
+  const GlobalMemoryPage({super.key});
+
+  @override
+  State<GlobalMemoryPage> createState() => _GlobalMemoryPageState();
+}
+
+class _GlobalMemoryPageState extends State<GlobalMemoryPage> {
+  final _memory = const GlobalMemory();
+
+  /// null = 读取中（转圈）
+  MemoryReadResult? _result;
+
+  /// 清空进行中 —— 右上角动作锁住并转圈，避免连点二次触发
+  bool _clearing = false;
+
+  @override
+  void initState() {
+    super.initState();
+    _load();
+  }
+
+  Future<void> _load() async {
+    final result = await _memory.readResult();
+    if (!mounted) return;
+    setState(() => _result = result);
+  }
+
+  /// 清空**不可逆** —— 先弹 iOS 确认框，破坏性动作用红色（iOS 的规矩）。
+  Future<void> _confirmClear() async {
+    await showIosDialog(
+      context,
+      title: '清空全局记忆？',
+      message: '所有跨会话记忆都会被删除，无法恢复。'
+          '之后的新会话不再带着这些内容开始。',
+      actions: [
+        const IosAction('取消'),
+        IosAction('清空记忆',
+            isDestructiveAction: true, onTap: _doClear),
+      ],
+    );
+  }
+
+  Future<void> _doClear() async {
+    setState(() => _clearing = true);
+    final ok = await _memory.clear();
+    if (!mounted) return;
+    setState(() => _clearing = false);
+    if (!ok) {
+      showIosToast(context, '清空失败');
+      return;
+    }
+    await _load();
+    if (!mounted) return;
+    showIosToast(context, '已清空');
+  }
+
+  /// 「12 条 · 3.4 KB / 256 KB」—— 规模与上限一行说清（接近上限就提醒）。
+  String _sizeLine(MemoryReadResult r) {
+    final cap = _fmtBytes(GlobalMemory.maxBytes);
+    if (r.isEmpty) return '暂无记忆 · 上限 $cap';
+    final line = '${_entryCount(r.text)} 条 · ${_fmtBytes(r.bytes)} / $cap';
+    return r.nearlyFull ? '$line · 接近上限，建议清空' : line;
+  }
+
+  TextStyle _mono(Hue h, Color color, {double size = 12}) => TextStyle(
+        fontSize: size,
+        fontFamily: kMonoFontFamily,
+        fontFamilyFallback: kMonoFallback,
+        color: color,
+      );
+
+  @override
+  Widget build(BuildContext context) {
+    final h = Hue.of(context);
+    final r = _result;
+    // 读不出来时连"有没有东西可清"都不知道 —— 那时只给「重试」
+    final canClear = r != null && r.error == null && !r.isEmpty;
+    return Scaffold(
+      appBar: AppBar(
+        title: const Text('全局记忆'),
+        leading: _iosBackLeading(context),
+        actions: [
+          // 没有记忆就没有可清的东西 —— 动作干脆不出现（iOS 的做法）
+          if (canClear)
+            CupertinoButton(
+              onPressed: _clearing ? null : _confirmClear,
+              minimumSize: const Size(0, 44),
+              padding: const EdgeInsets.symmetric(horizontal: HSpace.sm),
+              foregroundColor: HColors.errorOn(h.dark),
+              child: _clearing
+                  ? CupertinoActivityIndicator(
+                      radius: 8, color: HColors.errorOn(h.dark))
+                  : const Text('清空', style: TextStyle(fontSize: 15)),
+            ),
+          const SizedBox(width: HSpace.sm),
+        ],
+      ),
+      body: r == null
+          ? Center(child: CupertinoActivityIndicator(color: h.accent))
+          : ListView(
+              padding: const EdgeInsets.all(HSpace.lg),
+              children: [
+                // ---- 读不出来 ≠ 没有记忆：这两种情况必须说不同的话 ----
+                if (r.error != null) ...[
+                  Container(
+                    width: double.infinity,
+                    padding: const EdgeInsets.all(HSpace.md),
+                    decoration: BoxDecoration(
+                      color: HColors.errorOn(h.dark).withValues(alpha: 0.08),
+                      borderRadius: BorderRadius.circular(HRadius.md),
+                      border: Border.all(
+                        color: HColors.errorOn(h.dark).withValues(alpha: 0.3),
+                      ),
+                    ),
+                    child: Text(
+                      '读不出记忆：${r.error}',
+                      style: TextStyle(
+                        fontSize: 12.5,
+                        height: 1.5,
+                        color: HColors.errorOn(h.dark),
+                      ),
+                    ),
+                  ),
+                  const SizedBox(height: HSpace.md),
+                  IosButton(
+                    label: '重试',
+                    filled: false,
+                    color: h.accent,
+                    dense: true,
+                    onPressed: _load,
+                  ),
+                ] else ...[
+                  // ---- 规模与上限 ----
+                  Text(
+                    _sizeLine(r),
+                    style: _mono(
+                        h, r.nearlyFull ? HColors.warnOn(h.dark) : h.textDim),
+                  ),
+                  const SizedBox(height: HSpace.sm),
+                  // ---- 全文 / 空态 ----
+                  if (r.isEmpty)
+                    Container(
+                      width: double.infinity,
+                      padding: const EdgeInsets.all(HSpace.md),
+                      decoration: BoxDecoration(
+                        color: h.surfaceAlt,
+                        borderRadius: BorderRadius.circular(HRadius.md),
+                        border: Border.all(color: h.border),
+                      ),
+                      child: Text(
+                        '还没有任何记忆。和 Heracles 聊天时它会把值得记住的事'
+                        '写在这里（跨会话生效）。',
+                        textAlign: TextAlign.center,
+                        style: TextStyle(
+                          fontSize: 12.5,
+                          height: 1.6,
+                          color: h.textFaint,
+                        ),
+                      ),
+                    )
+                  else
+                    Container(
+                      width: double.infinity,
+                      padding: const EdgeInsets.all(HSpace.md),
+                      decoration: BoxDecoration(
+                        color: h.surfaceAlt,
+                        borderRadius: BorderRadius.circular(HRadius.md),
+                        border: Border.all(color: h.border),
+                      ),
+                      child: SelectableText(
+                        r.text,
+                        style: TextStyle(
+                          fontSize: 12,
+                          height: 1.5,
+                          fontFamily: kMonoFontFamily,
+                          fontFamilyFallback: kMonoFallback,
+                          color: h.text,
+                        ),
+                      ),
+                    ),
+                  const SizedBox(height: HSpace.md),
+                  // 滚到底时再报一次规模，不用翻回顶部
+                  Text(_sizeLine(r), style: _mono(h, h.textFaint)),
+                ],
+              ],
+            ),
+    );
+  }
+}
+
+/// 条目数 = 非空行数。
+///
+/// 与存储侧同一口径：Kotlin 那边**一条一行**（行首 ISO 时间戳由它加），
+/// 而契约只给全文字符串、没有单独的条数字段 —— 所以这里按行数，
+/// **不要**再在别处发明第二种"条数"算法。
+int _entryCount(String text) =>
+    text.split('\n').where((l) => l.trim().isNotEmpty).length;
+
+/// 人类可读的字节数：整数就不带小数（256 KB），否则一位小数（3.4 KB）。
+String _fmtBytes(int bytes) {
+  if (bytes < 1024) return '$bytes B';
+  final kb = bytes / 1024;
+  if (kb < 1024) return '${_fmtNum(kb)} KB';
+  return '${_fmtNum(kb / 1024)} MB';
+}
+
+/// 数字显示：整数值不带小数点（256），否则一位小数（3.4）。
+String _fmtNum(double v) =>
+    v % 1 == 0 ? v.toInt().toString() : v.toStringAsFixed(1);
+
+// ------------------------------------------------------------
+// 记忆的**真存储**在 `services/global_memory.dart`（写进
+// `<externalFilesDir>/heracles/memory.md`，与工作区无关、跨工作区共享，
+// 由 `local_agent` 每轮读出来注入 system prompt）。
+// 上面这一节只是它的**查看 + 清空 UI**：读走 `readResult()` 而不是 `read()`
+// —— 它带真实字节数与失败原因，而"读不出来"和"还没有记忆"对用户是两句话。
 
 // ============================================================ 通用设置
 class GeneralSettingsPage extends StatelessWidget {

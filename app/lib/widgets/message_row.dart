@@ -192,7 +192,12 @@ class MessageRow extends StatelessWidget {
     );
   }
 
-  /// 用户消息：左侧强调色竖边 —— 与助手输出在视觉上明确区分
+  /// 用户消息：**右侧**强调色竖边 + 文字右对齐（2026-10-23，iMessage 形态）
+  ///
+  /// 用户原话：「我自己说的话，那个蓝色的小竖条放在右边」。
+  /// 改前是 `Border(left: …)` + 左内边距 —— 和助手的左对齐正文挤在同一列，
+  /// 读者要在大脑中做一次"换边"。现在像 iMessage 的用户气泡：贴右、右对齐，
+  /// 谁的发言在左/右一眼分开。
   ///
   /// ★ 长按交互（2026-10-13，参考 DeepSeek 移动端）：
   ///   · **所有消息**长按 = 复制（+ iOS 吐司回执）
@@ -204,34 +209,44 @@ class MessageRow extends StatelessWidget {
       onLongPress: () => _showMessageMenu(context, h, text, id),
       child: Container(
         margin: const EdgeInsets.only(bottom: HSpace.lg),
-        padding: const EdgeInsets.only(left: HSpace.md),
+        // 竖条在右 ⇒ 内边距也在右（否则文字会贴到竖条上）
+        padding: const EdgeInsets.only(right: HSpace.md),
         decoration: BoxDecoration(
           border: Border(
-            left: BorderSide(color: h.accent, width: 2.5),
+            right: BorderSide(color: h.accent, width: 2.5),
           ),
         ),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Text(
-              '你',
-              style: TextStyle(
-                fontSize: 11,
-                fontWeight: FontWeight.w600,
-                color: h.accent,
-                letterSpacing: 0.6,
+        // ★ `Align` 而不是裸 Column：`Container` 在消息列表里拿到的是
+        //   **满宽**约束，裸 Column 会缩到最宽子件的宽度并贴在左边 ——
+        //   右对齐就失效了。`Align` 在有界宽度下撑满、在无界约束下
+        //   自动收缩（不会像 `stretch` 那样在有界/无界交界处抛异常）。
+        child: Align(
+          alignment: Alignment.centerRight,
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.end,
+            children: [
+              Text(
+                '你',
+                textAlign: TextAlign.right,
+                style: TextStyle(
+                  fontSize: 11,
+                  fontWeight: FontWeight.w600,
+                  color: h.accent,
+                  letterSpacing: 0.6,
+                ),
               ),
-            ),
-            const SizedBox(height: HSpace.xs),
-            Text(
-              text,
-              style: TextStyle(
-                fontSize: 15,
-                height: 1.55,
-                color: h.text,
+              const SizedBox(height: HSpace.xs),
+              Text(
+                text,
+                textAlign: TextAlign.right,
+                style: TextStyle(
+                  fontSize: 15,
+                  height: 1.55,
+                  color: h.text,
+                ),
               ),
-            ),
-          ],
+            ],
+          ),
         ),
       ),
     );
@@ -336,7 +351,12 @@ class MessageRow extends StatelessWidget {
           // 一个 ~百行的受控渲染器覆盖它们，不引依赖、样式完全跟
           // 主题走（`flutter_markdown` 的样式定制反而繁琐）。
           // 若将来语法需求超出覆盖面，再走依赖调研流程。
-          _MarkdownLite(text: text),
+          //
+          // ★ 2026-10-23：渲染器迁到 `tool_call_card.dart` 的 `MarkdownLite`
+          //   （步骤正文汇报复用同一套 ⇒ 见该类注释里的依赖方向说明）。
+          //   基准字号 **16**（用户：「总结字体还是小」）：正文汇报 15、
+          //   工具行 12 —— 三层字号层级因此一眼可辨。
+          MarkdownLite(text: text),
           // ★ 变更报告卡片（2026-10-22 用户指正位置）：
           //   总结正文**下面**、复制/点赞操作行**上面**。
           if (changes != null && changes.isNotEmpty) ...[
@@ -745,338 +765,3 @@ class _AnswerActionsState extends State<_AnswerActions> {
   }
 }
 
-
-/// **轻量 Markdown 渲染**（2026-10-13，用户截图暴露星号/井号原样显示）。
-///
-/// ## 覆盖的语法（回答里实际出现的）
-///
-/// | 语法 | 渲染 |
-/// |---|---|
-/// | `## 标题` / `### 标题` | 加粗大一号（标题层级） |
-/// | `**粗体**` | 粗体 span |
-/// | `` `code` `` | 等宽字体 span（带底色） |
-/// | `- 列表` / `* 列表` | 保留 `·` 前缀的列表行 |
-/// | `1. 列表` | 保留原编号 |
-///
-/// ## 设计取舍
-///
-/// · **不引依赖**（AGENTS.md：新依赖要 ADR —— 现有语法面窄，
-///   受控渲染器覆盖即可；将来语法需求超出再走调研流程）
-/// · 样式全部取自 [Hue] —— 深浅两色自动适配
-/// · 逐行解析（Markdown 的块结构按行划分足够，回答不是嵌套文档）
-class _MarkdownLite extends StatelessWidget {
-  const _MarkdownLite({required this.text});
-
-  final String text;
-
-  @override
-  Widget build(BuildContext context) {
-    final h = Hue.of(context);
-    final lines = text.split('\n');
-    final spans = <Widget>[];
-
-    // ★ 2026-10-22：从"纯逐行"升级为**块级扫描**。
-    //
-    // ## 为什么必须改（真机截图证据）
-    //
-    // 用户截图里模型输出了一张 Markdown 表格，界面把它**原样**画成
-    // `| id | title | updatedAt | starred |` —— 用户看到一堆竖线。
-    // 旧实现是"一行一 Widget"，**结构上不可能**认出跨行的表格/代码块。
-    //
-    // ## 现在识别哪些块
-    //
-    // | 块 | 触发 |
-    // |---|---|
-    // | 围栏代码块 | ``` 开头，吃到配对的 ``` |
-    // | 表格 | 行首 `|`，且**下一行是 `\|---\|` 分隔行**（GFM 口径） |
-    // | 分隔线 | `---` / `***` / `___` |
-    // | 引用 | `> ` 开头 |
-    // | 其余 | 交给原来的逐行渲染（标题/列表/段落/空行） |
-    //
-    // ⚠️ 表格必须有**分隔行**才认：否则 `a | b` 这种普通含竖线的
-    // 句子会被误判成表格（宁可少认，不要错渲染）。
-    var i = 0;
-    while (i < lines.length) {
-      final line = lines[i];
-      final t = line.trimLeft();
-
-      // ---- 围栏代码块 ----
-      if (t.startsWith('```')) {
-        final buf = StringBuffer();
-        i++;
-        while (i < lines.length && !lines[i].trimLeft().startsWith('```')) {
-          if (buf.isNotEmpty) buf.write('\n');
-          buf.write(lines[i]);
-          i++;
-        }
-        if (i < lines.length) i++; // 吃掉收尾的 ```
-        spans.add(_codeBlock(h, buf.toString()));
-        continue;
-      }
-
-      // ---- 表格（GFM：表头 + 分隔行 + 若干数据行）----
-      if (t.startsWith('|') &&
-          i + 1 < lines.length &&
-          _isTableSeparator(lines[i + 1])) {
-        final rows = <List<String>>[_splitRow(lines[i])];
-        i += 2; // 跳过表头与分隔行
-        while (i < lines.length && lines[i].trimLeft().startsWith('|')) {
-          rows.add(_splitRow(lines[i]));
-          i++;
-        }
-        spans.add(_table(h, rows));
-        continue;
-      }
-
-      // ---- 分隔线 ----
-      if (t == '---' || t == '***' || t == '___') {
-        spans.add(Padding(
-          padding: const EdgeInsets.symmetric(vertical: HSpace.sm),
-          child: Divider(height: 1, color: h.border),
-        ));
-        i++;
-        continue;
-      }
-
-      // ---- 引用 ----
-      if (t.startsWith('> ')) {
-        spans.add(_quote(h, t.substring(2)));
-        i++;
-        continue;
-      }
-
-      spans.add(_line(context, h, line));
-      i++;
-    }
-
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: spans,
-    );
-  }
-
-  // ============================================================
-  // 表格
-  // ============================================================
-
-  /// 是否是 `|---|:--:|---|` 这种分隔行（GFM 表格的判定锚点）。
-  bool _isTableSeparator(String line) {
-    final t = line.trim();
-    if (!t.startsWith('|')) return false;
-    final cells = _splitRow(t);
-    if (cells.isEmpty) return false;
-    return cells.every((c) => RegExp(r'^:?-{1,}:?$').hasMatch(c.trim()));
-  }
-
-  /// 把 `| a | b |` 拆成 `['a', 'b']`（去掉首尾空段）。
-  List<String> _splitRow(String line) {
-    var t = line.trim();
-    if (t.startsWith('|')) t = t.substring(1);
-    if (t.endsWith('|')) t = t.substring(0, t.length - 1);
-    return t.split('|').map((e) => e.trim()).toList();
-  }
-
-  /// 渲染成真正的 `Table`（不是等宽文本对齐 —— 手机上长值必然错位）。
-  ///
-  /// 列宽用 [FlexColumnWidth]：撑满可用宽度、**按比例**分配，
-  /// 单元格内文本自动换行。手机窄屏下 5 列表格会显得挤，
-  /// 但这比"原样吐竖线"和"横向滚动的死宽表格"都更可读。
-  Widget _table(Hue h, List<List<String>> rows) {
-    if (rows.isEmpty) return const SizedBox.shrink();
-    final header = rows.first;
-    final body = rows.skip(1).toList();
-    final cols = header.length;
-
-    TableRow buildRow(List<String> cells, {required bool head}) => TableRow(
-          decoration: head ? BoxDecoration(color: h.surfaceAlt) : null,
-          children: [
-            for (var c = 0; c < cols; c++)
-              Padding(
-                padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 6),
-                child: _rich(
-                  h,
-                  c < cells.length ? cells[c] : '',
-                  fontSize: 12,
-                  bold: head,
-                  lineHeight: 1.35,
-                ),
-              ),
-          ],
-        );
-
-    return Padding(
-      padding: const EdgeInsets.symmetric(vertical: HSpace.sm),
-      child: Table(
-        border: TableBorder.all(color: h.border, width: 0.6),
-        defaultColumnWidth: const FlexColumnWidth(),
-        children: [
-          buildRow(header, head: true),
-          for (final r in body) buildRow(r, head: false),
-        ],
-      ),
-    );
-  }
-
-  // ============================================================
-  // 代码块 / 引用
-  // ============================================================
-
-  Widget _codeBlock(Hue h, String code) {
-    return Container(
-      width: double.infinity,
-      margin: const EdgeInsets.symmetric(vertical: HSpace.xs),
-      padding: const EdgeInsets.all(HSpace.sm),
-      decoration: BoxDecoration(
-        color: h.surfaceAlt,
-        borderRadius: BorderRadius.circular(HRadius.sm),
-        border: Border.all(color: h.border),
-      ),
-      // 代码不换行（换行会破坏缩进语义）⇒ 允许横向滚动
-      child: SingleChildScrollView(
-        scrollDirection: Axis.horizontal,
-        child: Text(
-          code,
-          style: TextStyle(
-            fontFamily: kMonoFontFamily,
-            fontFamilyFallback: kMonoFallback,
-            fontSize: 12.5,
-            height: 1.5,
-            color: h.textDim,
-          ),
-        ),
-      ),
-    );
-  }
-
-  Widget _quote(Hue h, String text) {
-    return Container(
-      margin: const EdgeInsets.symmetric(vertical: HSpace.xs),
-      padding: const EdgeInsets.only(left: HSpace.sm),
-      decoration: BoxDecoration(
-        border: Border(left: BorderSide(color: h.border, width: 3)),
-      ),
-      child: Text(
-        text,
-        style: TextStyle(fontSize: 14.5, height: 1.6, color: h.textDim),
-      ),
-    );
-  }
-
-  Widget _line(BuildContext context, Hue h, String line) {
-    final t = line.trimLeft();
-
-    // ---- 标题 ## / ### ----
-    if (t.startsWith('### ')) {
-      return _heading(h, t.substring(4), 15.5);
-    }
-    if (t.startsWith('## ')) {
-      return _heading(h, t.substring(3), 16.5);
-    }
-    if (t.startsWith('# ')) {
-      return _heading(h, t.substring(2), 17.5);
-    }
-
-    // ---- 无序列表 ----
-    if (t.startsWith('- ') || t.startsWith('* ')) {
-      return Padding(
-        padding: const EdgeInsets.only(left: HSpace.sm),
-        child: Row(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Text('·  ', style: TextStyle(fontSize: 15, height: 1.6, color: h.text)),
-            Expanded(child: _rich(h, t.substring(2))),
-          ],
-        ),
-      );
-    }
-
-    // ---- 空行：保留间距（列表/段落分隔）----
-    if (t.isEmpty) {
-      return const SizedBox(height: HSpace.sm);
-    }
-
-    // ---- 普通段落 ----
-    return _rich(h, line);
-  }
-
-  Widget _heading(Hue h, String text, double size) {
-    return Padding(
-      padding: const EdgeInsets.only(top: HSpace.xs),
-      child: Text(
-        text,
-        style: TextStyle(
-          fontSize: size,
-          fontWeight: FontWeight.w700,
-          height: 1.5,
-          color: h.text,
-        ),
-      ),
-    );
-  }
-
-  /// 行内解析：`**粗体**` 与 `` `code` `` → 样式化 TextSpan。
-  ///
-  /// ★ 行内**没有**任何标记时返回普通 `Text` 而不是 `RichText` ——
-  ///   既是渲染捷径，也保证 `find.text(...)` 这类测试查找器
-  ///   对无标记回答仍然有效（2026-10-13 套件假失败的真实原因：
-  ///   RichText 不创建 Text widget，纯文本断言全空）。
-  Widget _rich(
-    Hue h,
-    String line, {
-    double fontSize = 15,
-    bool bold = false,
-    double lineHeight = 1.6,
-  }) {
-    final base = TextStyle(
-      fontSize: fontSize,
-      height: lineHeight,
-      color: h.text,
-      fontWeight: bold ? FontWeight.w700 : FontWeight.w400,
-    );
-    if (!line.contains('**') && !line.contains('`')) {
-      return Text(line, style: base);
-    }
-    final spans = <TextSpan>[];
-    var rest = line;
-    while (rest.isNotEmpty) {
-      // **粗体**
-      final b = rest.indexOf('**');
-      if (b >= 0) {
-        final e = rest.indexOf('**', b + 2);
-        if (e > b) {
-          if (b > 0) spans.add(TextSpan(text: rest.substring(0, b), style: base));
-          spans.add(TextSpan(
-            text: rest.substring(b + 2, e),
-            style: base.copyWith(fontWeight: FontWeight.w700),
-          ));
-          rest = rest.substring(e + 2);
-          continue;
-        }
-      }
-      // `code`
-      final c = rest.indexOf('`');
-      if (c >= 0) {
-        final e = rest.indexOf('`', c + 1);
-        if (e > c) {
-          if (c > 0) spans.add(TextSpan(text: rest.substring(0, c), style: base));
-          spans.add(TextSpan(
-            text: rest.substring(c + 1, e),
-            style: base.copyWith(
-              fontFamily: kMonoFontFamily,
-              fontFamilyFallback: kMonoFallback,
-              fontSize: 13.5,
-              color: h.accent,
-            ),
-          ));
-          rest = rest.substring(e + 1);
-          continue;
-        }
-      }
-      spans.add(TextSpan(text: rest, style: base));
-      break;
-    }
-    return RichText(
-      text: TextSpan(children: spans, style: base),
-    );
-  }
-}

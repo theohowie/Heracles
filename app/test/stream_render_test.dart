@@ -423,7 +423,13 @@ void main() {
       await settle(tester);
 
       expect(find.text('最终整理好的文本'), findsOneWidget);
-      expect(find.text('1234ms'), findsOneWidget);
+      // ★ 2026-10-23：用户要求**删掉标签后面的 `xxxms`**（原话：
+      //   「然后分析后面这个 xxxms 给我删了」）⇒ 这条断言反向钉住"不再显示耗时"。
+      //   事件里 `durationMs` 仍然照发（落盘与其它界面在用），只是不再画出来。
+      expect(find.text('1234ms'), findsNothing,
+          reason: '★ 用户要求：步骤行不再显示耗时');
+      expect(find.textContaining('ms'), findsNothing,
+          reason: '不许换个单位/写法把耗时又漏出来');
       // 结束之后**这条步骤**不该还在转圈
       expect(stepSpinner(), findsNothing,
           reason: 'step_ended 之后必须停掉「生成中」，否则用户以为还在跑');

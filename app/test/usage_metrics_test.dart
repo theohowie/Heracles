@@ -5,6 +5,7 @@ import 'package:heracles/models/message.dart';
 import 'package:heracles/models/session_usage.dart';
 import 'package:heracles/services/agent_bridge.dart';
 import 'package:heracles/theme/app_theme.dart';
+import 'package:heracles/theme/cupertino_kit.dart';
 import 'package:heracles/widgets/message_row.dart';
 import 'package:heracles/widgets/usage_sidebar.dart';
 
@@ -27,6 +28,27 @@ import 'package:heracles/widgets/usage_sidebar.dart';
 ///
 /// ⚠️ 这里**不测** provider 上报是不是少了（那要真 Key / 真机）。
 /// 能在这里钉住的是"我们这边有没有把它算漏/算错"。
+///
+/// ## ★ 2026-10-23 口径变更（本文件已按新口径重算，**旧公式已废**）
+///
+/// `promptTokens` 的语义从「**未命中部分**」改成「**整段**（含命中）」，
+/// 因为真机 provider 回的 `prompt_tokens` 本来就含缓存命中：
+///
+/// ```
+/// prompt_tokens: 5468, prompt_tokens_details: {cached_tokens: 5376}  ⇒ 真值 98.3%
+/// ```
+///
+/// | 口径 | 旧（已废） | 新 |
+/// |---|---|---|
+/// | 单轮 | `cached / (cached + prompt)` | `cached / prompt` |
+/// | 累计·加权 | `Σcached / (Σcached + Σprompt)` | `Σcached / Σprompt` |
+/// | 总输入 | `cached + prompt + unreported` | `prompt + unreported`（**不再加 cached**） |
+///
+/// 旧公式把命中的那部分**加了两次**：上面这组真机数会被算成
+/// `5376/(5376+5468) = 49.6%`，侧栏长期显示 ~50%，用户报"命中缓存率太低"。
+///
+/// ⇒ **凡是继续断言 `cached + prompt` 当分母/总输入的用例，都是在锁错误契约**，
+///   必须改成新口径（本文件下面的注释逐条标了"旧口径已废"）。
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
 
@@ -59,8 +81,10 @@ void main() {
       var u = SessionUsage.empty;
       for (var i = 0; i < 3; i++) {
         u = u.add(SessionUsage.ofTurn(
+          // 2026-10-23 新口径：prompt 是**整段**（含命中）⇒ 900 ⊆ 1000，
+          // 单轮命中率 90%（旧用例写 prompt:100 是"未命中部分"的旧口径）。
           cachedTokens: 900,
-          promptTokens: 100,
+          promptTokens: 1000,
           outputTokens: 160,
           wallMs: 1724,
           requestedTool: i < 2,
@@ -93,32 +117,36 @@ void main() {
   group('命中率口径', () {
     /// 构造一组"三处都出现、且三个数互不相等"的样本。
     ///
-    /// 数字取自用户真机现象（累计 94 / 单轮 96），再补一个稳态值。
+    /// 口径说明（2026-10-23）：`prompt` = **整段**（含命中）⇒
+    /// 单轮 = `cached / prompt`；累计加权 = `Σcached / Σprompt`。
+    /// 下面的数字已按新口径取（旧口径 `cached/(cached+prompt)` 会把命中算两遍）。
+    ///
     /// 关键：**同一个 run** 里
     /// · 单轮（第 2 轮）= 96%
-    /// · 累计·加权（全部轮次）= 94%
-    /// · 稳态·轮次平均（drop(1)）= 96%（只有一轮时它就是那一轮，看不出口径差异）
+    /// · 累计·加权（全部轮次）= 34%
+    /// · 稳态·轮次平均（drop(1)）= 58%（只有一轮时它就是那一轮，看不出口径差异）
     /// ⇒ 为了证明"口径不同"，必须让 drop(1) 有**多轮**。
     test('★★ 累计加权 ≠ 单轮 ≠ 稳态轮次平均（三个口径，三个数）', () {
       // run 有 3 轮：
       //   轮1（冷启动）：cached=0,    prompt=1000  → 单轮 0%
-      //   轮2：          cached=960,  prompt=40    → 单轮 96%
-      //   轮3：          cached=400,  prompt=1600  → 单轮 20%
+      //   轮2：          cached=960,  prompt=1000  → 单轮 96%（整段口径）
+      //   轮3：          cached=400,  prompt=2000  → 单轮 20%
       final turns = [
         const AgentTurn(
             index: 1, verdict: '', wallMs: 1000,
             cachedTokens: 0, promptTokens: 1000, outputTokens: 100),
         const AgentTurn(
             index: 2, verdict: '', wallMs: 1000,
-            cachedTokens: 960, promptTokens: 40, outputTokens: 100),
+            cachedTokens: 960, promptTokens: 1000, outputTokens: 100),
         const AgentTurn(
             index: 3, verdict: '', wallMs: 1000,
-            cachedTokens: 400, promptTokens: 1600, outputTokens: 100),
+            cachedTokens: 400, promptTokens: 2000, outputTokens: 100),
       ];
 
       // ① 单轮口径（消息卡片那个）—— 第 2 轮
       final single = turns[1].metrics.hitRate!;
-      expect(single, closeTo(0.96, 1e-9), reason: '单轮 = 960/(960+40)');
+      expect(single, closeTo(0.96, 1e-9),
+          reason: '单轮 = 960/1000（新口径：分母是整段输入，含命中）');
 
       // ② 累计·加权（标题圆圈 / 侧栏主标题）
       var acc = SessionUsage.empty;
@@ -130,7 +158,8 @@ void main() {
           wallMs: t.wallMs,
         ));
       }
-      // Σcached=1360, Σ(cached+prompt)=1360+2640=4000 → 34%
+      // Σcached=1360, Σprompt=1000+1000+2000=4000 → 34%
+      // （旧口径会算 1360/(1360+4000)=25.4% —— 分母把命中加了两遍，已废）
       expect(acc.hitRate, closeTo(0.34, 1e-9),
           reason: '累计加权只按 token 汇总，不认"各轮平均"');
 
@@ -146,16 +175,46 @@ void main() {
     });
 
     test('★ 标题圆圈用的就是累计·加权（不是单轮，也不是平均）', () {
-      // 两轮：100% 与 0%，权重不同 ⇒ 加权 50%，平均 50%，
-      // 但若把 token 量做成悬殊，加权就会被小轮拉走
+      // 两轮：100% 与 0%（新口径：单轮 = cached/prompt），
+      // 但把 token 量做成悬殊，加权就会被小轮拉走、与"各轮平均"拉开距离
       var u = SessionUsage.empty;
       u = u.add(SessionUsage.ofTurn(
-          cachedTokens: 1, promptTokens: 0, outputTokens: 0, wallMs: 0));
+          cachedTokens: 1000, promptTokens: 1000, outputTokens: 0, wallMs: 0));
       u = u.add(SessionUsage.ofTurn(
-          cachedTokens: 0, promptTokens: 999, outputTokens: 0, wallMs: 0));
-      // 加权：1/1000；而"各轮命中率平均"是 50%
-      expect(u.hitRate, closeTo(1 / 1000, 1e-9));
+          cachedTokens: 0, promptTokens: 100000, outputTokens: 0, wallMs: 0));
+      // 加权：Σcached/Σprompt = 1000/101000 ≈ 0.99%；
+      // 而"各轮命中率平均"是 (100% + 0%) / 2 = 50% —— 两个口径必须能分辨。
+      expect(u.hitRate, closeTo(1000 / 101000, 1e-9));
       expect(u.hitRate, isNot(closeTo(0.5, 0.01)));
+    });
+
+    test('★★ 回归（2026-10-23 新口径）：真机 16128 / 16690 ⇒ 97%，且三项能加回来', () {
+      // 用户原话：「未命中缓存16690，命中缓存16128，结果缓存命中率有97%？？」
+      // 他按**侧栏标签**算是 49%，算术没错 —— 错的是旧标签：
+      // 16,690 是**整段输入**（已含命中的 16,128），真正的未命中只有 562。
+      //
+      // 这组数来自真机侧栏（设备 e35e48c6，2026-10-23 14:08）。
+      final u = SessionUsage(
+        turns: 3,
+        reportedTurns: 3,
+        cachedTokens: 16128,
+        reportedPromptTokens: 16690,
+        outputTokens: 339,
+      );
+
+      // 命中率 = cached/整段输入 = 96.6% ⇒ 显示 97%（与侧栏主标题一致）
+      expect(u.hitRate, closeTo(16128 / 16690, 1e-9));
+      expect((u.hitRate! * 100).round(), 97);
+
+      // ★ 旧口径已废：总输入 = cached + prompt 会把命中算两遍（32,818，虚高一倍）
+      expect(u.totalInputTokens, 16690,
+          reason: '整段输入就是 16,690，不是 cached + prompt');
+      expect(u.totalInputTokens, isNot(16128 + 16690));
+      // 未命中 = 整段 − 命中 = 562（这才是「· 未命中」那一行该显示的数）
+      expect(u.uncachedInputTokens, 562);
+      // ★ 用户能自己在侧栏上验算的等式：命中 + 未命中 == 整段输入
+      expect(u.cachedTokens + u.uncachedInputTokens, u.totalInputTokens,
+          reason: '三项必须自洽，否则用户一算就发现"标签在撒谎"');
     });
 
     test('★★ steadyHitRate 累计：只保留最近一次（比率不可相加）', () {
@@ -222,13 +281,14 @@ void main() {
 
     /// 造一份"跑过一次"的用量：模型用时 5172ms、任务总耗时 48 秒。
     ///
-    /// ⚠️ 稳态命中率刻意取 **86%**，与累计加权（900/(900+100)=90%）**不同** ——
-    /// 若两个数一样，就证明不了"口径不同"，也测不出标签是否分开。
+    /// 口径（2026-10-23）：`promptTokens` = **整段**（含命中）⇒ 900/1000 = 90%。
+    /// 稳态命中率刻意取 **86%**，与累计加权 **不同** —— 若两个数一样，
+    /// 就证明不了"口径不同"，也测不出标签是否分开。
     SessionUsage oneRun() {
       var u = SessionUsage.empty;
       u = u.add(SessionUsage.ofTurn(
         cachedTokens: 900,
-        promptTokens: 100,
+        promptTokens: 1000,
         outputTokens: 476,
         wallMs: 5172,
         requestedTool: true,
@@ -291,11 +351,45 @@ void main() {
       // 新增一行：稳态（并写明是"最近一次·轮次平均"）
       expect(find.text('稳态命中率（最近一次·轮次平均）'), findsOneWidget);
       // ★★ 两个数**同时**在且**不相等** —— 用户看到的 94% vs 96% 正是这类差
-      expect(find.text('90%'), findsOneWidget, reason: '累计·加权 = 900/(900+100)');
+      expect(find.text('90%'), findsOneWidget,
+          reason: '累计·加权 = 900/1000（新口径：分母是整段输入）');
       expect(find.text('86%'), findsOneWidget, reason: '稳态·轮次平均（另一个口径）');
       expect(find.text('90%'), isNot(find.text('86%')));
-      // 口径说明必须在（用户要能自己判断两个数为何不同）
-      expect(find.textContaining('口径不同'), findsOneWidget);
+      // ★ 2026-10-23：这条原来断言界面上有一段「口径不同」的说明文字 ——
+      //   **已过期**：用户 2026-10-22 明确要求删掉这类解释性文字
+      //   （「那些公式给我去掉，不是写给用户看的！！！」）。
+      //   现在"口径"写在**标签本身**里（上面两条 label 断言钉住），
+      //   不再单独画一段说明；README/KDoc 里才有口径细节。
+      expect(find.textContaining('口径不同'), findsNothing,
+          reason: '口径写在标签里即可，界面上不再放解释性小字');
+    });
+
+    testWidgets('★★ 侧栏五行自洽：输入（含缓存）= 命中 + 未命中；Token 用量 = 输入 + 输出',
+        (tester) async {
+      // 用户 2026-10-23 就是**自己按侧栏三个数算了一遍**才发现标签在撒谎：
+      // 「未缓存输入 16690、缓存读取 16128 ⇒ 命中率 49%，怎么会显示 97%？」
+      // ⇒ 新口径下 命中 + 未命中 必须等于整段输入，用户能当场验算；
+      //   旧的「未缓存输入」「缓存读取」两行已删除（它们正是重复计数的来源）。
+      await tallViewport(tester);
+      await tester.pumpWidget(wrap(UsageSidebar(
+        usage: oneRun(),
+        contextUsage: const ContextUsage(
+            frozenTokens: 0, conversationTokens: 0, limit: 4096),
+      )));
+      await tester.pump();
+
+      expect(find.text('输入（含缓存）'), findsOneWidget);
+      expect(find.text('· 命中缓存'), findsOneWidget);
+      expect(find.text('· 未命中'), findsOneWidget);
+      // oneRun = cached 900 / prompt(整段) 1000 / output 476
+      expect(find.text('1,000'), findsOneWidget, reason: '整段输入');
+      expect(find.text('900'), findsOneWidget, reason: '命中缓存');
+      expect(find.text('100'), findsOneWidget, reason: '未命中 = 1000 − 900');
+      expect(find.text('476'), findsOneWidget, reason: '输出');
+      expect(find.text('1,476'), findsOneWidget, reason: 'Token 用量 = 1000 + 476');
+      // ★ 旧行名已删（2026-10-23）—— 它们把"整段输入"标成了"未缓存输入"
+      expect(find.text('未缓存输入'), findsNothing);
+      expect(find.text('缓存读取'), findsNothing);
     });
 
     testWidgets('★ 没有任务耗时数据时显示 —（不是「0秒」）', (tester) async {
@@ -322,14 +416,19 @@ void main() {
           message: const HAssistantMessage(id: 'a1', text: '回答'),
           metrics: const TurnMetrics(
             cachedTokens: 960,
-            promptTokens: 40,
+            // 2026-10-23 新口径：prompt = **整段**（含命中）⇒ 960/1000 = 96%。
+            // （旧用例写 prompt:40 是"未命中部分"的旧口径 ⇒ 会算出 2400%）
+            promptTokens: 1000,
             outputTokens: 476,
             wallMs: 5172,
           ),
         ),
       )));
       await tester.pump();
-      await tester.tap(find.byIcon(Icons.data_usage_rounded));
+      // ★ 2026-10-23：图标名换成本项目真实存在的那个 ——
+      //   Material `Icons.data_usage_rounded` 随 Cupertino 迁移已不存在，
+      //   `AppIcons.usage` = `CupertinoIcons.chart_bar`（见 cupertino_kit.dart）。
+      await tester.tap(find.byIcon(AppIcons.usage));
       await tester.pump();
 
       // ★ 秒级（用户要求）+ 「不含工具」口径

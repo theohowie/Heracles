@@ -51,6 +51,7 @@ class DeviceChannel(
     private val shell: DeviceShell,
     private val health: DeviceHealth,
     private val build: BuildTaskProgress,
+    private val memory: MemoryStore,
     private val filePicker: FilePickerBridge,
     private val folderPicker: FolderPickerBridge,
     private val scope: CoroutineScope,
@@ -126,6 +127,31 @@ class DeviceChannel(
                 scope.launch { reply(result, fs.readBytes(path)) }
             }
 
+            // ★ 从文件尾读最后 N 行（2026-10-23）—— 长会话加载走这条。
+            //
+            // 为什么不让 Dart 用 fs.readText 自己切尾巴：那要先把整文件读进内存
+            // （原始 String + split 出的行列表 ≈ 2×），几百条会话在真机上会掉帧。
+            // 这里 POSIX 走反向 seek，只读尾部字节。
+            "fs.readTailLines" -> {
+                val path = call.stringArg("path")
+                    ?: return reply(result, failure("fs.readTailLines 缺少参数 path"))
+                val maxLines = call.argument<Int>("maxLines") ?: 0
+                scope.launch { reply(result, fs.readTailLines(path, maxLines)) }
+            }
+
+            // ★ 真正的追加写（2026-10-23）—— 会话 .jsonl 的 append-only 靠它。
+            //
+            // 过去只有 fs.writeText（整体覆盖）⇒ Dart 每次追加都要
+            // "读全文 + 拼 + 写全文" = O(n²)，长会话越聊越卡。
+            // 这个方法是 O(追加量)。
+            "fs.appendText" -> {
+                val path = call.stringArg("path")
+                    ?: return reply(result, failure("fs.appendText 缺少参数 path"))
+                val text = call.argument<String>("text")
+                    ?: return reply(result, failure("fs.appendText 缺少参数 text"))
+                scope.launch { reply(result, fs.appendText(path, text)) }
+            }
+
             "fs.writeText" -> {
                 val path = call.stringArg("path")
                     ?: return reply(result, failure("fs.writeText 缺少参数 path"))
@@ -186,6 +212,24 @@ class DeviceChannel(
             // ---------------------------------------------------------- 健康
             "health.read" -> scope.launch { reply(result, health.read()) }
 
+            // ---------------------------------------------------------- 长期记忆
+            //
+            // ★ 2026-10-23：记忆搬到 **App 全局**（不再放工作区里）。
+            //   路径 `<externalFilesDir>/heracles/memory.md`，与工作区无关 ⇒
+            //   跨工作区共享；且不受 SAF 限制（不用授权、不用 MANAGE_EXTERNAL_STORAGE）。
+            //
+            //   为什么不让 Dart 用 `fs.*` 自己拼路径：那要 Dart 知道
+            //   `getExternalFilesDir` 的值，而它拿不到 —— 只有原生知道。
+            "memory.read" -> scope.launch { reply(result, memory.read()) }
+
+            "memory.append" -> {
+                val note = call.argument<String>("note")
+                    ?: return reply(result, failure("memory.append 缺少参数 note"))
+                scope.launch { reply(result, memory.append(note)) }
+            }
+
+            "memory.clear" -> scope.launch { reply(result, memory.clear()) }
+
             // ---------------------------------------------------------- 选择器
             "picker.folder" -> launchFolderPicker(result)
 
@@ -240,6 +284,22 @@ class DeviceChannel(
                 folderPicker.launch { ws ->
                     if (ws == null) {
                         reply(result, failure("用户取消，或所选位置没有本地路径（例如网盘）"))
+                        return@launch
+                    }
+                    // ★ 受限目录 / 网盘：选择器会回 `ok:false` + 一句人话 + 出路。
+                    //   **原样透传**那句 error（它已写清"为什么"和"下一步"），
+                    //   并带上 `suggest` 让 UI 能直接画两个可用按钮。
+                    if (ws["ok"] == false) {
+                        val reason = (ws["error"] as? String)
+                            ?: "这个位置无法用作工作区"
+                        val suggest = ws["suggest"]
+                        val payload = mutableMapOf<String, Any?>(
+                            "ok" to false,
+                            "error" to reason,
+                        )
+                        (ws["reason"] as? String)?.let { payload["reasonCode"] = it }
+                        if (suggest is List<*>) payload["suggest"] = suggest
+                        reply(result, payload)
                         return@launch
                     }
                     val path = ws["path"] as? String

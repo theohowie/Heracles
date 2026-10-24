@@ -48,6 +48,7 @@ class WindowRatioCompressor implements ContextCompressor {
     this.compressAtRatio = ContractCompression.compressAtRatio,
     this.keepRecentTurns = ContractCompression.keepRecentTurns,
     ContextCompressor? delegateImpl,
+    this.onCompressed,
   }) : _delegateImpl = delegateImpl; // ignore: prefer_initializing_formals
 
   /// 用来做摘要的 client。
@@ -64,9 +65,9 @@ class WindowRatioCompressor implements ContextCompressor {
 
   /// 超过窗口的这个比例就触发压缩。
   ///
-  /// 0.75 的取舍：
-  /// - 太低（如 0.5）⇒ 频繁压缩，丢细节，且多花摘要调用
-  /// - 太高（如 0.95）⇒ 可能在压缩前就撞窗口，请求被拒
+  /// 数值与取舍**只有一份真相**，在 `ContractCompression.compressAtRatio`
+  /// （0.80，用户要求 80%）。这里故意不重复写那个数字 ——
+  /// 抄一份过来就会出现"改了一处、另一处没跟上"的经典漂移。
   final double compressAtRatio;
 
   /// 保留最近多少**轮**原文（不被压缩）。
@@ -95,6 +96,32 @@ class WindowRatioCompressor implements ContextCompressor {
 
   final ContextCompressor? _delegateImpl;
 
+  /// **压缩真的发生之后**的回调（给 UI 播报用）。
+  ///
+  /// ## 触发条件（严格）
+  ///
+  /// 只有三个都成立才调：
+  /// 1. 估算值 ≥ `triggerThreshold`（真的到了阈值）
+  /// 2. delegate 跑完了
+  /// 3. **历史真的变短了**（`afterMessages < beforeMessages`）
+  ///
+  /// 第 3 条是必须的：框架的 `LLMBasedContextCompressor.compress` 内部有**多个
+  /// 静默早退分支**（`usages` 为空 / 消息条数不够 / 摘要正文为空 /
+  /// 摘要 XML 解析失败被 catch 掉），那些情况下它**什么都没改**。
+  /// 若不加这一条，UI 会收到"压缩了 40 条 → 40 条"这种无意义事件，
+  /// 用户以为压缩坏了。
+  ///
+  /// ## 为什么参数是"前后快照"而不是只报一个数
+  ///
+  /// 用户要能看见"省了多少"。只报 after 的话，UI 得自己记住 before，
+  /// 那是把状态散到界面层 —— 压不压缩只有这里知道，前后值必须一起交出去。
+  final void Function(
+    int beforeMessages,
+    int afterMessages,
+    int beforeTokens,
+    int afterTokens,
+  )? onCompressed;
+
   /// 触发压缩的 token 阈值。
   int get triggerThreshold => (modelWindowTokens * compressAtRatio).floor();
 
@@ -114,7 +141,36 @@ class WindowRatioCompressor implements ContextCompressor {
       // 装得下就全装，不因为"轮数多"而压缩。
       return;
     }
+
+    // ---- 压缩前快照（必须在 delegate 之前取）----
+    //
+    // 框架的压缩是**原地改写** `state.history.messages`（
+    // `context_compressor.dart` 里 `state.history.messages = messagesToKeep`），
+    // 跑完就再也拿不到"压缩前"的样子了。
+    final beforeMessages = state.history.messages.length;
+    final beforeTokens = usage;
+
     await delegate.compress(state);
+
+    // ---- 压缩后**重新取真实值**（不许用旧快照 / 不许用估算糊弄）----
+    //
+    // ⚠️ 这里为什么要真的重量一次，而不是"beforeTokens - 省下的"：
+    // delegate 里除了"删掉老消息"还会**往头部插入**一条摘要消息 + 一条
+    // ack（框架 `context_compressor.dart:167-179`），所以条数不是简单相减，
+    // token 也不是单调下降（摘要文本本身也占 token）。
+    // 用 before/after 两个**实测快照**报出去，才是用户看到的真相。
+    final afterMessages = state.history.messages.length;
+    final afterTokens = _estimateUsage(state);
+
+    // 没真的变短 ⇒ delegate 静默早退了（见 [onCompressed] 的 KDoc）⇒ 不播事件。
+    if (afterMessages < beforeMessages) {
+      onCompressed?.call(
+        beforeMessages,
+        afterMessages,
+        beforeTokens,
+        afterTokens,
+      );
+    }
   }
 
   /// 粗估当前历史占多少 token。

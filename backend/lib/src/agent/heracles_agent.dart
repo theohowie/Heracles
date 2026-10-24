@@ -45,6 +45,7 @@ import '../contract/contract.dart';
 import '../context/window_ratio_compressor.dart';
 import '../prompt/system_prompt.dart';
 import '../tools/tool_factory.dart';
+import 'multimodal.dart';
 import 'tools/apk_tools.dart';
 import 'tools/file_manage_tools.dart';
 import 'tools/file_tools.dart';
@@ -105,6 +106,7 @@ class RunOptions {
     this.maxToolCalls = ContractAgent.maxToolCalls,
     this.enablePlan = true,
     this.systemPrompts = const [],
+    this.memoryNote,
   });
 
   final int maxTurns;
@@ -124,6 +126,33 @@ class RunOptions {
 
   /// 额外系统提示（追加在默认提示之后）。
   final List<String> systemPrompts;
+
+  /// **长期记忆原文**（跨会话沉淀的项目知识与用户偏好）。
+  ///
+  /// 由宿主（App 的 `GlobalMemory`）在每次 run 之前读好传进来；`null` 或
+  /// trim 后为空 ⇒ 不注入任何内容（行为与加这个字段之前**完全一致**）。
+  ///
+  /// ## 为什么它是 `RunOptions` 的字段，而不是走 `systemPrompts`
+  ///
+  /// 两个理由：
+  /// 1. **语义不同**：`systemPrompts` 是"宿主想追加的固定提示"（通常在一次
+  ///    会话里不变）；记忆是**每轮都可能变**的数据。混在一起会让人以为它
+  ///    也是静态的。
+  /// 2. **注入位置有讲究**：记忆必须拼在默认提示**之后**（见
+  ///    `_buildSystemPrompts`）—— 这样默认提示那一段字节不变，缓存前缀
+  ///    只在记忆真的变化时才失效。
+  ///
+  /// ## ⚠️ 缓存代价（必须知道，别以为免费）
+  ///
+  /// 记忆是**进 system 消息**的 ⇒ 它一变，请求前缀就变，那一轮的**整条前缀
+  /// 缓存作废**。因为记忆是 append-only（`save_memory` 只往后加），所以：
+  /// - 同一会话里没调用 `save_memory` ⇒ 记忆不变 ⇒ 缓存正常命中；
+  /// - 调用过 `save_memory` ⇒ **下一轮前缀会重建一次**，之后又稳定。
+  ///
+  /// 这个代价是"换会话不失忆"必须付的，不是 bug。要彻底消除得把记忆做成
+  /// 独立的消息（会击穿更后面的前缀）或检索式注入（另一套机制），
+  /// **当前不做**，如实记在这里。
+  final String? memoryNote;
 }
 
 /// **组装好的 Agent**。
@@ -225,6 +254,47 @@ class HeraclesAgent {
     ];
   }
 
+  /// **组装 system prompts** —— 默认提示 → 宿主追加 → 长期记忆。
+  ///
+  /// ## 三段，顺序不能乱
+  ///
+  /// 1. `defaultSystemPrompt(_caps)` —— 人设与环境（**字节稳定**，除非能力变了）
+  /// 2. `_options.systemPrompts` —— 宿主追加的固定提示
+  /// 3. 长期记忆（若 [RunOptions.memoryNote] 非空）—— **放在最后，见下**
+  ///
+  /// ## 为什么记忆必须放最后而不是最前
+  ///
+  /// 框架 `composeSystemMessage()` 会把这些片段 **`join('\n\n')` 成一条**
+  /// SystemMessage，它位于整条请求的**最开头** —— 也就是缓存前缀的最前段。
+  ///
+  /// - 放最前 ⇒ 记忆一变，**后面所有人设与环境文字的前缀位置全部偏移**，
+  ///   那一轮的缓存几乎全废；
+  /// - 放最后 ⇒ 前面那两段字节**完全不变**，只有尾部这一段变。
+  ///
+  /// 前缀缓存的匹配是"最长公共前缀"，所以**把易变的部分尽量往后放**是
+  /// 唯一能少付代价的做法。这也解释了为什么 `memoryNote` 没被塞进
+  /// `defaultSystemPrompt()` 里。
+  ///
+  /// ## 为什么用 `renderMemory()`
+  ///
+  /// `interaction_tools.dart` 里早就有 `renderMemory()`，但它**从来没被调用过**
+  /// （记忆只写不读 ⇒ 换会话必失忆）。这里把它接上，而不是另写一份格式化 ——
+  /// 两处各写一份就是第二份真相，将来改标题必然只改一处。
+  List<String> _buildSystemPrompts() {
+    final prompts = <String>[
+      defaultSystemPrompt(_caps),
+      ..._options.systemPrompts,
+    ];
+
+    // trim 后再判空：模型/存储可能塞进纯空白，那种情况不该注入一个空段落
+    // （空段落会白白改变前缀字节，却不带任何信息）。
+    final note = _options.memoryNote;
+    if (note != null && note.trim().isNotEmpty) {
+      prompts.add(renderMemory(note));
+    }
+    return prompts;
+  }
+
   /// **跑一次完整任务**，边走边播事件。
   ///
   /// 返回的 Stream 在任务结束时关闭。取消用 `cancelToken`。
@@ -237,14 +307,49 @@ class HeraclesAgent {
   ///
   /// 第 2 步先于第 3 步是关键：即便 `_drive` 在第一个 await 前就同步写了几个
   /// 事件，`StreamController` 也会缓冲它们，等第 3 步订阅后按序吐出。
+  /// ## [history]：**跨轮记忆的唯一入口**
+  ///
+  /// 不传 ⇒ 行为与以前完全一样（每次 run 都从空 state 开始）。
+  /// 传了 ⇒ 这些消息会**原样成为 `state.history` 的开头**，本轮的用户请求
+  /// 追加在它们**之后**（append-only，绝不重排 —— 前缀缓存靠它）。
+  ///
+  /// ### 为什么必须由调用方注入，而不是这里自己去读会话文件
+  ///
+  /// 后端是**纯 Dart 包，不碰存储**（`heracles_backend.dart` 的硬约束：
+  /// 不 import Flutter / 不 import dart:ui，也不该知道 SAF 或 `.jsonl` 在哪）。
+  /// 会话存储由宿主（App 的 `SessionStore` / 将来的 CLI）负责，
+  /// 这里只接受"已经翻译好的框架消息"。
+  ///
+  /// ### 传进来的历史**不做校验、不做去重**
+  ///
+  /// 因为校验必然要猜（"这条 assistant 算不算数"），而猜错会静默改坏上下文。
+  /// 责任边界很硬：**调用方保证 history 是干净的、按时间正序、且不含本轮请求**。
+  /// 若把本轮请求也塞进来，模型会看到两遍同一条用户消息 —— 见
+  /// `LocalAgentExecutor` 里"排除本轮刚写进去的 user 行"那段。
   Stream<HeraclesEvent> run(
     String userRequest, {
+    List<LLMMessage>? history,
+    /// **图片输入**（2026-10-23 补：此前这里只有 String，
+    /// 附件在 App 侧就被丢掉了 —— 模型根本收不到图）。
+    ///
+    /// 用 [ImageInput]（base64 + mime）而不是框架的 `ImagePart`：
+    /// 宿主不该依赖 `dart_agent_core`（见 `multimodal.dart` 的说明）。
+    ///
+    /// 调用方负责**能力判断**（模型不支持视觉时不要传，否则 provider 会 400
+    /// 或静默忽略 —— 后者更糟，用户会以为模型看过图）。
+    List<ImageInput>? images,
     CancelToken? cancelToken,
   }) async* {
     final bridge = StreamController<HeraclesEvent>();
 
     // 驱动整个 run（它自己负责把事件写进 bridge，并在结束时 close）。
-    final runner = _drive(userRequest, bridge, cancelToken: cancelToken);
+    final runner = _drive(
+      userRequest,
+      bridge,
+      history: history,
+      images: images,
+      cancelToken: cancelToken,
+    );
 
     try {
       yield* bridge.stream;
@@ -254,16 +359,64 @@ class HeraclesAgent {
     }
   }
 
+  /// 构造本轮的首条用户消息：**文本 + 可选图片**。
+  ///
+  /// ## 为什么单独抽出来
+  ///
+  /// 旧实现是 `[UserMessage.text(userRequest)]` —— 硬编码成**纯文本**，
+  /// 于是无论 App 侧传了什么附件，模型都只看得到文字。
+  /// 用户那句质问（"大模型都有识图，为什么给 agent 后就不能了？"）的
+  /// 最后一环就在这行。
+  ///
+  /// ## 顺序
+  ///
+  /// `[TextPart(用户文字), ...图片]` —— 文字在前，图在后。
+  /// 用户问"这张图里是什么"时，先读问题再看图，符合对话直觉；
+  /// 反过来（图在前）部分模型会把图当成"历史附件"而忽略。
+  ///
+  /// ## 没有图片时
+  ///
+  /// 完全走老路径（`UserMessage.text`），**不改动既有行为**。
+  List<LLMMessage> _firstMessage(
+    String userRequest,
+    List<ImageInput>? images,
+  ) {
+    if (images == null || images.isEmpty) {
+      return [UserMessage.text(userRequest)];
+    }
+    return [
+      UserMessage(<UserContentPart>[
+        TextPart(userRequest),
+        ...buildImageParts(images),
+      ]),
+    ];
+  }
+
   /// 真正的执行体：框架循环 → 事件桥。
   Future<void> _drive(
     String userRequest,
     StreamController<HeraclesEvent> bridge, {
+    List<LLMMessage>? history,
+    List<ImageInput>? images,
     CancelToken? cancelToken,
   }) async {
     final emit = _Emitter(bridge);
     final wallClock = Stopwatch()..start();
     var totalToolCalls = 0;
     var budgetReached = false;
+
+    /// **本轮模型最后一次给出的正文**（`AfterCallLLMEvent` 捕获）。
+    ///
+    /// `null` = 本轮模型一次正文都没出（纯工具调用轮 / 异常 / 预算耗尽）。
+    ///
+    /// ## 为什么这个值比"倒扫 history"可靠
+    ///
+    /// 它是**事件流里的真实输出**，不受历史被压缩改写的影响：
+    /// - 压缩把 `state.history.messages` 截短 ⇒ 倒扫会越界变空；
+    /// - 压缩往头部插 ack ⇒ 倒扫会把英文客套话当答案。
+    ///
+    /// 这两个坑都只在"压缩真的发生过"的 run 里现形，所以以前没被测出来。
+    String? lastTurnText;
 
     /// 框架自己播报过的失败原因（`OnAgentExceptionEvent` / `OnAgentErrorEvent`）。
     ///
@@ -327,6 +480,36 @@ class HeraclesAgent {
       ));
     });
     controller.on<AfterCallLLMEvent>((e) {
+      // ★★ 2026-10-23：**在这里捕获本轮正文**（比"结束时倒扫历史"可靠得多）★★
+      //
+      // ## 为什么必须改成捕获，而不是倒扫 `state.history`
+      //
+      // 旧实现是 run 结束时"从历史末尾倒着找第一条有正文的 ModelMessage"。
+      // 上下文压缩一旦发生，这条就同时踩两个坑：
+      //
+      // 1. **历史被截短** ⇒ 越界守卫 `startIndex >= msgs.length` 直接返回空串
+      //    ⇒ 压缩过的那一轮**最终回答变成空**（UI 上"模型答完了但没有回答"）。
+      // 2. **框架会往保留段头部插一条 ack**：
+      //    `ModelMessage(textOutput: "Got it. Thanks for the additional context!")`
+      //    （`context_compressor.dart:175-178`）。倒扫会把这句**英文客套话
+      //    当成最终回答显示给用户** —— 这正是本项目反复警告的"假信息"。
+      //
+      // ## 为什么 AfterCallLLMEvent 天然排除这两件事
+      //
+      // 它由框架的**主循环**在每次模型调用后 publish（`stateful_agent.dart:1173`）。
+      // 而压缩器的摘要调用是 `LLMBasedContextCompressor` 内部直接
+      // `client.generate(...)`，**不经过主循环、不 publish 这个事件** ⇒
+      // 摘要调用与那条 ack 都不会被捕获。这是结构上的保证，不是靠字符串匹配。
+      //
+      // ## 为什么只保留"最后一条有正文的"
+      //
+      // 一轮里可能有多条 ModelMessage（先出工具调用、再出正文）。用户看到的
+      // "最终回答"是**最后一条有正文的**那条。空正文的（纯工具调用轮）跳过。
+      final text = e.response.textOutput;
+      if (text != null && text.trim().isNotEmpty) {
+        lastTurnText = text;
+      }
+
       // ★ 2026-10-22：**逐轮用量记账**（此前完全缺失 —— 旧 Kotlin 的
       // `TurnRecord.cachedTokens/promptTokens/outputTokens` 在迁移中丢了，
       // 导致 App 的用量面板/顶栏命中率/右侧边栏全部"不可用"）。
@@ -336,8 +519,42 @@ class HeraclesAgent {
       // 未上报时 UI 必须显示"不可用"，**不得用 0 代替** —— 0 会被读成"缓存坏了"）。
       final u = e.response.usage;
       if (u == null) return;
+      // ★ 原始用量**只在 debug 构建**打一行（assert 在 release 被剥掉）。
+      //
+      // ## 为什么必须有这一行
+      //
+      // "命中缓存率"这个数的**唯一权威来源是服务端返回的 usage**。各家字段名
+      // 不同（OpenAI 在 `prompt_tokens_details` 里、Anthropic 是
+      // `cache_read_input_tokens`、**DeepSeek 是顶层的 `prompt_cache_hit_tokens`**），
+      // 中转站还可能改字段。字段名猜错 ⇒ UI 永远显示一个假的低值，
+      // 而**看代码是看不出来的**（代码只是"没匹配上"）。
+      //
+      // 所以：把原样 usage 打出来，按**实测字段**对齐，而不是按文档猜。
+      // 用量里没有 API Key，打印是安全的。
+      assert(() {
+        // ignore: avoid_print
+        print('[heracles][usage] ${u.originalUsage}');
+        return true;
+      }());
       emit(HeraclesTurnUsage(
-        promptTokens: u.promptTokens,
+        // ★ 口径统一（2026-10-23）：`promptTokens` 一律表示**整段 prompt**
+        //   （**含**已命中的部分），命中率由消费方算 `cached / promptTokens`。
+        //
+        // ## 为什么必须在这里规范化（真机数据）
+        //
+        // 实测（设备 e35e48c6，中转站返回的原始 usage）：
+        // ```
+        // prompt_tokens: 5468, prompt_tokens_details: {cached_tokens: 5376}
+        // ```
+        // 即**真实命中率 98.3%**。但旧算法是 `cached / (cached + prompt)`，
+        // 把"整段"和"其中的命中部分"**又加了一遍** ⇒ 5376/(5376+5468) = **49.6%**，
+        // 顶栏长期显示 ~50%；用户因此报"命中缓存率太低了"。
+        //
+        // 这不是算错一个数：`prompt_tokens` 在 OpenAI/DeepSeek 系里是**整段**，
+        // 而在 Anthropic 系里 `input_tokens` **只是未命中部分**（命中数在
+        // `cache_read_input_tokens`）。两种语义混在一起用同一个公式，
+        // 必然有一家是错的 ⇒ 规范化只能发生在**知道 wire 的地方**（这里）。
+        promptTokens: _fullPromptTokens(u),
         outputTokens: u.completionTokens,
         cachedTokens: _cachedFrom(u),
       ));
@@ -374,11 +591,31 @@ class HeraclesAgent {
     // ---- 压缩器 ----
     //
     // 摘要用小模型（如果配了）：省钱的常规手段。
+    //
+    // ## 压缩时机（框架控制，不是我们）
+    //
+    // 框架在**每一轮循环的最开头、请求发出之前**调 `compress(state)`
+    // （`stateful_agent.dart` 的 `while (true)` 里）。
+    // ⇒ "任务跑到一半也能压缩后继续"**天生成立**，不需要我们额外做什么。
+    //
+    // ## onCompressed：把"压缩真的发生了"播给 UI
+    //
+    // 压缩器与 `emit` 在同一个作用域（都在 `_drive` 里），所以直接闭包捕获。
+    // 回调只在**历史真的变短**时触发（见 `WindowRatioCompressor.onCompressed`），
+    // 所以这里不用再判断一次 —— 别在两处判同一件事，将来会分叉。
     final summarizerClient = _config.summarizerModel == null ? null : _buildClient();
     final compressor = WindowRatioCompressor(
       client: summarizerClient ?? client,
       modelConfig: _modelConfig(model: _config.summarizerModel),
       modelWindowTokens: _config.modelWindowTokens,
+      onCompressed: (beforeMessages, afterMessages, beforeTokens, afterTokens) {
+        emit(HeraclesContextCompressed(
+          beforeMessages: beforeMessages,
+          afterMessages: afterMessages,
+          beforeTokens: beforeTokens,
+          afterTokens: afterTokens,
+        ));
+      },
     );
 
     // ---- 工具调用预算（ADR-033 的"真预算"）----
@@ -393,16 +630,46 @@ class HeraclesAgent {
     );
 
     // ---- 组装 StatefulAgent ----
-    _state ??= AgentState(sessionId: _newSessionId());
+    //
+    // ## 跨轮记忆（2026-10-23 修）
+    //
+    // ### 修之前为什么"模型记不住上一轮"
+    //
+    // `_state ??= AgentState(...)` 意味着：**只要这个 `HeraclesAgent` 实例是
+    // 新建的，`_state` 就是 null ⇒ 从空历史开始**。而 App 侧每次 run 都
+    // `new HeraclesAgent(...)`（`local_agent.dart`），于是每一轮都是全新会话 ——
+    // 模型看不到上一轮的 user/assistant，表现就是"它忘了我们刚才在聊什么"。
+    // 这同时也是缓存命中率只有 1% 的主因：**每条请求的前缀几乎全变**。
+    //
+    // ### 现在的规则（三条，别改）
+    //
+    // 1. **有 history 就以它为准**重建 state —— 即使 `_state` 已存在。
+    //    理由：调用方（App）从会话文件读到的才是**唯一真相**；同一个
+    //    `HeraclesAgent` 实例被复用时若沿用旧 `_state`，会与文件分叉
+    //    （两边各自 append，越用越乱）。
+    // 2. **没有 history 才退回 `_state ??=`** —— 保住"同一实例连续跑两轮"
+    //    这个老行为（测试与 CLI 依赖它），**向后兼容**。
+    // 3. history 是**原样**放进去的（`AgentMessageHistory(messages: history)`），
+    //    不重排、不去重、不裁剪 —— 裁剪是调用方的事（它才知道哪些能丢）。
+    //
+    // ⚠️ `AgentMessageHistory` 的 `messages` 是**可变的 List**，且框架会继续
+    //    往里 `add`（`state.history.messages.add(...)`）。所以这里传
+    //    `List.of(history)` 而不是直接把调用方的 list 递进去 —— 否则框架
+    //    会**往调用方那个列表里塞消息**，调用方复用它就会看到被污染的数据。
+    if (history != null && history.isNotEmpty) {
+      _state = AgentState(
+        sessionId: _state?.sessionId ?? _newSessionId(),
+        history: AgentMessageHistory(messages: List<LLMMessage>.of(history)),
+      );
+    } else {
+      _state ??= AgentState(sessionId: _newSessionId());
+    }
     final agent = StatefulAgent(
       name: 'heracles',
       client: client,
       modelConfig: _modelConfig(),
       state: _state!,
-      systemPrompts: [
-        defaultSystemPrompt(_caps),
-        ..._options.systemPrompts,
-      ],
+      systemPrompts: _buildSystemPrompts(),
       tools: _buildTools(),
       controller: controller,
       compressor: compressor,
@@ -422,11 +689,17 @@ class HeraclesAgent {
           : (state) async => _stateStorage.save(state),
     );
 
+    /// **本轮追加的起点** —— 之后 `_lastText` 只在这里之后找本轮的正文。
+    ///
+    /// 必须在 `runStream` **之前**取：它会往 `state.history` 里 append
+    /// 本轮的用户消息与模型回答，取晚了下标就错。
+    final turnStartIndex = _state!.history.messages.length;
+
     // ---- 跑 ----
     var finished = false;
     try {
       await for (final ev in agent.runStream(
-        [UserMessage.text(userRequest)],
+        _firstMessage(userRequest, images),
         cancelToken: cancelToken,
       )) {
         // 框架的 Stream 事件只用来补我们 Controller 覆盖不到的（如工具请求）
@@ -443,7 +716,7 @@ class HeraclesAgent {
       }
       wallClock.stop();
       emit(HeraclesFinished(
-        finalText: _lastText(agent),
+        finalText: _lastText(agent, turnStartIndex, captured: lastTurnText),
         turns: _state!.totalLoopCount,
         totalToolCalls: totalToolCalls,
         wallClockMs: wallClock.elapsedMilliseconds,
@@ -485,13 +758,43 @@ class HeraclesAgent {
 
   /// 从 `ModelUsage.originalUsage`（provider 原始 map）里取**真实上报**的缓存命中数。
   ///
+  /// 把 provider 的 prompt token 数**规范化成"整段"**（含已命中的部分）。
+  ///
+  /// ## 两家的语义不同（这是必须规范化的原因）
+  ///
+  /// | wire | 字段 | 语义 |
+  /// |---|---|---|
+  /// | OpenAI / DeepSeek | `prompt_tokens` | **整段**（已含命中） |
+  /// | Anthropic | `input_tokens` | **仅未命中部分**；命中在 `cache_read_input_tokens`，写入在 `cache_creation_input_tokens` |
+  ///
+  /// 若把两者当同一个数用，Anthropic 那条轨会把 prompt 少算一大截
+  /// （命中率被高估、上下文占用被低估）。
+  ///
+  /// ⚠️ **Anthropic 分支未真机验证**（本机只有 OpenAI 兼容中转站的实测数据）。
+  /// 规范化逻辑按 Anthropic 官方字段语义写，并留了 `creation` 那一项 ——
+  /// 但**在拿到 Anthropic 真 Key 证据前，不要宣称这条轨正确**。
+  static int _fullPromptTokens(ModelUsage u) {
+    final o = u.originalUsage;
+    if (o is! Map) return u.promptTokens;
+    int pick(String k) => (o[k] as num?)?.toInt() ?? 0;
+    // Anthropic 标志：出现 cache_read / cache_creation 即认为 input_tokens 不含缓存
+    final hasAnthropicCache =
+        o.containsKey('cache_read_input_tokens') ||
+            o.containsKey('cache_creation_input_tokens');
+    if (!hasAnthropicCache) return u.promptTokens;
+    return u.promptTokens + pick('cache_read_input_tokens') + pick('cache_creation_input_tokens');
+  }
+
   /// 返回 `null` = 这个 provider 压根没上报缓存字段 ⇒ UI 必须显示"不可用"，
   /// **不许显示 0%**（0% 会被读成"缓存坏了"，那是两种完全不同的事）。
   ///
-  /// 兼容三家 wire 的字段名：
+  /// 兼容四家 wire 的字段名：
   /// · OpenAI Chat：`prompt_tokens_details.cached_tokens`
   /// · Anthropic：`cache_read_input_tokens`
   /// · Responses：`input_tokens_details.cached_tokens`
+  /// · **DeepSeek：`prompt_cache_hit_tokens`（顶层，不在 details 里）**
+  ///   —— 2026-10-23 补。此前漏了这一家，而用户的模型正是 DeepSeek 系
+  ///   （经中转站），于是"命中缓存率"永远读不出真值（顶栏一直 1%）。
   static int? _cachedFrom(ModelUsage u) {
     final o = u.originalUsage;
     if (o is! Map) return u.cachedToken > 0 ? u.cachedToken : null;
@@ -503,6 +806,9 @@ class HeraclesAgent {
     }
     final anth = pick(o, 'cache_read_input_tokens');
     if (anth != null) return anth;
+    // DeepSeek 原生字段（顶层）：命中 / 未命中是一对，取命中那半
+    final dsHit = pick(o, 'prompt_cache_hit_tokens');
+    if (dsHit != null) return dsHit;
     // 框架已把值归一到 cachedToken —— 非 0 时信它；为 0 且上面都没命中字段 ⇒ 未上报
     return u.cachedToken > 0 ? u.cachedToken : null;
   }
@@ -510,19 +816,72 @@ class HeraclesAgent {
   String _newSessionId() =>
       's${DateTime.now().microsecondsSinceEpoch}';
 
-  /// 取最后一轮的正文当最终回答。
+  /// 取**本轮**的正文当最终回答。
   ///
-  /// ⚠️ **只取 ModelMessage 的 `textOutput`**，不碰 `thought` ——
+  /// ⚠️ **只取 `textOutput`**，不碰 `thought` ——
   /// 旧实现有过"思考被当答案"的事故（用户看到一堆英文推理）。
-  String _lastText(StatefulAgent agent) {
+  ///
+  /// ## 主路径：[captured]（`AfterCallLLMEvent` 捕获的本轮正文）
+  ///
+  /// 见 `_drive` 里 `lastTurnText` 的 KDoc。**这是唯一可靠的来源**，
+  /// 因为它不依赖 `state.history` 的形状 —— 而上下文压缩会把历史**原地改写**。
+  ///
+  /// ## 兜底路径：倒扫历史（只在 captured 为空时）
+  ///
+  /// captured 为空 = 本轮模型一次正文都没出。这种情况下仍然尝试倒扫，
+  /// 是为了兼容"正文进了历史但事件没被捕获"的理论可能（例如将来框架改了
+  /// 事件时序）。但这条路**两个风险都在**，所以：
+  ///
+  /// 1. 用 [startIndex] 排除历史（否则会把**上一轮的回答**当本轮答案 ——
+  ///    那条 bug 有测试锁着，不能弄红）；
+  /// 2. **显式跳过框架的压缩 ack 文案**（否则会把一句英文客套话当答案）。
+  ///
+  /// ### 为什么第 1 条会被压缩击穿（这就是本轮要修的）
+  ///
+  /// `startIndex` 是"本轮开始前历史的长度"。压缩后
+  /// `state.history.messages = messagesToKeep` ⇒ **长度可能比 `startIndex` 还短**
+  /// ⇒ 旧守卫 `startIndex >= msgs.length` 直接返回空串
+  /// ⇒ 压缩过的那一轮"答完了却没有回答"。主路径修掉了它，兜底路径至少
+  /// 不再假装能读到东西（返回空串是**如实**的：确实没捕获到）。
+  String _lastText(
+    StatefulAgent agent,
+    int startIndex, {
+    String? captured,
+  }) {
+    // ---- 主路径 ----
+    if (captured != null && captured.trim().isNotEmpty) {
+      return captured;
+    }
+
+    // ---- 兜底路径 ----
     final msgs = _state?.history.messages ?? const [];
-    for (final m in msgs.reversed) {
+    // startIndex 可能大于实际长度（压缩截短之后就会）⇒ 什么都不取，
+    // 绝不用越界下标去 sublist。
+    if (startIndex >= msgs.length) return '';
+    for (final m in msgs.skip(startIndex).toList().reversed) {
       if (m is ModelMessage) {
         final t = m.textOutput;
-        if (t != null && t.trim().isNotEmpty) return t;
+        if (t == null || t.trim().isEmpty) continue;
+        // ★ 跳过框架的压缩 ack。它是 `LLMBasedContextCompressor` 为"接上"
+        //   摘要快照而插入的一句模型口吻确认，**不是模型对本轮用户的回答**。
+        //   把它当答案显示 = 用户看到一句莫名其妙的英文。
+        if (_isCompressionAck(t)) continue;
+        return t;
       }
     }
     return '';
+  }
+
+  /// 是不是框架压缩时插入的那句 ack 文案。
+  ///
+  /// 判据来自框架源码（`context_compressor.dart:175-178`）：
+  /// `ModelMessage(textOutput: "Got it. Thanks for the additional context!")`。
+  ///
+  /// 用**包含**而不是全等：将来框架可能给这句话加个前缀/后缀，全等会漏。
+  /// 判错的风险很低 —— 这不是模型会主动说的话，而且只有兜底路径会走到这里。
+  static bool _isCompressionAck(String text) {
+    const marker = 'Thanks for the additional context';
+    return text.contains(marker);
   }
 
   Map<String, dynamic> _safeParseArgs(String raw) {
@@ -678,6 +1037,45 @@ class HeraclesPlanStep {
 }
 
 enum HeraclesPlanStatus { pending, active, done, cancelled }
+
+/// **上下文已压缩**（2026-10-23 新增）—— 让用户看得见"压缩真的发生了"。
+///
+/// ## 为什么必须播这个事件
+///
+/// 压缩是**有损**的：老消息被摘要成一段 XML 快照，细节丢了。在这之前，
+/// 用户完全看不到它发生过 —— 表现只有两种，都很糟：
+///
+/// - 模型"突然忘了前面说过的事"（他以为模型变笨了）；
+/// - 或者什么都没察觉，直到某天发现上下文被悄悄改写过。
+///
+/// 「上下文到 80% 自动压缩，然后继续任务」这个行为本身就是**要给用户看的**：
+/// 他会看到"哦，它压缩了，所以刚才那段细节它可能不记得了"，而不是困惑。
+///
+/// ## 字段口径
+///
+/// - `beforeMessages` / `afterMessages`：**消息条数**。压缩后一般会**变小**，
+///   但注意框架会往保留段头部**插入**一条摘要消息 + 一条确认（共 2 条），
+///   所以条数不是"删掉多少"，而是**前后各自的真实值**。
+/// - `beforeTokens` / `afterTokens`：按本压缩器的估算规则算出的 token 数
+///   （**估算，不是 provider 上报值** —— 此刻还没有发请求）。
+///   UI 上要说明这是估算，别让用户拿它跟顶栏的"命中率"比。
+///
+/// ⚠️ `afterTokens` **可能比 `beforeTokens` 大**（极少见但可能）：摘要文本
+/// 本身也占 token，若被压掉的老消息很短、而摘要写得长，就会反弹。
+/// 这不是 bug，如实报即可 —— 别在 UI 层假设"一定变少"。 
+final class HeraclesContextCompressed extends HeraclesEvent {
+  const HeraclesContextCompressed({
+    required this.beforeMessages,
+    required this.afterMessages,
+    required this.beforeTokens,
+    required this.afterTokens,
+  });
+
+  final int beforeMessages;
+  final int afterMessages;
+  final int beforeTokens;
+  final int afterTokens;
+}
 
 /// **逐轮用量**（2026-10-22 补）—— provider 每完成一次真实请求上报一帧。
 ///
