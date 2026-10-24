@@ -22,6 +22,7 @@ List<Tool> buildFileTools(
   ToolFactory f,
   Capabilities caps, {
   EditReadTracker? tracker,
+  Future<String> Function()? verify,
 }) {
   final ws = caps.workspace;
   return [
@@ -159,6 +160,12 @@ List<Tool> buildFileTools(
         if (tracker != null && r is CapabilitySuccess) {
           tracker.markWritten(path);
         }
+        // ★ H3/K2（2026-10-25）：写成功 ⇒ 自动跑宿主配置的验证命令，
+        //   输出附在结果里 —— 模型看到失败立刻修（架构级闭环）。
+        if (verify != null && r is CapabilitySuccess) {
+          final v = await verify();
+          return CapabilitySuccess('${r.data}\n[自动验证] $v');
+        }
         return r;
       },
     ),
@@ -206,6 +213,10 @@ List<Tool> buildFileTools(
         if (tracker != null && r is CapabilitySuccess) {
           tracker.markWritten(path);
         }
+        if (verify != null && r is CapabilitySuccess) {
+          final v = await verify();
+          return CapabilitySuccess('${r.data}\n[自动验证] $v');
+        }
         return r;
       },
     ),
@@ -245,6 +256,10 @@ List<Tool> buildFileTools(
         final r = await ws!.applyPatch(path, patch);
         if (tracker != null && r is CapabilitySuccess) {
           tracker.markWritten(path);
+        }
+        if (verify != null && r is CapabilitySuccess) {
+          final v = await verify();
+          return CapabilitySuccess('${r.data}\n[自动验证] $v');
         }
         return r;
       },
