@@ -86,10 +86,18 @@ void main() {
       expect(first.beforeMessages, greaterThan(0));
       expect(first.afterMessages, greaterThan(0));
       expect(first.beforeTokens, greaterThan(0));
-      // 压缩后条数必须真的变少（否则不该播这个事件）
-      expect(first.afterMessages, lessThan(first.beforeMessages),
-          reason: '播了事件就说明历史真的变短了（before=${first.beforeMessages}, '
-              'after=${first.afterMessages}）');
+      // 压缩必须真的动了历史。2026-10-24 起是三级压缩：一次 run 里可能有
+      // 多次压缩事件（每轮检查一次；摘要替换可以条数不变、token 变少；
+      // 强制重置整批丢弃）—— 所以判定是"**至少一次**压缩真的省了"。
+      // ⚠️ 不钉 .first：滑动窗口 + 快照重写的那次可能 token 微涨
+      // （新内容进窗 > 旧内容被摘要），那不是失败，是窗口在滚动。
+      expect(
+        compressed.any((e) =>
+            e.afterMessages < e.beforeMessages ||
+            e.afterTokens < e.beforeTokens),
+        isTrue,
+        reason: '至少一次压缩必须真的省下空间 —— 压缩的全部意义'
+            '（各次：${compressed.map((e) => '${e.beforeMessages}->${e.afterMessages}条/${e.beforeTokens}->${e.afterTokens}tk').join('；')}）');
     });
   });
 

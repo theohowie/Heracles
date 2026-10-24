@@ -66,6 +66,8 @@ List<Tool> buildShellTools(ToolFactory f, Capabilities caps) {
             'type': 'integer',
             'description': '超时秒数，默认 300。构建类命令建议给 600 以上。',
             'default': 300,
+            'minimum': 1,
+            'maximum': 7200,
           },
         },
         'required': ['command'],

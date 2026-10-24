@@ -76,6 +76,15 @@ class ToolFactory {
         if (!isAvailable()) {
           return _fail(unavailableReason);
         }
+        // ★ 本地 schema 校验（2026-10-24，H2/T3）：执行前把参数按声明校一遍
+        //   —— 未知字段 / 类型不符在这里就挡下并给模型可读的错，
+        //   不让垃圾进能力层。（重复键在这一层测不到：参数已是解码后的
+        //   Map，provider/框架解码时后者覆盖前者 —— 如实记为已知边界。）
+        try {
+          _validateAgainstSchema(name, args, parameters);
+        } catch (e) {
+          return _fail(_humanize(e));
+        }
         try {
           final result = await run(args);
           return _translate(result);
@@ -85,6 +94,63 @@ class ToolFactory {
         }
       },
     );
+  }
+
+  /// **按工具声明的 JSON Schema 校验参数**（2026-10-24，H2/T3 的落地）。
+  ///
+  /// 查三层：
+  /// 1. **未知字段** —— schema `properties` 之外的键直接拒绝（拼错字段名
+  ///    是模型最常见的错，静默忽略会让它以为生效了）；
+  /// 2. **类型** —— 声明 `integer` 收到 `string` 等一律拒绝
+  ///    （工具内的 `requireX` 助手仍保留：它们报错更贴近具体参数语义）；
+  /// 3. **范围** —— schema 里声明了 `minimum` / `maximum` 就按它查
+  ///    （工具逐个补声明，声明了的自动受保护）。
+  ///
+  /// 只做**顶层**校验：嵌套对象（ask_user 的 questions）由工具内部自己查 ——
+  /// 它们的结构是业务语义，schema 表达 nested 校验的复杂度不值得。
+  void _validateAgainstSchema(
+    String toolName,
+    Map<String, dynamic> args,
+    Map<String, dynamic> schema,
+  ) {
+    final props = schema['properties'];
+    if (props is! Map) return; // 没声明 properties ⇒ 无从校验，放行
+    for (final key in args.keys) {
+      final spec = props[key];
+      if (spec is! Map) {
+        throw ArgumentError(
+          '工具 `$toolName` 不认识参数 `$key`。可用参数：'
+          '${props.keys.join("、")}（不要编造参数名）',
+        );
+      }
+      final value = args[key];
+      if (value == null) continue; // 显式 null 按缺省处理
+      final type = spec['type'];
+      final mismatch = switch (type) {
+        'string' => value is! String,
+        'integer' => value is! int && !(value is double && value == value.truncateToDouble()),
+        'number' => value is! num,
+        'boolean' => value is! bool,
+        'array' => value is! List,
+        'object' => value is! Map,
+        _ => false, // 未声明类型 ⇒ 不猜
+      };
+      if (mismatch) {
+        throw ArgumentError(
+          '工具 `$toolName` 的参数 `$key` 应是 `$type`，收到 ${value.runtimeType}',
+        );
+      }
+      final min = (spec['minimum'] as num?)?.toInt();
+      final max = (spec['maximum'] as num?)?.toInt();
+      if (value is num) {
+        if (min != null && value < min) {
+          throw ArgumentError('工具 `$toolName` 的参数 `$key` 最小 $min，收到 $value');
+        }
+        if (max != null && value > max) {
+          throw ArgumentError('工具 `$toolName` 的参数 `$key` 最大 $max，收到 $value');
+        }
+      }
+    }
   }
 
   /// 判断返回值是不是"失败/未执行"。

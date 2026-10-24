@@ -64,6 +64,7 @@ class BackendConfig {
     this.maxOutputTokens = ContractModel.maxOutputTokens,
     this.temperature,
     this.summarizerModel,
+    this.reasoningEffort,
   });
 
   final String apiKey;
@@ -82,6 +83,15 @@ class BackendConfig {
 
   final double? temperature;
 
+  /// **推理档位**（2026-10-24 接线；provider 无关概念，App 的
+  /// `ReasoningLevel.reasoningEffort` 传入）。
+  ///
+  /// 翻译规则：经框架 `ModelConfig.extra['reasoning_effort']` 通道下发，
+  /// OpenAI 兼容轨会翻成 wire 的 `reasoning_effort`；Anthropic / Responses
+  /// 轨的 client 不读这个键 ⇒ 自然忽略（档位对那两轨暂不生效，如实记录）。
+  /// `null` = 不下发（auto / off —— 旧行为）。
+  final String? reasoningEffort;
+
   /// 摘要用的模型（留空 = 用主模型）。
   ///
   /// 建议配一个便宜模型：摘要不需要强推理，但每压缩一次都是一次完整调用。
@@ -99,6 +109,24 @@ enum BackendProvider {
   openAiResponses,
 }
 
+/// **审批档位**（2026-10-24 接线）—— 对应 App 设置里的三档权限模式。
+///
+/// 由宿主（App 的 `settings.permission`）显式传入 [RunOptions.approvalMode]；
+/// 档位决定**哪些工具在执行前要过用户批准**（见 `_ApprovalHook` 的分类表）。
+///
+/// ## 三档语义（与 App 侧 `PermissionMode` 的文案逐字对应）
+///
+/// | 档位 | 语义 | 要批准的 |
+/// |---|---|---|
+/// | [manual] | 手动审批：每次修改都要确认 | 全部会改状态/有副作用的工具 |
+/// | [workspaceAuto] | 工作区内修改自动 | 破坏性三件套 + shell + APK 全家 |
+/// | [fullAccess] | 不再询问 | 无（旧行为） |
+enum ApprovalMode {
+  manual,
+  workspaceAuto,
+  fullAccess,
+}
+
 /// 一次运行的配置。
 class RunOptions {
   const RunOptions({
@@ -107,6 +135,7 @@ class RunOptions {
     this.enablePlan = true,
     this.systemPrompts = const [],
     this.memoryNote,
+    this.approvalMode = ApprovalMode.fullAccess,
   });
 
   final int maxTurns;
@@ -153,6 +182,21 @@ class RunOptions {
   /// 独立的消息（会击穿更后面的前缀）或检索式注入（另一套机制），
   /// **当前不做**，如实记在这里。
   final String? memoryNote;
+
+  /// **审批档位**（2026-10-24 接线）—— 决定哪些工具执行前要过用户批准。
+  ///
+  /// ## ⚠️ 库默认值是 [ApprovalMode.fullAccess]（不拦），这是有意的
+  ///
+  /// 库（backend 包）无法假设宿主有没有 UI：CLI、单测、脚本场景里
+  /// 没有"用户"可问，若默认 `manual`，所有会改状态的工具会被
+  /// fail-closed 拒掉 —— 既有测试与 CLI 全部变红。所以**库默认 = 旧行为**，
+  /// 而把"必须传更严档位"的责任交给**有 UI 的宿主**：
+  /// App 的 `LocalAgentExecutor` 恒从 `settings.permission` 显式映射，
+  /// 不依赖这里的默认值。
+  ///
+  /// 实际的拦截由 [_ApprovalHook] 执行；"问谁"由宿主注入的
+  /// `AskGate.requestApproval` 决定（白名单也在宿主侧）。
+  final ApprovalMode approvalMode;
 }
 
 /// **组装好的 Agent**。
@@ -229,7 +273,37 @@ class HeraclesAgent {
         model: model ?? _config.modelName,
         maxTokens: _config.maxOutputTokens,
         temperature: _config.temperature,
+        // 推理档位走框架的通用 extra 通道（见 BackendConfig.reasoningEffort）
+        extra: _config.reasoningEffort == null
+            ? null
+            : <String, dynamic>{'reasoning_effort': _config.reasoningEffort},
       );
+
+  /// **上下文构成**（C5，2026-10-24）—— 三块的**估算** token。
+  ///
+  /// ## 为什么是估算
+  ///
+  /// 此刻没有 provider 上报值；与压缩器同一套估算规则
+  /// （CJK≈1字/token，ASCII≈4字符/token）。UI 必须标"估算"，
+  /// 别让用户拿它跟"命中率"（provider 上报口径）对账。
+  ///
+  /// ## `system` 含什么
+  ///
+  /// 默认提示 + 宿主追加 + 工作区宪法/快照 + 长期记忆 —— 全部进 system 消息，
+  /// 所以合成一块单列（再拆就要跨层穿透，不值得）。
+  Map<String, int> contextBreakdown() {
+    final st = _state;
+    if (st == null) return const <String, int>{};
+    var system = 0;
+    for (final p in _buildSystemPrompts()) {
+      system += WindowRatioCompressor.estimateText(p);
+    }
+    return <String, int>{
+      'system': system,
+      'tools': WindowRatioCompressor.estimateToolDefinitions(st),
+      'history': WindowRatioCompressor.estimateMessagesUsage(st),
+    };
+  }
 
   /// 构建全部工具（**21 个**）。
   ///
@@ -468,6 +542,7 @@ class HeraclesAgent {
         output: _flattenContent(e.result.content),
         durationMs: sw?.elapsedMilliseconds ?? 0,
         metadata: e.result.metadata,
+        id: e.result.id,
       ));
     });
     controller.on<PlanChangedEvent>((e) {
@@ -627,6 +702,21 @@ class HeraclesAgent {
     final budgetHook = _ToolBudgetHook(
       maxToolCalls: _options.maxToolCalls,
       onExceeded: () => budgetReached = true,
+      // ★ 预警（E5，2026-10-24）：75%/90% 各播一次，让用户在熔断**前**
+      //   就知道"快烧完了"，而不是等硬熔断才第一次听说。
+      onWarning: (used, limit) =>
+          emit(HeraclesBudgetWarning(used: used, limit: limit)),
+    );
+
+    // ---- 审批门禁（2026-10-24 接线）----
+    //
+    // 挂在同一个 `beforeToolCall` 上，排在预算之后：先算预算再谈批准 ——
+    // 预算烧完直接终止，不为一个注定要被拦下的调用弹窗。
+    // 注意被拒绝的调用**也计入预算**：它是模型的一次"挥霍"，
+    // 否则"拒绝→模型换着花样重试"可以无限循环。
+    final approvalHook = _ApprovalHook(
+      mode: _options.approvalMode,
+      gate: _askGate,
     );
 
     // ---- 组装 StatefulAgent ----
@@ -675,7 +765,7 @@ class HeraclesAgent {
       compressor: compressor,
       planMode: _options.enablePlan ? PlanMode.auto : PlanMode.none,
       maxTurns: _options.maxTurns,
-      hooks: [budgetHook],
+      hooks: [budgetHook, approvalHook],
       // 框架自带循环检测（相同调用重复 + 周期性 LLM 诊断）。
       // 旧实现只有"相同调用重复"且阈值 2；这里用框架默认（5），
       // 因为云端模型有自愈能力，2 太激进。
@@ -710,6 +800,7 @@ class HeraclesAgent {
             emit(HeraclesToolRequested(
               toolName: c.name,
               arguments: _safeParseArgs(c.arguments),
+              id: c.id,
             ));
           }
         }
@@ -950,16 +1041,36 @@ class _Emitter {
 /// `AgentHook.beforeToolCall` 是 `FutureOr` 且被 await ⇒ 返回 `abort` 会
 /// 立刻抛 `AgentException(stopByController)`，框架不会执行那个工具。
 class _ToolBudgetHook extends AgentHook {
-  _ToolBudgetHook({required this.maxToolCalls, required this.onExceeded});
+  _ToolBudgetHook({
+    required this.maxToolCalls,
+    required this.onExceeded,
+    this.onWarning,
+  });
 
   final int maxToolCalls;
   final void Function() onExceeded;
+
+  /// 预警回调（2026-10-24，E5）：75% / 90% 各播一次 —— 止损不该是
+  /// 用户第一次听说预算的地方。`null` = 不预警（旧行为）。
+  final void Function(int used, int limit)? onWarning;
+  bool _warned75 = false;
+  bool _warned90 = false;
 
   int _count = 0;
 
   @override
   FutureOr<ToolCallHookResult> beforeToolCall(ToolCallHookContext context) {
     _count++;
+    final warn = onWarning;
+    if (warn != null) {
+      if (!_warned90 && _count >= maxToolCalls * 0.90) {
+        _warned90 = true;
+        warn(_count, maxToolCalls);
+      } else if (!_warned75 && _count >= maxToolCalls * 0.75) {
+        _warned75 = true;
+        warn(_count, maxToolCalls);
+      }
+    }
     if (_count > maxToolCalls) {
       onExceeded();
       return ToolCallHookResult.abort(
@@ -968,6 +1079,131 @@ class _ToolBudgetHook extends AgentHook {
     }
     return ToolCallHookResult.proceed(context.call);
   }
+}
+
+/// **审批门禁 hook**（2026-10-24 接线）—— 把 AGENTS.md 的
+/// 「工具白名单 + 参数门禁三态（Allow/NeedsApproval/Deny）」重新变成架构保证。
+///
+/// ## 为什么必须是 hook 而不是"工具返回 NeedsApproval 再处理"
+///
+/// 旧思路是能力层返回 `CapabilityNeedsApproval`，翻译层把它变成一句文本提示
+/// —— 那**不拦截任何东西**：模型收到"需要用户批准"这句提醒后照跑不误。
+/// 拦截必须发生在**执行之前**，而框架唯一的执行前挂载点就是
+/// `AgentHook.beforeToolCall`（被 await，返回 `deny` 可以用合成结果替代执行）。
+///
+/// ## 三个出口
+///
+/// · 不需要批准（档位放行 / 完全访问）⇒ `proceed`，工具正常执行；
+/// · 需要批准且用户同意 ⇒ `proceed`；
+/// · 需要批准但**拒绝 / 超时 / 无审批通道** ⇒ `deny` —— 模型收到的是
+///   一条**合成失败结果**（"用户拒绝了…"），这一轮的循环照常继续，
+///   模型可以换路，但**那个操作没有发生**。fail-closed：拿不到"允许"就当拒绝。
+///
+/// ## 为什么拒绝文案要劝"不要原样重试"
+///
+/// 不劝的话，模型的自然反应是再调一次（它会以为刚才是环境抖动）⇒
+/// 用户被同一个弹窗连着轰炸。把"换路或询问"写进结果里，是在模型
+/// 唯一必读的通道（工具结果）上给出路。
+class _ApprovalHook extends AgentHook {
+  _ApprovalHook({required this.mode, required this.gate});
+
+  final ApprovalMode mode;
+  final AskGate? gate;
+
+  /// **会改工作区状态**的文件工具 —— `manual` 档要批；
+  /// `workspaceAuto` 档放行（这正是该档位文案"工作区内修改自动执行"的含义）。
+  static const _workspaceMutating = {'write_file', 'edit', 'apply_patch', 'mkdir'};
+
+  /// **破坏性三件套** —— 删/移/复制都是不可逆或难逆的，任何非完全访问档都批。
+  static const _destructive = {'delete_path', 'move_path', 'copy_path'};
+
+  /// shell —— 能执行任意命令，是最大的权力面；硬禁令（kill 等）在工具层，
+  /// 这里管的是"剩下的所有命令"要不要用户点头。
+  static const _shell = {'run_shell_command'};
+
+  /// APK 五件套 —— 构建写 staging、安装直接动设备，全部按高危算。
+  static const _apk = {
+    'build_apk', 'apk_decompile', 'apk_recompile', 'apk_sign', 'install_apk',
+  };
+
+  /// 这个工具在当前档位下要不要批准。
+  bool needsApproval(String tool) => switch (mode) {
+        ApprovalMode.fullAccess => false,
+        ApprovalMode.workspaceAuto =>
+          _destructive.contains(tool) ||
+              _shell.contains(tool) ||
+              _apk.contains(tool),
+        ApprovalMode.manual =>
+          _workspaceMutating.contains(tool) ||
+              _destructive.contains(tool) ||
+              _shell.contains(tool) ||
+              _apk.contains(tool),
+      };
+
+  @override
+  Future<ToolCallHookResult> beforeToolCall(ToolCallHookContext context) async {
+    final tool = context.call.name;
+    if (!needsApproval(tool)) {
+      return ToolCallHookResult.proceed(context.call);
+    }
+
+    final g = gate;
+    // fail-closed：有审批要求但没有审批通道（无 UI 的环境）⇒ 拒绝，并明说原因。
+    if (g == null) {
+      return ToolCallHookResult.deny(content: [
+        TextPart(
+          '未执行：`$tool` 在当前档位下需要用户批准，'
+          '但这个环境没有可用的审批通道（无 UI）。按 fail-closed 原则拒绝执行；'
+          '请改用不需要该操作的方式，或告诉用户无法继续的原因。',
+        ),
+      ]);
+    }
+
+    final args = _argsMapOf(context.call.arguments);
+    final allowed = await g.requestApproval(tool, args, _summaryOf(tool, args));
+    if (allowed) {
+      return ToolCallHookResult.proceed(context.call);
+    }
+    return ToolCallHookResult.deny(content: [
+      TextPart(
+        '未执行：用户拒绝了这次 `$tool` 调用（超时或关闭弹窗也按拒绝计）。'
+        '**不要原样重试同一调用** —— 那只会再次弹窗打扰用户；'
+        '请换一种不需要该操作的方式完成任务，或在最终回答里说明被拒后无法继续的部分。',
+      ),
+    ]);
+  }
+
+  /// 把模型给的原始参数 JSON 解析成字符串 map（弹窗展示用）。
+  ///
+  /// 解析失败不抛 —— 审批弹窗不能因为参数坏了而炸；给个 `_raw` 兜底，
+  /// 用户至少能看到原始串。
+  Map<String, String> _argsMapOf(String raw) {
+    try {
+      final v = jsonDecode(raw);
+      if (v is Map) {
+        return {
+          for (final e in v.entries)
+            e.key.toString(): e.value?.toString() ?? '',
+        };
+      }
+    } catch (_) {
+      // 落到下面的兜底
+    }
+    return {'_raw': raw};
+  }
+
+  /// 弹窗顶部的原因行（一句人话 + 参数短预览；完整参数由宿主弹窗展示）。
+  String _summaryOf(String tool, Map<String, String> args) {
+    if (args.isEmpty) return '模型请求执行 `$tool`。';
+    final preview = args.entries
+        .take(3)
+        .map((e) => '${e.key}=${_clip(e.value, 120)}')
+        .join('；');
+    final more = args.length > 3 ? ' 等 ${args.length} 项参数' : '';
+    return '模型请求执行 `$tool`（$preview$more）。';
+  }
+
+  String _clip(String s, int n) => s.length <= n ? s : '${s.substring(0, n)}…';
 }
 
 /// 宽松 JSON 解析 —— 占位（实际用 dart:convert 的 jsonDecode）。
@@ -1005,9 +1241,21 @@ final class HeraclesRetrying extends HeraclesEvent {
 }
 
 final class HeraclesToolRequested extends HeraclesEvent {
-  const HeraclesToolRequested({required this.toolName, required this.arguments});
+  const HeraclesToolRequested({
+    required this.toolName,
+    required this.arguments,
+    this.id = '',
+  });
   final String toolName;
   final Map<String, dynamic> arguments;
+
+  /// **框架的调用 id**（2026-10-24 新增）。
+  ///
+  /// 宿主落盘"tool_call 行"时带上它，历史回填才能把
+  /// `ModelMessage(functionCalls)` 与 `FunctionExecutionResultMessage`
+  /// **配对**重建 —— 没有它，工具历史永远回不了上下文（取舍①的根因）。
+  /// 空串 = 该 provider 没给 id（此时宿主跳过落盘，回填退回旧行为）。
+  final String id;
 }
 
 final class HeraclesToolFinished extends HeraclesEvent {
@@ -1017,12 +1265,18 @@ final class HeraclesToolFinished extends HeraclesEvent {
     required this.output,
     required this.durationMs,
     this.metadata,
+    this.id = '',
   });
   final String toolName;
   final bool isError;
   final String output;
   final int durationMs;
   final Map<String, dynamic>? metadata;
+
+  /// **框架的调用 id**（2026-10-24 新增）—— 与 [HeraclesToolRequested.id]
+  /// 配对，宿主据此把"结果行"落盘成可回填的形状（见 `session_history.dart`
+  /// 取舍①）。空串 = provider 没给 id（旧行为）。
+  final String id;
 }
 
 final class HeraclesPlanUpdated extends HeraclesEvent {
@@ -1094,6 +1348,16 @@ final class HeraclesTurnUsage extends HeraclesEvent {
 
   /// `null` = provider **未上报**缓存字段 —— UI 显示"不可用"，不得当 0。
   final int? cachedTokens;
+}
+
+/// **预算预警**（2026-10-24，E5）—— 工具调用预算用到 75% / 90% 时各播一次。
+///
+/// 为什么必须有：硬熔断是**止损**，不是**提醒**——用户在 200 次烧完之前
+/// 对"快没了"一无所知。预警让"拆小任务 / 点停止"成为可做的决定。
+final class HeraclesBudgetWarning extends HeraclesEvent {
+  const HeraclesBudgetWarning({required this.used, required this.limit});
+  final int used;
+  final int limit;
 }
 
 final class HeraclesFinished extends HeraclesEvent {
