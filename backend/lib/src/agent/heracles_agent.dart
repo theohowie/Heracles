@@ -36,6 +36,7 @@ library;
 
 import 'dart:async';
 import 'dart:convert';
+import 'dart:io';
 
 import 'package:dart_agent_core/dart_agent_core.dart';
 import 'package:dio/dio.dart';
@@ -139,6 +140,14 @@ class RunOptions {
     this.approvalMode = ApprovalMode.fullAccess,
     this.enableSubAgents = false,
     this.enableSkills = false,
+
+    /// **全链路 trace 目录**（E4，2026-10-24；默认 null = 不记录）。
+    ///
+    /// 设置后每轮模型调用的**原始请求与响应**（JSON）写入该目录
+    /// （turn-N-req.json / turn-N-res.json）—— 这是“逐轮原始输入输出
+    /// 可回放”的那一半（工具级 trace 已在会话 .jsonl）。CLI 用 --trace 开；
+    /// App 默认关（文件量大，排障时才开）。
+    this.traceDir,
   });
 
   final int maxTurns;
@@ -226,6 +235,9 @@ class RunOptions {
   /// activate_skills 按需加载全文（渐进披露）—— 平时只花目录的成本。
   /// 库默认关（旧行为）；App 显式开启。清单见 [builtinSkills]。
   final bool enableSkills;
+
+  /// 见 [RunOptions.traceDir] 的 KDoc（E4）。
+  final String? traceDir;
 }
 
 /// **组装好的 Agent**。
@@ -883,7 +895,12 @@ class HeraclesAgent {
       compressor: compressor,
       planMode: _options.enablePlan ? PlanMode.auto : PlanMode.none,
       maxTurns: _options.maxTurns,
-      hooks: [budgetHook, approvalHook],
+      hooks: [
+        budgetHook,
+        approvalHook,
+        // ★ E4：traceDir 非空才挂（默认关）
+        if (_options.traceDir != null) _TraceHook(_options.traceDir!),
+      ],
       // ★ 子代理（H6，2026-10-24）：开启后框架自动追加 `delegate_task`
       //   工具与系统提示（列出来源见 buildSubAgentSystemPrompt）。
       // ★ disableSubAgents 才是真正的开关（框架在 !disableSubAgents 时
@@ -933,6 +950,28 @@ class HeraclesAgent {
         }
       }
       wallClock.stop();
+      // ★ E4（2026-10-24）：traceDir 非空 ⇒ 全对话原始内容落盘
+      //   （messages 逐条 toJson 可回放；工具级 trace 已在会话 .jsonl）。
+      //   失败静默 —— 排障辅助绝不搞崩任务。App 恒传
+      //   `<工作区>/.heracles/traces`；SAF 工作区写不进去也如实静默。
+      if (_options.traceDir != null) {
+        try {
+          final d = Directory(_options.traceDir!);
+          await d.create(recursive: true);
+          await File(
+                  '${d.path}${Platform.pathSeparator}'
+                  'conversation-${DateTime.now().millisecondsSinceEpoch}.json')
+              .writeAsString(jsonEncode({
+            'sessionId': _state!.sessionId,
+            'turns': _state!.totalLoopCount,
+            'messages': [
+              for (final m in _state!.history.messages) m.toJson(),
+            ],
+          }));
+        } catch (_) {
+          // 静默
+        }
+      }
       emit(HeraclesFinished(
         finalText: _lastText(agent, turnStartIndex, captured: lastTurnText),
         turns: _state!.totalLoopCount,
@@ -1255,6 +1294,46 @@ class _ToolBudgetHook extends AgentHook {
       );
     }
     return ToolCallHookResult.proceed(context.call);
+  }
+}
+
+/// **全链路 trace 钩子**（E4，2026-10-24）—— afterModelCall 落盘原始请求/响应。
+///
+/// 只在 RunOptions.traceDir 非空时挂。文件按轮编号（turn-N-*），
+/// JSON 用框架 toJson —— 回放时逐字段可还原。落盘失败**静默**
+/// （trace 是排障辅助，绝不能让排障工具本身搞崩任务）。
+class _TraceHook extends AgentHook {
+  _TraceHook(this.dir);
+  final String dir;
+  int _n = 0;
+
+  @override
+  Future<ModelResponseHookResult> afterModelCall(
+    ModelResponseHookContext context,
+  ) async {
+    try {
+      _n++;
+      final d = Directory(dir);
+      await d.create(recursive: true);
+      final req = {
+        'turn': _n,
+        'messages': [
+          for (final m in context.params.messages) m.toJson(),
+        ],
+      };
+      await File('${d.path}${Platform.pathSeparator}turn-$_n-req.json')
+          .writeAsString(jsonEncode(req));
+      await File('${d.path}${Platform.pathSeparator}turn-$_n-res.json')
+          .writeAsString(jsonEncode(context.response.toJson()));
+    } catch (e) {
+      // 静默：trace 失败不影响任务；但 debug 下打一行便于排障
+      assert(() {
+        // ignore: avoid_print
+        print("[heracles][trace] 落盘失败: $e");
+        return true;
+      }());
+    }
+    return ModelResponseHookResult.proceed(context.response);
   }
 }
 
