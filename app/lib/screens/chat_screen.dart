@@ -335,6 +335,10 @@ class _ChatScreenState extends State<ChatScreen> {
   /// 冻结区估算 token（系统提示词 + 工具定义）；`-1` = 还没跑过
   int _frozenTokens = -1;
 
+  /// **上下文构成**（C5，2026-10-24）：system/tools/history 估算 token。
+  /// 空 = 没有 run 过（侧栏退回两行旧图例）。
+  Map<String, int> _contextBreakdown = const <String, int>{};
+
   /// 右侧边栏**用按钮打开**（**不依赖边缘滑动**，见 `docs/24` §4.3）。
   ///
   /// ⚠️ 刻意**不引入第二个 GlobalKey** ——
@@ -2493,6 +2497,14 @@ class _ChatScreenState extends State<ChatScreen> {
     );
 
     final frozen = await _bridge.lastFrozenTokens();
+    // ★ C5（2026-10-24）：构成统计在 setState **外**取（await 不能进同步闭包）；
+    //   没跑过 = 空 map ⇒ 侧栏退回两行旧图例，不得显示 0。
+    Map<String, int> breakdown = const <String, int>{};
+    try {
+      breakdown = await _bridge.lastContextBreakdown();
+    } catch (_) {
+      breakdown = const <String, int>{};
+    }
     if (!mounted) return;
     setState(() {
       _contextLimit = limit;
@@ -2505,6 +2517,7 @@ class _ChatScreenState extends State<ChatScreen> {
           ? '服务端上报'
           : '⚠️ 未从服务端获取，按保守值估算';
       _frozenTokens = frozen;
+      _contextBreakdown = breakdown;
     });
   }
 
@@ -2516,6 +2529,8 @@ class _ChatScreenState extends State<ChatScreen> {
         conversationTokens: _estimateConversationTokens(),
         limit: _contextLimit,
         limitSource: _contextLimitSource,
+        // ★ C5（2026-10-24）：三块构成（估算）；空 = 没跑过，侧栏走旧图例
+        breakdown: _contextBreakdown.isEmpty ? null : _contextBreakdown,
       );
 
   /// 估算**对话消息**的 token（与 `TextMath` 同系数，见 `session_usage.dart`）。

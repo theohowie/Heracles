@@ -51,6 +51,7 @@ library;
 
 import 'dart:async';
 
+import 'package:dio/dio.dart' show CancelToken;
 import 'package:heracles_backend/heracles_backend.dart';
 
 import '../models/attachment.dart';
@@ -110,6 +111,30 @@ class LocalAskGate implements AskGate {
   /// 非 null = 此刻有题目在等用户回答。值类型可空：取消/超时用 `null` 完成。
   Completer<Map<String, List<String>>?>? _pending;
 
+  // ==========================================================================
+  // 审批（2026-10-24 接线 —— 与 backend `_ApprovalHook` 配对）
+  // ==========================================================================
+
+  /// 非 null = 此刻有一个审批在等用户决定。
+  Completer<bool>? _pendingApproval;
+
+  /// 挂起审批对应的工具名（`allow_always` 时要记住谁被放行了）。
+  String? _pendingApprovalTool;
+
+  /// **「始终允许」名单** —— 本 run 内生效的累计集合。
+  ///
+  /// 种子来自持久化存储（`AgentBridge` 在 run 开始时 `seedAllowed` 注入，
+  /// 数据源是 `SharedPreferences`，跨启动有效）；用户点「本会话始终允许」
+  /// 后通过 [onAlwaysAllow] 回调交给桥接层持久化，同时立刻加进本集合
+  /// —— 同一 run 里的后续调用不再问。
+  final Set<String> _allowed = {};
+
+  /// 用户点了「本会话始终允许」时的持久化回调（桥接层注入）。
+  void Function(String toolName)? onAlwaysAllow;
+
+  /// 用户**点停止**后置位：之后到达的提问/审批一律按"没答案/拒绝"处理。
+  bool _aborted = false;
+
   /// 等用户回答的**上限**。
   ///
   /// 10 分钟：用户可能在处理别的事、切走了、或锁屏。不能永远挂住整个 run ——
@@ -119,12 +144,21 @@ class LocalAskGate implements AskGate {
   /// 把本 run 的事件出口接上（每个 run 一个 gate 实例，只接一次）。
   void attach(void Function(AgentEvent) emit) => _emit = emit;
 
-  /// 用户**点停止**时调用：让挂起的提问立刻以"未回答"收场。
+  /// 注入持久化的「始终允许」名单（run 开始时由桥接层调用）。
+  void seedAllowed(Iterable<String> tools) => _allowed.addAll(tools);
+
+  /// 用户**点停止**时调用：让挂起的提问/审批立刻收场。
   void abort() {
+    _aborted = true;
     final c = _pending;
     if (c != null && !c.isCompleted) {
       _pending = null;
       c.complete(null);
+    }
+    final a = _pendingApproval;
+    if (a != null && !a.isCompleted) {
+      _pendingApproval = null;
+      a.complete(false);
     }
   }
 
@@ -139,6 +173,8 @@ class LocalAskGate implements AskGate {
     // 没有 UI 出口（直接跑 executor 的测试/CLI 场景）：如实返回 null（问不了），
     // 而不是挂 10 分钟。
     if (_emit == null) return null;
+    // 用户已点停止：不能再弹窗问问题。
+    if (_aborted) return null;
 
     final c = Completer<Map<String, List<String>>?>();
     _pending = c;
@@ -220,15 +256,101 @@ class LocalAskGate implements AskGate {
     return buf.toString().trimRight();
   }
 
-  /// 审批门禁（backend `AskGate` 接口的一部分，本任务不涉及）。
+  // ==========================================================================
+  // 审批实现（2026-10-24 接线）
+  //
+  // 链路：backend `_ApprovalHook`（工具执行前）→ 本方法 → `kApprovalRequest`
+  // 事件 → `chat_screen._showApprovalDialog`（已存在的 UI，字段 tool/args/reason）
+  // → `AgentBridge.replyApproval(decision)` → [replyApproval] → 完成挂起。
+  // ========================================================================
+
+  /// 请求用户批准一次工具调用。
   ///
-  /// ⚠️ 今天 backend **没有任何工具调用它**（全仓只有接口声明处 + 0 调用）——
-  /// 危险工具的审批走的是另一条链路（工具返回 `CapabilityNeedsApproval`
-  /// → 事件 `approval_request` → `AgentBridge.replyApproval`）。
-  /// 这里实现成**保守拒绝**：万一将来有人接上这个接口却忘了实现，
-  /// 宁可拒绝也不能静默放行。
+  /// ## 三个提前返回（都不弹窗）
+  ///
+  /// · **白名单命中** ⇒ 直接放行（`true`）—— 持久名单 + 本 run 内的
+  ///   「始终允许」都在 [_allowed] 里，后端不感知白名单，只管"要批谁"。
+  /// · **没有 UI 出口** ⇒ 拒绝（`false`，fail-closed）—— 测试/无头场景问不了人。
+  /// · **已 abort**（用户点过停止）⇒ 拒绝 —— 不能在用户叫停之后还弹窗。
+  ///
+  /// ## 并发排队
+  ///
+  /// 框架可能 `Future.wait` **并行**执行一批工具调用，其中多个都需要审批。
+  /// 同一时刻只能有一个弹窗 ⇒ 后到者**排队**等前一个决定完成再问
+  /// （不能直接拒绝 —— 那是替用户做决定）。用户点停止时 [abort] 会
+  /// 解掉挂起者，排队者看到 [_aborted] 后也按拒绝收场。
   @override
-  Future<bool> requestApproval(String toolName, String detail) async => false;
+  Future<bool> requestApproval(
+    String toolName,
+    Map<String, String> args,
+    String detail,
+  ) async {
+    if (_allowed.contains(toolName)) return true;
+    if (_emit == null || _aborted) return false;
+
+    // 等待已在挂起的审批结束（并行批次串行化）。
+    while (_pendingApproval != null) {
+      await _pendingApproval!.future;
+      if (_aborted) return false;
+    }
+
+    final c = Completer<bool>();
+    _pendingApproval = c;
+    _pendingApprovalTool = toolName;
+
+    _emit!(AgentEvent(
+      type: AgentEvent.kApprovalRequest,
+      ts: DateTime.now().millisecondsSinceEpoch,
+      tool: toolName,
+      // UI 弹窗展示完整参数（审批的意义就是"看清楚再点允许"，不截断）
+      args: args,
+      reason: detail,
+    ));
+
+    try {
+      return await c.future.timeout(
+        answerTimeout,
+        onTimeout: () {
+          // 超时 = 没拿到"允许" = 拒绝（fail-closed；后端会把"用户拒绝"
+          // 如实回给模型，并劝它不要原样重试）。
+          // ignore: avoid_print
+          print('[heracles][approval] 审批超时（${answerTimeout.inMinutes} 分钟）未决定，按拒绝处理');
+          return false;
+        },
+      );
+    } finally {
+      if (identical(_pendingApproval, c)) _pendingApproval = null;
+      _pendingApprovalTool = null;
+    }
+  }
+
+  /// UI 提交审批决定（`allow` / `allow_always` / `deny`；null/其它 = 拒绝）。
+  ///
+  /// 返回 `true` = 确实交到了一个正在等待的审批；`false` = 没有挂起的审批
+  /// （run 已结束 / 已超时 / 已点停止）—— **如实告知，不静默成功**。
+  Future<bool> replyApproval(String decision) async {
+    final c = _pendingApproval;
+    if (c == null || c.isCompleted) return false;
+    _pendingApproval = null;
+    final tool = _pendingApprovalTool;
+    _pendingApprovalTool = null;
+    switch (decision) {
+      case 'allow':
+        c.complete(true);
+      case 'allow_always':
+        // 先记账再放行：同一 run 里后续同工具调用直接放行（[requestApproval]
+        // 的白名单检查），持久化通过回调交给桥接层（SharedPreferences）。
+        if (tool != null) {
+          _allowed.add(tool);
+          onAlwaysAllow?.call(tool);
+        }
+        c.complete(true);
+      default:
+        // 'deny' / 点外面 / 未知值 —— 一律拒绝（安全默认）。
+        c.complete(false);
+    }
+    return true;
+  }
 }
 
 /// **进程内 agent 执行器**。
@@ -256,8 +378,15 @@ class LocalAgentExecutor {
   /// `CancelToken.cancel()` 只让**框架**停下来；我们的 `_drive` 还需要知道
   /// "这是用户主动取消的"（而不是框架判定循环），才能给出正确措辞
   /// （"任务已取消"而不是"检测到循环"）。
+  ///
+  /// ## 2026-10-24：令牌**真的接上了**
+  ///
+  /// 之前这里只有一个从未被任何代码 await 的 `_interruptSignal` ——
+  /// `agent.run(...)` 不传 `cancelToken` ⇒ 点"停止"只是置标志位，
+  /// LLM 流与工具执行**照常跑完**（假取消）。现在令牌传进
+  /// `HeraclesAgent.run(cancelToken:)`：框架在轮次边界检查它、
+  /// dio 收到 cancel 会**立刻掐断**在途的流式请求 —— 真中断。
   bool _cancelled = false;
-  Completer<void>? _interruptSignal;
 
   /// 跑一轮。
   ///
@@ -275,6 +404,10 @@ class LocalAgentExecutor {
     List<HAttachment> attachments = const [],
   }) async {
     final controller = StreamController<AgentEvent>.broadcast();
+
+    // ★ 真取消的令牌（2026-10-24）：创建于 run 开始、传进 agent.run，
+    //   cancel() 时框架在轮次边界停下 + dio 掐断在途流式请求。
+    final cancelToken = CancelToken();
 
     // ★★ 2026-10-23（修「提问不可用」）：把本 run 的事件出口接到提问门禁上。
     //
@@ -296,6 +429,10 @@ class LocalAgentExecutor {
       apiKey: provider.apiKey,
       modelName: provider.model,
       baseUrl: provider.baseUrl,
+      // ★ 推理档位（2026-10-24 接线）：设置的 Off/Low/High/Max →
+      //   provider 无关概念 → 框架 extra → OpenAI 轨的 reasoning_effort。
+      //   auto 不下发（旧行为）；Anthropic/Responses 轨暂不生效（框架不读）。
+      reasoningEffort: settings.reasoningLevel.reasoningEffort,
       provider: switch (provider.protocol) {
         ProviderProtocol.anthropic => BackendProvider.anthropic,
         ProviderProtocol.openaiResponses => BackendProvider.openAiResponses,
@@ -359,6 +496,108 @@ class LocalAgentExecutor {
       // 保持 null（当作没有记忆）。
     }
 
+    // ---- 工作区宪法（H4，2026-10-24 接通）----
+    //
+    // ## 修之前为什么模型对工作区"零感知"
+    //
+    // system prompt 只有静态默认提示 + 长期记忆。工作区里有没有说明文件
+    // （构建命令、目录结构、项目约定）模型完全不知道，只能自己 list_files
+    // 摸索 —— system_prompt.dart 的 KDoc 记录的"列文件跑 22 轮"事故，
+    // 根因就是开场没有工作区上下文，当时只用提示词（停止条件）压住了症状。
+    //
+    // ## 现在的规则
+    //
+    // 按 AGENTS.md → CLAUDE.md → README.md 的顺序找**第一个存在的**，
+    // 整段注入 system prompt（`RunOptions.systemPrompts`，位于默认提示之后、
+    // 长期记忆之前 —— 两段都是"字节稳定"的，缓存前缀不受影响）。
+    // 三个都不存在 ⇒ 不注入任何东西（行为与以前完全一致）。
+    //
+    // ## 失败不阻断（与记忆同一条纪律）
+    //
+    // 宪法是增强，不是主链路：读不到（文件不存在 / SAF 失败 / 通道超时）
+    // 就当"没有宪法"继续跑。900ms 超时与记忆读取同款 —— 这条通道在
+    // 真机上挂过（local_agent.dart 顶部的记忆读取注释）。
+    //
+    // ## 大小上限（ContractWorkspace.constitutionMaxChars = 20000）
+    //
+    // 超限**截断并明说** —— 用户要知道模型看到的是节选，不能静默。
+    String? constitutionNote;
+    try {
+      final ch = const DeviceChannelClient();
+      for (final name in const ['AGENTS.md', 'CLAUDE.md', 'README.md']) {
+        final raw = await ch
+            .call('fs.readText', <String, Object?>{
+              'path': name,
+              'offsetLine': 1,
+              'maxLines': 0,
+            })
+            .timeout(const Duration(milliseconds: 900));
+        if (errorOf(raw) != null) continue; // 不存在/读不了 ⇒ 试下一个
+        final text = ((raw['text'] as String?) ?? '').trim();
+        if (text.isEmpty) continue;
+        final cap = ContractWorkspace.constitutionMaxChars;
+        final body = text.length <= cap
+            ? text
+            : '${text.substring(0, cap)}\n\n……（原文共 ${text.length} 字符，'
+                '已截断到前 $cap 字符）';
+        constitutionNote = '## 工作区说明（来自 `$name`，项目自己的约定）\n\n'
+            '$body\n\n'
+            '（以上是项目在工作区里写的说明：构建命令、目录结构、约束等。'
+            '若与用户当前指令冲突，以用户当前指令为准。）';
+        break;
+      }
+    } catch (_) {
+      // 保持 null（当作没有宪法）。
+    }
+
+    // ---- 工作区快照（F8 等价物，2026-10-24 接通）----
+    //
+    // ## 修的是什么
+    //
+    // 模型开场对工作区结构零感知（宪法是"人写的说明"，不是"目录长什么样"）
+    // ⇒ 只能自己 list_files 摸索 —— system_prompt.dart 记录的"列文件跑 22 轮"
+    // 事故的另一半根因。快照 = 一次 fs.list（递归、上限见契约）摊平成相对路径
+    // 清单，随 system prompt 进场。
+    //
+    // ## 取舍
+    //
+    // · 跳过 .heracles/（会话存储目录，纯噪音）；
+    // · 超限（截断）**如实标注**，模型要精查用 find_files；
+    // · 内容随工作区变化 ⇒ 那一轮前缀重建（与宪法/记忆同一性质的税，记账不掩盖）。
+    String? snapshotNote;
+    try {
+      final raw = await const DeviceChannelClient()
+          .call('fs.list', <String, Object?>{
+            'path': workspacePath,
+            'recursive': true,
+            'maxEntries': ContractWorkspace.snapshotMaxEntries,
+          })
+          .timeout(const Duration(milliseconds: 1200));
+      if (errorOf(raw) == null && (raw['entries'] is List)) {
+        final lines = <String>[];
+        for (final item in raw['entries'] as List) {
+          if (item is! Map) continue;
+          var p = (item['path'] ?? '').toString().replaceAll('\\', '/');
+          final prefix = workspacePath.replaceAll('\\', '/');
+          if (p.startsWith('$prefix/')) p = p.substring(prefix.length + 1);
+          if (p.startsWith('./')) p = p.substring(2);
+          if (p.isEmpty || p == '.') continue;
+          if (p == '.heracles' || p.startsWith('.heracles/')) continue;
+          final isDir = item['isDir'] == true;
+          lines.add(isDir ? '$p/' : p);
+        }
+        if (lines.isNotEmpty) {
+          final truncated = raw['truncated'] == true;
+          snapshotNote = '## 工作区文件树（相对路径，共 ${lines.length} 项'
+              '${truncated ? '，已截断' : ''})'
+              '\n${lines.join('\n')}\n'
+              '${truncated ? '（条目超过上限，未全部列出）' : ''}';
+        }
+      }
+    } catch (_) {
+      // 保持 null（当作没有快照）。
+    }
+
     // ---- 图片附件 → 多模态输入（2026-10-23 接通）----
     //
     // ## 修之前发生了什么
@@ -405,6 +644,22 @@ class LocalAgentExecutor {
         maxTurns: maxTurns,
         maxToolCalls: ContractAgent.maxToolCalls,
         memoryNote: memoryNote,
+        // ★ 工作区宪法（H4，2026-10-24）：注入 system prompt
+        //  （默认提示之后、长期记忆之前 —— 两段稳定字节之间的新段，
+        //   只有宪法内容本身变化时才动前缀）。
+        systemPrompts: [
+          ?constitutionNote,
+          ?snapshotNote,
+        ],
+        // ★ 审批档位（2026-10-24 接线）：从设置显式映射。
+        //   backend 库默认 fullAccess（不拦，库没有 UI 可问）；
+        //   App 是有 UI 的宿主，**必须**把用户选的档位传下去 ——
+        //   拦截在 backend 的 `_ApprovalHook`，"问谁"在 [LocalAskGate]。
+        approvalMode: switch (settings.permission) {
+          PermissionMode.manual => ApprovalMode.manual,
+          PermissionMode.workspaceAuto => ApprovalMode.workspaceAuto,
+          PermissionMode.fullAccess => ApprovalMode.fullAccess,
+        },
       ),
       askGate: gate,
     );
@@ -420,6 +675,7 @@ class LocalAgentExecutor {
       controller,
       images: images,
       imageNotes: imageNotes,
+      cancelToken: cancelToken,
     );
 
     return LocalRunHandle(
@@ -429,11 +685,14 @@ class LocalAgentExecutor {
         if (_cancelled) return false;
         // 标记"这是用户取消"，让收尾措辞正确
         _cancelled = true;
-        // ★ 2026-10-23：若此刻正在等用户回答，先把它解掉 ——
-        //   否则 backend 的 `ask_user` 工具会白等满 10 分钟，用户以为
-        //   「停止」没生效。解掉后工具拿到 null（= 未回答），如实收场。
+        // ★ 2026-10-23：若此刻正在等用户回答/审批，先把它解掉 ——
+        //   否则 backend 的 `ask_user` / 审批挂起会白等满 10 分钟，用户以为
+        //   「停止」没生效。解掉后工具拿到 null/false（= 未回答/拒绝），如实收场。
         if (gate is LocalAskGate) gate.abort();
-        _interruptSignal?.complete();
+        // ★ 2026-10-24：**真取消** —— 令牌传进了 agent.run：
+        //   dio 掐断在途的流式请求，框架在轮次/工具边界停下。
+        //   （此前这里只置标志位，LLM 流与工具照常跑完 —— 假取消。）
+        cancelToken.cancel('用户取消');
         return true;
       },
     );
@@ -471,6 +730,7 @@ class LocalAgentExecutor {
     StreamController<AgentEvent> controller, {
     List<ImageInput>? images,
     List<String> imageNotes = const [],
+    CancelToken? cancelToken,
   }) async {
     final sw = Stopwatch()..start();
 
@@ -560,7 +820,7 @@ class LocalAgentExecutor {
     /// 框架可能 `Future.wait` **并行**跑同名工具（例如同时读两个文件），
     /// 按名字存单个值会互相覆盖（旧实现"耗时按名字配对"就是这个形状的 bug）。
     final pendingArgs =
-        <String, List<({Map<String, dynamic> args, int turn})>>{};
+        <String, List<({Map<String, dynamic> args, String id, int turn})>>{};
 
     var failed = false;
     var cancelled = false;
@@ -588,6 +848,7 @@ class LocalAgentExecutor {
         _requestForModel(request, imageNotes),
         history: history,
         images: images,
+        cancelToken: cancelToken,
       )) {
         switch (ev) {
           case HeraclesThoughtDelta(:final delta):
@@ -607,16 +868,35 @@ class LocalAgentExecutor {
               output: outputTokens,
               cached: cachedTokens,
             );
-          case HeraclesToolRequested(:final toolName, :final arguments):
+          case HeraclesToolRequested(
+              :final toolName,
+              :final arguments,
+              :final id,
+            ):
             tr.toolRequested(toolName, arguments);
             (pendingArgs[toolName] ??=
-                    <({Map<String, dynamic> args, int turn})>[])
-                .add((args: arguments, turn: tr.currentTurn));
+                    <({Map<String, dynamic> args, int turn, String id})>[])
+                .add((args: arguments, turn: tr.currentTurn, id: id));
+            // ★ 工具调用行落盘（2026-10-24）：发起时写 `tool_call` 行、
+            //   带框架调用 id —— 历史回填靠它与结果行配对，重建
+            //   ModelMessage(functionCalls) + FunctionExecutionResultMessage
+            //   （session_history.dart 取舍①）。id 为空（provider 没给）
+            //   就不写：回填对它退回旧行为（跳过），不会产生半批。
+            if (id.isNotEmpty) {
+              await sessionStore.appendMessage(sid, {
+                'role': 'tool_call',
+                'id': id,
+                'tool': toolName,
+                'args': arguments,
+                'ts': DateTime.now().millisecondsSinceEpoch,
+              });
+            }
           case HeraclesToolFinished(
               :final toolName,
               :final isError,
               :final output,
               :final durationMs,
+              :final id,
             ):
             final bucket = pendingArgs[toolName];
             final pending = (bucket != null && bucket.isNotEmpty)
@@ -653,6 +933,9 @@ class LocalAgentExecutor {
             }
             await sessionStore.appendMessage(sid, {
               'role': 'tool',
+              // ★ 调用 id（2026-10-24）：与发起时的 `tool_call` 行配对，
+              //   历史回填才能重建工具往返（无 id 时省略，回填跳过该行）。
+              if (id.isNotEmpty) 'id': id,
               'tool': toolName,
               'args': args,
               'result': output,
@@ -660,6 +943,8 @@ class LocalAgentExecutor {
               'ok': !isError,
               'ts': DateTime.now().millisecondsSinceEpoch,
             });
+          case HeraclesBudgetWarning(:final used, :final limit):
+            tr.budgetWarning(used, limit);
           case HeraclesPlanUpdated(:final steps):
             tr.planUpdated(steps);
           case HeraclesContextCompressed(
@@ -766,6 +1051,12 @@ class LocalAgentExecutor {
     // 2026-10-22：`turns` 与三个 token 总数、稳态命中率**全部换成真实记账**
     // （此前 turns 恒空、token 恒 0 —— 顶栏与侧栏"不可用"的根因）。
     lastFrozenTokens = tr.firstTurnPrompt;
+    // ★ C5（2026-10-24）：上下文构成 —— 侧栏"构成"三行的数据源（估算）。
+    try {
+      lastBreakdown = agent.contextBreakdown();
+    } catch (_) {
+      lastBreakdown = const <String, int>{};
+    }
     return AgentRunResult(
       stopReason: cancelled
           ? '已取消'
@@ -789,6 +1080,10 @@ class LocalAgentExecutor {
   /// `-1` = 还没跑过 / 没有用量。`AgentBridge` 在 run 结束后读走它，
   /// 供顶栏"上下文占用"与侧栏"系统提示与工具定义"使用。
   int lastFrozenTokens = -1;
+
+  /// 上一次 run 的**上下文构成**（C5，2026-10-24）：system / tools / history
+  /// 三块的估算 token。空 map = 还没跑过或拿不到 —— UI 显示两行旧图例。
+  Map<String, int> lastBreakdown = const <String, int>{};
 
   /// 从用户请求里取一个会话标题（取首行、截断）。
   String _titleOf(String request) {
@@ -1143,6 +1438,21 @@ class _Translator {
       result: output,
       ok: !isError,
       wallMs: durationMs,
+    ));
+  }
+
+  /// **预算预警**（E5，2026-10-24）—— 复用 `kBlocked` 卡片形状。
+  ///
+  /// 为什么复用它：这是"系统级提示"的既有展示位（带 reason 的醒目卡片），
+  /// 预算预警在语义上就是"系统要拦在你前面说话"。每档只播一次
+  /// （75% / 90%），`_drawnBlockedKeys` 的 per-run 去重天然兜底。
+  void budgetWarning(int used, int limit) {
+    _sink(AgentEvent(
+      type: AgentEvent.kBlocked,
+      ts: _now,
+      tool: 'budget_warning',
+      reason: '⚠️ 工具调用预算已用 $used/$limit 次 —— 接近熔断线，'
+          '任务可能做不完。可以点停止把需求拆小，或让它先收尾汇报。',
     ));
   }
 
