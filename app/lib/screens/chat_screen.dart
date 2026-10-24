@@ -2151,9 +2151,10 @@ class _ChatScreenState extends State<ChatScreen> {
       // 到达时机：Kotlin 侧已经**挂起**在审批队列上（工具返回 NeedsApproval）。
       // 允许 ⇒ 重新执行该工具；拒绝/关弹窗 ⇒ 作为失败回填，模型不会以为做成了。
       // 不弹窗的后果：队列等 10 分钟后超时 —— 用户只看到任务卡死。
-      case AgentEvent.kApprovalRequest:
+      case AgentEvent.kApprovalRequired:
         unawaited(_showApprovalDialog(
           context,
+          callId: e.callId ?? '',
           tool: e.tool,
           args: e.args,
           reason: e.reason ?? e.message ?? '',
@@ -4897,6 +4898,7 @@ class _ChatScreenState extends State<ChatScreen> {
   /// 用户看到的是"任务卡死"，且模型得不到任何反馈。
   Future<void> _showApprovalDialog(
     BuildContext context, {
+    required String callId,
     required String? tool,
     required Map<String, String>? args,
     required String reason,
@@ -4931,7 +4933,7 @@ class _ChatScreenState extends State<ChatScreen> {
       // ignore: avoid_print
       print('[heracles][approval] 完全访问档收到审批请求（tool=$tool）'
           '⇒ 直接放行、不弹窗（Kotlin 侧漏判档位时由这里兜住）');
-      await _bridge.replyApproval('allow');
+      await _bridge.replyApproval(callId: callId, decision: 'once');
       return;
     }
 
@@ -5059,12 +5061,12 @@ class _ChatScreenState extends State<ChatScreen> {
           // ★ 「本会话始终允许」（2026-10-19）：同一工具 + 同一关键参数不再问。
           //   只在本 run 内有效（不落盘）—— 跨任务的持久白名单是另一个安全决定。
           CupertinoDialogAction(
-            onPressed: () => Navigator.of(dlgCtx).pop('allow_always'),
+            onPressed: () => Navigator.of(dlgCtx).pop('always'),
             child: const Text('本会话始终允许'),
           ),
           CupertinoDialogAction(
             isDefaultAction: true,
-            onPressed: () => Navigator.of(dlgCtx).pop('allow'),
+            onPressed: () => Navigator.of(dlgCtx).pop('once'),
             child: const Text('允许'),
           ),
           // ★★ 停止入口（2026-10-20 真机修）★★
@@ -5101,7 +5103,7 @@ class _ChatScreenState extends State<ChatScreen> {
       ),
     );
     // null = 点外面/返回键 ⇒ 按**拒绝**处理（安全默认，绝不放行）
-    await _bridge.replyApproval(decision ?? 'deny');
+    await _bridge.replyApproval(callId: callId, decision: decision ?? 'deny');
   }
 
   /// **目录选模型**（2026-10-14，二级弹层）。

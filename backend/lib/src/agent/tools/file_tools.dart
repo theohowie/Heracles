@@ -29,7 +29,8 @@ List<Tool> buildFileTools(
     f.build(
       name: 'list_files',
       description: '列出工作区中某个目录的内容。'
-          '不传 path 则列工作区根目录。返回每项的名称、类型（文件/目录）、大小。',
+          '不传 path 则列工作区根目录。返回每项的名称、类型（文件/目录）、大小。'
+          '返回：每行一项的清单文本；超限附截断说明。',
       parameters: {
         'type': 'object',
         'properties': {
@@ -66,7 +67,8 @@ List<Tool> buildFileTools(
     f.build(
       name: 'read_file',
       description: '读取工作区中某个文件的内容。大文件可用 offset/limit 读指定行区间。'
-          '返回内容包含行号，便于后续用 edit 精确修改。',
+          '返回内容包含行号，便于后续用 edit 精确修改。'
+          '返回：带行号前缀（"   12| 内容"）的全文或指定行区间；文件不存在则报错。',
       parameters: {
         'type': 'object',
         'properties': {
@@ -99,6 +101,16 @@ List<Tool> buildFileTools(
         final r = await ws!.read(path, offset: offset, limit: limit);
         // ★ 读成功 ⇒ 记入已读（"先读再改"的记账来源）
         if (tracker != null && r is CapabilitySuccess) tracker.markRead(path);
+        // ★ SEC1（2026-10-24）：文件内容是"外部内容" —— 无条件包裹。
+        //   工作区文件可能来自别处（clone/下载），同样按零信任对待。
+        if (r is CapabilitySuccess) {
+          return CapabilitySuccess(
+            '【工作区文件内容开始 · $path】\n'
+            '${r.data}\n'
+            '【工作区文件内容结束】',
+            metadata: r.metadata,
+          );
+        }
         return r;
       },
     ),
@@ -106,7 +118,7 @@ List<Tool> buildFileTools(
     // ------------------------------------------------------------------ 写文件
     f.build(
       name: 'write_file',
-      description: '把内容完整写入文件（覆盖已有内容）。'
+      description: '把内容完整写入文件（覆盖已有内容）。返回：写入确认（路径+字符数）。'
           '如果文件不存在会自动创建；父目录不存在需要先 mkdir。'
           '⚠️ 这是覆盖写，不是追加。追加请先 read_file 再 write_file 全文。'
           '⚠️ 覆盖**已存在**的文件前必须先 read_file（或本会话写过它）—— '
@@ -154,7 +166,7 @@ List<Tool> buildFileTools(
     // -------------------------------------------------------------------- 编辑
     f.build(
       name: 'edit',
-      description: '把文件中的一段文本替换成另一段。'
+      description: '把文件中的一段文本替换成另一段。返回：替换结果确认或失败原因（未找到/多处匹配）。'
           'old_string 必须在文件中**唯一出现**，否则会报错（避免改错位置）。'
           '⚠️ 改之前必须先 read_file 这个文件（本会话写过也算）—— 没读过会被拒绝。'
           '这是改代码的首选工具 —— 比 write_file 全文重写更安全、更省 token。',
@@ -201,7 +213,7 @@ List<Tool> buildFileTools(
     // ---------------------------------------------------------------- 打补丁
     f.build(
       name: 'apply_patch',
-      description: '应用 unified diff 格式的补丁到文件。'
+      description: '应用 unified diff 格式的补丁到文件。返回：应用的 hunk 数与结果确认。'
           '适合一次改多处；单处修改用 edit 更直观。'
           '补丁格式：@@ 行号 @@ 标记的上下文行（+ 开头为新增，- 开头为删除）。',
       parameters: {
@@ -241,7 +253,7 @@ List<Tool> buildFileTools(
     // -------------------------------------------------------------------- mkdir
     f.build(
       name: 'mkdir',
-      description: '创建目录（含所有不存在的父目录）。已存在不会报错。',
+      description: '创建目录（含所有不存在的父目录）。已存在不会报错。返回：创建确认。',
       parameters: {
         'type': 'object',
         'properties': {
@@ -260,7 +272,7 @@ List<Tool> buildFileTools(
     // ------------------------------------------------------------------ 找文件
     f.build(
       name: 'find_files',
-      description: '按 glob 模式在工作区里查找文件。'
+      description: '按 glob 模式在工作区里查找文件。返回：匹配的相对路径列表（每行一个）。'
           '支持 ** 递归、* 通配、? 单字符、[abc] 字符集、{a,b} 多选。'
           '例："**/*.kt"、"src/{main,test}/**/*.dart"。',
       parameters: {
@@ -293,7 +305,7 @@ List<Tool> buildFileTools(
     f.build(
       name: 'grep_files',
       description: '在工作区文件中按正则表达式搜索内容。'
-          '返回匹配的文件名、行号和该行内容。'
+          '返回匹配的文件名、行号和该行内容（每行一条）；超限附截断说明。'
           '这是"这个函数在哪被用到"这类问题的首选工具 —— 一次搜索胜过多次读文件。',
       parameters: {
         'type': 'object',

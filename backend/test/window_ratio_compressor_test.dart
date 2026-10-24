@@ -507,7 +507,7 @@ void main() {
       expect(WindowRatioCompressor.estimateText(''), 0);
     });
 
-    test('★★ HeraclesAgent.contextBreakdown()：跑一轮后三块齐全且 > 0', () async {
+    test('★★ HeraclesAgent.contextBreakdown()：跑一轮后 N2 七键齐全', () async {
       final agent = HeraclesAgent(
         config: const BackendConfig(apiKey: 'k', modelName: 'm'),
         capabilities: const Capabilities(),
@@ -515,11 +515,22 @@ void main() {
       );
       await agent.run('问一句').drain<void>();
       final b = agent.contextBreakdown();
-      expect(b.keys, containsAll(['system', 'tools', 'history']));
+      // N2 契约：固定 7 键，只许新增不许改名
+      expect(b.keys, containsAll([
+        'system', 'toolDefs', 'toolResults', 'reasoning', 'assistant', 'user', 'summary',
+      ]));
       expect(b['system']!, greaterThan(0), reason: 'system 提示必有');
-      expect(b['history']!, greaterThan(0), reason: '跑过一轮必有历史');
-      expect(b['tools']!, greaterThan(0),
+      expect(b['user']!, greaterThan(0), reason: '本轮请求在历史里');
+      expect(b['user']!, greaterThan(0), reason: '本轮请求在历史里');
+      expect(b['toolDefs']!, greaterThan(0),
           reason: '发过请求就有工具面快照（21 个工具定义是常驻开销）');
+      // Σ ≈ 旧三块口径（system + toolDefs + 消息）—— 口径没变，只是拆细了
+      final total = b.values.reduce((a, c) => a + c);
+      expect(total,
+          WindowRatioCompressor.estimateMessagesUsage(agent.state!) +
+              WindowRatioCompressor.estimateToolDefinitions(agent.state!) +
+              b['system']!,
+          reason: '七键之和必须对得上总账（±0，同一套估算器）');
     });
   });
 }

@@ -46,6 +46,7 @@
 /// 两套都在，调用方按需要选，**没有隐藏的全局状态**。
 library;
 
+import 'dart:convert';
 import 'device_capabilities.dart';
 
 /// 一次记忆读取的结果。
@@ -161,6 +162,145 @@ class GlobalMemory {
     );
   }
 
+  // ==========================================================================
+  // 结构化条目（N7，2026-10-24 —— 前端 INTERFACE.md 的记忆页数据源）
+  //
+  // ## 格式
+  //
+  // memory.md 每行一条 **JSON 条目**（Kotlin 侧追加时行首会带 ISO 时间戳
+  // 前缀 —— 解析时取行内第一个 '{' 起 decode，前缀当噪声忽略）：
+  //   {"id":"m169...","kind":"preference","text":"...","source":"user","createdAt":169...}
+  //
+  // ## 旧格式迁移
+  //
+  // 非 JSON 行（历史纯文本）读出来按 kind='other'、source='legacy' 的条目
+  // 对待 —— 不丢内容，只是没有结构字段。**写入永远用新格式**。
+  //
+  // ## 为什么增删改走"读全文→改→clear→逐条 append"而不动 Kotlin
+  //
+  // 通道只有 read/append/clear 三个原语，而记忆文件在 App 私有目录
+  // （Dart 够不到文件系统）—— 用三个原语合成改写是唯一不扩 Kotlin 的路。
+  // 代价：改写期间若进程被杀，clear 已生效而 append 未完成 ⇒ 丢尾部条目。
+  // 概率极低、后果是"少一条记忆"而非损坏 —— 如实接受。
+  // ==========================================================================
+
+  /// 解析记忆文件全文为条目列表（含旧格式迁移）。
+  static List<MemoryEntry> parseEntries(String raw) {
+    final out = <MemoryEntry>[];
+    var legacy = 0;
+    for (var line in raw.split('\n')) {
+      line = line.trim();
+      if (line.isEmpty) continue;
+      final brace = line.indexOf('{');
+      if (brace >= 0) {
+        try {
+          final j = jsonDecode(line.substring(brace)) as Map<String, dynamic>;
+          final text = (j['text'] as String?) ?? '';
+          if (text.isEmpty) continue;
+          out.add(MemoryEntry(
+            id: (j['id'] as String?) ?? 'm${out.length}',
+            kind: (j['kind'] as String?) ?? 'other',
+            text: text,
+            source: (j['source'] as String?) ?? 'agent',
+            createdAt: (j['createdAt'] as num?)?.toInt() ?? 0,
+          ));
+          continue;
+        } catch (_) {
+          // 落到 legacy 分支
+        }
+      }
+      legacy++;
+      out.add(MemoryEntry(
+        id: 'legacy-$legacy',
+        kind: 'other',
+        text: line,
+        source: 'legacy',
+        createdAt: 0,
+      ));
+    }
+    return out;
+  }
+
+  /// 条目 → 存储行（JSON）。
+  static String _entryLine(MemoryEntry e) => jsonEncode({
+        'id': e.id,
+        'kind': e.kind,
+        'text': e.text,
+        'source': e.source,
+        'createdAt': e.createdAt,
+      });
+
+  /// 列出全部条目。
+  Future<List<MemoryEntry>> listEntries() async =>
+      parseEntries(await read());
+
+  /// 追加一条（SEC4：疑似密钥拒收 —— 与 backend save_memory 同一闸）。
+  Future<MemoryWriteResult> addEntry(String text,
+      {String kind = 'other', String source = 'user'}) async {
+    final t = text.trim();
+    if (t.isEmpty) return const MemoryWriteResult.failure('内容为空');
+    if (_secretPattern.hasMatch(t)) {
+      return const MemoryWriteResult.failure(
+          '内容疑似包含密钥/令牌，拒绝写入长期记忆（明文存储，泄露风险）');
+    }
+    return appendResult(_entryLine(MemoryEntry(
+      id: 'm${DateTime.now().microsecondsSinceEpoch}',
+      kind: kind,
+      text: t,
+      source: source,
+      createdAt: DateTime.now().millisecondsSinceEpoch,
+    )));
+  }
+
+  /// 更新一条（读全文→改→clear→逐条重写）。
+  Future<MemoryWriteResult> updateEntry(String id, String text) async {
+    final entries = await listEntries();
+    final idx = entries.indexWhere((e) => e.id == id);
+    if (idx < 0) return MemoryWriteResult.failure('条目不存在：$id');
+    final t = text.trim();
+    if (t.isEmpty) return const MemoryWriteResult.failure('内容为空');
+    if (_secretPattern.hasMatch(t)) {
+      return const MemoryWriteResult.failure('内容疑似包含密钥/令牌，拒绝写入');
+    }
+    entries[idx] = MemoryEntry(
+      id: entries[idx].id,
+      kind: entries[idx].kind,
+      text: t,
+      source: entries[idx].source,
+      createdAt: entries[idx].createdAt,
+    );
+    return _rewrite(entries);
+  }
+
+  /// 删除一条。
+  Future<MemoryWriteResult> deleteEntry(String id) async {
+    final entries = await listEntries();
+    final n = entries.length;
+    entries.removeWhere((e) => e.id == id);
+    if (entries.length == n) {
+      return MemoryWriteResult.failure('条目不存在：$id');
+    }
+    return _rewrite(entries);
+  }
+
+  Future<MemoryWriteResult> _rewrite(List<MemoryEntry> entries) async {
+    final ok = await clear();
+    if (!ok) return const MemoryWriteResult.failure('重写失败：清空原文件出错');
+    for (final e in entries) {
+      final r = await append(_entryLine(e));
+      if (!r) {
+        return const MemoryWriteResult.failure('重写失败：写入条目时超限');
+      }
+    }
+    return MemoryWriteResult(ok: true, bytes: entries.length);
+  }
+
+  /// 容量（N7 的 memoryCapacity）：usedBytes / maxBytes。
+  Future<({int usedBytes, int maxBytes})> capacity() async {
+    final r = await readResult();
+    return (usedBytes: r.bytes, maxBytes: maxBytes);
+  }
+
   /// 清空记忆（把文件截断成 0 字节）。
   ///
   /// 为什么是"清空文件"而不是"删文件"：删了之后与"从没用过"无法区分，
@@ -172,4 +312,29 @@ class GlobalMemory {
     final raw = await _ch.call('memory.clear');
     return errorOf(raw) == null;
   }
+}
+
+/// 疑似密钥/令牌特征（SEC4；与 backend save_memory 同一闸）。
+final _secretPattern = RegExp(
+    r'(sk-[A-Za-z0-9_-]{10,}|AKIA[0-9A-Z]{16}|ghp_[A-Za-z0-9]{20,}'
+    r'|gho_[A-Za-z0-9]{20,}|eyJ[A-Za-z0-9_-]{15,}|[A-Fa-f0-9]{32,})');
+
+/// **一条长期记忆**（N7 结构化条目）。
+///
+/// `kind` 词表由后端定（INTERFACE.md §7.3）：`preference`（长期偏好）/
+/// `background`（项目背景）/ `habit`（使用习惯）/ `other`；前端只展示。
+class MemoryEntry {
+  const MemoryEntry({
+    required this.id,
+    required this.kind,
+    required this.text,
+    required this.source,
+    required this.createdAt,
+  });
+
+  final String id;
+  final String kind;
+  final String text;
+  final String source;
+  final int createdAt; // 毫秒时间戳；legacy 条目为 0
 }

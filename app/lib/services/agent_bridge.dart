@@ -12,6 +12,7 @@ import '../models/model_capabilities.dart';
 import '../models/settings.dart';
 import '../models/workspace.dart';
 import 'local_agent.dart';
+import 'global_memory.dart';
 import 'session_store.dart';
 
 /// Flutter → Kotlin 的桥（`15-前端选型与通道协议.md` §3.1）。
@@ -870,10 +871,13 @@ class AgentBridge {
   ///
   /// 返回 `true` = 确实交到了一个正在等待的审批；`false` = 没有挂起的审批
   /// （run 已结束/超时/先点了停止）—— **如实告知，不静默成功**。
-  Future<bool> replyApproval(String decision) async {
+  Future<bool> replyApproval({
+    required String callId,
+    required String decision,
+  }) async {
     final gate = _currentAskGate;
     if (gate == null) return false;
-    return gate.replyApproval(decision);
+    return gate.replyApproval(callId: callId, decision: decision);
   }
 
   /// **「始终允许」白名单**（2026-10-19 引入；2026-10-24 改存 Flutter 侧）。
@@ -919,6 +923,30 @@ class AgentBridge {
       // 清空失败：下次审批会继续弹窗（比"清不掉旧白名单"安全得多）。
     }
   }
+
+  // ==========================================================================
+  // N7 结构化记忆（2026-10-24）—— 前端记忆页数据源
+  // ==========================================================================
+
+  /// 列出全部记忆条目（含旧格式迁移：纯文本行 = kind:other/source:legacy）。
+  Future<List<MemoryEntry>> listMemory() => const GlobalMemory().listEntries();
+
+  /// 新增一条（kind 词表：preference/background/habit/other，后端定）。
+  /// SEC4：疑似密钥/令牌拒收。
+  Future<MemoryWriteResult> addMemory(String text, {String kind = 'other'}) =>
+      const GlobalMemory().addEntry(text, kind: kind, source: 'user');
+
+  /// 更新一条（按 id）。
+  Future<MemoryWriteResult> updateMemory(String id, String text) =>
+      const GlobalMemory().updateEntry(id, text);
+
+  /// 删除一条（按 id）。
+  Future<MemoryWriteResult> deleteMemory(String id) =>
+      const GlobalMemory().deleteEntry(id);
+
+  /// 容量：usedBytes / maxBytes（maxBytes = ContractMemory.maxBytes）。
+  Future<({int usedBytes, int maxBytes})> memoryCapacity() =>
+      const GlobalMemory().capacity();
 
   /// **拉取后端的可用模型列表**（2026-10-14，接入第三方 API 服务）。
   /// ## 为什么需要它
@@ -1241,6 +1269,12 @@ class AgentEvent {
     this.cache,
     this.tool,
     this.args,
+    this.callId,
+    this.workspaceInside,
+    this.breakdown,
+    this.limit,
+    this.limitSource,
+    this.planStepsDetailed,
     this.result,
     this.ok,
     this.reason,
@@ -1284,6 +1318,26 @@ class AgentEvent {
   // ---- 工具 ----
   final String? tool;
   final Map<String, String>? args;
+
+  /// `approval_required`：框架调用 id（答复 [AgentBridge.replyApproval] 必带回）。
+  /// 其余事件为 null。
+  final String? callId;
+
+  /// `approval_required`：操作对象是否在工作区内（N1）。
+  final bool? workspaceInside;
+
+    /// `context_updated`（N2）：分项统计（key → 估算 token）。
+    /// 固定键 system/toolDefs/toolResults/reasoning/assistant/user/summary，
+    /// 只许新增不许改名；前端忽略不认识的并入「其他」。
+    final Map<String, int>? breakdown;
+
+    /// `context_updated`：窗口上限与来源（沿用 ContextUsage 口径）。
+    final int? limit;
+    final String? limitSource;
+
+    /// `plan_updated`（N4）：完整计划帧的步骤明细（[{id,title,status}]，
+    /// status ∈ pending/active/done/cancelled —— cancelled 为本实现的追加）。
+    final List<Map<String, String>>? planStepsDetailed;
 
   /// `tool_finished`：工具结果文本
   final String? result;
@@ -1454,6 +1508,29 @@ class AgentEvent {
   /// 拒绝/超时 = 作为失败回填给模型（绝不谎称成功）。
   static const kApprovalRequest = 'approval_request';
 
+  /// **审批请求（N1 结构化形状，2026-10-24）**—— 取代 [kApprovalRequest]。
+  ///
+  /// 载荷：`callId`（答复配对必带）/ `tool` / `args` / `reason`（=risk，
+  /// 一句话风险说明）/ `workspaceInside`（操作对象是否在工作区内）。
+  /// 答复走 [AgentBridge.replyApproval]（结构化：callId + decision），
+  /// decision ∈ deny / once（允许一次）/ always（本会话始终允许）。
+  static const kApprovalRequired = 'approval_required';
+
+  /// **上下文分项统计（N2，2026-10-24）**—— 每轮至少一帧。
+  ///
+  /// 载荷：`breakdown`（key→估算 token；固定键 system/toolDefs/toolResults/
+  /// reasoning/assistant/user/summary，只许新增不许改名）+ `limit` + `limitSource`。
+  /// 估算与压缩器同一套 CJK 系数（口径稳定）；reasoning/summary 恒 0
+  /// （thought 不回放、快照消息不可辨识 —— 如实给 0，前端并入「其他」）。
+  static const kContextUpdated = 'context_updated';
+
+  /// **计划帧（N4，2026-10-24）**—— 取代 [kPlanCreated] 的完整帧形状：
+  /// 每次变化发一帧全量（前端只读最后一帧，不做增量拼接）；
+  /// 会话恢复时先发一帧还原；`steps` 为空 = 收起灵动岛。
+  /// 载荷：`planStepsDetailed`（[{id,title,status}]，status ∈ pending/active/done）
+  /// + 既有 planSteps/doneCount/activeIndex（兼容保留）。
+  static const kPlanUpdated = 'plan_updated';
+
   /// **上下文已自动压缩**（2026-10-23）—— 让用户看得见"压缩真的发生了"。
   ///
   /// ## 为什么必须有这个事件
@@ -1515,6 +1592,9 @@ class AgentEvent {
     kPlanClosed,
     kAskUser,
     kApprovalRequest,
+    kApprovalRequired,
+    kContextUpdated,
+    kPlanUpdated,
     kStepStarted,
     kReasoningDelta,
     kStepDelta,
