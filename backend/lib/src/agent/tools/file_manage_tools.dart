@@ -23,7 +23,15 @@ import '../../capability/capabilities.dart';
 import '../../tools/tool_factory.dart';
 
 /// 构建文件管理工具。
-List<Tool> buildFileManageTools(ToolFactory f, Capabilities caps) {
+///
+/// [tracker]：与文件工具共享的"先读再改"记账（见 `EditReadTracker`）。
+/// 删除让路径失效、移动迁移记录 —— 否则会出现"读过 a.txt，删了重写一个
+/// 新的 a.txt，edit 却被放行"的记账漂移。
+List<Tool> buildFileManageTools(
+  ToolFactory f,
+  Capabilities caps, {
+  EditReadTracker? tracker,
+}) {
   final ws = caps.workspace;
   return [
     // ------------------------------------------------------------------ 删除
@@ -52,7 +60,10 @@ List<Tool> buildFileManageTools(ToolFactory f, Capabilities caps) {
       run: (args) async {
         final path = requireString(args, 'path');
         final recursive = optionalBool(args, 'recursive') ?? false;
-        return ws!.delete(path, recursive: recursive);
+        final r = await ws!.delete(path, recursive: recursive);
+        // ★ 记账：删掉的路径不再"已读/已写"
+        if (tracker != null && r is CapabilitySuccess) tracker.forget(path);
+        return r;
       },
     ),
 
@@ -80,7 +91,10 @@ List<Tool> buildFileManageTools(ToolFactory f, Capabilities caps) {
       run: (args) async {
         final from = requireString(args, 'from');
         final to = requireString(args, 'to');
-        return ws!.move(from, to);
+        final r = await ws!.move(from, to);
+        // ★ 记账：路径变了，读写记录跟着迁移
+        if (tracker != null && r is CapabilitySuccess) tracker.moved(from, to);
+        return r;
       },
     ),
 

@@ -398,10 +398,14 @@ class HeraclesAgent {
   /// 分组顺序即日志阅读顺序：**高频基础 → 危险手段 → 长耗时 → 交互**。
   List<Tool> _buildTools() {
     final factory = ToolFactory(_caps);
+    // ★ "先读再改"记账（K1，2026-10-24）：与工具列表同生命周期 ——
+    //   App 每次 run 新建 agent ⇒ 恰好 run 级；CLI/测试复用实例 ⇒ 会话级
+    //   （从宽取向：读过的文件跨 run 仍算读过）。
+    final tracker = EditReadTracker();
     return [
-      ...buildFileTools(factory, _caps),        // 8 个：读/写/编辑/补丁/列/建目录/找/搜
+      ...buildFileTools(factory, _caps, tracker: tracker),        // 8 个：读/写/编辑/补丁/列/建目录/找/搜
       ...buildShellTools(factory, _caps),       // 1 个：run_shell_command
-      ...buildFileManageTools(factory, _caps),  // 3 个：删除/移动/复制（有破坏性）
+      ...buildFileManageTools(factory, _caps, tracker: tracker),  // 3 个：删除/移动/复制（有破坏性）
       ...buildInfoTools(factory, _caps),        // 2 个：web_fetch / check_device_state
       ...buildApkTools(factory, _caps),         // 5 个：构建/反编译/重打包/签名/安装
       ...buildInteractionTools(factory,         // 2 个：ask_user / save_memory

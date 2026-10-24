@@ -15,7 +15,14 @@ import '../../capability/capabilities.dart';
 import '../../tools/tool_factory.dart';
 
 /// 构建所有文件类工具。
-List<Tool> buildFileTools(ToolFactory f, Capabilities caps) {
+///
+/// [tracker] 为 null 时不做"先读再改"强制（旧行为，测试便捷入口用）；
+/// 生产组装（`HeraclesAgent._buildTools`）恒传 —— 那是 K1 的架构保证。
+List<Tool> buildFileTools(
+  ToolFactory f,
+  Capabilities caps, {
+  EditReadTracker? tracker,
+}) {
   final ws = caps.workspace;
   return [
     // ------------------------------------------------------------------ 列目录
@@ -89,7 +96,10 @@ List<Tool> buildFileTools(ToolFactory f, Capabilities caps) {
         final path = requireString(args, 'path');
         final offset = optionalInt(args, 'offset') ?? 1;
         final limit = optionalInt(args, 'limit') ?? 0;
-        return ws!.read(path, offset: offset, limit: limit);
+        final r = await ws!.read(path, offset: offset, limit: limit);
+        // ★ 读成功 ⇒ 记入已读（"先读再改"的记账来源）
+        if (tracker != null && r is CapabilitySuccess) tracker.markRead(path);
+        return r;
       },
     ),
 
@@ -98,7 +108,9 @@ List<Tool> buildFileTools(ToolFactory f, Capabilities caps) {
       name: 'write_file',
       description: '把内容完整写入文件（覆盖已有内容）。'
           '如果文件不存在会自动创建；父目录不存在需要先 mkdir。'
-          '⚠️ 这是覆盖写，不是追加。追加请先 read_file 再 write_file 全文。',
+          '⚠️ 这是覆盖写，不是追加。追加请先 read_file 再 write_file 全文。'
+          '⚠️ 覆盖**已存在**的文件前必须先 read_file（或本会话写过它）—— '
+          '没读过会被拒绝，防止盲覆盖丢掉现有内容。',
       parameters: {
         'type': 'object',
         'properties': {
@@ -118,7 +130,24 @@ List<Tool> buildFileTools(ToolFactory f, Capabilities caps) {
       run: (args) async {
         final path = requireString(args, 'path');
         final content = requireString(args, 'content');
-        return ws!.write(path, content);
+        // ★ "先读再改"强制（K1）：覆盖**已存在**的文件前必须读过或写过；
+        //   盲覆盖 = 基于猜测修改，正是这条防线要挡的。
+        if (tracker != null) {
+          final ex = await ws!.exists(path);
+          if (ex && !tracker.canEdit(path)) {
+            return const CapabilityFailure(
+              '未执行：这个文件已存在，但你还没有读过它。'
+              '先 read_file 看当前内容，再决定怎么写 —— '
+              '盲覆盖会丢掉别人的改动（基于猜测的修改一律拒绝）。',
+              isRetryable: true,
+            );
+          }
+        }
+        final r = await ws!.write(path, content);
+        if (tracker != null && r is CapabilitySuccess) {
+          tracker.markWritten(path);
+        }
+        return r;
       },
     ),
 
@@ -127,6 +156,7 @@ List<Tool> buildFileTools(ToolFactory f, Capabilities caps) {
       name: 'edit',
       description: '把文件中的一段文本替换成另一段。'
           'old_string 必须在文件中**唯一出现**，否则会报错（避免改错位置）。'
+          '⚠️ 改之前必须先 read_file 这个文件（本会话写过也算）—— 没读过会被拒绝。'
           '这是改代码的首选工具 —— 比 write_file 全文重写更安全、更省 token。',
       parameters: {
         'type': 'object',
@@ -152,7 +182,19 @@ List<Tool> buildFileTools(ToolFactory f, Capabilities caps) {
         final path = requireString(args, 'path');
         final oldStr = requireString(args, 'old_string');
         final newStr = requireString(args, 'new_string');
-        return ws!.edit(path, oldStr, newStr);
+        // ★ "先读再改"强制（K1）：没读过/没写过就 edit = 基于猜测的修改。
+        if (tracker != null && !tracker.canEdit(path)) {
+          return const CapabilityFailure(
+            '未执行：这个文件还没被读过。先 read_file 拿到带行号的当前内容，'
+            '再 edit —— old_string 要与真实内容逐字符一致，猜是猜不中的。',
+            isRetryable: true,
+          );
+        }
+        final r = await ws!.edit(path, oldStr, newStr);
+        if (tracker != null && r is CapabilitySuccess) {
+          tracker.markWritten(path);
+        }
+        return r;
       },
     ),
 
@@ -181,7 +223,18 @@ List<Tool> buildFileTools(ToolFactory f, Capabilities caps) {
       run: (args) async {
         final path = requireString(args, 'path');
         final patch = requireString(args, 'patch');
-        return ws!.applyPatch(path, patch);
+        // ★ 同 edit：先读再改。
+        if (tracker != null && !tracker.canEdit(path)) {
+          return const CapabilityFailure(
+            '未执行：这个文件还没被读过。先 read_file 看当前内容，再打补丁。',
+            isRetryable: true,
+          );
+        }
+        final r = await ws!.applyPatch(path, patch);
+        if (tracker != null && r is CapabilitySuccess) {
+          tracker.markWritten(path);
+        }
+        return r;
       },
     ),
 
