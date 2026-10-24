@@ -57,6 +57,9 @@ Future<void> main(List<String> args) async {
       : ContractAgent.maxTurns;
   final approval = opt('approval', 'HERACLES_CLI_APPROVAL');
   final showThinking = args.contains('--show-thinking');
+  final traceDir = args.contains('--trace')
+      ? 'heracles-trace-${DateTime.now().millisecondsSinceEpoch}'
+      : null;
 
   if (task.trim().isEmpty) {
     stderr.writeln('缺少 --task "任务描述"');
@@ -103,6 +106,8 @@ Future<void> main(List<String> args) async {
       enableSubAgents: true,
       enableSkills: true,
       approvalMode: mode,
+      // ★ E4：--trace 开启逐轮原始请求/响应落盘（排障/回放）
+      traceDir: traceDir,
     ),
     // askGate 恒 null ⇒ 需要批准的操作 fail-closed 拒绝（见文件头）。
   );
