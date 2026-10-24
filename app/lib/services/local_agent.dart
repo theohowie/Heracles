@@ -655,6 +655,9 @@ class LocalAgentExecutor {
         //   backend 库默认 fullAccess（不拦，库没有 UI 可问）；
         //   App 是有 UI 的宿主，**必须**把用户选的档位传下去 ——
         //   拦截在 backend 的 `_ApprovalHook`，"问谁"在 [LocalAskGate]。
+        // ★ 子代理（H6，2026-10-24）：App 显式开启 —— 探索/核对类子任务
+        //   在干净上下文里跑，主上下文只收结论。
+        enableSubAgents: true,
         approvalMode: switch (settings.permission) {
           PermissionMode.manual => ApprovalMode.manual,
           PermissionMode.workspaceAuto => ApprovalMode.workspaceAuto,

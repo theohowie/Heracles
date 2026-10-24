@@ -136,6 +136,7 @@ class RunOptions {
     this.systemPrompts = const [],
     this.memoryNote,
     this.approvalMode = ApprovalMode.fullAccess,
+    this.enableSubAgents = false,
   });
 
   final int maxTurns;
@@ -197,6 +198,25 @@ class RunOptions {
   /// 实际的拦截由 [_ApprovalHook] 执行；"问谁"由宿主注入的
   /// `AskGate.requestApproval` 决定（白名单也在宿主侧）。
   final ApprovalMode approvalMode;
+
+  /// **子代理**（2026-10-24 接线，H6）—— 开启后模型可以用 `delegate_task`
+  /// 把子任务派给一个**干净上下文**的 worker，主上下文只收回最终结论。
+  ///
+  /// ## 为什么默认关
+  ///
+  /// 库默认 = 旧行为（21 个工具、无派生），与既有测试/CLI 兼容；
+  /// 有 UI 的宿主显式开启（App 传 true）。
+  ///
+  /// ## 隔离语义（见 [_workerSubAgent]）
+  ///
+  /// · worker 是**全新 AgentState**（看不到主对话）—— 真隔离，不是 clone；
+  /// · worker 的过程事件走**独立事件总线**，就地丢弃 —— 主线程的用量记账
+  ///   与 UI 不被污染；
+  /// · **hooks 继承**：审批 hook 与预算 hook 是同一个对象 ⇒ worker 的危险
+  ///   操作照样弹窗、worker 的调用照样计入任务总预算（防止"派子代理绕过
+  ///   预算"）；
+  /// · worker 禁止再派生（`disableSubAgents`）—— 深度恒为 1。
+  final bool enableSubAgents;
 }
 
 /// **组装好的 Agent**。
@@ -818,6 +838,12 @@ class HeraclesAgent {
       planMode: _options.enablePlan ? PlanMode.auto : PlanMode.none,
       maxTurns: _options.maxTurns,
       hooks: [budgetHook, approvalHook],
+      // ★ 子代理（H6，2026-10-24）：开启后框架自动追加 `delegate_task`
+      //   工具与系统提示（列出来源见 buildSubAgentSystemPrompt）。
+      // ★ disableSubAgents 才是真正的开关（框架在 !disableSubAgents 时
+      //   无条件追加 delegate_task，不看 subAgents 是否为空）。
+      subAgents: _options.enableSubAgents ? [_workerSubAgent()] : null,
+      disableSubAgents: !_options.enableSubAgents,
       // 框架自带循环检测（相同调用重复 + 周期性 LLM 诊断）。
       // 旧实现只有"相同调用重复"且阈值 2；这里用框架默认（5），
       // 因为云端模型有自愈能力，2 太激进。
@@ -1067,6 +1093,56 @@ class HeraclesAgent {
     }
     return '任务异常：$e';
   }
+  /// **worker 子代理工厂**（H6，2026-10-24）—— 干净上下文的执行者。
+  ///
+  /// ## 为什么是"干净 state"而不是框架的 clone
+  ///
+  /// 框架的 assignee='clone' 会把主对话历史拷进 worker 的情景记忆 ——
+  /// 那是"带着记忆的分身"。H6 要的是**隔离**：探索/核对类子任务的全部
+  /// 中间过程不进主上下文，主线程只收结论。所以注册一个命名 worker，
+  /// 工厂里给**全新 AgentState** —— worker 看不到主对话，
+  /// task_description 必须自包含（框架追加的 worker 协议提示已写明）。
+  ///
+  /// ## 三个刻意的决定
+  ///
+  /// 1. **独立事件总线**：worker 的思考/工具/用量事件进一个新
+  ///    AgentController，没人订阅 ⇒ 就地丢弃。否则它们会混进主 run 的
+  ///    事件流 —— 用量记账翻倍、UI 出现"来历不明"的工具卡片。
+  /// 2. **hooks 照常继承**：审批与预算是任务级约束，不因派生而失效
+  ///    （worker 的危险操作照样弹窗、调用照样计入总预算）。
+  /// 3. **disableSubAgents: true + 收紧的 maxTurns(12)**：深度恒为 1，
+  ///    worker 自身不失控。
+  SubAgent _workerSubAgent() => SubAgent(
+        name: 'worker',
+        description: '通用工作者：在干净上下文里执行研究、探索、批量核对类子任务，'
+            '只把最终结论带回来。task_description 必须自包含（worker 看不到主对话）。',
+        agentFactory: (parent) {
+          final workerState = AgentState(
+            sessionId:
+                '${parent.state.sessionId}_w${DateTime.now().microsecondsSinceEpoch}',
+          );
+          return StatefulAgent(
+            name: '${parent.name}_worker',
+            client: parent.client,
+            modelConfig: parent.modelConfig,
+            state: workerState,
+            tools: parent.tools,
+            systemPrompts: List.of(parent.systemPrompts),
+            compressor: parent.compressor,
+            loopDetector: DefaultLoopDetector(
+              state: workerState,
+              client: parent.client,
+              modelConfig: parent.modelConfig,
+            ),
+            hooks: parent.hooks,
+            // 独立事件总线：worker 的过程事件无人订阅 ⇒ 隔离（见上方注释 1）
+            controller: AgentController(),
+            isSubAgent: true,
+            disableSubAgents: true,
+            maxTurns: 12,
+          );
+        },
+      );
 }
 
 /// 事件出口 —— 桥已关就丢弃，绝不往已关闭的 controller 里写。
