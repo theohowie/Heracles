@@ -203,6 +203,7 @@ class GlobalMemory {
             text: text,
             source: (j['source'] as String?) ?? 'agent',
             createdAt: (j['createdAt'] as num?)?.toInt() ?? 0,
+            expiresAt: (j['expiresAt'] as num?)?.toInt(),
           ));
           continue;
         } catch (_) {
@@ -228,11 +229,80 @@ class GlobalMemory {
         'text': e.text,
         'source': e.source,
         'createdAt': e.createdAt,
+        if (e.expiresAt != null) 'expiresAt': e.expiresAt,
       });
 
-  /// 列出全部条目。
+  /// **检索式注入**（M4，2026-10-25）：按当前任务给条目打相关性分，
+  /// 相关条目全文在前、其余压成一行摘要 —— 不再无差别全量塞入。
+  ///
+  /// ## 打分与排序（M6 显式优先在这里生效）
+  ///
+  /// · 关键词：ASCII 词（≥2 字符）+ CJK 二元组；得分 = 在条目正文的出现次数；
+  /// · **用户亲手加的条目（source=user）同分置顶** —— "用户说记住"优先；
+  /// · 无任何匹配 ⇒ 原文原样返回（旧行为，不白白破坏缓存）；
+  /// · 相关性排序随任务变化 ⇒ 那一轮前缀缓存重建（固有代价，如实记账）。
+  static String composeRetrieval(List<MemoryEntry> entries, String task) {
+    entries = entries.where((e) => e.isAlive()).toList()
+      ..sort((a, b) {
+        if ((a.source == 'user') != (b.source == 'user')) {
+          return a.source == 'user' ? -1 : 1;
+        }
+        return 0;
+      });
+    if (entries.isEmpty) return '';
+
+    final keywords = <String>{};
+    for (final m in RegExp(r'[A-Za-z0-9_]{2,}').allMatches(task)) {
+      keywords.add(m.group(0)!.toLowerCase());
+    }
+    for (final m in RegExp(r'[一-鿿]{2}').allMatches(task)) {
+      keywords.add(m.group(0)!);
+    }
+    if (keywords.isEmpty) {
+      return entries.map((e) => e.text).join('\n');
+    }
+
+    final scored = <List<dynamic>>[];
+    for (final e in entries) {
+      var score = 0;
+      final lower = e.text.toLowerCase();
+      for (final k in keywords) {
+        var idx = lower.indexOf(k);
+        while (idx >= 0) {
+          score++;
+          idx = lower.indexOf(k, idx + k.length);
+        }
+      }
+      scored.add([score, e]);
+    }
+    scored.sort((a, b) => (b[0] as int).compareTo(a[0] as int));
+
+    final matched = scored.where((s) => (s[0] as int) > 0).toList();
+    final rest = scored.where((s) => (s[0] as int) <= 0).toList();
+    if (matched.isEmpty) {
+      return entries.map((e) => e.text).join('\n');
+    }
+    final buf = StringBuffer();
+    buf.writeln('【与当前任务相关的记忆】');
+    for (final pair in matched) {
+      final e = pair[1] as MemoryEntry;
+      buf.writeln('- (${e.kind}) ${e.text}');
+    }
+    if (rest.isNotEmpty) {
+      buf.writeln();
+      buf.writeln('【其余记忆（摘要）】');
+      for (final pair in rest) {
+        final e = pair[1] as MemoryEntry;
+        final t = e.text.length <= 40 ? e.text : '${e.text.substring(0, 40)}…';
+        buf.writeln('- (${e.kind}) $t');
+      }
+    }
+    return buf.toString().trimRight();
+  }
+
+  /// 列出全部**未过期**条目（M6 有效期：过期的读取即过滤）。
   Future<List<MemoryEntry>> listEntries() async =>
-      parseEntries(await read());
+      parseEntries(await read()).where((e) => e.isAlive()).toList();
 
   /// 追加一条（SEC4：疑似密钥拒收 —— 与 backend save_memory 同一闸）。
   Future<MemoryWriteResult> addEntry(String text,
@@ -330,11 +400,21 @@ class MemoryEntry {
     required this.text,
     required this.source,
     required this.createdAt,
+    this.expiresAt,
   });
 
   final String id;
   final String kind;
   final String text;
   final String source;
-  final int createdAt; // 毫秒时间戳；legacy 条目为 0
+
+  /// 毫秒时间戳；legacy 条目为 0。
+  final int createdAt;
+
+  /// **有效期**（M6，2026-10-25）：到期时间戳；null = 永不过期。
+  /// 读取时（[parseEntries] 之后的 [isAlive]）过滤过期条目。
+  final int? expiresAt;
+
+  bool isAlive([int? nowMs]) =>
+      expiresAt == null || expiresAt! > (nowMs ?? DateTime.now().millisecondsSinceEpoch);
 }

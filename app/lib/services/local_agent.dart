@@ -533,7 +533,11 @@ class LocalAgentExecutor {
           .readResult()
           .timeout(const Duration(milliseconds: 900));
       if (mem.error == null && !mem.isEmpty) {
-        memoryNote = mem.text;
+        // ★ M4（2026-10-25）：检索式注入 —— 相关条目全文在前，其余摘要。
+        memoryNote = GlobalMemory.composeRetrieval(
+          GlobalMemory.parseEntries(mem.text),
+          request,
+        );
       }
     } catch (_) {
       // 保持 null（当作没有记忆）。
