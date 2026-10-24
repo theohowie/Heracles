@@ -658,6 +658,9 @@ class LocalAgentExecutor {
         // ★ 子代理（H6，2026-10-24）：App 显式开启 —— 探索/核对类子任务
         //   在干净上下文里跑，主上下文只收结论。
         enableSubAgents: true,
+        // ★ 内置技能（S1/S2，2026-10-24）：目录常驻（每条一行），
+        //   模型按任务用 activate_skills 按需加载全文。
+        enableSkills: true,
         approvalMode: switch (settings.permission) {
           PermissionMode.manual => ApprovalMode.manual,
           PermissionMode.workspaceAuto => ApprovalMode.workspaceAuto,
