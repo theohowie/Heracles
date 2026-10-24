@@ -118,8 +118,13 @@ class LocalAskGate implements AskGate {
   /// 非 null = 此刻有一个审批在等用户决定。
   Completer<bool>? _pendingApproval;
 
-  /// 挂起审批对应的工具名（`allow_always` 时要记住谁被放行了）。
+  /// 挂起审批的 callId（N1：答复按 callId 配对）与工具名（always 记账）。
+  String? _pendingApprovalCallId;
   String? _pendingApprovalTool;
+
+  /// 审批等待上限（N1 契约：5 分钟；超时按 deny 处理并发 blocked）。
+  /// 提问（ask_user）仍用 [answerTimeout] 10 分钟 —— 两个超时各自独立。
+  static const approvalTimeout = Duration(minutes: 5);
 
   /// **「始终允许」名单** —— 本 run 内生效的累计集合。
   ///
@@ -279,12 +284,20 @@ class LocalAskGate implements AskGate {
   /// 同一时刻只能有一个弹窗 ⇒ 后到者**排队**等前一个决定完成再问
   /// （不能直接拒绝 —— 那是替用户做决定）。用户点停止时 [abort] 会
   /// 解掉挂起者，排队者看到 [_aborted] 后也按拒绝收场。
+  ///
+  /// ## 事件形状（N1）
+  ///
+  /// 发 `approval_required`：callId/tool/args/risk(=reason)/workspaceInside。
+  /// **超时（5 分钟）= deny + 发 blocked 事件**（契约明确要求超时可见）。
   @override
-  Future<bool> requestApproval(
-    String toolName,
-    Map<String, String> args,
-    String detail,
-  ) async {
+  Future<bool> requestApproval({
+    required String callId,
+    required String toolName,
+    required Map<String, String> args,
+    required String risk,
+    required String detail,
+    required bool workspaceInside,
+  }) async {
     if (_allowed.contains(toolName)) return true;
     if (_emit == null || _aborted) return false;
 
@@ -296,48 +309,71 @@ class LocalAskGate implements AskGate {
 
     final c = Completer<bool>();
     _pendingApproval = c;
+    _pendingApprovalCallId = callId;
     _pendingApprovalTool = toolName;
 
     _emit!(AgentEvent(
-      type: AgentEvent.kApprovalRequest,
+      type: AgentEvent.kApprovalRequired,
       ts: DateTime.now().millisecondsSinceEpoch,
+      callId: callId,
       tool: toolName,
       // UI 弹窗展示完整参数（审批的意义就是"看清楚再点允许"，不截断）
       args: args,
-      reason: detail,
+      reason: risk,
+      message: detail,
+      workspaceInside: workspaceInside,
     ));
 
     try {
       return await c.future.timeout(
-        answerTimeout,
+        approvalTimeout,
         onTimeout: () {
-          // 超时 = 没拿到"允许" = 拒绝（fail-closed；后端会把"用户拒绝"
-          // 如实回给模型，并劝它不要原样重试）。
+          // N1：超时按 deny 处理，**并发 blocked 事件**（用户要知道
+          // 弹窗为什么"自己没了"）—— fail-closed，绝不默认放行。
+          _emit!(AgentEvent(
+            type: AgentEvent.kBlocked,
+            ts: DateTime.now().millisecondsSinceEpoch,
+            tool: toolName,
+            reason: '审批超时（${approvalTimeout.inMinutes} 分钟）未决定，'
+                '按拒绝处理（fail-closed）。',
+          ));
           // ignore: avoid_print
-          print('[heracles][approval] 审批超时（${answerTimeout.inMinutes} 分钟）未决定，按拒绝处理');
+          print('[heracles][approval] 审批超时未决定，按拒绝处理');
           return false;
         },
       );
     } finally {
-      if (identical(_pendingApproval, c)) _pendingApproval = null;
-      _pendingApprovalTool = null;
+      if (identical(_pendingApproval, c)) {
+        _pendingApproval = null;
+        _pendingApprovalCallId = null;
+        _pendingApprovalTool = null;
+      }
     }
   }
 
-  /// UI 提交审批决定（`allow` / `allow_always` / `deny`；null/其它 = 拒绝）。
+  /// UI 提交审批决定（N1 结构化：callId + decision）。
   ///
-  /// 返回 `true` = 确实交到了一个正在等待的审批；`false` = 没有挂起的审批
-  /// （run 已结束 / 已超时 / 已点停止）—— **如实告知，不静默成功**。
-  Future<bool> replyApproval(String decision) async {
+  /// · `decision` ∈ `deny` / `once`（允许一次）/ `always`（本会话始终允许，
+  ///   回调持久化）；其它值/点外面 = 拒绝（安全默认）。
+  /// · **callId 配对**：与挂起请求的 callId 不一致 ⇒ 如实返回 false
+  ///   （迟到的旧答复不打进新请求）。
+  /// · 返回 `true` = 确实交到了一个正在等待的审批；`false` = 没有挂起的
+  ///   审批或 callId 不匹配 —— **如实告知，不静默成功**。
+  Future<bool> replyApproval({
+    required String callId,
+    required String decision,
+  }) async {
     final c = _pendingApproval;
     if (c == null || c.isCompleted) return false;
+    if (callId != _pendingApprovalCallId) return false;
     _pendingApproval = null;
     final tool = _pendingApprovalTool;
     _pendingApprovalTool = null;
+    _pendingApprovalCallId = null;
     switch (decision) {
-      case 'allow':
+      case 'once':
         c.complete(true);
-      case 'allow_always':
+      case 'always':
         // 先记账再放行：同一 run 里后续同工具调用直接放行（[requestApproval]
         // 的白名单检查），持久化通过回调交给桥接层（SharedPreferences）。
         if (tool != null) {
@@ -444,6 +480,13 @@ class LocalAgentExecutor {
           ? provider.contextLength
           : ContractModel.defaultWindowTokens,
     );
+    // N2：上限与来源（context_updated 帧载荷；与 ContextUsage 口径一致）。
+    // 存实例字段 —— _drive 里发帧要用（executor 每次 run 新建，无跨 run 串扰）。
+    effectiveWindow = provider.contextLength > 0
+        ? provider.contextLength
+        : ContractModel.defaultWindowTokens;
+    effectiveWindowSource =
+        provider.contextLength > 0 ? '服务端上报' : '按契约默认值';
 
     // ---- 轮次上限 ----
     // `settings.maxTurns == 0` 的语义是"按后端自动"（UI 的 `kMaxTurnsOptions`）。
@@ -874,6 +917,17 @@ class LocalAgentExecutor {
               output: outputTokens,
               cached: cachedTokens,
             );
+            // ★ N2（2026-10-24）：每轮随用量发一帧分项统计（环图数据源）。
+            //   估算与压缩器同源（口径稳定）；limit = 用户配置的窗口。
+            try {
+              tr.contextUpdated(
+                agent.contextBreakdown(),
+                limit: effectiveWindow,
+                limitSource: effectiveWindowSource,
+              );
+            } catch (_) {
+              // 构不成统计（还没跑过/异常）就不发 —— 前端沿用上一帧。
+            }
           case HeraclesToolRequested(
               :final toolName,
               :final arguments,
@@ -1101,6 +1155,10 @@ class LocalAgentExecutor {
   /// 上一次 run 的**上下文构成**（C5，2026-10-24）：system / tools / history
   /// 三块的估算 token。空 map = 还没跑过或拿不到 —— UI 显示两行旧图例。
   Map<String, int> lastBreakdown = const <String, int>{};
+
+  /// N2：窗口上限与来源（context_updated 帧载荷；run 开始时由 run() 填）。
+  int effectiveWindow = 0;
+  String effectiveWindowSource = '';
 
   /// 从用户请求里取一个会话标题（取首行、截断）。
   String _titleOf(String request) {
@@ -1474,14 +1532,39 @@ class _Translator {
   }
 
   void planUpdated(List<HeraclesPlanStep> steps) {
+    // ★ N4（2026-10-24）：改发 plan_updated **完整帧**（前端只读最后一帧，
+    //   不做增量拼接）。planSteps/doneCount/activeIndex 兼容保留。
     final done = steps.where((s) => s.status == HeraclesPlanStatus.done).length;
     final active = steps.indexWhere((s) => s.status == HeraclesPlanStatus.active);
     _sink(AgentEvent(
-      type: AgentEvent.kPlanCreated,
+      type: AgentEvent.kPlanUpdated,
       ts: _now,
       planSteps: steps.map((s) => s.text).toList(),
       doneCount: done,
       activeIndex: active,
+      planStepsDetailed: [
+        for (var i = 0; i < steps.length; i++)
+          {
+            'id': 's${i + 1}',
+            'title': steps[i].text,
+            'status': steps[i].status.name,
+          },
+      ],
+    ));
+  }
+
+  /// **context_updated 帧**（N2）—— 分项统计 + 上限（环图数据源）。
+  void contextUpdated(
+    Map<String, int> breakdown, {
+    required int limit,
+    required String limitSource,
+  }) {
+    _sink(AgentEvent(
+      type: AgentEvent.kContextUpdated,
+      ts: _now,
+      breakdown: breakdown,
+      limit: limit,
+      limitSource: limitSource,
     ));
   }
 

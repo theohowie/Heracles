@@ -209,6 +209,17 @@ abstract final class ContractShell {
 
   /// 超时后等待进程真正退出的宽限时间（毫秒）。
   static const int killGraceMs = 300;
+
+  /// **超长输出落盘引用阈值**（字符，2026-10-24，C4）。
+  ///
+  /// shell / web 抓取的输出超过它就写进工作区 `.heracles/overflow/` 并返回
+  /// "前 N 字符 + 完整内容路径引用" —— 截断（防窗口爆）与完整性（可取回）
+  /// 两头都占。10 万字符 ≈ 2.5 万~10 万 token：直灌上下文必爆，
+  /// 全丢又可能丢关键证据（报错原文）—— 落盘引用是两头都顾的形状。
+  static const int overflowChars = 100000;
+
+  /// 溢出文件的存放目录（工作区相对路径）。
+  static const String overflowDir = '.heracles/overflow';
 }
 
 /// **网络抓取能力**（`DioWebFetchCapability`）。

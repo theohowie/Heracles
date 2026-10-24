@@ -307,9 +307,13 @@ class UsageSidebar extends StatelessWidget {
           _legend(h, h.accent, '系统提示与记忆',
               contextUsage.breakdown!['system'] ?? 0),
           _legend(h, HColors.infoOn(h.dark), '工具定义',
-              contextUsage.breakdown!['tools'] ?? 0),
+              contextUsage.breakdown!['toolDefs'] ?? 0),
           _legend(h, HColors.infoOn(h.dark), '对话历史',
-              contextUsage.breakdown!['history'] ?? 0),
+              (contextUsage.breakdown!['user'] ?? 0) +
+                  (contextUsage.breakdown!['assistant'] ?? 0) +
+                  (contextUsage.breakdown!['toolResults'] ?? 0) +
+                  (contextUsage.breakdown!['reasoning'] ?? 0) +
+                  (contextUsage.breakdown!['summary'] ?? 0)),
         ] else ...[
           _legend(h, h.accent, '系统提示与工具定义',
               contextUsage.frozenTokens),

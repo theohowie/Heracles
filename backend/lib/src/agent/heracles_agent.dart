@@ -372,6 +372,20 @@ class HeraclesAgent {
   ///
   /// 默认提示 + 宿主追加 + 工作区宪法/快照 + 长期记忆 —— 全部进 system 消息，
   /// 所以合成一块单列（再拆就要跨层穿透，不值得）。
+  /// ## 键（INTERFACE.md N2，2026-10-24：固定 7 个，只许新增不许改名）
+  ///
+  /// · `system`：默认提示 + 宿主追加 + 宪法/快照 + 长期记忆（都进 system 消息）；
+  /// · `toolDefs`：工具定义（toolsHistory 最后一次快照）；
+  /// · `user` / `assistant` / `toolResults`：按历史消息类型拆分；
+  /// · `reasoning`：恒 0 —— thought **不回放**（session_history 取舍②），
+  ///   历史里没有推理内容可估；
+  /// · `summary`：恒 0 —— 压缩快照在历史里是普通 ModelMessage，结构上
+  ///   无法与 assistant 正文区分（框架不给标记），如实给 0 并入 assistant。
+  ///
+  /// ## 后两块为什么是 0 也要给
+  ///
+  /// N2：前端环图只认固定键名 —— 0 也是"这一类存在但当前为空"的如实
+  /// 表达，比缺席（前端并入"其他"）更诚实。
   Map<String, int> contextBreakdown() {
     final st = _state;
     if (st == null) return const <String, int>{};
@@ -379,10 +393,29 @@ class HeraclesAgent {
     for (final p in _buildSystemPrompts()) {
       system += WindowRatioCompressor.estimateText(p);
     }
+    var user = 0;
+    var assistant = 0;
+    var toolResults = 0;
+    for (final m in st.history.messages) {
+      switch (m) {
+        case UserMessage():
+          user += WindowRatioCompressor.estimateMessageTokens(m);
+        case ModelMessage():
+          assistant += WindowRatioCompressor.estimateMessageTokens(m);
+        case FunctionExecutionResultMessage():
+          toolResults += WindowRatioCompressor.estimateMessageTokens(m);
+        default:
+          break;
+      }
+    }
     return <String, int>{
       'system': system,
-      'tools': WindowRatioCompressor.estimateToolDefinitions(st),
-      'history': WindowRatioCompressor.estimateMessagesUsage(st),
+      'toolDefs': WindowRatioCompressor.estimateToolDefinitions(st),
+      'toolResults': toolResults,
+      'reasoning': 0,
+      'assistant': assistant,
+      'user': user,
+      'summary': 0,
     };
   }
 
@@ -1304,7 +1337,14 @@ class _ApprovalHook extends AgentHook {
     }
 
     final args = _argsMapOf(context.call.arguments);
-    final allowed = await g.requestApproval(tool, args, _summaryOf(tool, args));
+    final allowed = await g.requestApproval(
+      callId: context.call.id,
+      toolName: tool,
+      args: args,
+      risk: _riskOf(tool),
+      detail: _summaryOf(tool, args),
+      workspaceInside: _workspaceInside(tool),
+    );
     if (allowed) {
       return ToolCallHookResult.proceed(context.call);
     }
@@ -1348,6 +1388,29 @@ class _ApprovalHook extends AgentHook {
   }
 
   String _clip(String s, int n) => s.length <= n ? s : '${s.substring(0, n)}…';
+
+  /// 一句话风险说明（INTERFACE.md N1 的 risk 字段；弹窗直接展示）。
+  String _riskOf(String tool) {
+    if (_shell.contains(tool)) {
+      return '在工作区里执行任意 shell 命令 —— 可能碰到工作区外的文件；'
+          'kill/force-stop 类已被硬禁令拦截。';
+    }
+    if (_destructive.contains(tool)) {
+      return '删除/移动/复制操作，不可逆或难逆 —— 删错数据找不回来。';
+    }
+    if (_apk.contains(tool)) {
+      return '构建/逆向/安装 APK —— 写入沙箱外 staging、安装直接动设备。';
+    }
+    return '会修改工作区内的文件（写/编辑/建目录）。';
+  }
+
+  /// 操作对象是否在工作区内（INTERFACE.md N1 的 workspaceInside 字段）。
+  ///
+  /// · 文件工具：路径按契约就是工作区相对路径 ⇒ 恒 true；
+  /// · shell：静态判不了命令会碰哪里 ⇒ false（保守，让用户看到命令原文再批）；
+  /// · APK：staging 在工作区外 ⇒ false。
+  bool _workspaceInside(String tool) =>
+      _workspaceMutating.contains(tool) || _destructive.contains(tool);
 }
 
 /// 宽松 JSON 解析 —— 占位（实际用 dart:convert 的 jsonDecode）。

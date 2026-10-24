@@ -49,15 +49,29 @@ abstract class AskGate {
   /// · **拿不到答案 = 拒绝**：超时 / 用户关闭 / 通道不可用一律回 `false`
   ///   （fail-closed），后端会把"用户拒绝"如实回给模型。
   ///
-  /// [args] 是工具参数（值已字符串化，供弹窗展示完整内容 ——
-  /// 审批的意义就是"看清楚再点允许"，**不要在宿主侧截断**）；
-  /// [detail] 是一句人话摘要（弹窗顶部的原因行）。
-  Future<bool> requestApproval(
-    String toolName,
-    Map<String, String> args,
-    String detail,
-  );
+  /// ## 参数（INTERFACE.md N1 的载荷，2026-10-24 升级为结构化形状）
+  ///
+  /// · [callId]：框架调用 id（答复必须带回它配对）；
+  /// · [toolName] / [args]：工具与参数（值已字符串化，弹窗展示完整内容，
+  ///   **不要在宿主侧截断** —— 审批的意义就是"看清楚再点允许"）；
+  /// · [risk]：一句话风险说明；
+  /// · [workspaceInside]：操作对象是否在工作区内（shell/APK 恒 false ——
+  ///   静态判不了/在工作区外）。
+  Future<bool> requestApproval({
+    required String callId,
+    required String toolName,
+    required Map<String, String> args,
+    required String risk,
+    required String detail,
+    required bool workspaceInside,
+  });
 }
+
+/// 疑似密钥/令牌的特征（SEC4）。宽匹配宁可误拦 —— 误拦的代价是
+/// 模型换一句脱敏写法，漏拦的代价是凭据进了明文文件。
+final RegExp _secretPattern = RegExp(
+    r'(sk-[A-Za-z0-9_-]{10,}|AKIA[0-9A-Z]{16}|ghp_[A-Za-z0-9]{20,}'
+    r'|gho_[A-Za-z0-9]{20,}|eyJ[A-Za-z0-9_-]{15,}|[A-Fa-f0-9]{32,})');
 
 /// 构建交互工具。
 ///
@@ -74,7 +88,7 @@ List<Tool> buildInteractionTools(
     // --------------------------------------------------------------- 问用户
     f.build(
       name: 'ask_user',
-      description: '向用户提问并等待回答。'
+      description: '向用户提问并等待回答。返回：用户逐题回答的文本（未答的题如实标注）。'
           '当关键信息缺失且无法从工作区推断时使用（例如"要覆盖还是另存？"）。'
           '⚠️ 不要用它确认显而易见的事；也不要问用户本来就能自己查的东西。',
       parameters: {
@@ -165,7 +179,7 @@ List<Tool> buildInteractionTools(
     // ----------------------------------------------------------- 长期记忆
     f.build(
       name: 'save_memory',
-      description: '把一条**跨会话有用**的信息记进长期记忆。'
+      description: '把一条**跨会话有用**的信息记进长期记忆。返回：写入确认或失败原因（含敏感内容拒收）。'
           '适合：项目约定（构建命令、代码风格）、用户偏好、踩过的坑。'
           '⚠️ 不适合记任务进度（那属于当前对话）；也不适合记一次性信息。',
       parameters: {
@@ -186,6 +200,17 @@ List<Tool> buildInteractionTools(
           return const CapabilityFailure(
             '记忆内容太短，至少写一句完整的话',
             isRetryable: true,
+          );
+        }
+        // ★ SEC4（2026-10-24）：疑似密钥/令牌拒绝入记忆 —— 记忆是明文文件
+        //   且整段进 system prompt，存 Key = 每轮都把它送进上下文。
+        final secret = _secretPattern.firstMatch(note);
+        if (secret != null) {
+          return const CapabilityFailure(
+            '未执行：内容疑似包含密钥/令牌（API Key、token 类字符串）。'
+            '长期记忆是明文存储且每轮进入上下文，绝不写入凭据。'
+            '如需记录配置方式，请写"密钥存放在何处"而不是密钥本身。',
+            isRetryable: false,
           );
         }
         return memory!.append(note);
