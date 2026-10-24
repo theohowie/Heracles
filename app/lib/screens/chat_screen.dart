@@ -3435,11 +3435,65 @@ class _ChatScreenState extends State<ChatScreen> {
     }
   }
 
+  /// **/compact 手动压缩**（2026-10-24）—— 输入框敲 `/compact` 触发。
+  ///
+  /// ## 为什么拦截在 `_runAgent` 而不是输入框组件
+  ///
+  /// 输入框只管收集文本；"什么文本是命令"属于会话层语义 —— 与排队/
+  /// 忙碌行为（BusySendBehavior）同一层。放这里，`/compact` 也自然继承
+  /// 排队语义（忙时按设置排队或中断，与普通消息一致）。
+  ///
+  /// ## 展示
+  ///
+  /// 摘要结果以**助手消息**形式插入当前屏幕（不落盘 —— 它不是模型回答，
+  /// 落盘会污染重放；真正的持久化是会话尾部的 compact 标记行）。
+  Future<void> _doCompact() async {
+    final ws = _activeWorkspace;
+    final sid = _activeSessionId;
+    if (ws == null) {
+      setState(() => _error = '请先选择一个工作区');
+      return;
+    }
+    if (sid == null || sid.isEmpty) {
+      setState(() {
+        _messages.add(HAssistantMessage(
+          id: _nextId(),
+          text: '当前还没有会话（先发一条消息创建），无需压缩。',
+        ));
+      });
+      _followBottomIfNeeded();
+      return;
+    }
+    setState(() => _busy = true);
+    try {
+      final note = await _bridge.compactSession(
+        workspacePath: ws.path,
+        sessionId: sid,
+        settings: widget.settings.value,
+      );
+      if (!mounted) return;
+      setState(() {
+        _messages.add(HAssistantMessage(id: _nextId(), text: note));
+      });
+      _followBottomIfNeeded();
+    } catch (e) {
+      if (mounted) setState(() => _error = '压缩失败：$e');
+    } finally {
+      if (mounted) setState(() => _busy = false);
+    }
+  }
+
   /// ★ **真实运行** —— 调用 Kotlin 侧的 `AgentLoop`。
   ///
   /// **没有会话时 Kotlin 会自动新建** —— 这就是
   /// "在工作区里直接发消息"的行为，与桌面版一致。
   Future<void> _runAgent(String request) async {
+    // ★ /compact 手动压缩（2026-10-24，C2 的 P2 欠账）：拦截在**落用户气泡
+    //   之前** —— /compact 是命令不是对话内容，不该出现在会话流里。
+    if (request.trim().toLowerCase() == '/compact') {
+      await _doCompact();
+      return;
+    }
     setState(() {
       final names = _attachments.map((a) => a.name).join('、');
       final label = _attachments.isEmpty

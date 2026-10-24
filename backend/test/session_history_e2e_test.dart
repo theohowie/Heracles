@@ -289,6 +289,56 @@ void main() {
   // ==========================================================================
   // 工具历史回填（2026-10-24）：tool_call / tool(带 id) 行 → 配对重建
   // ==========================================================================
+  // ==========================================================================
+  // /compact 手动压缩（2026-10-24）：compact 标记行 + 会话摘要
+  // ==========================================================================
+  group('/compact —— compact 标记行回填与摘要调用', () {
+    test('★★★ compact 标记 ⇒ 丢弃此前一切，只带摘要进场；之后的行照常追加', () {
+      final h = sessionRowsToHistory([
+        {'role': 'user', 'text': '很久以前的问题'},
+        {'role': 'assistant', 'text': '很久以前的回答'},
+        {'role': 'tool_call', 'id': 'c1', 'tool': 't', 'args': {}},
+        {'role': 'tool', 'id': 'c1', 'tool': 't', 'result': 'x', 'ok': true},
+        {'role': 'compact', 'summary': '用户在做 X，已完成 A，剩余 B。'},
+        {'role': 'user', 'text': '压缩后的新问题'},
+      ]);
+
+      expect(h, hasLength(2), reason: '标记之前的一切（含半批工具）都不进历史');
+      expect(_textOfAny(h[0]), contains('用户在做 X'),
+          reason: '摘要以 user 消息进场');
+      expect(_textOfAny(h[0]), contains('/compact'));
+      expect(_textOfAny(h[1]), '压缩后的新问题');
+    });
+
+    test('★★ summary 为空的标记行（异常产物）被忽略，不清历史', () {
+      final rows = [
+        {'role': 'user', 'text': '问题'},
+        {'role': 'compact', 'summary': ''},
+      ];
+      final h = sessionRowsToHistory(rows);
+      expect(h, hasLength(1));
+      expect(_textOfAny(h.single), '问题');
+    });
+
+    test('★★★ summarizeTranscript：把记录交给摘要器，返回修剪后的正文', () async {
+      final client = _ScriptedClient(reply: '  摘要正文。  ');
+      final out = await HeraclesAgent.summarizeTranscript(
+        config: const BackendConfig(apiKey: 'k', modelName: 'm'),
+        transcript: '用户：做 X\n助手：做完 A',
+              // ★ 注入替身 —— 不注入就会打真实 API（dio 重试到超时）
+        client: client,
+);
+      expect(out, '摘要正文。', reason: '首尾空白要修剪');
+      // 第 0 条 = system（摘要指令），第 1 条 = user（transcript 原文）
+      final sys = client.calls[0].whereType<SystemMessage>().single;
+      expect(sys.content, contains('摘要'));
+      expect(sys.content, contains('未完成'));
+      final user = client.calls[0].whereType<UserMessage>().single;
+      expect(_textOf(user), contains('做 X'));
+      expect(_textOf(user), contains('做完 A'));
+    });
+  });
+
   group('工具历史 —— tool_call/tool 行按 id 配对回填（取舍① 的解除）', () {
     test('★★★ 单个调用：tool_call + tool ⇒ 一对消息，结果进上下文', () {
       final h = sessionRowsToHistory([

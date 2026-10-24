@@ -160,6 +160,22 @@ List<LLMMessage> sessionRowsToHistory(
           model: 'history',
         ));
 
+      case 'compact':
+        // /compact 标记（2026-10-24）：**丢弃此前的一切**，只带摘要进场。
+        //
+        // 这就是手动压缩的语义 —— 与 Claude Code /compact 的"完全重置"
+        // 同义，但在 append-only 会话文件上实现：原始行一字未动，
+        // 只是回填历史时不再看它们。摘要为空的标记行（异常产物）忽略。
+        final summary = ((row['summary'] as String?) ?? '').trim();
+        if (summary.isEmpty) continue;
+        out.clear();
+        pendingCalls.clear();
+        pendingResults.clear();
+        out.add(UserMessage.text(
+          '[会话已压缩（/compact）] 以下是更早对话的要点摘要，'
+          '原始细节已按用户要求丢弃：\n$summary',
+        ));
+
       case 'tool_call':
         // 模型发起的工具调用（2026-10-24 新行格式）→ 暂存，等结果凑齐。
         final id = (row['id'] as String?) ?? '';

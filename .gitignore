@@ -54,3 +54,6 @@ phone/
 # 2026-10-22 旧 Kotlin `toolchain` 模块的本地备份压缩包（重构后已从仓库删除该模块，
 # 这份 zip 只是本机留档，**不入库**；需要时解压即得旧源码）
 toolchain.zip
+
+# E1 跑分结果（本地产物，不入库）
+backend/tool/eval_results/
