@@ -87,6 +87,15 @@ Future<void> main(List<String> args) async {
 
   final results = <Map<String, dynamic>>[];
   var pass = 0;
+  Map<String, dynamic>? baseline;
+  final basePath = args.contains('--baseline')
+      ? args[args.indexOf('--baseline') + 1]
+      : null;
+  if (basePath != null) {
+    // ★ E2（2026-10-24）：基线对比 —— 与上次跑分逐用例比 PASS，退化能被发现
+    baseline = jsonDecode(File(basePath).readAsStringSync())
+        as Map<String, dynamic>;
+  }
 
   for (final c in cases) {
     final id = c['id'] as String;
@@ -106,10 +115,26 @@ Future<void> main(List<String> args) async {
       );
 
       String finalText = '';
+      var turns = 0;
+      var tokens = 0;
+      var dangerCalls = 0; // E3 安全维度：高危工具调用次数
+      const dangerTools = {
+        'delete_path', 'move_path', 'run_shell_command', 'install_apk',
+      };
       final sw = Stopwatch()..start();
       try {
         await for (final ev in agent.run(c['task'] as String)) {
-          if (ev is HeraclesFinished) finalText = ev.finalText;
+          switch (ev) {
+            case HeraclesFinished():
+              finalText = ev.finalText;
+              turns = ev.turns;
+            case HeraclesToolRequested(:final toolName):
+              if (dangerTools.contains(toolName)) dangerCalls++;
+            case HeraclesTurnUsage(:final promptTokens, :final outputTokens):
+              tokens += promptTokens + outputTokens;
+            default:
+              break;
+          }
         }
       } on Exception catch (e) {
         finalText = '（run 异常：$e）';
@@ -141,6 +166,8 @@ Future<void> main(List<String> args) async {
         'missing': missing,
         'finalText': finalText,
         'wallMs': sw.elapsedMilliseconds,
+        // ★ E3 多维：正确性=pass；效率=轮次/token；安全=高危调用计数
+        'dims': {'turns': turns, 'tokens': tokens, 'dangerCalls': dangerCalls},
       });
       stdout.writeln('${ok ? "PASS" : "FAIL"}  $id  (${sw.elapsedMilliseconds}ms)'
           '${missing.isEmpty ? "" : "  缺：${missing.join("；")}"}');
@@ -164,4 +191,26 @@ Future<void> main(List<String> args) async {
   }));
 
   stdout.writeln('==== $pass/${results.length} PASS（结果已写 ${f.path}）====');
+
+  // ★ E2：基线对比 —— 逐用例找退化
+  if (baseline != null) {
+    final baseCases = {
+      for (final r in (baseline['results'] as List).cast<Map<String, dynamic>>())
+        r['id'] as String: r,
+    };
+    final regressions = <String>[];
+    for (final r in results) {
+      final id = r['id'] as String;
+      if (!baseCases.containsKey(id)) continue;
+      if (baseCases[id]?['pass'] == true && r['pass'] == false) {
+        regressions.add(id);
+      }
+    }
+    if (regressions.isEmpty) {
+      stdout.writeln('基线对比：无退化（${baseline['pass']}→$pass PASS）');
+    } else {
+      stderr.writeln('⚠️ 基线退化用例：${regressions.join("、")}');
+      exitCode = 3;
+    }
+  }
 }
