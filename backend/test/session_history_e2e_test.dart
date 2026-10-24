@@ -292,6 +292,65 @@ void main() {
   // ==========================================================================
   // /compact 手动压缩（2026-10-24）：compact 标记行 + 会话摘要
   // ==========================================================================
+  group('M2 —— 计划落盘（plan 行回填恢复）', () {
+    test('★★★ plan 行 ⇒ 末尾合成一条"恢复会话"消息，含状态标注', () {
+      final h = sessionRowsToHistory([
+        {'role': 'user', 'text': '做个功能'},
+        {
+          'role': 'plan',
+          'steps': [
+            {'text': '查结构', 'status': 'done'},
+            {'text': '写实现', 'status': 'active'},
+            {'text': '验证', 'status': 'pending'},
+          ],
+        },
+        {'role': 'assistant', 'text': '进行中。'},
+      ]);
+
+      final plan = h.whereType<UserMessage>().last;
+      final t = _textOf(plan);
+      expect(t, contains('[恢复会话]'));
+      expect(t, contains('1. [已完成] 查结构'));
+      expect(t, contains('2. [进行中] 写实现'));
+      expect(t, contains('3. [待办] 验证'));
+      expect(t, contains('write_todos'), reason: '告诉模型可以继续更新');
+      // 顺序：合成消息在末尾（它是最新状态）
+    });
+
+    test('★★ 多条 plan 行 ⇒ 只有最后一条生效；无 plan 行 ⇒ 无合成消息', () {
+      final withPlan = sessionRowsToHistory([
+        {'role': 'plan', 'steps': [{'text': '旧', 'status': 'pending'}]},
+        {'role': 'plan', 'steps': [{'text': '新', 'status': 'active'}]},
+      ]);
+      final texts = withPlan.map(_textOfAny).join(' | ');
+      expect(texts, contains('新'));
+      expect(texts, isNot(contains('旧')), reason: '只有最后一次计划是现状');
+
+      final noPlan = sessionRowsToHistory([
+        {'role': 'user', 'text': '问'},
+        {'role': 'assistant', 'text': '答'},
+      ]);
+      expect(noPlan.map(_textOfAny).join(' | '), isNot(contains('恢复会话')));
+    });
+
+    test('★★ 合成消息在 dropLastUserIfMatches **之后** —— 不挡本轮去重', () {
+      final h = sessionRowsToHistory([
+        {'role': 'user', 'text': '上一轮'},
+        {
+          'role': 'plan',
+          'steps': [{'text': '步骤', 'status': 'pending'}],
+        },
+        {'role': 'user', 'text': '本轮请求'},
+      ], dropLastUserIfMatches: '本轮请求');
+
+      final texts = h.map(_textOfAny).toList();
+      expect(texts, isNot(contains('本轮请求')),
+          reason: '本轮请求必须被去重（合成消息在之后追加，不能挡住它）');
+      expect(texts.last, contains('[恢复会话]'),
+          reason: '合成计划消息是回填的最后一条');
+    });
+  });
+
   group('/compact —— compact 标记行回填与摘要调用', () {
     test('★★★ compact 标记 ⇒ 丢弃此前一切，只带摘要进场；之后的行照常追加', () {
       final h = sessionRowsToHistory([
