@@ -1151,6 +1151,31 @@ class _ChatScreenState extends State<ChatScreen> {
   /// {"role":"assistant","text":"...","cached":1024,"prompt":1200,"out":50,"ms":6530}
   /// ```
   List<HMessage> _toMessages(List<Map<String, dynamic>> raw) {
+    // ★ 计划恢复（M2，2026-10-24）：取**最后一条** plan 行还原顶部清单。
+    //   副作用写在转换器里（重载必经之路）；实时路径不受影响
+    //   （plan_created 事件照常覆盖这些字段）。
+    for (final m in raw) {
+      if ((m['role'] as String?) != 'plan') continue;
+      final steps = m['steps'];
+      if (steps is! List || steps.isEmpty) continue;
+      final texts = <String>[];
+      var done = 0;
+      var active = -1;
+      for (final s in steps) {
+        if (s is! Map) continue;
+        final t = ((s['text'] as String?) ?? '').trim();
+        if (t.isEmpty) continue;
+        texts.add(t);
+        final st = (s['status'] as String?) ?? 'pending';
+        if (st == 'done') done++;
+        if (st == 'active') active = texts.length - 1;
+      }
+      if (texts.isNotEmpty) {
+        _planSteps = texts;
+        _planDone = done;
+        _planActive = active;
+      }
+    }
     final out = <HMessage>[];
     for (final m in raw) {
       final role = (m['role'] as String?) ?? '';

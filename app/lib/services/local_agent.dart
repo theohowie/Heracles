@@ -953,6 +953,17 @@ class LocalAgentExecutor {
             tr.budgetWarning(used, limit);
           case HeraclesPlanUpdated(:final steps):
             tr.planUpdated(steps);
+            // ★ 计划落盘（M2，2026-10-24）：每次变化追加一行 plan ——
+            //   回填取最后一行恢复（模型侧），UI 重载也读它（清单恢复）。
+            //   append-only：旧计划行保留（历史里能看到计划怎么演化的）。
+            await sessionStore.appendMessage(sid, {
+              'role': 'plan',
+              'steps': [
+                for (final s in steps)
+                  {'text': s.text, 'status': s.status.name},
+              ],
+              'ts': DateTime.now().millisecondsSinceEpoch,
+            });
           case HeraclesContextCompressed(
               :final beforeMessages,
               :final afterMessages,

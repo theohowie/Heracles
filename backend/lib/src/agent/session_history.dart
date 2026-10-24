@@ -121,6 +121,12 @@ List<LLMMessage> sessionRowsToHistory(
   final pendingCalls = <String, FunctionCall>{};
   final pendingResults = <String, FunctionExecutionResult>{};
 
+  // 计划恢复（M2，2026-10-24）：记住**最后一次**计划的可读渲染，
+  // 在回填结果的末尾以一条 user 消息进场 —— 模型隔天续会话能看到
+  // "此前计划到哪了"。（渲染成文本而不是重建框架 PlanState：
+  // write_todos 每次都是全量更新，模型读到文本就够了。）
+  String? lastPlanText;
+
   void flushToolBatchIfComplete() {
     if (pendingCalls.isEmpty) return;
     if (pendingResults.length < pendingCalls.length) return;
@@ -159,6 +165,30 @@ List<LLMMessage> sessionRowsToHistory(
           textOutput: text,
           model: 'history',
         ));
+
+      case 'plan':
+        // 计划行（M2，2026-10-24）：App 每次计划变化追加一行，取最后一条。
+        final planSteps = row['steps'];
+        if (planSteps is! List || planSteps.isEmpty) continue;
+        final pbuf = StringBuffer();
+        var count = 0;
+        for (final s in planSteps) {
+          if (s is! Map) continue;
+          final t = ((s['text'] as String?) ?? '').trim();
+          if (t.isEmpty) continue;
+          count++;
+          final tag = switch ((s['status'] as String?) ?? 'pending') {
+            'done' => '已完成',
+            'active' => '进行中',
+            'cancelled' => '已取消',
+            _ => '待办',
+          };
+          pbuf.writeln('$count. [$tag] $t');
+        }
+        if (count > 0) {
+          lastPlanText = '此前的任务计划（可用 write_todos 继续更新）：'
+              '\n${pbuf.toString().trimRight()}';
+        }
 
       case 'compact':
         // /compact 标记（2026-10-24）：**丢弃此前的一切**，只带摘要进场。
@@ -247,6 +277,12 @@ List<LLMMessage> sessionRowsToHistory(
       out.last is ModelMessage &&
       (out.last as ModelMessage).functionCalls.isNotEmpty) {
     out.removeLast();
+  }
+
+  // ---- 计划恢复（M2）：放**最后** —— 它是最新状态，且必须在
+  //      dropLastUserIfMatches 之后（否则会挡住"本轮请求去重"的判定）。
+  if (lastPlanText != null) {
+    out.add(UserMessage.text('[恢复会话] $lastPlanText'));
   }
   return out;
 }
