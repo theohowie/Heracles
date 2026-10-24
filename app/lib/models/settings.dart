@@ -47,6 +47,21 @@ enum AppAppearance {
   final String label;
 }
 
+/// 主题风格（2026-10-24，用户拍板：外观页用主题选择代替强调色选择）。
+///
+/// 只改颜色与背景，不改布局结构。默认黑白；柔雾是 2026-10-23 定过的
+/// 方向；极光、活力来自概念图里的两套配色。
+enum AppThemeStyle {
+  bw('黑白', '默认：只用黑、白、灰'),
+  mist('柔雾', '奶油底 + 淡紫 + 薄荷'),
+  aurora('极光', '深色底 + 紫青极光'),
+  vitality('活力', '暖底 + 珊瑚橙');
+
+  const AppThemeStyle(this.label, this.description);
+  final String label;
+  final String description;
+}
+
 /// 工作步骤展示详细度 —— 用户设置截图里的四档。
 ///
 /// **行为落点**：工具调用卡片（`widgets/tool_call_card.dart`）的渲染密度，
@@ -512,6 +527,7 @@ class AppSettings {
     this.permission = PermissionMode.workspaceAuto,
     this.language = AppLanguage.zh,
     this.appearance = AppAppearance.dark,
+    this.themeStyle = AppThemeStyle.bw,
     this.fontSize = 15,
     this.stepDetail = StepDetail.standard,
     this.reasoningLevel = ReasoningLevel.auto,
@@ -526,6 +542,9 @@ class AppSettings {
   final PermissionMode permission;
   final AppLanguage language;
   final AppAppearance appearance;
+
+  /// 主题风格（颜色与背景；默认黑白）
+  final AppThemeStyle themeStyle;
 
   /// 会话内容字号（12–20）
   final double fontSize;
@@ -701,6 +720,7 @@ class AppSettings {
     PermissionMode? permission,
     AppLanguage? language,
     AppAppearance? appearance,
+    AppThemeStyle? themeStyle,
     double? fontSize,
     StepDetail? stepDetail,
     ReasoningLevel? reasoningLevel,
@@ -715,6 +735,7 @@ class AppSettings {
         permission: permission ?? this.permission,
         language: language ?? this.language,
         appearance: appearance ?? this.appearance,
+        themeStyle: themeStyle ?? this.themeStyle,
         fontSize: fontSize ?? this.fontSize,
         stepDetail: stepDetail ?? this.stepDetail,
         reasoningLevel: reasoningLevel ?? this.reasoningLevel,

@@ -300,10 +300,22 @@ class UsageSidebar extends StatelessWidget {
             ),
           ),
         const SizedBox(height: HSpace.md),
-        _legend(h, h.accent, '系统提示与工具定义',
-            contextUsage.frozenTokens),
-        _legend(h, HColors.infoOn(h.dark), '对话消息',
-            contextUsage.conversationTokens),
+        // ★ C5（2026-10-24）：有构成数据时把"冻结区"拆成 系统 / 工具定义
+        //   两行（记忆/宪法/快照都在 system 消息里，合成一块）——
+        //   用户能看见"上下文被什么吃掉了"。没有数据（没跑过）退回两行旧图例。
+        if (contextUsage.breakdown != null) ...[
+          _legend(h, h.accent, '系统提示与记忆',
+              contextUsage.breakdown!['system'] ?? 0),
+          _legend(h, HColors.infoOn(h.dark), '工具定义',
+              contextUsage.breakdown!['tools'] ?? 0),
+          _legend(h, HColors.infoOn(h.dark), '对话历史',
+              contextUsage.breakdown!['history'] ?? 0),
+        ] else ...[
+          _legend(h, h.accent, '系统提示与工具定义',
+              contextUsage.frozenTokens),
+          _legend(h, HColors.infoOn(h.dark), '对话消息',
+              contextUsage.conversationTokens),
+        ],
         // ★ 2026-10-22：删掉「均为估算值，非真实 tokenizer」这句小字
         //   （用户：不是写给用户看的）。
       ],

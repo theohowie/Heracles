@@ -91,6 +91,7 @@ class SettingsController extends ValueNotifier<AppSettings> {
   static const _kPermission = 'permission';
   static const _kLanguage = 'language';
   static const _kAppearance = 'appearance';
+  static const _kThemeStyle = 'themeStyle';
   static const _kFontSize = 'fontSize';
   static const _kStepDetail = 'stepDetail';
   /// 推理等级（2026-10-12，S4/S5）—— 未写过时默认 `auto`
@@ -235,6 +236,8 @@ class SettingsController extends ValueNotifier<AppSettings> {
           AppLanguage.values, _prefs.getString(_kLanguage), AppLanguage.zh),
       appearance: _enumOf(AppAppearance.values,
           _prefs.getString(_kAppearance), AppAppearance.dark),
+      themeStyle: _enumOf(AppThemeStyle.values,
+          _prefs.getString(_kThemeStyle), AppThemeStyle.bw),
       fontSize: _prefs.getDouble(_kFontSize) ?? 15,
       stepDetail: _enumOf(StepDetail.values, _prefs.getString(_kStepDetail),
           StepDetail.standard),
@@ -320,6 +323,9 @@ class SettingsController extends ValueNotifier<AppSettings> {
 
   Future<void> setAppearance(AppAppearance v) =>
       _apply(value.copyWith(appearance: v), _kAppearance, v.name);
+
+  Future<void> setThemeStyle(AppThemeStyle v) =>
+      _apply(value.copyWith(themeStyle: v), _kThemeStyle, v.name);
 
   Future<void> setFontSize(double v) => _apply(
       value.copyWith(fontSize: v.clamp(12, 20)), _kFontSize, v.clamp(12, 20));

@@ -67,7 +67,7 @@ class SettingsScreen extends StatelessWidget {
             _SettingsTile(
               icon: CupertinoIcons.paintbrush,
               title: 'Theme / 外观',
-              subtitle: '强调色 · 玻璃效果',
+              subtitle: '玻璃效果',
               onTap: () => _push(context, AppearanceSettingsPage(controller: controller)),
             ),
             // ★ 设备权限（2026-10-16）—— **二级页面**
@@ -1039,25 +1039,25 @@ class GeneralSettingsPage extends StatelessWidget {
             Divider(),
 
             // ---- 工作步骤展示（★ 真实功能：过滤工具卡片细节）----
+            // 2026-10-24 黑白改版：选择器改分档滑杆（真实四档：
+            // 精简/标准/详细/完全展开），与概念图一致。
             const _SectionLabel('会话'),
-            _PickerRow<StepDetail>(
+            _SteppedRow<StepDetail>(
               label: '工作步骤展示',
               hint: '选择希望看到多少工具调用细节',
               value: s.stepDetail,
               options: StepDetail.values,
               labelOf: (v) => v.label,
-              descOf: (v) => v.description,
               onChanged: controller.setStepDetail,
             ),
             // ⚠️ 2026-10-19：「显示代码工作视图」开关已删 —— 它没有任何消费方
             //   （渲染层从未读过这个值），是个"拨了没反应"的假开关。
-            _PickerRow<BusySendBehavior>(
+            _SteppedRow<BusySendBehavior>(
               label: '繁忙时的发送行为',
               hint: '智能体运行时按发送键的行为',
               value: s.busySend,
               options: BusySendBehavior.values,
               labelOf: (v) => v.label,
-              descOf: (v) => v.description,
               onChanged: controller.setBusySend,
             ),
           ],
@@ -2092,7 +2092,6 @@ class AppearanceSettingsPage extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final h = Hue.of(context);
     return Scaffold(
       appBar:
           AppBar(title: Text('Theme / 外观'), leading: _iosBackLeading(context)),
@@ -2101,36 +2100,17 @@ class AppearanceSettingsPage extends StatelessWidget {
         builder: (context, s, _) => ListView(
           padding: const EdgeInsets.symmetric(vertical: HSpace.sm),
           children: [
-            const _SectionLabel('强调色'),
-            Padding(
-              padding: const EdgeInsets.symmetric(horizontal: HSpace.lg),
-              child: Wrap(
-                spacing: HSpace.md,
-                runSpacing: HSpace.md,
-                children: kAccentPresets.map((p) {
-                  final selected = p.hex == s.accentHex;
-                  return GestureDetector(
-                    onTap: () => controller.setAccentHex(p.hex),
-                    child: Container(
-                      width: 40,
-                      height: 40,
-                      decoration: BoxDecoration(
-                        color: Color(p.hex),
-                        shape: BoxShape.circle,
-                        border: selected
-                            ? Border.all(color: h.text, width: 2.5)
-                            : null,
-                      ),
-                      child: selected
-                          ? const Icon(AppIcons.check,
-                              size: 19, color: CupertinoColors.white)
-                          : null,
-                    ),
-                  );
-                }).toList(),
+            Divider(),
+            // ★ 主题选择（2026-10-24，用户拍板）：代替已移除的强调色选择。
+            //   只换颜色与背景，不换布局；默认黑白。
+            const _SectionLabel('主题'),
+            for (final t in AppThemeStyle.values)
+              _ThemeCard(
+                style: t,
+                selected: s.themeStyle == t,
+                dark: Hue.of(context).dark,
+                onTap: () => controller.setThemeStyle(t),
               ),
-            ),
-            const SizedBox(height: HSpace.xl),
             Divider(),
             const _SectionLabel('效果'),
             _SwitchRow(
@@ -2144,6 +2124,95 @@ class AppearanceSettingsPage extends StatelessWidget {
       ),
     );
   }
+}
+
+/// 主题选择卡：名字 + 一句话 + 该主题在当前深浅下的色板预览。
+class _ThemeCard extends StatelessWidget {
+  const _ThemeCard({
+    required this.style,
+    required this.selected,
+    required this.dark,
+    required this.onTap,
+  });
+
+  final AppThemeStyle style;
+  final bool selected;
+  final bool dark;
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    final h = Hue.of(context);
+    final preview = Hue.forTheme(style, dark);
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(HSpace.lg, 0, HSpace.lg, HSpace.sm),
+      child: GestureDetector(
+        onTap: onTap,
+        behavior: HitTestBehavior.opaque,
+        child: Container(
+          padding: const EdgeInsets.symmetric(
+              horizontal: HSpace.lg, vertical: HSpace.md),
+          decoration: BoxDecoration(
+            color: h.surface,
+            borderRadius: BorderRadius.circular(HRadius.md),
+            border: Border.all(
+              color: selected ? h.text : h.border,
+              width: selected ? 1.5 : 1,
+            ),
+          ),
+          child: Row(
+            children: [
+              // 色板：底色 / 卡片色 / 强调色
+              Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  _dot(preview.bg, preview.border),
+                  const SizedBox(width: 4),
+                  _dot(preview.surface, preview.border),
+                  const SizedBox(width: 4),
+                  _dot(preview.accent, preview.border),
+                ],
+              ),
+              const SizedBox(width: HSpace.md),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      style.label,
+                      style: TextStyle(
+                        fontSize: 15,
+                        fontWeight:
+                            selected ? FontWeight.w600 : FontWeight.w400,
+                        color: h.text,
+                      ),
+                    ),
+                    const SizedBox(height: 2),
+                    Text(
+                      style.description,
+                      style: TextStyle(fontSize: 12, color: h.textFaint),
+                    ),
+                  ],
+                ),
+              ),
+              if (selected)
+                Icon(AppIcons.check, size: 19, color: h.text),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _dot(Color fill, Color ring) => Container(
+        width: 18,
+        height: 18,
+        decoration: BoxDecoration(
+          color: fill,
+          shape: BoxShape.circle,
+          border: Border.all(color: ring),
+        ),
+      );
 }
 
 class AboutPage extends StatelessWidget {
@@ -2468,6 +2537,97 @@ class _SliderRow extends StatelessWidget {
 }
 
 /// 开关行
+/// 分档滑杆（2026-10-24 黑白改版）：把枚举选项排成滑杆的刻度，
+/// 拖到哪一档就是哪一档。与 _SliderRow 同款外观（标签 + 当前值徽标 + 滑杆）。
+class _SteppedRow<T> extends StatelessWidget {
+  const _SteppedRow({
+    required this.label,
+    required this.value,
+    required this.options,
+    required this.labelOf,
+    required this.onChanged,
+    this.hint,
+  });
+
+  final String label;
+  final String? hint;
+  final T value;
+  final List<T> options;
+  final String Function(T) labelOf;
+  final void Function(T) onChanged;
+
+  @override
+  Widget build(BuildContext context) {
+    final h = Hue.of(context);
+    final index = options.indexOf(value).clamp(0, options.length - 1);
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(
+          HSpace.lg, HSpace.sm, HSpace.lg, HSpace.sm),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(label,
+                        style: TextStyle(fontSize: 14, color: h.text)),
+                    if (hint != null) ...[
+                      const SizedBox(height: 2),
+                      Text(hint!,
+                          style: TextStyle(
+                              fontSize: 11.5, color: h.textFaint)),
+                    ],
+                  ],
+                ),
+              ),
+              Container(
+                padding: const EdgeInsets.symmetric(
+                    horizontal: HSpace.md, vertical: HSpace.xs + 2),
+                decoration: BoxDecoration(
+                  color: h.surface,
+                  borderRadius: BorderRadius.circular(HRadius.md),
+                  border: Border.all(color: h.border),
+                ),
+                child: Text(
+                  labelOf(value),
+                  style: TextStyle(fontSize: 13, color: h.text),
+                ),
+              ),
+            ],
+          ),
+          CupertinoSlider(
+            value: index.toDouble(),
+            min: 0,
+            max: (options.length - 1).toDouble(),
+            divisions: options.length - 1,
+            activeColor: h.accent,
+            onChanged: (v) => onChanged(options[v.round()]),
+          ),
+          // 刻度标签：首尾对齐，中间均分
+          Row(
+            mainAxisAlignment: MainAxisAlignment.spaceBetween,
+            children: [
+              for (final o in options)
+                Text(
+                  labelOf(o),
+                  style: TextStyle(
+                    fontSize: 11,
+                    color: o == value ? h.text : h.textFaint,
+                    fontWeight:
+                        o == value ? FontWeight.w600 : FontWeight.w400,
+                  ),
+                ),
+            ],
+          ),
+        ],
+      ),
+    );
+  }
+}
+
 class _SwitchRow extends StatelessWidget {
   const _SwitchRow({
     required this.label,

@@ -420,7 +420,16 @@ class WorkspaceDrawer extends StatelessWidget {
         padding: const EdgeInsets.fromLTRB(HSpace.lg, HSpace.md, HSpace.sm, 0),
         child: Row(
           children: [
-            Icon(AppIcons.bolt, size: 21, color: h.accent),
+            // ★ 真实 App 图标（2026-10-24 黑白改版）：不再用字母/符号占位
+            ClipRRect(
+              borderRadius: BorderRadius.circular(8),
+              child: Image.asset(
+                'assets/branding/app_icon_source.png',
+                width: 30,
+                height: 30,
+                fit: BoxFit.cover,
+              ),
+            ),
             const SizedBox(width: HSpace.sm),
             Text(
               'Heracles',
@@ -979,8 +988,8 @@ class _WorkspaceGroup extends StatelessWidget {
                         maxLines: 1,
                         overflow: TextOverflow.ellipsis,
                         style: TextStyle(
-                            fontSize: 14,
-                            fontWeight: FontWeight.w500,
+                            fontSize: 15,
+                            fontWeight: FontWeight.w600,
                             color: h.text),
                       ),
                       if (!workspace.writable)

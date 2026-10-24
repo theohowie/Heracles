@@ -27,23 +27,33 @@
 ///
 /// ## 三条取舍（都不是随便定的）
 ///
-/// ### ① **只回填 user / assistant 的纯文本，不喂 tool 行**
+/// ### ① **tool 行按"调用 id"配对回填（2026-10-24 起）**
 ///
-/// 工具结果（`role:"tool"`）在框架里的角色是
-/// `FunctionExecutionResultMessage`，它**必须**紧跟在带
-/// `functionCalls` 的 `ModelMessage` 后面配对出现。而我们的 `.jsonl` 里
-/// 工具行是**独立一行**、且它对应的 `ModelMessage.functionCalls`
-/// **没有被落盘**（App 只存了工具结果，没存"模型请求了哪个调用 id"）。
+/// 原来的取舍是"只回填 user/assistant 纯文本，tool 行一律跳过"—— 根因是
+/// `.jsonl` 里**没有**"模型请求了哪个调用 id"，硬塞 `FunctionExecutionResultMessage`
+/// 就是**无配对的 tool 结果**，OpenAI/Anthropic 两家都会 400。
+/// 那个代价（模型看不到上一轮工具的输出）在真机上反复疼过：隔天续会话，
+/// 模型把昨天已经跑过的构建/搜索**原样重跑一遍**。
 ///
-/// ⇒ 硬把一个 `FunctionExecutionResultMessage` 塞进历史，就是**没有配对的
-///   tool 结果**。OpenAI 系会直接 400（`tool_call_id` 找不到对应的
-///   `tool_calls`），Anthropic 系会 400（`tool_use` / `tool_result` 不配对）。
+/// 现在会话格式补了两种行（App 侧 `_drive` 落盘）：
 ///
-/// **代价（必须说清，不许淡化）**：模型回看历史时**看不到上一轮工具的输出**。
-/// 它知道"我说过要读那个文件"，但不知道"读到了什么"。这是"能跑"与
-/// "全能"之间的取舍 —— 我们选能跑，并在系统提示里让模型必要时重新读一次。
-/// 要真正补齐，得让 App 落盘 `ModelMessage.functionCalls`（改会话格式），
-/// 那是另一个改动。
+/// ```jsonl
+/// {"role":"tool_call","id":"c1","tool":"read_file","args":{...}}   ← 发起时写
+/// {"role":"tool","id":"c1","tool":"read_file","result":"...",...}  ← 结束时写（旧格式无 id）
+/// ```
+///
+/// 翻译规则：`tool_call` 行 → 暂存一个 `FunctionCall`；`tool` 行带 `id` →
+/// 凑成 `FunctionExecutionResult`。**一个批次的所有调用都有结果时**才
+/// 一起发出 `ModelMessage(functionCalls)` + `FunctionExecutionResultMessage`
+/// —— 框架与两家 wire 都要求严格配对，宁可不发也不发半个批次。
+///
+/// 兼容性：旧会话（无 `tool_call` 行 / `tool` 行无 `id`）自然落回旧行为
+/// （跳过）；尾部"只有调用、没有结果"的残批（进程被杀）整体丢弃。
+///
+/// ### ①′ **裁剪不许切断配对**
+///
+/// 按条数裁到最近 N 条后做一次清理：开头孤立的结果消息、结尾孤立带调用的
+/// assistant 消息都丢掉 —— 半个批次比少一个批次更危险（400）。
 ///
 /// ### ② **assistant 消息用 `ModelMessage(textOutput:)`，不碰 `thought`**
 ///
@@ -58,6 +68,8 @@
 /// 本文件不管这件事（它不知道哪条是本轮），责任在调用方 —— 见
 /// [_HistoryLimits] 之上的 `fromSessionRows` 的 `dropLastUserIfMatches` 参数。
 library;
+
+import 'dart:convert';
 
 import 'package:dart_agent_core/dart_agent_core.dart';
 
@@ -91,22 +103,37 @@ const int kHistoryMaxMessages = 40;
 /// 就把它丢掉。用于排除"本轮刚落盘的那条 user 消息"。
 /// 传 `null` 表示不做这件事（纯读历史场景）。
 ///
-/// 返回的列表**只含** `UserMessage` / `ModelMessage`，且已被裁到
-/// 最近 [maxMessages] 条。
-///
-/// ## 为什么按"轮"裁剪可能切断半轮
-///
-/// 直接按条数裁确实可能留下"一条 assistant 却没有对应的 user"。
-/// 但那**不会让请求失败**（OpenAI 与 Anthropic 都接受以 assistant 开头的
-/// 历史；后者还用它做 prefill）。真正会失败的是**不配对的 tool 结果**，
-/// 而那种行我们压根没转 —— 所以这里不需要更复杂的"按轮对齐"逻辑。
-/// 宁可少一条，也不为了"整齐"去猜。
+/// 返回的列表含 `UserMessage` / `ModelMessage` / `FunctionExecutionResultMessage`
+/// （最后一类必须与前面的 assistant 调用**成对**出现），且已被裁到
+/// 最近 [maxMessages] 条、并清理过被裁断的半批（见文件头「取舍①′」）。
 List<LLMMessage> sessionRowsToHistory(
   List<Map<String, dynamic>> rows, {
   int maxMessages = kHistoryMaxMessages,
   String? dropLastUserIfMatches,
 }) {
   final out = <LLMMessage>[];
+
+  // ---- tool 批次的暂存（见文件头「取舍①」）----
+  //
+  // 一个批次 = 一次 functionCallRequest 事件的全部调用（并行批）。
+  // `calls` 攒"发起"，`results` 攒"结果"；**全部凑齐才发出**一对消息。
+  // 结果可能乱序完成（框架 Future.wait），所以按 id 匹配而不是按顺序。
+  final pendingCalls = <String, FunctionCall>{};
+  final pendingResults = <String, FunctionExecutionResult>{};
+
+  void flushToolBatchIfComplete() {
+    if (pendingCalls.isEmpty) return;
+    if (pendingResults.length < pendingCalls.length) return;
+    out.add(ModelMessage(
+      model: 'history',
+      functionCalls: pendingCalls.values.toList(),
+    ));
+    out.add(FunctionExecutionResultMessage(
+      results: pendingCalls.keys.map((id) => pendingResults[id]!).toList(),
+    ));
+    pendingCalls.clear();
+    pendingResults.clear();
+  }
 
   for (final row in rows) {
     final role = (row['role'] as String?) ?? '';
@@ -133,8 +160,35 @@ List<LLMMessage> sessionRowsToHistory(
           model: 'history',
         ));
 
-      // `tool` / `step` / `changes` / `system` 一律跳过：
-      // tool ⇒ 见文件头「取舍①」（缺配对会 400）；
+      case 'tool_call':
+        // 模型发起的工具调用（2026-10-24 新行格式）→ 暂存，等结果凑齐。
+        final id = (row['id'] as String?) ?? '';
+        final tool = (row['tool'] as String?) ?? '';
+        if (id.isEmpty || tool.isEmpty) continue;
+        final args = row['args'];
+        pendingCalls[id] = FunctionCall(
+          id: id,
+          name: tool,
+          arguments: args is Map ? jsonEncode(args) : '{}',
+        );
+
+      case 'tool':
+        // 工具结果：带 `id` 才能配对（旧格式无 id ⇒ 跳过，保持旧行为）。
+        final id = (row['id'] as String?) ?? '';
+        if (id.isEmpty || !pendingCalls.containsKey(id)) continue;
+        final tool = (row['tool'] as String?) ?? '';
+        final result = (row['result'] as String?) ?? '';
+        final ok = row['ok'];
+        pendingResults[id] = FunctionExecutionResult(
+          id: id,
+          name: tool,
+          isError: ok is bool ? !ok : false,
+          arguments: '',
+          content: [TextPart(result)],
+        );
+        flushToolBatchIfComplete();
+
+      // `step` / `changes` / `system` 一律跳过：
       // step ⇒ 是我们 UI 的展示行，不是对话内容（含"我先看看目录…"这类
       //   本地生成的摘要，回放给模型纯属噪音且会污染缓存前缀）；
       // changes ⇒ UI 汇总卡片；
@@ -143,6 +197,9 @@ List<LLMMessage> sessionRowsToHistory(
         continue;
     }
   }
+  // 尾部残批（只有调用、没有结果 —— 进程被杀）整体丢弃：发不出去。
+  pendingCalls.clear();
+  pendingResults.clear();
 
   // ---- 排除"本轮刚写进去的 user 行" ----
   //
@@ -160,7 +217,20 @@ List<LLMMessage> sessionRowsToHistory(
 
   // ---- 裁到最近 maxMessages 条 ----
   if (maxMessages > 0 && out.length > maxMessages) {
-    return out.sublist(out.length - maxMessages);
+    out.removeRange(0, out.length - maxMessages);
+  }
+
+  // ---- 裁剪后清理半批（见文件头「取舍①′」）----
+  //
+  // 开头孤立的结果消息（配对的 assistant 被裁掉）⇒ 丢，否则 400；
+  // 结尾孤立的带调用 assistant（结果被裁掉）⇒ 丢，同理。
+  while (out.isNotEmpty && out.first is FunctionExecutionResultMessage) {
+    out.removeAt(0);
+  }
+  while (out.isNotEmpty &&
+      out.last is ModelMessage &&
+      (out.last as ModelMessage).functionCalls.isNotEmpty) {
+    out.removeLast();
   }
   return out;
 }

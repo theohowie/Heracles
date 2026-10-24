@@ -111,6 +111,26 @@ abstract final class ContractCompression {
 
   /// 一轮折算成多少条消息（喂给框架 `keepRecentMessageSize`）。
   static const int messagesPerTurn = 4;
+
+  /// **第一级（micro）阈值比例** —— 2026-10-24 引入，对齐 Claude Code 的三级压缩。
+  ///
+  /// 到 40% 就做**无 LLM 的轻清理**（microcompact）：把保护窗之外的
+  /// 老工具结果替换成占位符。理由：老工具输出（整个文件内容、长日志）
+  /// 是上下文里最大的死重，而模型几乎从不回头用它 —— 真要用了重新
+  /// `read_file` 一次即可。**不动任何 user/assistant 正文**，信息零损失。
+  static const double microRatio = 0.40;
+
+  /// **第二级（auto）阈值比例** —— LLM 摘要压缩在这一档启动。
+  ///
+  /// 60% 时窗口还剩 40%，够摘要调用本身 + 后续若干轮使用；
+  /// 60% 才开始摘要（而不是等 80%）意味着"到 80%"时通常已经压过一轮，
+  /// 第三级大概率不需要出场。
+  static const double autoRatio = 0.60;
+
+  // compressAtRatio（0.80）= **第三级**阈值，含义升级：
+  // 用户"到 80% 必须压缩"的承诺不变，但现在由**确定性的强制重置**
+  // （_forceReset，不依赖 LLM）兜底 —— 即使摘要调用失败/静默早退，
+  // 80% 这条线也**一定**有动作。见 WindowRatioCompressor.compress。
 }
 
 /// **工具默认值** —— 与 `agent/tools/*.dart` 里 JSON Schema 的 `default` 必须一致。
@@ -159,6 +179,21 @@ abstract final class ContractWorkspace {
 
   /// 二进制判定：前这么多字节里出现 NUL 就当二进制跳过。
   static const int binarySniffBytes = 8192;
+
+  /// **工作区快照（文件树）注入的条目上限**（2026-10-24，F8 等价物）。
+  ///
+  /// 快照让模型开场就知道工作区长什么样，省掉"先列目录再干活"的摸索轮。
+  /// 200 条与 `list_files` 默认上限同源：超过的靠 `find_files` 精查，
+  /// 快照只负责"一眼看清骨架"。
+  static const int snapshotMaxEntries = 200;
+
+  /// **工作区宪法文件注入的字符上限**（2026-10-24，H4）。
+  ///
+  /// 宪法（AGENTS.md/CLAUDE.md/README）整段进 system prompt ⇒ 它的大小
+  /// 等于**每轮固定开销**。20K 字符 ≈ 5K~20K token（中英混合），
+  /// 对 128K 窗口是可接受的固定成本；更大的宪法就该精简了，而不是让
+  /// 每一轮都背着它。超限**截断并明说**（不静默 —— 用户要知道看的是节选）。
+  static const int constitutionMaxChars = 20000;
 }
 
 /// **命令执行能力**（`ProcessShellCapability`）。

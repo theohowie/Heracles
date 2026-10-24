@@ -21,9 +21,11 @@ import '../services/settings_controller.dart';
 import '../theme/app_theme.dart';
 import '../theme/cupertino_kit.dart';
 import 'settings_screen.dart';
+import '../widgets/bw_topbar.dart';
+import '../widgets/bw_usage_sheet.dart';
+import '../widgets/themed_background.dart';
 import '../widgets/input_bar.dart';
 import '../widgets/message_row.dart';
-import '../widgets/plan_checklist.dart';
 import '../widgets/tool_call_card.dart'
     show
         ToolGroupRow,
@@ -33,7 +35,6 @@ import '../widgets/tool_call_card.dart'
         kStepRowStatusGap,
         kStepRowStatusSize,
         kStepRowVPad;
-import '../widgets/usage_sidebar.dart';
 import '../widgets/workspace_drawer.dart';
 
 /// 会话主屏 —— 默认首屏（`06-UI界面设计.md` §6.1）。
@@ -335,16 +336,17 @@ class _ChatScreenState extends State<ChatScreen> {
   /// 冻结区估算 token（系统提示词 + 工具定义）；`-1` = 还没跑过
   int _frozenTokens = -1;
 
-  /// 右侧边栏**用按钮打开**（**不依赖边缘滑动**，见 `docs/24` §4.3）。
+  /// **上下文构成**（C5，2026-10-24）：system/tools/history 估算 token。
+  /// 空 = 没有 run 过（侧栏退回两行旧图例）。
+  Map<String, int> _contextBreakdown = const <String, int>{};
+
+  /// 用量半抽屉（2026-10-24 黑白改版）：点圆环打开，替代右侧边栏。
   ///
-  /// ⚠️ 刻意**不引入第二个 GlobalKey** ——
-  /// 我第一版加了个 `_endDrawerKey`，但它没挂到 `Scaffold` 上
-  /// （`Scaffold` 用的是 [_scaffoldKey]），于是 `currentState` 恒为 null、
-  /// 点指示器**静默无反应**。集成测试当场抓到了。
-  ///
-  /// 同一个 `Scaffold` 已经有 `_scaffoldKey`，`openEndDrawer()` 就在它上面 ——
-  /// 复用即可。多一个 GlobalKey 只是多一个能忘记挂的地方。
-  void _openUsageSidebar() => _scaffoldKey.currentState?.openEndDrawer();
+  /// 打开时先静默刷新上下文占用（原来挂在 onEndDrawerChanged 上）。
+  void _openUsageSidebar() {
+    unawaited(_refreshContextUsage());
+    showUsageSheet(context, _usage, _contextUsage);
+  }
 
   /// 当前会话的累计用量（没有则零元）。
   SessionUsage get _usage => _usageBySession[_activeSessionId ?? ''] ?? SessionUsage.empty;
@@ -2493,6 +2495,14 @@ class _ChatScreenState extends State<ChatScreen> {
     );
 
     final frozen = await _bridge.lastFrozenTokens();
+    // ★ C5（2026-10-24）：构成统计在 setState **外**取（await 不能进同步闭包）；
+    //   没跑过 = 空 map ⇒ 侧栏退回两行旧图例，不得显示 0。
+    Map<String, int> breakdown = const <String, int>{};
+    try {
+      breakdown = await _bridge.lastContextBreakdown();
+    } catch (_) {
+      breakdown = const <String, int>{};
+    }
     if (!mounted) return;
     setState(() {
       _contextLimit = limit;
@@ -2505,6 +2515,7 @@ class _ChatScreenState extends State<ChatScreen> {
           ? '服务端上报'
           : '⚠️ 未从服务端获取，按保守值估算';
       _frozenTokens = frozen;
+      _contextBreakdown = breakdown;
     });
   }
 
@@ -2516,6 +2527,8 @@ class _ChatScreenState extends State<ChatScreen> {
         conversationTokens: _estimateConversationTokens(),
         limit: _contextLimit,
         limitSource: _contextLimitSource,
+        // ★ C5（2026-10-24）：三块构成（估算）；空 = 没跑过，侧栏走旧图例
+        breakdown: _contextBreakdown.isEmpty ? null : _contextBreakdown,
       );
 
   /// 估算**对话消息**的 token（与 `TextMath` 同系数，见 `session_usage.dart`）。
@@ -3873,8 +3886,13 @@ class _ChatScreenState extends State<ChatScreen> {
     //    `InputBar.isLocalBackend` —— 两者都随本地后端删除（ADR-035 S4）。
     final provider = widget.settings.value.effectiveProvider;
 
-    return Scaffold(
+    // ★ 主题背景（2026-10-24）：光晕画在 Scaffold 底下，整屏透出
+    //   （黑白/柔雾无光晕时 ThemedBackground 就是一层纯色底，视觉不变）。
+    return ThemedBackground(
+      child: Scaffold(
       key: _scaffoldKey,
+      // 有光晕的主题：Scaffold 底透明，让光斑透出来
+      backgroundColor: h.glowColors.isEmpty ? null : Colors.transparent,
       // ★ 横滑呼出侧边栏（2026-10-10 实测定稿）
       //
       // ## 走过的弯路
@@ -3908,27 +3926,6 @@ class _ChatScreenState extends State<ChatScreen> {
       drawerEnableOpenDragGesture: true,
       drawerEdgeDragWidth: 200,
 
-      // ★ 右侧边栏：用量与上下文（2026-10-11，t13；`docs/24`）
-      //
-      // ## 为什么 `endDrawerEnableOpenDragGesture: false`
-      //
-      // `docs/24` §4.3 + `docs/21` §2.2 的教训：**右侧边缘是系统返回区**，
-      // 而"右滑关闭"又是抽屉的通用手势 —— 让"边缘右滑"同时承担
-      // "打开边栏"与"系统返回"两种含义，必然打架。
-      //
-      // 关掉它**只影响"关闭态的边缘打开手势"**（`DrawerController` 在
-      // `_controller.isDismissed` 分支里才挂那个 GestureDetector），
-      // **打开态的右滑关闭仍然有效**（另一个分支常驻）。
-      // 所以：**打开走按钮，关闭可右滑** —— 正是 `docs/24` 的建议。
-      endDrawerEnableOpenDragGesture: false,
-      endDrawer: UsageSidebar(
-        usage: _usage,
-        contextUsage: _contextUsage,
-        onClose: () => Navigator.of(context).pop(),
-      ),
-      onEndDrawerChanged: (open) {
-        if (open) unawaited(_refreshContextUsage());
-      },
       onDrawerChanged: (open) {
         // 抽屉打开时静默刷新 —— 会话可能在别处变化
         if (open && !_loading) _reload(silent: true);
@@ -3955,6 +3952,8 @@ class _ChatScreenState extends State<ChatScreen> {
         onSearchChanged: (q) => setState(() => _search = q),
       ),
       appBar: AppBar(
+        // 有光晕的主题：顶栏也透明，光斑从屏幕顶部透出来（同图一）
+        backgroundColor: h.glowColors.isEmpty ? null : Colors.transparent,
         titleSpacing: 0,
         leading: CupertinoButton(
           padding: const EdgeInsets.all(8),
@@ -3979,18 +3978,30 @@ class _ChatScreenState extends State<ChatScreen> {
                 ),
               ),
             ),
+            // ★ 灵动岛（2026-10-24 黑白改版）：计划从列表顶部移到顶栏胶囊，
+            //   收起只显示当前步骤，点击展开完整清单（数据与 PlanChecklist 同源）。
+            if (_planSteps != null && _planSteps!.isNotEmpty)
+              Padding(
+                padding: const EdgeInsets.only(left: 8),
+                child: DynamicIsland(
+                  steps: _planSteps!,
+                  doneCount: _planDone,
+                  activeIndex: _planActive,
+                  collapsed: _planCollapsed,
+                  onToggle: () =>
+                      setState(() => _planCollapsed = !_planCollapsed),
+                  reachedGoal: _planReachedGoal,
+                  closedReason: _planClosedReason,
+                ),
+              ),
           ],
         ),
         actions: [
-          // ★ 常驻**紧凑指示器** → 点击打开右侧边栏（2026-10-11，t13）
-          //
-          // 为什么常驻的是它、而不是一个普通图标：
-          // 用户要"命中率显示在一个固定位置"。手机上放不下参考图那种
-          // 三簇状态条（`docs/24` §5），所以这里只放**一个数**，
-          // 详情进边栏。数本身可点 —— 少一次"先找图标"的认知成本。
-          UsageIndicator(
-            usage: _usage,
-            contextUsage: _contextUsage,
+          // ★ 上下文圆环（2026-10-24 黑白改版）：替代原来的 UsageIndicator 文字，
+          //   环的弧长 = 已用 / 上限，点按打开用量半抽屉。
+          ContextRing(
+            usedTokens: _contextUsage.used,
+            limitTokens: _contextUsage.limit,
             onTap: _openUsageSidebar,
           ),
           Tooltip(
@@ -4046,27 +4057,8 @@ class _ChatScreenState extends State<ChatScreen> {
           Expanded(
             child: Column(
               children: [
-                // ★ 任务计划清单（2026-10-14，harness）——
-                //   常驻列表**顶部**（不随消息滚走）：用户随时能看到
-                //   "还要做什么、现在在哪一步"。用户原话：
-                //   「顶部显示任务计划（1.查看结构 ✓ 2.写HTML ←进行中 3.验证）」
-                if (_planSteps != null && _planSteps!.isNotEmpty)
-                  Padding(
-                    padding: const EdgeInsets.fromLTRB(
-                        HSpace.lg, HSpace.md, HSpace.lg, 0),
-                    child: PlanChecklist(
-                      steps: _planSteps!,
-                      doneCount: _planDone,
-                      activeIndex: _planActive,
-                      collapsed: _planCollapsed,
-                      // ★ 收尾状态（2026-10-15，BUG-1）——
-                      //   false = 中断（显示警示，不画成成功）
-                      reachedGoal: _planReachedGoal,
-                      closedReason: _planClosedReason,
-                      onToggle: () =>
-                          setState(() => _planCollapsed = !_planCollapsed),
-                    ),
-                  ),
+                // ★ 任务计划清单已移入顶栏灵动岛（2026-10-24 黑白改版），
+                //   不再常驻列表顶部。数据仍由 _planSteps 等字段持有。
                 Expanded(
                   child: Stack(
               children: [
@@ -4205,6 +4197,7 @@ class _ChatScreenState extends State<ChatScreen> {
           ),
         ],
       ),
+    ),
     );
   }
 

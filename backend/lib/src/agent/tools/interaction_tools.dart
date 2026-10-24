@@ -35,7 +35,28 @@ abstract class AskGate {
   /// 返回 `null` = 用户没回答（超时/关闭）。**绝不编造答案**。
   Future<String?> askUser(List<AskQuestion> questions);
 
-  Future<bool> requestApproval(String toolName, String detail);
+  /// 请求用户批准一次工具调用（2026-10-24 接线）。
+  ///
+  /// 由 `_ApprovalHook`（`heracles_agent.dart`）在**工具执行前**调用 ——
+  /// 返回 `true` 放行执行，`false` 则该工具以"用户拒绝"的合成失败结果回给模型。
+  ///
+  /// ## 语义约定（宿主实现必须遵守）
+  ///
+  /// · **白名单先行**：宿主自己维护的「始终允许」名单命中时直接回 `true`，
+  ///   不弹窗 —— 后端不感知白名单，只负责"需要批谁"。
+  /// · **挂起**：与 [askUser] 同理，实现应当**挂起等用户决定**（带超时兜底），
+  ///   绝不能发完事件就返回 —— 那等于替用户做决定。
+  /// · **拿不到答案 = 拒绝**：超时 / 用户关闭 / 通道不可用一律回 `false`
+  ///   （fail-closed），后端会把"用户拒绝"如实回给模型。
+  ///
+  /// [args] 是工具参数（值已字符串化，供弹窗展示完整内容 ——
+  /// 审批的意义就是"看清楚再点允许"，**不要在宿主侧截断**）；
+  /// [detail] 是一句人话摘要（弹窗顶部的原因行）。
+  Future<bool> requestApproval(
+    String toolName,
+    Map<String, String> args,
+    String detail,
+  );
 }
 
 /// 构建交互工具。
