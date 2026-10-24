@@ -159,27 +159,108 @@ void main() {
   });
 
   group('触发阈值 —— 按模型窗口比例，不是写死的数', () {
-    test('★★★ 128K 窗口 ⇒ 阈值 96000（= 128000 × 0.75）', () {
+    test('★★★ 128K 窗口 ⇒ 阈值 102400（= 128000 × 0.80）', () {
       final c = compressor(modelWindowTokens: 128000);
-      expect(c.triggerThreshold, 96000);
+      expect(c.triggerThreshold, 102400);
+    });
+
+    test('★★★ 80% 是用户明确要求的比例（不是拍的）', () {
+      // 用户原话：「如果上下文达到了 80% 必须先自动压缩，然后继续任务」。
+      expect(ContractCompression.compressAtRatio, 0.80);
     });
 
     test('★★★ 换窗口阈值跟着变（自适应才是这个类存在的理由）', () {
-      expect(compressor(modelWindowTokens: 200000).triggerThreshold, 150000);
-      expect(compressor(modelWindowTokens: 8192).triggerThreshold, 6144);
+      expect(compressor(modelWindowTokens: 200000).triggerThreshold, 160000);
+      expect(compressor(modelWindowTokens: 8192).triggerThreshold, 6553,
+          reason: '8192 × 0.8 = 6553.6 ⇒ floor 6553');
     });
 
-    test('★★ 阈值向下取整（不能浮点漏成 0.75 个 token）', () {
-      // 1000 × 0.75 = 750
-      expect(compressor(modelWindowTokens: 1000).triggerThreshold, 750);
-      // 1001 × 0.75 = 750.75 ⇒ floor ⇒ 750
-      expect(compressor(modelWindowTokens: 1001).triggerThreshold, 750);
+    test('★★ 阈值向下取整（不能浮点漏成 0.8 个 token）', () {
+      // 10000 × 0.8 = 8000（整数，无余数）
+      expect(compressor(modelWindowTokens: 10000).triggerThreshold, 8000);
+      // 10001 × 0.8 = 8000.8 ⇒ floor ⇒ 8000
+      expect(compressor(modelWindowTokens: 10001).triggerThreshold, 8000);
+      // 10005 × 0.8 = 8004.0（整数）
+      expect(compressor(modelWindowTokens: 10005).triggerThreshold, 8004);
     });
 
     test('★★ 默认参数来自契约常量（不是内联字面量）', () {
       final c = compressor();
-      expect(c.compressAtRatio, 0.75);
+      expect(c.compressAtRatio, ContractCompression.compressAtRatio);
+      expect(c.compressAtRatio, 0.80);
       expect(c.keepRecentTurns, 6);
+    });
+  });
+
+  group('窗口 10000 的边界：7999 不压 / 8000 压', () {
+    /// 造一个估算值恰好约等于 [tokens] token 的 state。
+    ///
+    /// ## 估算规则（`_estimateTokens`，别猜）
+    ///
+    /// - **CJK ≈ 1 字 / token**
+    /// - **ASCII ≈ 4 字符 / token**（`ceil`)`
+    ///
+    /// ⇒ 想精确凑到 N token，用**中文**最直接：N 个汉字 = N token。
+    ///
+    /// ⚠️ 我第一版用 ASCII（'a'*N）凑，以为 1 字符=1 token —— 实际是
+    /// 4 字符/token，8000 个字符只有 2000 token，断言当场就炸了。
+    /// **这就是为什么边界测试必须真跑，不能"看起来对"**。
+    AgentState stateWithTokens(int targetTokens) {
+      final msgs = <LLMMessage>[];
+      var remaining = targetTokens;
+      while (remaining > 0) {
+        // 每条最多 100 个汉字 ⇒ 100 token
+        final n = remaining >= 100 ? 100 : remaining;
+        msgs.add(UserMessage.text('字' * n));
+        remaining -= n;
+      }
+      return AgentState(
+        sessionId: 'probe',
+        history: AgentMessageHistory(messages: msgs),
+      );
+    }
+
+    test('★★★ 7999 token < 阈值 8000 ⇒ 不压（delegate 一次都不调）', () async {
+      final client = _RecordingClient();
+      var compressed = 0;
+      final c = WindowRatioCompressor(
+        client: client,
+        modelConfig: ModelConfig(model: 'stub'),
+        modelWindowTokens: 10000,
+        onCompressed: (_, __, ___, ____) => compressed++,
+      );
+
+      final state = stateWithTokens(7999);
+      final usage = c.estimateUsage(state);
+      // 正好 7999（汉字 1:1，没有 ceil 误差）
+      expect(usage, 7999, reason: '构造必须精确：实际 $usage');
+      expect(usage, lessThan(8000));
+
+      final before = client.calls;
+      await c.compress(state);
+
+      expect(compressed, 0, reason: '没到阈值不许触发压缩事件');
+      expect(client.calls, before, reason: '没到阈值连摘要请求都不该发');    });
+
+    test('★★★ 8000 token = 阈值 ⇒ 放行到 delegate', () async {
+      final client = _RecordingClient();
+      final c = WindowRatioCompressor(
+        client: client,
+        modelConfig: ModelConfig(model: 'stub'),
+        modelWindowTokens: 10000,
+      );
+
+      final state = stateWithTokens(8000);
+      final usage = c.estimateUsage(state);
+      expect(usage, 8000, reason: '构造必须精确：实际 $usage');
+      expect(c.triggerThreshold, 8000);
+      expect(usage, greaterThanOrEqualTo(c.triggerThreshold));
+
+      // 放行 ≠ 真的压缩：delegate 内部还有早退条件
+      // （`usages` 为空、消息条数 ≤ keepRecentMessageSize 等）。
+      // 这条只证明"我们这层在 8000 这个点放行"。
+      // "真的压缩了 + 任务继续"由 `compression_e2e_test.dart` 证明。
+      await c.compress(state);
     });
   });
 

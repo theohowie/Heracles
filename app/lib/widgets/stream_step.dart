@@ -7,7 +7,24 @@ import '../models/message.dart';
 import '../models/settings.dart';
 import '../theme/app_theme.dart';
 import '../theme/cupertino_kit.dart';
-import 'tool_call_card.dart' show kFileWritingTools, estimatedDiffStatOf, changedFilesOf;
+// ★ 共享件全部来自 `tool_call_card.dart`（**单向依赖**）：
+//   · `MarkdownLite` —— 正文汇报复用最终回答那套渲染（用户：「正文汇报不渲染 md」）
+//   · `kStepRow*`    —— 「分析请求」行与工具行共用的左侧几何（两行必须对齐）
+//   ⚠️ 依赖方向只能是 stream_step → tool_call_card。`message_row.dart` 反过来
+//      import 本文件（渲染 StreamStepView），所以本文件**绝不能** import
+//      `message_row.dart`，否则成环。
+import 'tool_call_card.dart'
+    show
+        MarkdownLite,
+        changedFilesOf,
+        estimatedDiffStatOf,
+        kFileWritingTools,
+        kStepRowArrowGap,
+        kStepRowArrowSize,
+        kStepRowHPad,
+        kStepRowStatusGap,
+        kStepRowStatusSize,
+        kStepRowVPad;
 
 /// **逐字生成中的一个步骤** —— 思考与正文分开渲染。
 ///
@@ -80,32 +97,70 @@ class _StreamStepViewState extends State<StreamStepView> {
 
     // ★ 收起状态（2026-10-13）：只有标题行 + 一行流式预览。
     //   用户原话：「收起状态下，流式输出也不是没有」——
-    //   增量到达时标题行下方那一行会持续刷新（DeepSeek harness 风格），
+    //   增量到达时那一行会持续刷新（DeepSeek harness 风格），
     //   用户不展开也能看见"在动、在出字"。
     //   预览内容 = 最新的增量（思考优先于正文 —— 思考先发生）。
-    //   ★ 工具调用形态时预览也掩蔽（与正文区同一条纪律：
-    //     几 KB 的文件内容不能滚进预览行）
     final streaming = !step.finished;
     final toolStreaming = StreamStepView.isStreamingToolCallStatic(step.text);
+    final finishedToolCall = _isFinishedToolCall(step);
 
-    // ★ 2026-10-22（对齐用户给的 DSH 截图）：
-    //   收起态**即使在结束后也保留一行预览** —— 用户截图里那一行是
-    //   `思考 · The user is clarifying something important. Let me parse carefully.`
+    // ★★ 2026-10-23 用户报：「分析请求还没跑完呢，正文汇报就出来了」★★
     //
-    //   为什么结束也要留：用户对「思考不是一次性的」的要求，本质是
-    //   **每一轮都能看到模型当时在想什么**；只在流式时显示，回看历史就全丢了。
+    // 根因：正文的渲染条件只看"有没有字"，不看 `finished` —— 思考还在流，
+    // 正文一露头就整段铺到屏幕上，还跟着逐字重排。
+    // 现在的纪律：
+    //   · 流式中 ⇒ **只**有标题行里的单行预览（`preview`）
+    //   · 结束后 ⇒ 才把正文（正文汇报）渲染出来
+    //
+    // 另：正文与思考**完全同一段文字**时也不显示（第 1 条「同类文本不要
+    // 重复出现两遍」）—— 只做"完全相等"这种最保守的去重，
+    // 见 `_duplicatesReasoning`（按子串去重会误删正文，不做）。
+    final showBody = step.finished &&
+        !step.bodyCollapsed &&
+        step.text.isNotEmpty &&
+        !toolStreaming &&
+        !finishedToolCall &&
+        !_duplicatesReasoning(step);
+
+    // ★★ 2026-10-23 用户原话 ★★
+    //
+    // > 「如果分析完了，思考完了，就**不要显示后面的思考文字了**」
+    //
+    // 这是对 2026-10-22「结束也留一行预览」的**反向修订**：那行灰字只属于
+    // **进行中**（证明"还在想 / 还在出字"）；这一轮一结束就不再挂 ——
+    // 结束后的内容由正文汇报（`_body`）承担，同一个思考再留一条尾巴纯属残渣。
+    //
+    // ★ 另一条纪律不变：流式中的**协议信封原文**（`{"final":…` / `{"tool":…`）
+    //   也不摆进预览行 —— 那是给 AgentLoop 解析的输出协议，用户在标签后面
+    //   看到一截 JSON 尾巴只会困惑（正文区结束后会剥壳，见 `_finishStep`）。
+    final envelope = streaming && step.text.trimLeft().startsWith('{');
     final preview = streaming
         ? (step.reasoning.isNotEmpty
             ? _tail(step.reasoning)
-            : (toolStreaming ? '正在修改文件代码…' : _tail(step.text)))
-        : (step.reasoning.isNotEmpty ? _tail(step.reasoning, 90) : '');
+            : (toolStreaming
+                ? '正在修改文件代码…'
+                : (envelope ? '正在整理输出…' : _tail(step.text))))
+        // 结束后**不再**留预览（上一条用户要求）—— 不是空字符串就是死代码
+        : '';
+
+    // 预览只在**进行中**出现（结束后 `preview` 恒为空）：
+    // · 收起 ⇒ 一律显示（展开才有完整内容）
+    // · 展开 ⇒ 仅当**没有思考**可看时显示（纯正文流式：给一行"在出字"的
+    //   证据，否则正文按第 6 条要等结束才显示，屏幕上会一段空白）
+    //   —— 有思考时展开区已经显示它，再在标题行复述一遍就是重复。
+    final previewVisible = preview.isNotEmpty &&
+        (!_expanded || step.reasoning.isEmpty);
 
     return Container(
       // ★ 2026-10-22 用户要求：**「分析需求」要和下面的工具行长得一样**。
       //
       // 旧样子是一条"带左侧竖线的引用块"（`border: left 2.5`），而工具行是
       // 无边框的紧凑日志行 ⇒ 两套视觉语言摆在一起很割裂（用户截图指出）。
-      // 现在统一成与 `ToolCallCard` 同款：无边框、无左缩进、同样的下边距。
+      // 现在统一成与 `ToolCallCard` 同款：无边框、无缩进、同样的下边距。
+      //
+      // ★ 2026-10-23：连**水平内边距 / 箭头尺寸 / 图标间距**也统一到
+      //   `tool_call_card.dart` 的 `kStepRow*` 常量 —— 用户报
+      //   「分析请求没和其他工具调用对齐」，见 `_header`。
       margin: const EdgeInsets.only(bottom: HSpace.xs),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
@@ -118,45 +173,46 @@ class _StreamStepViewState extends State<StreamStepView> {
           // >   做了什么，然后又干嘛干嘛」「现在软件要不就是一直调用工具、
           // >   不汇报，要么就是思考都没有」
           //
-          // 也就是说：**汇报（正文）必须一直看得见**，不能被折叠在
-          // 一条叫「正在生成…」的步骤行里 —— 那让人以为模型"闷头调工具"。
+          // 也就是说：**汇报（正文）必须看得见**，不能被折叠在一条叫
+          // 「正在生成…」的步骤行里 —— 那让人以为模型"闷头调工具"。
           //
           // 于是：
           // · **思考**（reasoning）⇒ 一条可折叠的「思考」行（默认收起）
-          // · **正文**（text）    ⇒ 永远直接显示（除非与最终回答重复）
+          // · **正文**（text）    ⇒ 这一轮**结束后**直接显示（第 6 条）
           // · 没有思考、也没有工具子条目时，**连标题行都不画** ——
           //   直接就是一段模型说的话，和 DSH 的观感一致。
-          if (_showHeader) InkWell(
-            onTap: () => setState(() => _userExpanded = !_expanded),
-            child: _header(h, accent, preview),
-          ),
+          if (_showHeader)
+            InkWell(
+              onTap: () => setState(() => _userExpanded = !_expanded),
+              child: _header(h, accent, preview, previewVisible),
+            ),
 
-          // ---- 思考：仅展开时显示 ----
+          // ---- 思考：仅展开时显示（收起时只留标题行里的单行预览）----
+          //
+          // 这条纪律就是第 1 条：**思考原文只属于这一块**，正文区（`_body`）
+          // 只画 `step.text` 通道，绝不把 `step.reasoning` 再拼进去 ——
+          // 两个通道粘在一起就再也分不开，用户会看到同一段话出现两遍。
           if (_expanded && step.reasoning.isNotEmpty) ...[
             const SizedBox(height: HSpace.sm),
             _reasoning(h),
           ],
 
-          // ---- 正文：**始终可见**（bodyCollapsed = 与最终回答重复才收起）----
-          if (!step.bodyCollapsed &&
-              step.text.isNotEmpty &&
-              !StreamStepView.isStreamingToolCallStatic(step.text) &&
-              !_isFinishedToolCall(step)) ...[
+          // ---- 正文汇报：**这一轮结束后**才显示（第 6 条）----
+          if (showBody) ...[
             const SizedBox(height: HSpace.sm),
             _body(h),
           ],
 
-          // 正文与最终回答重复 ⇒ 收起来。
+          // 正文与最终回答重复 ⇒ 收起来（`bodyCollapsed` 由 ChatScreen 在
+          // 运行收尾时置位）。
           //
-          // ★ 2026-10-22：**连"回答见下方"这句话也不画** —— 标题行已经隐藏
-          // （`_showHeader` 对 `bodyCollapsed` 返回 false），再留一句提示
-          // 就是纯残渣（真机截图里出现过一行孤零零的「回答见下方」）。
-          // 用户要的是干净：这一轮直接消失，回答就在下面。
+          // ★ 2026-10-22：**连"回答见下方"这句话也不画** —— 最终回答那一轮
+          // 的标题行本就不画，再留一句提示就是纯残渣（真机截图里出现过一行
+          // 孤零零的「回答见下方」）。用户要的是干净：这一轮直接消失，
+          // 回答就在下面。
 
           // ---- 工具调用子条目（流式中的 JSON 信封）----
-          if (_expanded &&
-              (StreamStepView.isStreamingToolCallStatic(step.text) ||
-                  _isFinishedToolCall(step))) ...[
+          if (_expanded && (toolStreaming || finishedToolCall)) ...[
             const SizedBox(height: HSpace.sm),
             _ToolSubEntry(text: step.text, finished: step.finished),
           ],
@@ -178,9 +234,16 @@ class _StreamStepViewState extends State<StreamStepView> {
   /// 是否要画那条标题行（只有"有东西可折叠 / 有状态要报"时才画）。
   ///
   /// 纯文本的普通轮次**不画** —— 否则每条回答上面都顶一行
-  /// 「本轮输出 3.2s」，像日志噪音。
+  /// 「输出完成」，像日志噪音。
   bool get _showHeader {
     final step = widget.step;
+    // ★ 2026-10-23：流式期间**必须**有这一行。
+    //
+    // 正文已按用户要求改成"这一轮结束后才显示"（第 6 条），于是流式中
+    // 唯一能表达"还在出字"的就是标题行里的单行预览。这里不画这一行，
+    // 纯正文轮次在跑完之前会是一片空白 —— 正是 `docs/25` §5.3 要消灭的
+    // 「发送后一片空白」。
+    if (!step.finished && step.hasBody) return true;
     if (step.reasoning.isNotEmpty) return true; // 有思考 ⇒ 需要那条「思考」行
     if (_isFinishedToolCall(step)) return true;
     if (StreamStepView.isStreamingToolCallStatic(step.text)) return true;
@@ -188,25 +251,68 @@ class _StreamStepViewState extends State<StreamStepView> {
     // ★ 2026-10-22 用户要求：**最终回答那一轮的标题行要隐藏**。
     //
     // 那一轮的文字因 `bodyCollapsed`（与下方正式回答重复）被折叠，于是界面上
-    // 只剩一行 `本轮输出 141ms` 的"空标题"，像残渣。用户原话：「隐藏这个！」
+    // 只剩一行「输出完成」的"空标题"，像残渣。用户原话：「隐藏这个！」
     // ⇒ `bodyCollapsed` 时**连标题行一起不画**，正文由下方助手消息承担。
     if (step.bodyCollapsed) return false;
     return false;
   }
 
-  /// 步骤行的时态文案（进行中 / 已完成），对齐参考界面的写法。
+  /// 步骤行的时态文案 —— 用户原话（2026-10-23）：
   ///
-  /// 只有「分析」这一种会显示标题行（纯正文轮次的标题行已按用户要求隐藏），
-  /// 所以这里主要就是把 `分析需求` 说成 `正在分析请求` / `已完成分析`。
+  /// > 「每次思考完都要进行正文汇报，**第一次拿到用户给的任务，第一下叫
+  /// >   分析**，后面就不是分析了，就是**思考**，你要注意这个点」
+  ///
+  /// 所以文案按**该步骤在本次运行里的轮次**分两类（**不再看 `title`** ——
+  /// 以前每一轮只要是"先出思考"就都叫「分析」，那正是用户指出的错）：
+  ///
+  /// | 位置 | 进行中 | 已结束 |
+  /// |---|---|---|
+  /// | 第 1 轮（刚拿到任务的第一下） | `正在分析` | `分析完成` |
+  /// | 第 2 轮及以后 | `正在思考` | `思考完成` |
+  ///
+  /// ## 判据：轮次序号从哪来（不新增协议字段）
+  ///
+  /// 见 [_stepOrdinal]：`.jsonl` 里存的 `i`（读回时落在 [HStepStream.index]）
+  /// 与 `stepId`（`turn-3`）都是现成字段。**不能只看内存态** —— 重开旧会话
+  /// 时也要能正确区分，否则历史里每一轮都会显示成「分析」。
   String _label(HStepStream step) {
-    final t = step.title;
-    if (t.isEmpty || t == '分析需求' || t == '分析') {
-      return step.finished ? '已完成分析' : '正在分析请求';
+    // 纯正文轮（这一轮**没有思考通道**，先出正文）：叫「分析」或「思考」
+    // 都是假话，保留「输出」语义。判据用 title 只做这一种兜底 ——
+    // `local_agent` 在"正文先到"时标的标题正是「本轮输出」。
+    if (step.reasoning.isEmpty && step.title == '本轮输出') {
+      return step.finished ? '输出完成' : '正在输出';
     }
-    if (t == '本轮输出') {
-      return step.finished ? '已完成输出' : '正在输出';
+    if (_stepOrdinal(step) == 1) {
+      return step.finished ? '分析完成' : '正在分析';
     }
-    return step.finished ? '已完成$t' : '正在$t…';
+    return step.finished ? '思考完成' : '正在思考';
+  }
+
+  /// 该步骤在**本次运行**里的轮次序号（1 起）；判不出来返回 null。
+  ///
+  /// ## 为什么需要它（用户：「第一下叫分析，后面就是思考」）
+  ///
+  /// 「第几次」只能从**已经存在**的数据里读，不新增协议字段：
+  ///
+  /// 1. [HStepStream.index] —— 来自 `step_started` / `step_ended` 的 `index`；
+  ///    `.jsonl` 里就是 `i`（`local_agent.endStep` 写的 `'i': _turn`），
+  ///    `chat_screen._toMessages` 读回时放进 `index` ⇒ **历史会话也判得准**。
+  /// 2. 退回解析 `stepId`（形如 `turn-3`）的尾号 —— 同一序号的另一种写法。
+  ///
+  /// ⚠️ 为什么必须有第 2 条：**实时路径**建 `HStepStream` 时并不填 `index`
+  /// （`chat_screen._ensureStep` 只拿它拼兜底标题），所以实时步骤的 `index`
+  /// 为 null，只有 `stepId` 可靠。分支新建会话时 `i` 又被写成字符串
+  /// （`'i': old.index.toString()`），读回时 `as num?` 得 null ——
+  /// 两种情况下都靠 `stepId` 兜住，**历史里不会退化成"全是思考"**。
+  static int? _stepOrdinal(HStepStream step) {
+    final i = step.index;
+    if (i != null && i > 0) return i;
+    final dash = step.stepId.lastIndexOf('-');
+    if (dash >= 0 && dash < step.stepId.length - 1) {
+      final n = int.tryParse(step.stepId.substring(dash + 1));
+      if (n != null && n > 0) return n;
+    }
+    return null;
   }
 
   /// 已结束的步骤，其正文剥壳后是工具调用（无 final 内容）？
@@ -222,88 +328,132 @@ class _StreamStepViewState extends State<StreamStepView> {
     }
   }
 
+  /// 正文（`text` 通道）与思考（`reasoning` 通道）是不是**同一段文字**。
+  ///
+  /// 第 1 条的纪律是"同类文本不要重复出现两遍"。两个通道本来就是分开渲染的
+  /// （见 build 的注释：正文只画 `step.text`）。这里只兜住一种真实见过的
+  /// 病态情况：个别 provider 把最终结论**同时**写进 `reasoning_content` 与
+  /// `content`，于是同一段话会显示两次。
+  ///
+  /// ## 为什么只认"完全相等"（trim 后）
+  ///
+  /// 按子串/包含关系去重会**误删正文**：模型在思考里提过某句话、再在正文里
+  /// 原样收尾，是正常的推进过程（思考里出现过的词句不代表正文是重复内容）。
+  /// 宁可多显示一段，也不吞掉模型真正说给你的话 —— 诚实优先。
+  static bool _duplicatesReasoning(HStepStream step) {
+    final t = step.text.trim();
+    if (t.isEmpty) return false;
+    return t == step.reasoning.trim();
+  }
+
   /// 取文本的**末尾若干字符**做单行预览 —— 流式时新字不断从尾部出现，
   /// 预览跟着滚动（正是 DeepSeek harness 的"一行流动"观感）。
-  static String _tail(String s, [int max = 60]) {
+  ///
+  /// ⚠️ 只服务**进行中**的预览。2026-10-23 删掉"结束后也留一行"之后，
+  /// 原来那个 `max` 参数（结束态传 90）再没有调用方 —— 一起删掉，不留死参数。
+  static String _tail(String s) {
+    const max = 60;
     final t = s.replaceAll('\n', ' ').trim();
     if (t.length <= max) return t;
     return '…${t.substring(t.length - max)}';
   }
 
-  /// 标题行：状态点 + 标题 + 耗时 + （收起时的单行流式预览）+ 展开箭头
-  Widget _header(Hue h, Color accent, String preview) {
+  /// 标题行：状态点 + 文案 + （进行中的单行预览）+ 展开箭头
+  ///
+  /// ## 与工具行**逐像素对齐**（2026-10-23，用户报「分析请求没和其他工具调用
+  /// 对齐」）
+  ///
+  /// 两行的左边距、箭头尺寸、箭头后间距、状态图标槽位、图标后间距、标题文字
+  /// 起点，**全部取自 `tool_call_card.dart` 的 `kStepRow*` 常量**（工具行也读
+  /// 同一组）。改前这里是"箭头贴着左边缘 + `HSpace.sm` 图标间距"，工具行是
+  /// "`HSpace.sm` 水平内边距 + 6px 图标间距" ⇒ 箭头差 8px、文字差 14px。
+  ///
+  /// 状态图标槽位**固定宽 14**：运行中是 12 的转圈，也居中放进去 —— 否则
+  /// 「正在分析」与「分析完成」两种状态之间标题文字会左右跳。
+  ///
+  /// ## 没有耗时了（2026-10-23 用户原话：「这个 xxxms 给我删了」）
+  ///
+  /// 原来的 `917ms` 属于**诊断信息**，在"每一轮都有标题行"之后变成每行必挂的
+  /// 噪音。删掉显示的同时把只服务它的代码一起删了（不留给下一个人的死代码）；
+  /// `HStepStream.durationMs` 字段本身保留 —— 落盘/其它界面仍在使用，本组件不碰。
+  Widget _header(
+    Hue h,
+    Color accent,
+    String preview,
+    bool previewVisible,
+  ) {
     final step = widget.step;
-    return Row(
-      children: [
-        // ★ 左侧折叠箭头 —— 与 `ToolCallCard` 完全一致的位置（用户要求"样式一样"）
-        Icon(
-          _expanded ? AppIcons.chevronDown : AppIcons.chevronRight,
-          size: 18,
-          color: h.textFaint,
+    return ConstrainedBox(
+      // 热区与工具行同高（≥ kMinTapTarget，`docs/25` §7）：
+      // 一整行都可点，展开/收起不用瞄准那个小箭头。
+      constraints: const BoxConstraints(minHeight: kMinTapTarget),
+      child: Padding(
+        padding: const EdgeInsets.symmetric(
+          horizontal: kStepRowHPad,
+          vertical: kStepRowVPad,
         ),
-        const SizedBox(width: HSpace.xs),
-        if (!step.finished)
-          SizedBox(
-            width: 12,
-            height: 12,
-            child: CupertinoActivityIndicator(radius: 6, color: accent),
-          )
-        else
-          Icon(
-            step.isError ? AppIcons.error : AppIcons.check,
-            size: 14,
-            color: accent,
-          ),
-        const SizedBox(width: HSpace.sm),
-        Flexible(
-          child: Text(
-            // ★ 2026-10-22：对齐参考界面的**时态文案**
-            //   进行中 → `正在分析请求`
-            //   已结束 → `已完成分析`
-            // （用户原话：「正在分析请求（分析完了要变成已完成分析）」）
-            _label(step),
-            overflow: TextOverflow.ellipsis,
-            style: TextStyle(
-              fontSize: 12,
-              fontWeight: FontWeight.w600,
-              color: h.textDim,
-              letterSpacing: 0.2,
-            ),
-          ),
-        ),
-        const SizedBox(width: HSpace.sm),
-        if (step.durationMs != null && step.durationMs! > 0) ...[
-          Text(
-            '${step.durationMs}ms',
-            style: TextStyle(
-              fontFamily: kMonoFontFamily,
-              fontFamilyFallback: kMonoFallback,
-              fontSize: 10,
+        child: Row(
+          children: [
+            // ★ 左侧折叠箭头 —— 与 `ToolCallCard` 同 x、同 size（用户要求"对齐"）
+            Icon(
+              _expanded ? AppIcons.chevronDown : AppIcons.chevronRight,
+              size: kStepRowArrowSize,
               color: h.textFaint,
             ),
-          ),
-          const SizedBox(width: HSpace.sm),
-        ],
-        // ---- ★ 收起时的单行预览（DeepSeek harness 风格）----
-        //   `思考 · The user is clarifying something...` —— 标签后面直接跟一行灰字。
-        //   之前是**右对齐 + 斜体**，读起来像"状态栏"；DSH 那张图是
-        //   **紧跟在标签后面**，所以改成左对齐、常规字重、仅灰色弱化。
-        if (!_expanded && preview.isNotEmpty)
-          Expanded(
-            child: Text(
-              preview,
-              maxLines: 1,
-              overflow: TextOverflow.ellipsis,
-              textAlign: TextAlign.left,
-              style: TextStyle(
-                fontSize: 11.5,
-                color: h.textFaint,
+            const SizedBox(width: kStepRowArrowGap),
+            SizedBox(
+              width: kStepRowStatusSize,
+              height: kStepRowStatusSize,
+              child: step.finished
+                  ? Icon(
+                      step.isError ? AppIcons.error : AppIcons.check,
+                      size: kStepRowStatusSize,
+                      color: accent,
+                    )
+                  : Center(
+                      child: CupertinoActivityIndicator(
+                        radius: 6,
+                        color: accent,
+                      ),
+                    ),
+            ),
+            const SizedBox(width: kStepRowStatusGap),
+            Flexible(
+              child: Text(
+                // ★ 2026-10-23：文案见 `_label`（第 1 轮「分析」/ 之后「思考」）
+                _label(step),
+                overflow: TextOverflow.ellipsis,
+                style: TextStyle(
+                  fontSize: 12,
+                  fontWeight: FontWeight.w600,
+                  color: h.textDim,
+                  letterSpacing: 0.2,
+                ),
               ),
             ),
-          )
-        else
-          const Spacer(),
-      ],
+            const SizedBox(width: HSpace.sm),
+            // ---- ★ 单行预览（**只在进行中**；DeepSeek harness 风格）----
+            //   `思考 · The user is clarifying something...` —— 标签后面直接跟一行灰字。
+            //   之前是**右对齐 + 斜体**，读起来像"状态栏"；DSH 那张图是
+            //   **紧跟在标签后面**，所以改成左对齐、常规字重、仅灰色弱化。
+            if (previewVisible)
+              Expanded(
+                child: Text(
+                  preview,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  textAlign: TextAlign.left,
+                  style: TextStyle(
+                    fontSize: 11.5,
+                    color: h.textFaint,
+                  ),
+                ),
+              )
+            else
+              const Spacer(),
+          ],
+        ),
+      ),
     );
   }
 
@@ -347,34 +497,37 @@ class _StreamStepViewState extends State<StreamStepView> {
     );
   }
 
-  /// **正文** —— 正常样式；运行中纯文本，结束后才格式化。
+  /// **正文汇报** —— 这一轮结束后才渲染（第 6 条），**复用最终回答的 Markdown**。
+  ///
+  /// ## 为什么复用 `MarkdownLite`（用户原话：「正文汇报不渲染 md」）
+  ///
+  /// 原来这里走自写的 `_format`（只还原 `\n` / 制表符），于是步骤正文里的
+  /// `**粗体**`、`` `code` ``、`- 列表`、表格全部**原样吐标记**；而最终回答
+  /// 有完整渲染 ⇒ 同一个人说的话，上下两层长得不一样。
+  /// 现在两处共用 `tool_call_card.dart` 的 `MarkdownLite`（同一套实现，
+  /// 不会再出现"改了一处、另一处漂移"）。
+  ///
+  /// ## 字号
+  ///
+  /// 基准 **15**（正文汇报保持不变）；最终回答是 16（用户「总结字体还是小」），
+  /// 工具行 12 —— 三层层级一眼可辨。`MarkdownLite` 内部的标题/列表/代码/表格
+  /// 字号都从基准派生，所以这里不用逐个再调。
   Widget _body(Hue h) {
-    final text =
-        widget.step.finished ? _format(widget.step.text) : widget.step.text;
-    return Text(
-      text,
-      // ★ 2026-10-22 用户要求：**正文汇报与最终总结同一号字（15）**，
-      //   工具行更小（12）—— "模型说的话"与"工具日志"一眼分开。
-      style: TextStyle(
-        fontSize: 15,
-        height: 1.6,
-        color: widget.step.isError ? HColors.errorOn(h.dark) : h.text,
-      ),
+    return MarkdownLite(
+      // 协议转义（字面量 `\n` / 制表符）先还原，再交给 Markdown 渲染
+      text: _format(widget.step.text),
+      fontSize: 15,
+      // 错误态正文用错误色；正常态传 null ⇒ 跟随主题
+      color: widget.step.isError ? HColors.errorOn(h.dark) : null,
     );
   }
 
-  /// `step_ended` 之后的**轻量格式化**（只认换行与缩进）。
-  ///
-  /// ## 为什么不是完整 Markdown
-  ///
-  /// 一期刻意不引入 `flutter_markdown`：它是新依赖，
-  /// 按 `AGENTS.md` 必须先进 `11-复用调研.md` 并写 ADR（另有任务在做）。
-  /// 而这里要解决的核心问题很小 —— **逐字过程的重解析**，
-  /// 用现有的纯文本渲染已经解决。所以本函数只做两件无风险的事：
+  /// 渲染前的**协议转义还原**（只做两件无风险的事）：
   /// 把字面量 `\n` 还原成换行、把制表符换成两个空格。
   ///
-  /// ⚠️ **不要**在这里加 Markdown 解析：那需要新依赖 + ADR，
-  /// 而且会在没有视觉回归测试的情况下改动既有渲染。
+  /// Markdown 结构（标题/粗体/列表/表格/代码块）交给共享的 [MarkdownLite] ——
+  /// 与最终回答**同一套**实现。这里**不做** Markdown 解析：
+  /// 一份实现两处用，才不会两边漂移。
   static String _format(String raw) =>
       raw.replaceAll(r'\n', '\n').replaceAll('\t', '  ');
 }

@@ -7,6 +7,37 @@ import '../models/settings.dart';
 import '../theme/app_theme.dart';
 import '../theme/cupertino_kit.dart';
 
+// ============================================================================
+// 共享：步骤行的统一左侧几何（2026-10-23）
+// ============================================================================
+
+/// **步骤行的统一左侧几何**（用户报：「分析请求没和其他工具调用对齐」）。
+///
+/// ## 为什么要集中定义
+///
+/// 「分析请求」行（`stream_step.dart`）与工具调用行（本文件）是同一列里的
+/// 两条日志，用户会**横向扫视**它们。此前两行各写各的几何，结果对不齐：
+///
+/// | 项 | 分析行（改前） | 工具行（改前） |
+/// |---|---|---|
+/// | 水平内边距 | 0 | `HSpace.sm`（8） |
+/// | 左侧箭头 | 18 | 18 |
+/// | 箭头后间距 | `HSpace.xs`（4） | `HSpace.xs`（4） |
+/// | 状态图标 | 12（转圈）/ 14 | 14 |
+/// | 图标后间距 | `HSpace.sm`（8） | **6** |
+///
+/// ⇒ 左起箭头差 8px、标题文字起点差 14px，一屏里两列日志左边缘参差，
+/// 看着像渲染错。现在两个组件都从这里取值 —— **只有一套几何**，
+/// 改一处两行一起变，不会再出现"各自微调后又不齐"。
+///
+/// ⚠️ 改这组值之前先确认**两处都跟着变**：这里是唯一真相源。
+const double kStepRowArrowSize = 18.0;
+const double kStepRowArrowGap = HSpace.xs;
+const double kStepRowStatusSize = 14.0;
+const double kStepRowStatusGap = 6.0;
+const double kStepRowHPad = HSpace.sm;
+const double kStepRowVPad = HSpace.xs;
+
 /// **工具名 → 人话**（2026-10-13，用户要求）。
 ///
 /// ## 为什么需要
@@ -26,7 +57,206 @@ import '../theme/cupertino_kit.dart';
 /// 也不要编一个可能不准的中文说法（诚实优先）。
 /// **工具行的显示名**：`动词 + 目标`（2026-10-22，对齐用户给的参考界面）。
 ///
-/// 参考界面里工具行长这样：
+/// 工具动词表 —— **唯一真相源**（2026-10-23 抽出）。
+///
+/// ## 三个字段各用在哪（别混）
+///
+/// | 字段 | 用途 | 例 |
+/// |---|---|---|
+/// | `run` / `done` | **单行标题**的动词（后面还会接目标路径/命令） | `读取了` + `app/lib/x.dart` |
+/// | `summary` | **折叠行**的独立短语（不接目标） | `读取了文件` |
+///
+/// ⚠️ 为什么不共用一个字段：单行是「动词 + 目标」，折叠是「一句完整的话」。
+/// 单行若写成 `读取了文件 app/lib/x.dart` 就重复啰嗦；折叠若只写 `读取了`
+/// 就是半句话。**抽表时差点把已验收的单行措辞改坏**，所以这里显式分开。
+({String run, String done, String summary}) toolVerbs(String tool) =>
+    switch (tool) {
+      'read_file' => (run: '正在读取', done: '读取了', summary: '读取了文件'),
+      'list_files' => (
+          run: '正在查看目录',
+          done: '查看了目录',
+          summary: '查看了目录'
+        ),
+      'find_files' => (run: '正在查找', done: '查找了', summary: '查找了文件'),
+      'grep_files' => (run: '正在搜索', done: '搜索了', summary: '搜索了内容'),
+      'write_file' => (run: '正在写入', done: '写入了', summary: '写入了文件'),
+      'edit' => (run: '正在编辑', done: '编辑了', summary: '编辑了文件'),
+      'apply_patch' => (
+          run: '正在按补丁修改',
+          done: '按补丁修改了',
+          summary: '按补丁修改了文件'
+        ),
+      'mkdir' => (run: '正在创建目录', done: '创建了目录', summary: '创建了目录'),
+      'delete_path' => (run: '正在删除', done: '删除了', summary: '删除了文件'),
+      'move_path' => (run: '正在移动', done: '移动了', summary: '移动了文件'),
+      'copy_path' => (run: '正在复制', done: '复制了', summary: '复制了文件'),
+      'run_shell_command' => (
+          run: '正在执行命令',
+          done: '执行了命令',
+          summary: '执行了命令'
+        ),
+      'web_fetch' => (run: '正在抓取网页', done: '抓取了网页', summary: '抓取了网页'),
+      'check_device_state' => (
+          run: '正在读取设备状态',
+          done: '读取了设备状态',
+          summary: '读取了设备状态'
+        ),
+      'write_todos' => (run: '正在更新待办', done: '更新了待办', summary: '更新了待办'),
+      'ask_user' => (run: '正在向你提问', done: '向你提了问', summary: '向你提了问'),
+      'save_memory' => (run: '正在记录', done: '记录了', summary: '记录了要点'),
+      'build_apk' => (run: '正在构建 APK', done: '构建了 APK', summary: '构建了 APK'),
+      'apk_decompile' => (
+          run: '正在反编译',
+          done: '反编译了',
+          summary: '反编译了 APK'
+        ),
+      'apk_recompile' => (run: '正在重打包', done: '重打包了', summary: '重打包了 APK'),
+      'apk_sign' => (run: '正在签名', done: '签名了', summary: '签名了 APK'),
+      'install_apk' => (run: '正在安装', done: '安装了', summary: '安装了 APK'),
+      // 前向兼容：图片读取工具（旧 Kotlin 层有 `view_image`，当前 backend 没有）。
+      // 留着是为了"工具面回补"那天折叠行能直接说人话，而不是"调用了 view_image"。
+      'view_image' => (run: '正在读取图片', done: '读取了图片', summary: '读取了图片'),
+      _ => (run: '正在调用 $tool', done: '调用了 $tool', summary: '调用了 $tool'),
+    };
+
+/// 一组**连续**工具调用压成一句话（折叠行的标题）。
+///
+/// ## 用户要求（原话）
+///
+/// > 「调用工具太多了，我往下翻全是调用工具，导致观感不好，所以要你做一个折叠。
+/// >   就是默认是图片这样合并」
+///
+/// 参考形态：`>_ 执行了命令并已读取图片` —— 即**只讲做了什么**，
+/// 不复述每个调用的路径/参数（那些展开后看）。
+///
+/// ## 归纳规则
+///
+/// · 按**首次出现顺序**取动词并去重（同一类只留一个，否则"读取了文件并读取了文件"）
+/// · 1 类 ⇒ `读取了文件`
+/// · 2 类 ⇒ `执行了命令并读取了图片`
+/// · ≥3 类 ⇒ `执行了命令、查看了目录 等 5 项`（用**调用次数**收尾，不是类别数）
+String toolGroupSummary(List<String> tools) {
+  if (tools.isEmpty) return '没有工具调用';
+  final phrases = <String>[];
+  for (final t in tools) {
+    final s = toolVerbs(t).summary;
+    if (!phrases.contains(s)) phrases.add(s);
+  }
+  if (phrases.length == 1) return phrases.first;
+  if (phrases.length == 2) return '${phrases[0]}并${phrases[1]}';
+  return '${phrases[0]}、${phrases[1]} 等 ${tools.length} 项';
+}
+
+/// **一组连续工具调用的折叠行**（2026-10-23，用户要求"默认合并"）。
+///
+/// ## 长什么样
+///
+/// ```
+/// ›  >_ 执行了命令并读取了图片                        3
+/// ```
+/// 左侧箭头可点（展开 ⇒ 逐条显示原来的工具行），中间 `>_` 图标 + 一句话摘要，
+/// 右侧是**调用次数**（一眼知道合并了几条）。
+///
+/// ## 为什么单独一个 widget 而不是塞进 `ToolCallCard`
+///
+/// `ToolCallCard` 是**单条**调用的卡片（含参数/结果/展开正文）。折叠行只讲
+/// "这一组做了什么"，两者数据形状不同；塞在一起会让那个已经有 900 行的
+/// 组件再长一段条件分支，而它已经承担了 diff 统计/三态/复制按钮等职责。
+///
+/// ## 几何
+///
+/// 一律走 `kStepRow*`（与「分析/思考」行、单条工具行**同一套常量**）——
+/// 用户此前专门报过"没和其他工具调用对齐"，对齐不能因为多一种行就破。
+class ToolGroupRow extends StatelessWidget {
+  const ToolGroupRow({
+    super.key,
+    required this.tools,
+    required this.expanded,
+    required this.onToggle,
+    this.failed = false,
+  });
+
+  /// 这一组里每个调用的工具名（顺序 = 实际发生顺序）。
+  final List<String> tools;
+
+  /// 是否已展开。
+  final bool expanded;
+
+  final VoidCallback onToggle;
+
+  /// 组里**只要有一条失败**就该传 true（由调用方判定，见 `chat_screen`）。
+  ///
+  /// 为什么由调用方给而不是在这里 `any`：这里只有工具名，没有状态；
+  /// 名子里推不出成败（同一工具可能这次成、下次败）。
+  final bool failed;
+
+  @override
+  Widget build(BuildContext context) {
+    final h = Hue.of(context);
+    final summary = toolGroupSummary(tools);
+    final tone = failed ? HColors.errorOn(h.dark) : h.text;
+
+    return InkWell(
+      onTap: onToggle,
+      borderRadius: BorderRadius.circular(HRadius.sm),
+      child: ConstrainedBox(
+        constraints: const BoxConstraints(minHeight: kMinTapTarget),
+        child: Padding(
+          padding: const EdgeInsets.symmetric(
+            horizontal: kStepRowHPad,
+            vertical: kStepRowVPad,
+          ),
+          child: Row(
+            children: [
+              Icon(
+                expanded ? AppIcons.chevronDown : AppIcons.chevronRight,
+                size: kStepRowArrowSize,
+                color: h.textFaint,
+              ),
+              const SizedBox(width: kStepRowArrowGap),
+              Icon(
+                AppIcons.terminal,
+                size: kStepRowStatusSize,
+                color: failed ? tone : h.textDim,
+              ),
+              const SizedBox(width: kStepRowStatusGap),
+              Flexible(
+                child: Text(
+                  failed ? '$summary（含失败）' : summary,
+                  overflow: TextOverflow.ellipsis,
+                  style: TextStyle(
+                    fontSize: 12,
+                    fontWeight: FontWeight.w500,
+                    color: tone,
+                  ),
+                ),
+              ),
+              const SizedBox(width: HSpace.xs),
+              // 次数徽标：一眼看出"这几条被合并了"
+              Container(
+                padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 1),
+                decoration: BoxDecoration(
+                  color: h.surfaceAlt,
+                  borderRadius: BorderRadius.circular(HRadius.pill),
+                  border: Border.all(color: h.border),
+                ),
+                child: Text(
+                  '${tools.length}',
+                  style: TextStyle(
+                    fontFamily: kMonoFontFamily,
+                    fontFamilyFallback: kMonoFallback,
+                    fontSize: 11,
+                    color: h.textDim,
+                  ),
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
 /// ```
 /// >_ 运行命令 · Find prompt insertion point
 ///    读取 app/lib/widgets/stream_step.dart
@@ -47,29 +277,8 @@ import '../theme/cupertino_kit.dart';
 /// 运行中 → `正在读取 …`；结束后 → `读取了 …`；失败 → 末尾补 `失败`。
 String toolCallLabel(String tool, Map<String, String> args,
     {required bool running, required bool failed}) {
-  final (run, done) = switch (tool) {
-    'read_file' => ('正在读取', '读取了'),
-    'list_files' => ('正在查看目录', '查看了目录'),
-    'find_files' => ('正在查找', '查找了'),
-    'grep_files' => ('正在搜索', '搜索了'),
-    'write_file' => ('正在写入', '写入了'),
-    'edit' => ('正在编辑', '编辑了'),
-    'apply_patch' => ('正在按补丁修改', '按补丁修改了'),
-    'mkdir' => ('正在创建目录', '创建了目录'),
-    'delete_path' => ('正在删除', '删除了'),
-    'move_path' => ('正在移动', '移动了'),
-    'copy_path' => ('正在复制', '复制了'),
-    'run_shell_command' => ('正在执行命令', '执行了命令'),
-    'web_fetch' => ('正在抓取网页', '抓取了网页'),
-    'check_device_state' => ('正在读取设备状态', '读取了设备状态'),
-    'write_todos' => ('正在更新待办', '更新了待办'),
-    'ask_user' => ('正在向你提问', '向你提了问'),
-    'save_memory' => ('正在记录', '记录了'),
-    'build_apk' => ('正在构建 APK', '构建了 APK'),
-    'apk_decompile' => ('正在反编译', '反编译了'),
-    _ => ('正在调用 $tool', '调用了 $tool'),
-  };
-  final verb = running ? run : done;
+  final v = toolVerbs(tool);
+  final verb = running ? v.run : v.done;
 
   // 目标：优先路径，其次命令/描述/模式
   final raw = (args['path'] ??
@@ -422,9 +631,12 @@ class _ToolCallCardState extends State<ToolCallCard> {
             child: ConstrainedBox(
               constraints: const BoxConstraints(minHeight: kMinTapTarget),
               child: Padding(
+                // ★ 步骤行几何**只从 `kStepRow*` 取**（2026-10-23）：
+                //   「分析请求」行（`stream_step.dart`）渲染同一个常量集，
+                //   两行才能逐像素对齐（用户报「没和其他工具调用对齐」）。
                 padding: const EdgeInsets.symmetric(
-                  horizontal: HSpace.sm,
-                  vertical: HSpace.xs,
+                  horizontal: kStepRowHPad,
+                  vertical: kStepRowVPad,
                 ),
                 child: Row(
                   children: [
@@ -437,14 +649,14 @@ class _ToolCallCardState extends State<ToolCallCard> {
                         _expanded
                             ? AppIcons.chevronDown
                             : AppIcons.chevronRight,
-                        size: 18,
+                        size: kStepRowArrowSize,
                         color: h.textFaint,
                       )
                     else
-                      const SizedBox(width: 18),
-                    const SizedBox(width: HSpace.xs),
-                    Icon(icon, size: 14, color: color),
-                    const SizedBox(width: 6),
+                      const SizedBox(width: kStepRowArrowSize),
+                    const SizedBox(width: kStepRowArrowGap),
+                    Icon(icon, size: kStepRowStatusSize, color: color),
+                    const SizedBox(width: kStepRowStatusGap),
                     Flexible(
                       child: Text(
                         // ★ 2026-10-22：`动词 + 目标`（对齐参考界面）
@@ -874,4 +1086,409 @@ class _ToolCallCardState extends State<ToolCallCard> {
           ),
         ],
       );
+}
+
+// ============================================================================
+// 共享：轻量 Markdown 渲染（最终回答 / 步骤正文汇报共用）
+// ============================================================================
+
+/// **轻量 Markdown 渲染**（2026-10-13 落地；2026-10-23 从 `message_row.dart`
+/// 迁到本文件，供**最终回答**与**步骤正文汇报**共用 —— 用户报
+/// 「正文汇报不渲染 md」）。
+///
+/// ## 为什么放在 `tool_call_card.dart`（而不是留在 `message_row.dart`）
+///
+/// 用户要求正文汇报复用这套渲染器。但 `message_row.dart` **已经**
+/// `import 'stream_step.dart'`（要渲染 `StreamStepView`）—— 若把本类留在
+/// `message_row.dart`、再让 `stream_step.dart` 反向 import 它，两个文件就成了
+/// **循环依赖**。而这两个文件**都已经** import 本文件 ⇒ 把共享件放在这里，
+/// import 图仍是 DAG（单向，无环）：
+///
+/// ```text
+/// message_row ──┬──> tool_call_card  （本文件：MarkdownLite + 步骤行几何）
+/// stream_step ──┘
+/// ```
+///
+/// 本文件本来就是跨组件共享的低层件（`toolCallLabel` / `friendlyToolName` /
+/// `diffStatOf` / `changedFilesOf` 都被别的组件用着），共享渲染器放这里不新增
+/// 任何 import 边。
+///
+/// ## 覆盖的语法（回答里实际出现的）
+///
+/// | 语法 | 渲染 |
+/// |---|---|
+/// | `## 标题` / `### 标题` | 加粗、比正文大一号 |
+/// | `**粗体**` | 粗体 span |
+/// | `` `code` `` | 等宽字体 span（强调色） |
+/// | `- 列表` / `* 列表` | 保留 `·` 前缀的列表行 |
+/// | 围栏代码块 | 等宽 + 底色 + 横向滚动 |
+/// | GFM 表格（表头 + `\|---\|`） | 真 `Table`（按比例分配列宽） |
+/// | `---` / `> 引用` | 分隔线 / 左侧竖线引用 |
+///
+/// ## 字号：各级一律由 [fontSize] 派生（2026-10-23）
+///
+/// 用户报「总结字体还是小」⇒ 最终回答基准 15 → **16**。但只改基准不够：
+/// 标题原来写死 15.5/16.5/17.5，基准调到 16 之后 `###`（15.5）反而**比正文小**。
+/// 现在各级相对 [fontSize] 计算：
+///
+/// | 级 | 字号 |
+/// |---|---|
+/// | 正文 / 列表 / 引用 | `fontSize` |
+/// | `###` / `##` / `#` | `+0.5` / `+1.5` / `+2.5` |
+/// | 行内代码 | `-1.5` |
+/// | 围栏代码块 | `-2.5` |
+/// | 表格单元格 | `-3` |
+///
+/// 即：**段落级文本不会比正文小**；只有代码与表格（非段落，且窄屏上必须压缩
+/// 密度）略小。
+///
+/// ## 设计取舍
+///
+/// · **不引依赖**（`AGENTS.md`：新依赖要 ADR —— 现有语法面窄，受控渲染器
+///   覆盖即可；将来语法需求超出再走调研流程）
+/// · 样式全部取自 [Hue] —— 深浅两色自动适配
+/// · 行内**没有**标记时返回普通 `Text` 而不是 `RichText`：既是渲染捷径，
+///   也保证 `find.text(...)` 这类测试查找器对无标记文本仍然有效
+class MarkdownLite extends StatelessWidget {
+  const MarkdownLite({
+    super.key,
+    required this.text,
+    this.fontSize = 16,
+    this.color,
+  });
+
+  final String text;
+
+  /// 正文基准字号 —— 标题/列表/引用/代码/表格的字号都由它派生（见类注释）。
+  ///
+  /// · 最终回答：16（用户要求"总结字体还是小"）
+  /// · 步骤正文汇报：15（用户要求正文汇报保持 15）
+  final double fontSize;
+
+  /// 正文墨色；`null` = 跟随主题（[Hue.text]）。错误态正文传错误色。
+  final Color? color;
+
+  /// 正文 / 标题 / 列表的墨色（[color] 优先）。
+  Color _ink(Hue h) => color ?? h.text;
+
+  @override
+  Widget build(BuildContext context) {
+    final h = Hue.of(context);
+    final lines = text.split('\n');
+    final spans = <Widget>[];
+
+    // ★ 2026-10-22：从"纯逐行"升级为**块级扫描**。
+    //
+    // 用户截图里模型输出了一张 Markdown 表格，界面把它**原样**画成
+    // `| id | title | updatedAt |` —— 用户看到一堆竖线。旧实现是"一行一
+    // Widget"，**结构上不可能**认出跨行的表格/代码块。现在识别：
+    // 围栏代码块 / GFM 表格 / 分隔线 / 引用，其余交给逐行渲染。
+    //
+    // ⚠️ 表格必须有**分隔行**才认：否则 `a | b` 这种普通含竖线的句子会被
+    //    误判成表格（宁可少认，不要错渲染）。
+    var i = 0;
+    while (i < lines.length) {
+      final line = lines[i];
+      final t = line.trimLeft();
+
+      // ---- 围栏代码块 ----
+      if (t.startsWith('```')) {
+        final buf = StringBuffer();
+        i++;
+        while (i < lines.length && !lines[i].trimLeft().startsWith('```')) {
+          if (buf.isNotEmpty) buf.write('\n');
+          buf.write(lines[i]);
+          i++;
+        }
+        if (i < lines.length) i++; // 吃掉收尾的 ```
+        spans.add(_codeBlock(h, buf.toString()));
+        continue;
+      }
+
+      // ---- 表格（GFM：表头 + 分隔行 + 若干数据行）----
+      if (t.startsWith('|') &&
+          i + 1 < lines.length &&
+          _isTableSeparator(lines[i + 1])) {
+        final rows = <List<String>>[_splitRow(lines[i])];
+        i += 2; // 跳过表头与分隔行
+        while (i < lines.length && lines[i].trimLeft().startsWith('|')) {
+          rows.add(_splitRow(lines[i]));
+          i++;
+        }
+        spans.add(_table(h, rows));
+        continue;
+      }
+
+      // ---- 分隔线 ----
+      if (t == '---' || t == '***' || t == '___') {
+        spans.add(Padding(
+          padding: const EdgeInsets.symmetric(vertical: HSpace.sm),
+          child: Divider(height: 1, color: h.border),
+        ));
+        i++;
+        continue;
+      }
+
+      // ---- 引用 ----
+      if (t.startsWith('> ')) {
+        spans.add(_quote(h, t.substring(2)));
+        i++;
+        continue;
+      }
+
+      spans.add(_line(h, line));
+      i++;
+    }
+
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: spans,
+    );
+  }
+
+  // ============================================================
+  // 表格
+  // ============================================================
+
+  /// 是否是 `|---|:--:|---|` 这种分隔行（GFM 表格的判定锚点）。
+  bool _isTableSeparator(String line) {
+    final t = line.trim();
+    if (!t.startsWith('|')) return false;
+    final cells = _splitRow(t);
+    if (cells.isEmpty) return false;
+    return cells.every((c) => RegExp(r'^:?-{1,}:?$').hasMatch(c.trim()));
+  }
+
+  /// 把 `| a | b |` 拆成 `['a', 'b']`（去掉首尾空段）。
+  List<String> _splitRow(String line) {
+    var t = line.trim();
+    if (t.startsWith('|')) t = t.substring(1);
+    if (t.endsWith('|')) t = t.substring(0, t.length - 1);
+    return t.split('|').map((e) => e.trim()).toList();
+  }
+
+  /// 渲染成真正的 `Table`（不是等宽文本对齐 —— 手机上长值必然错位）。
+  ///
+  /// 列宽用 [FlexColumnWidth]：撑满可用宽度、**按比例**分配，
+  /// 单元格内文本自动换行。手机窄屏下 5 列表格会显得挤，
+  /// 但这比"原样吐竖线"和"横向滚动的死宽表格"都更可读。
+  Widget _table(Hue h, List<List<String>> rows) {
+    if (rows.isEmpty) return const SizedBox.shrink();
+    final header = rows.first;
+    final body = rows.skip(1).toList();
+    final cols = header.length;
+    // 表格是"高密度信息"，比正文小 3 号（跟着基准字号一起缩放）
+    final cellSize = fontSize - 3;
+
+    TableRow buildRow(List<String> cells, {required bool head}) => TableRow(
+          decoration: head ? BoxDecoration(color: h.surfaceAlt) : null,
+          children: [
+            for (var c = 0; c < cols; c++)
+              Padding(
+                padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 6),
+                child: _rich(
+                  h,
+                  c < cells.length ? cells[c] : '',
+                  size: cellSize,
+                  bold: head,
+                  lineHeight: 1.35,
+                ),
+              ),
+          ],
+        );
+
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: HSpace.sm),
+      child: Table(
+        border: TableBorder.all(color: h.border, width: 0.6),
+        defaultColumnWidth: const FlexColumnWidth(),
+        children: [
+          buildRow(header, head: true),
+          for (final r in body) buildRow(r, head: false),
+        ],
+      ),
+    );
+  }
+
+  // ============================================================
+  // 代码块 / 引用
+  // ============================================================
+
+  Widget _codeBlock(Hue h, String code) {
+    return Container(
+      width: double.infinity,
+      margin: const EdgeInsets.symmetric(vertical: HSpace.xs),
+      padding: const EdgeInsets.all(HSpace.sm),
+      decoration: BoxDecoration(
+        color: h.surfaceAlt,
+        borderRadius: BorderRadius.circular(HRadius.sm),
+        border: Border.all(color: h.border),
+      ),
+      // 代码不换行（换行会破坏缩进语义）⇒ 允许横向滚动
+      child: SingleChildScrollView(
+        scrollDirection: Axis.horizontal,
+        child: Text(
+          code,
+          style: TextStyle(
+            fontFamily: kMonoFontFamily,
+            fontFamilyFallback: kMonoFallback,
+            fontSize: fontSize - 2.5,
+            height: 1.5,
+            color: h.textDim,
+          ),
+        ),
+      ),
+    );
+  }
+
+  /// 引用（`> `）—— 左侧竖线 + 与正文同号字（只靠淡色与缩进降层级）。
+  ///
+  /// 字号**不再比正文小**：2026-10-23 之前是 14.5（正文 15），
+  /// 基准提到 16 后若继续按老值走，引用会显得像"脚注"。
+  Widget _quote(Hue h, String text) {
+    return Container(
+      margin: const EdgeInsets.symmetric(vertical: HSpace.xs),
+      padding: const EdgeInsets.only(left: HSpace.sm),
+      decoration: BoxDecoration(
+        border: Border(left: BorderSide(color: h.border, width: 3)),
+      ),
+      child: Text(
+        text,
+        style: TextStyle(
+          fontSize: fontSize,
+          height: 1.6,
+          color: h.textDim,
+        ),
+      ),
+    );
+  }
+
+  // ============================================================
+  // 逐行渲染（标题 / 列表 / 段落 / 空行）
+  // ============================================================
+
+  Widget _line(Hue h, String line) {
+    final t = line.trimLeft();
+
+    // ---- 标题 # / ## / ### ----
+    // ★ 字号相对基准：### 必须**比正文大**（旧值写死 15.5，基准 16 时更小）
+    if (t.startsWith('### ')) {
+      return _heading(h, t.substring(4), fontSize + 0.5);
+    }
+    if (t.startsWith('## ')) {
+      return _heading(h, t.substring(3), fontSize + 1.5);
+    }
+    if (t.startsWith('# ')) {
+      return _heading(h, t.substring(2), fontSize + 2.5);
+    }
+
+    // ---- 无序列表 ----
+    if (t.startsWith('- ') || t.startsWith('* ')) {
+      return Padding(
+        padding: const EdgeInsets.only(left: HSpace.sm),
+        child: Row(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text(
+              '·  ',
+              style: TextStyle(
+                fontSize: fontSize,
+                height: 1.6,
+                color: _ink(h),
+              ),
+            ),
+            Expanded(child: _rich(h, t.substring(2))),
+          ],
+        ),
+      );
+    }
+
+    // ---- 空行：保留间距（列表/段落分隔）----
+    if (t.isEmpty) {
+      return const SizedBox(height: HSpace.sm);
+    }
+
+    // ---- 普通段落 ----
+    return _rich(h, line);
+  }
+
+  Widget _heading(Hue h, String text, double size) {
+    return Padding(
+      padding: const EdgeInsets.only(top: HSpace.xs),
+      child: Text(
+        text,
+        style: TextStyle(
+          fontSize: size,
+          fontWeight: FontWeight.w700,
+          height: 1.5,
+          color: _ink(h),
+        ),
+      ),
+    );
+  }
+
+  /// 行内解析：`**粗体**` 与 `` `code` `` → 样式化 TextSpan。
+  ///
+  /// [size] 为 null 时用基准 [fontSize]（表格单元格会显式传更小的值）。
+  Widget _rich(
+    Hue h,
+    String line, {
+    double? size,
+    bool bold = false,
+    double lineHeight = 1.6,
+  }) {
+    final fs = size ?? fontSize;
+    final base = TextStyle(
+      fontSize: fs,
+      height: lineHeight,
+      color: _ink(h),
+      fontWeight: bold ? FontWeight.w700 : FontWeight.w400,
+    );
+    // ★ 无标记 ⇒ 普通 Text（渲染捷径 + 保住 find.text 类测试查找器）
+    if (!line.contains('**') && !line.contains('`')) {
+      return Text(line, style: base);
+    }
+    final spans = <TextSpan>[];
+    var rest = line;
+    while (rest.isNotEmpty) {
+      // **粗体**
+      final b = rest.indexOf('**');
+      if (b >= 0) {
+        final e = rest.indexOf('**', b + 2);
+        if (e > b) {
+          if (b > 0) spans.add(TextSpan(text: rest.substring(0, b), style: base));
+          spans.add(TextSpan(
+            text: rest.substring(b + 2, e),
+            style: base.copyWith(fontWeight: FontWeight.w700),
+          ));
+          rest = rest.substring(e + 2);
+          continue;
+        }
+      }
+      // `code`
+      final c = rest.indexOf('`');
+      if (c >= 0) {
+        final e = rest.indexOf('`', c + 1);
+        if (e > c) {
+          if (c > 0) spans.add(TextSpan(text: rest.substring(0, c), style: base));
+          spans.add(TextSpan(
+            text: rest.substring(c + 1, e),
+            style: base.copyWith(
+              fontFamily: kMonoFontFamily,
+              fontFamilyFallback: kMonoFallback,
+              fontSize: fs - 1.5,
+              color: h.accent,
+            ),
+          ));
+          rest = rest.substring(e + 1);
+          continue;
+        }
+      }
+      spans.add(TextSpan(text: rest, style: base));
+      break;
+    }
+    return RichText(
+      text: TextSpan(children: spans, style: base),
+    );
+  }
 }

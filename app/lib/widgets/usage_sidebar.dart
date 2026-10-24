@@ -183,14 +183,21 @@ class UsageSidebar extends StatelessWidget {
           '稳态命中率（最近一次·轮次平均）',
           steady == null ? '—' : '${(steady * 100).round()}%',
         ),
-        // ★ 2026-10-22 用户要求：**删掉"主标题 = Σ命中/Σ(命中+未命中)…"这段公式说明**。
-        //   原话：「那些公式给我去掉，不是写给用户看的！！！」
-        //   口径的说明留在本文件 KDoc（第 119 行起）—— 那是给开发者看的，
-        //   本来就该在代码里而不是界面上。
-        _kv(h, 'Token 用量', formatTokensFull(usage.totalInputTokens + usage.outputTokens)),
-        _kv(h, '未缓存输入', formatTokensFull(usage.reportedPromptTokens + usage.unreportedPromptTokens)),
-        _kv(h, '缓存读取', formatTokensFull(usage.cachedTokens)),
+        // ★ 2026-10-23：这三行过去**互相矛盾**（用户自己一算就发现了）：
+        //
+        //   「未缓存输入 16690 / 缓存读取 16128 ⇒ 命中率 49%，怎么显示 97%？」
+        //
+        // 他的算式没错，是标签错了：16,690 是**整段输入**（已含命中的 16,128），
+        // 真正的未命中是 16,690 − 16,128 = **562**。
+        // 根因是 `promptTokens` 的语义在 2026-10-23 改成"整段"后，
+        // 这两行的旧定义没跟着改（还把 cached 多加了一遍 ⇒ Token 用量虚高一倍）。
+        //
+        // 现在保证**加法自洽**：整段输入 = 命中 + 未命中；总量 = 整段输入 + 输出。
+        _kv(h, '输入（含缓存）', formatTokensFull(usage.totalInputTokens)),
+        _kv(h, '· 命中缓存', formatTokensFull(usage.cachedTokens)),
+        _kv(h, '· 未命中', formatTokensFull(usage.uncachedInputTokens)),
         _kv(h, '输出', formatTokensFull(usage.outputTokens)),
+        _kv(h, 'Token 用量', formatTokensFull(usage.totalInputTokens + usage.outputTokens)),
         // ★ 2026-10-22：删掉「"输出" = provider 上报的 completion_tokens 累加…」
         //   这句公式说明（用户：不是写给用户看的）。口径留在上面的代码注释里。
         // ★ 分母标注（docs/24 §4.1 硬要求）——

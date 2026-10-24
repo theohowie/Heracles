@@ -172,6 +172,39 @@ class SessionStore {
   /// 会话文件所在目录（相对工作区）。
   static const String _dirRel = '.heracles/sessions';
 
+  /// **长会话只加载最近这么多条**（2026-10-23）。
+  ///
+  /// ## 为什么必须有这个数（用户报的"长会话卡住不动"）
+  ///
+  /// 会话 `.jsonl` 是只追加的，越聊越长。几百条消息之后：
+  ///
+  /// | 问题 | 量级 |
+  /// |---|---|
+  /// | 一次 `loadMessages` 的正文 | 几百 KB（`fs.readText` 整文件） |
+  /// | 解析出的 Map 列表 | 每条 3–8 个字段 × 几百条 |
+  /// | UI 侧 `_toMessages` 的强转 + `ListView` 重建 | 几百个 widget |
+  /// | 每轮 `appendMessage` 的搬运量 | 整文件 ×2（读 + 写）= **O(n²)** |
+  ///
+  /// 前三项靠"只给最近 N 条"直接降下来；第四项靠 `fs.appendText`
+  /// （真追加，O(追加量)）根治 —— 见 [appendMessage]。
+  ///
+  /// ## 为什么是 400
+  ///
+  /// 一条真实的长会话约 250–400 条消息（每轮 ≈ 1 用户 + 1 步骤 + 1 工具 + 1 回答）。
+  /// 400 能让"最近几十轮"完整可见（用户回看几乎都在这个范围），
+  /// 又不至于把几 MB 塞进内存。**超出的部分不丢** —— 见 [loadMessages] 的说明。
+  static const int defaultRecentLimit = 400;
+
+  /// `loadMessages` 允许的**最大**行数上限（防调用方传天文数字）。
+  static const int _hardMaxLines = 20000;
+
+  /// `loadMessages` 取尾部时的**行数余量**。
+  ///
+  /// `.jsonl` 的文件末尾有换行（可能读出一个空行），历史里也可能有空行 /
+  /// 坏行 —— 这些行占了额度但解析后会被丢弃。多要 8 行就足以覆盖，
+  /// 保证"要 N 条真的拿到 N 条"。
+  static const int _lineSlack = 8;
+
   /// 上一次操作留下的失败原因（排障用；`null` = 上次没出错）。
   ///
   /// 为什么用字段而不是抛异常：会话读写失败**不该让 UI 崩**
@@ -459,15 +492,99 @@ class SessionStore {
   /// 但**读取整体失败**（不是"文件不存在"）时返回一条 `role: system` 记录
   /// 说明原因 —— 与旧实现同款：**不能静默返回空列表**，那会让用户以为
   /// 记录真的没了。
-  Future<List<Map<String, dynamic>>> loadMessages(String sessionId) async {
+  /// 读一个会话的消息行（**原样 Map 列表**，按写入顺序）。
+  ///
+  /// ## 参数
+  ///
+  /// - [limit]：**只返回最近多少条**。`0`（默认）= 全量，**保持向后兼容** ——
+  ///   老调用点（`agent_bridge.loadMessages`）不传就还是全读。
+  /// - [offset]：从第几条（0 起）开始返回，配合 [limit] 做"往前翻更多"。
+  ///   与 SQL 的 OFFSET 同语义：**在"最近 limit 条"这个窗口内**再偏移。
+  ///
+  /// ## 长会话怎么优化（2026-10-23，用户报"卡住不动"）
+  ///
+  /// ### 改之前（三个都慢）
+  ///
+  /// 1. `fs.readText` 把**整文件**读进一个 String（几百 KB → 内存峰值 2×）；
+  /// 2. `LineSplitter().convert(text)` 再 split 出几百个 String；
+  /// 3. 每条 `jsonDecode` + 建 Map，**全部**跑在**主 isolate**（`await` 不换线程）。
+  ///
+  /// 而且 1 还有个硬顶：通道的 `fs.readText` 上限 **1 MB**，
+  /// 超过就 `truncated` —— 长会话连"读全"都做不到。
+  ///
+  /// ### 改之后
+  ///
+  /// | 步 | 做法 |
+  /// |---|---|
+  /// | 取文本 | `fs.readTailLines` 让 **Kotlin 侧**只读文件**尾部**（POSIX 反向 seek，只读尾部字节） |
+  /// | 解析 | 只对拿到的这 N 行 `jsonDecode` |
+  /// | 兜底 | 通道不支持 `fs.readTailLines`（旧 APK）⇒ 回落到 `fs.readText` 全量读 |
+  ///
+  /// ⚠️ **诚实的边界**：
+  /// - 回落路径**没有**变快（仍是整文件 + 主 isolate 解析），只是保证旧 APK 还能用。
+  /// - 解析仍在主 isolate。要彻底解决得把解析挪进 `Isolate.run`，
+  ///   但那条需要把 `DeviceChannelClient` 的通道调用也搬过去（通道只能在主 isolate 用），
+  ///   收益不抵复杂度 ⇒ 本轮只做"少读 + 少解析"。
+  /// - **超出的历史不丢**：它在磁盘上，用 `offset` 往前翻可以取到
+  ///   （见 `chat_screen` 的"加载更早的消息"入口）。
+  ///
+  /// ## 返回形状（**UI 的 `_toMessages` 直接吃**）
+  ///
+  /// 每行原样返回 Map。读不全 / 读失败时**追加一条 `role: system`** 说明原因
+  /// —— 与旧实现同款：不能静默返回空列表，那会让用户以为记录真没了。
+  Future<List<Map<String, dynamic>>> loadMessages(
+    String sessionId, {
+    int limit = 0,
+    int offset = 0,
+  }) async {
     lastError = null;
-    final raw = await _ch.call('fs.readText', <String, Object?>{
-      'path': messagesPath(sessionId),
-      'offsetLine': 1,
-      'maxLines': 0,
-    });
+    final want = limit <= 0 ? 0 : limit.clamp(1, _hardMaxLines);
+    final skip = offset < 0 ? 0 : offset;
+
+    final raw = want == 0
+        ? await _ch.call('fs.readText', <String, Object?>{
+            'path': messagesPath(sessionId),
+            'offsetLine': 1,
+            'maxLines': 0,
+          })
+        : await _ch.call('fs.readTailLines', <String, Object?>{
+            'path': messagesPath(sessionId),
+            // ★ 多要一点余量（want + skip + 缓冲）。
+            //
+            // 为什么要缓冲：.jsonl 末尾有换行、历史里也可能有空行/坏行，
+            // 这些行**占了行数额度但解析后会被丢掉**。只要一点余量，
+            // 就能保证"要 10 条真的拿到 10 条"，而不是偶尔少一条。
+            'maxLines': (want + skip + _lineSlack).clamp(1, _hardMaxLines),
+          });
+
     final err = errorOf(raw);
     if (err != null) {
+      // 旧 APK 没有 fs.readTailLines ⇒ 回落到"读全文 + 本地切尾"。
+      //
+      // ⚠️ 这里**不能**再调 `loadMessages(sessionId)`（不传 limit）——
+      //    那会把整个文件原样返回、把分页彻底丢掉（曾经踩过）。
+      //    所以这条回落路径自己读全文，然后走**同一套**窗口逻辑。
+      if (want > 0 && err.contains('未知方法')) {
+        final full = await _ch.call('fs.readText', <String, Object?>{
+          'path': messagesPath(sessionId),
+          'offsetLine': 1,
+          'maxLines': 0,
+        });
+        final ferr = errorOf(full);
+        if (ferr != null) {
+          if (ferr.contains('不存在')) return <Map<String, dynamic>>[];
+          lastError = ferr;
+          return <Map<String, dynamic>>[
+            <String, dynamic>{
+              'role': 'system',
+              'text': '无法读取会话记录：$ferr',
+              'ts': 0,
+            },
+          ];
+        }
+        // 落到下面的统一解析 + 窗口逻辑（want > 0 会自己截）
+        return _parseAndWindow(full, want: want, skip: skip);
+      }
       if (err.contains('不存在')) return <Map<String, dynamic>>[];
       lastError = err;
       return <Map<String, dynamic>>[
@@ -479,21 +596,35 @@ class SessionStore {
       ];
     }
 
-    if (raw['truncated'] == true) {
-      // 会话超过 1 MB 文本上限：**如实告知只读到一部分**，不假装完整。
-      // UI 会把 system 行画成一条提示气泡（`_toMessages` 的 'system' 分支）。
+    return _parseAndWindow(raw, want: want, skip: skip);
+  }
+
+  /// 解析通道返回的文本 → 行列表，并应用分页窗口。
+  ///
+  /// 抽成方法是为了让**两条路径共用同一套窗口逻辑**
+  /// （`readTailLines` 正常路径 与 `readText` 回落路径）——
+  /// 分开写过一次就出过 bug：回落路径把整个文件原样返回，分页被丢。
+  List<Map<String, dynamic>> _parseAndWindow(
+    Map<String, Object?> raw, {
+    required int want,
+    required int skip,
+  }) {
+    if (raw['truncated'] == true && want == 0) {
+      // 只有"全量读（readText）"下的 truncated 才代表**真丢内容**
+      // （超过通道 1MB 上限）。readTailLines 下的 truncated 只表示
+      // "前面还有更早的消息没取"，那是分页的正常行为。
       lastError = '会话记录超过通道 1MB 文本上限，只读回了前面一部分。';
     }
 
     final text = (raw['text'] as String?) ?? '';
-    final out = <Map<String, dynamic>>[];
+    final all = <Map<String, dynamic>>[];
     for (final line in const LineSplitter().convert(text)) {
       final t = line.trim();
       if (t.isEmpty) continue;
       try {
         final decoded = jsonDecode(t);
         if (decoded is Map) {
-          out.add(decoded.map((k, v) => MapEntry(k.toString(), v)));
+          all.add(decoded.map((k, v) => MapEntry(k.toString(), v)));
         }
         // 不是对象（例如坏掉的一行只剩个数字）⇒ 跳过这行，不影响其它行
       } catch (_) {
@@ -501,6 +632,48 @@ class SessionStore {
         continue;
       }
     }
+
+    // ---- 分页窗口 ----
+    //
+    // `all` 是拿到的行（顺序 = 写入顺序）。两条路径内容**不一样**：
+    //
+    // | 路径 | `all` 是什么 |
+    // |---|---|
+    // | `readTailLines` | 已经是**最近 (want+skip+余量) 行** |
+    // | `readText`（回落/全量） | **整个文件** |
+    //
+    // 统一做法：先截"最后 (want+skip) 条"，再在该窗口内甩掉 skip 条。
+    // 这对两种情况都成立（对尾部读是幂等的：它本来就已经是尾巴）。
+    List<Map<String, dynamic>> out;
+    if (want > 0) {
+      var window = all;
+      final windowSize = want + skip;
+      if (window.length > windowSize) {
+        window = window.sublist(window.length - windowSize);
+      }
+      if (skip > 0 && window.length > skip) {
+        window = window.sublist(0, window.length - skip);
+      }
+      // 尾部读带回来的余量可能让窗口偏长 ⇒ 只要最后 want 条
+      if (window.length > want) {
+        window = window.sublist(window.length - want);
+      }
+      out = List<Map<String, dynamic>>.of(window);
+    } else {
+      out = all;
+    }
+
+    // 有更早的消息没加载 ⇒ 插一条提示（UI 的 `_toMessages` 已支持 system role）
+    if (want > 0 && all.length > out.length) {
+      out.insert(0, <String, dynamic>{
+        'role': 'system',
+        'text': '（更早的消息未加载：只为省内存加载了最近 $want 条。'
+            '完整记录仍在磁盘上。）',
+        'ts': 0,
+        '_synthetic': 'paging',
+      });
+    }
+
     if (lastError != null) {
       out.add(<String, dynamic>{
         'role': 'system',
@@ -532,6 +705,39 @@ class SessionStore {
   /// 同一会话的 append **不许并发**（本类不是线程安全的，也刻意不做成
   /// 看起来是）。类内只能**检测**并发并如实失败 —— 检测不到跨实例 /
   /// 跨进程的竞争。
+  /// **追加一条消息** —— 只准追加，绝不准整文件重写。
+  ///
+  /// ## 2026-10-23：从"读改写"升级为**真追加**（长会话卡顿的根治）
+  ///
+  /// ### 改之前为什么卡
+  ///
+  /// 通道过去只有 `fs.writeText`（整体覆盖）⇒ 每次追加都是
+  /// 「读全文 → 拼一行 → 写全文」。一轮对话有 3–5 次 append，于是：
+  ///
+  /// | 会话长度 | 单次 append 搬运 | 一轮（4 次） |
+  /// |---|---|---|
+  /// | 10 条 | ~2 KB | 8 KB |
+  /// | 200 条 | ~40 KB | 320 KB |
+  /// | 1000 条 | ~200 KB | **1.6 MB** |
+  ///
+  /// ⇒ **O(n²)**。而且撞上通道的 1 MB 文本上限后**直接拒绝写入**
+  /// —— 表现就是"长会话聊到一半卡住不动"。
+  ///
+  /// ### 现在
+  ///
+  /// 优先走 `fs.appendText`（Kotlin 侧 `FileOutputStream(append=true)` /
+  /// SAF `openOutputStream(uri,"wa")`）= **O(追加量)**，且不读旧内容
+  /// ⇒ 1 MB 上限不再影响追加。
+  ///
+  /// **三条防线保留**（只是不再需要读全文来满足它们）：
+  /// 1. 旧 APK 没有 `fs.appendText` ⇒ 回落"读改写"（那条路仍然正确，只是慢）；
+  /// 2. 回落路径在 `truncated == true` 时**拒绝写入**（否则会吃掉后半截）；
+  /// 3. 并发 append ⇒ 拒绝（见 `_appending`）。
+  ///
+  /// ## ⚠️ 调用方必须串行化
+  ///
+  /// 同一会话的 append **不许并发**（本类不是线程安全的，也刻意不做成
+  /// 看起来是）。类内只能**检测**并发并如实失败。
   Future<bool> appendMessage(
     String sessionId,
     Map<String, dynamic> message,
@@ -548,33 +754,7 @@ class SessionStore {
     }
     _appending = true;
     try {
-      // ---- 读旧全文 ----
-      final raw = await _ch.call('fs.readText', <String, Object?>{
-        'path': path,
-        'offsetLine': 1,
-        'maxLines': 0,
-      });
-      final err = errorOf(raw);
-      var existing = '';
-      if (err != null) {
-        if (!err.contains('不存在')) {
-          lastError = '读取会话记录失败，未追加：$err';
-          return false;
-        }
-        // 文件还不存在 ⇒ 本次写就是"建文件 + 第一行"，合法
-      } else {
-        if (raw['truncated'] == true) {
-          lastError = '会话记录已超过通道 1 MB 文本上限，读不全。'
-              '**本次没有写入** —— 在"只读到前半截"的状态下拼新行再写回，'
-              '会把没读到的那部分永久删掉。\n'
-              '请先把旧会话归档/裁短（或等通道支持 append 原语）再继续。\n'
-              '文件：$path';
-          return false;
-        }
-        existing = (raw['text'] as String?) ?? '';
-      }
-
-      // ---- 拼一行 ----
+      // ---- 先序列化（失败就不用碰磁盘）----
       final entry = _normalizeEntry(message);
       if (entry == null) {
         lastError = '这一行消息缺少 role（或含不可编码对象），未写入。'
@@ -587,30 +767,107 @@ class SessionStore {
         return false;
       }
 
-      // 旧内容末尾没有换行时先补一个：补的是**追加**，既有字节没动。
-      final needsNewline = existing.isNotEmpty && !existing.endsWith('\n');
-      final updated = '$existing${needsNewline ? "\n" : ""}$line\n';
-
-      // ---- 防线③：既有内容必须是新内容的**前缀** ----
-      if (!updated.startsWith(existing)) {
-        lastError = '内部断言失败：拼接结果不是"旧内容 + 新行"，已放弃写入（会丢用户数据）。';
-        return false;
+      // ---- ① 优先：真追加（O(追加量)）----
+      final appended = await _appendViaChannel(path, '$line\n');
+      if (appended.ok) return true;
+      if (!appended.supported) {
+        // 通道不支持 ⇒ 回落读改写（旧 APK）。**不是失败**，只是慢。
+        //
+        // ⚠️ `return await`（不是 `return`）：这里是 `try` 块，而 `finally`
+        //   里要复位 `_appending` 这个**并发闸**。若直接 `return` 一个 Future，
+        //   `finally` 会在 Future 完成**之前**就执行 ⇒ 闸提前放开 ⇒ 同一会话的
+        //   第二次 append 可能挤进来读到半截文件（那正是丢行的场景）。
+        //   `flutter analyze` 的 `unawaited_return_in_try_block` 报的就是它。
+        return await _appendReadModifyWrite(sessionId, path, '$line\n');
       }
-
-      // ---- 写回 ----
-      final w = await _ch.call('fs.writeText', <String, Object?>{
-        'path': path,
-        'text': updated,
-      });
-      final werr = errorOf(w);
-      if (werr != null) {
-        lastError = '写入会话记录失败（${_humanize(werr)}）。会话文件位置：$path';
-        return false;
-      }
-      return true;
+      lastError = appended.error;
+      return false;
     } finally {
       _appending = false;
     }
+  }
+
+  /// 走 `fs.appendText` 真追加。
+  ///
+  /// @return `ok` = 成功；`supported == false` = 通道没这个方法（旧 APK，
+  ///         调用方应回落）；否则 `ok == false` 且 `error` 有原因。
+  Future<({bool ok, bool supported, String? error})> _appendViaChannel(
+    String path,
+    String text,
+  ) async {
+    final raw = await _ch.call('fs.appendText', <String, Object?>{
+      'path': path,
+      'text': text,
+    });
+    final err = errorOf(raw);
+    if (err == null) return (ok: true, supported: true, error: null);
+
+    // 旧 APK：通道回"未知方法：fs.appendText"
+    if (err.contains('未知方法')) {
+      return (ok: false, supported: false, error: null);
+    }
+    // SAF provider 不支持 "wa" 追加模式 ⇒ 也回落（那条路仍正确）
+    if (err.contains('不支持追加') || err.contains('文件不存在')) {
+      return (ok: false, supported: false, error: null);
+    }
+    return (ok: false, supported: true, error: err);
+  }
+
+  /// 回落路径：读全文 → 拼 → 写全文。**只在通道不支持真追加时用。**
+  ///
+  /// 这一步保留了原来的三道防线（尤其"读不全就拒绝写"）——
+  /// 它是唯一可能**吃掉用户数据**的地方，不能因为"现在是回落路径"就放松。
+  Future<bool> _appendReadModifyWrite(
+    String sessionId,
+    String path,
+    String lineWithNewline,
+  ) async {
+    final raw = await _ch.call('fs.readText', <String, Object?>{
+      'path': path,
+      'offsetLine': 1,
+      'maxLines': 0,
+    });
+    final err = errorOf(raw);
+    var existing = '';
+    if (err != null) {
+      if (!err.contains('不存在')) {
+        lastError = '读取会话记录失败，未追加：$err';
+        return false;
+      }
+      // 文件还不存在 ⇒ 本次写就是"建文件 + 第一行"，合法
+    } else {
+      if (raw['truncated'] == true) {
+        lastError = '会话记录已超过通道 1 MB 文本上限，读不全'
+            '（当前 APK 还没有 fs.appendText 快速追加）。'
+            '**本次没有写入** —— 在"只读到前半截"的状态下拼新行再写回，'
+            '会把没读到的那部分永久删掉。\n'
+            '请升级 App，或先把旧会话归档/裁短。\n'
+            '文件：$path';
+        return false;
+      }
+      existing = (raw['text'] as String?) ?? '';
+    }
+
+    // 旧内容末尾没有换行时先补一个（补的是追加，既有字节没动）
+    final needsNewline = existing.isNotEmpty && !existing.endsWith('\n');
+    final updated = '$existing${needsNewline ? "\n" : ""}$lineWithNewline';
+
+    // 防线：既有内容必须是新内容的**前缀**
+    if (!updated.startsWith(existing)) {
+      lastError = '内部断言失败：拼接结果不是"旧内容 + 新行"，已放弃写入（会丢用户数据）。';
+      return false;
+    }
+
+    final w = await _ch.call('fs.writeText', <String, Object?>{
+      'path': path,
+      'text': updated,
+    });
+    final werr = errorOf(w);
+    if (werr != null) {
+      lastError = '写入会话记录失败（${_humanize(werr)}）。会话文件位置：$path';
+      return false;
+    }
+    return true;
   }
 
   /// 本实例是否正在写（**只用于检测并发，不是锁**）。

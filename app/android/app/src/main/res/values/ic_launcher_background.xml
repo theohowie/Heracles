@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- 自适应图标背景：纯白（与品牌图底色一致）。
+     由 staging/make_launcher_icons.py 生成，改图请重跑脚本。 -->
+<resources>
+    <color name="ic_launcher_background">#FFFFFFFF</color>
+</resources>

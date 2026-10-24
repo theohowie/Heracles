@@ -19,6 +19,7 @@ import com.theohowie.heracles.bridge.DeviceShellManager
 import com.theohowie.heracles.bridge.BuildTaskProgress
 import com.theohowie.heracles.bridge.FilePickerBridge
 import com.theohowie.heracles.bridge.FolderPickerBridge
+import com.theohowie.heracles.bridge.MemoryStore
 import com.theohowie.heracles.bridge.WorkspaceRegistry
 import io.flutter.embedding.android.FlutterActivity
 import io.flutter.embedding.engine.FlutterEngine
@@ -160,6 +161,8 @@ class MainActivity : FlutterActivity() {
             shell = DeviceShell(),
             health = DeviceHealth(ctx),
             build = BuildTaskProgress(ctx),
+            // ★ 长期记忆（App 全局，与工作区无关）—— `memory.read/append/clear`
+            memory = MemoryStore(ctx),
             filePicker = filePicker,
             folderPicker = folderPicker,
             scope = scope,
@@ -176,7 +179,7 @@ class MainActivity : FlutterActivity() {
     private fun handle(call: MethodCall, result: MethodChannel.Result) {
         when (call.method) {
             // ---- 工作区（登记表在本地 prefs，SAF/POSIX 由 DeviceFs 自行路由） ----
-            "pickWorkspace" -> handlePickWorkspace(result)
+            "pickWorkspace" -> handlePickWorkspace(call, result)
             "listWorkspaces" -> handleListWorkspaces(result)
             "removeWorkspace" -> handleRemoveWorkspace(call, result)
             "ensureAppWorkspace" -> handleEnsureAppWorkspace(result)
@@ -220,13 +223,29 @@ class MainActivity : FlutterActivity() {
      *
      * 用户取消时回 `null`（**沿用旧契约**：Dart 侧据此判断"没选"而不是"出错"）。
      */
-    private fun handlePickWorkspace(result: MethodChannel.Result) {
+    private fun handlePickWorkspace(call: MethodCall, result: MethodChannel.Result) {
+        // 上次用的目录作为选择器起点（Dart 可传，避免 UI 侧还要存一份）
+        val lastUri = call.argument<String>("lastUri").orEmpty()
         runOnUiThread {
             try {
-                folderPicker.launch { ws ->
+                folderPicker.launch(lastUri) { ws ->
                     if (ws == null) {
                         // 用户取消，或选的位置没有本地路径（如网盘）
                         reply(result, null)
+                        return@launch
+                    }
+                    // ★ 受限目录（Android 11+ 系统不授权）/ 网盘：
+                    //   把**原因 + 出路**原样交给 Dart，让它能显示人话并给出按钮。
+                    //   不再回 null（那会退化成一句笼统的"请换一个"）。
+                    if (ws["ok"] == false) {
+                        val payload = mutableMapOf<String, Any?>(
+                            "ok" to false,
+                            "error" to ((ws["error"] as? String)
+                                ?: "这个位置无法用作工作区"),
+                        )
+                        (ws["reason"] as? String)?.let { payload["reasonCode"] = it }
+                        (ws["suggest"] as? List<*>)?.let { payload["suggest"] = it }
+                        reply(result, payload)
                         return@launch
                     }
                     val path = ws["path"] as? String

@@ -462,14 +462,39 @@ class AgentBridge {
     //
     // 现在：直接用 `LocalAgentExecutor` 在同一个 Dart VM 里驱动
     // `HeraclesAgent`。参数不再需要序列化，`apiKey` 也不会离开本进程。
+    // ★★ 2026-10-23（修「提问现在不可用」）：每次 run 一个 `AskGate` ★★
+    //
+    // ## 之前断在哪
+    //
+    // 这里构造执行器时**没传 `askGate`** ⇒ backend 的 `ask_user` 工具
+    // `isAvailable: () => askGate != null` 为 false ⇒ 工具直接告诉模型
+    // "当前环境不支持向用户提问" —— 用户看到的即"提问不可用"。
+    //
+    // ## 为什么门禁放在桥接层创建
+    //
+    // 提问是**双向**的：工具挂起等回答（`askUser`），UI 提交答案（`replyAsk`）。
+    // 两端必须拿到**同一个实例**。放在桥接层创建，`replyAsk` 通过静态字段
+    // `_currentAskGate` 找到它（`AgentBridge` 会被多处置新，与事件流同理，
+    // 实例字段会找错对象）。
+    final askGate = LocalAskGate();
     final executor = LocalAgentExecutor(
       workspacePath: workspacePath,
       settings: settings,
       sessionStore: SessionStore(workspaceRoot: workspacePath),
+      askGate: askGate,
     );
+    _currentAskGate = askGate;
 
     try {
-      final handle = await executor.run(request: request, sessionId: sessionId);
+      // ★ 附件必须在这里传下去（2026-10-23 修）：
+      //   这一行曾经只传 request/sessionId，于是**图片在桥接层就被丢掉** ——
+      //   用户上传的图永远到不了模型。现在照片/截图会一路走到 `UserMessage`
+      //   的多模态内容块（压缩 + 视觉能力判断在 `LocalAgentExecutor` 里做）。
+      final handle = await executor.run(
+        request: request,
+        sessionId: sessionId,
+        attachments: attachments,
+      );
       _currentHandle = handle;
 
       // 把执行器产出的事件搬到全局广播流上（UI 只订阅 `events`）。
@@ -491,11 +516,22 @@ class AgentBridge {
     } catch (e) {
       _currentHandle = null;
       throw AgentBridgeException('运行失败：$e');
+    } finally {
+      // 本轮结束（成功/失败/取消）⇒ 关闭提问门禁的"当前"指针。
+      // 之后迟到的 `replyAsk` 会如实返回 false，而不是打进下一轮。
+      if (identical(_currentAskGate, askGate)) _currentAskGate = null;
     }
   }
 
   /// 当前在跑的句柄（**唯一**取消入口）。
   LocalRunHandle? _currentHandle;
+
+  /// **当前 run 的提问门禁**（2026-10-23）。
+  ///
+  /// 静态：`AgentBridge` 会被多处置新，而 UI 的 `replyAsk` 与真正在跑的
+  /// `run()` 可能不是同一个实例 —— 与 `_localEvents` / token 记账同理。
+  /// 一次只允许一个 run（事件流单 sink），所以"当前"是明确的。
+  static LocalAskGate? _currentAskGate;
 
   /// ~keep~ 旧实现留档：以下是被替换掉的通道调用（勿重新启用）：
   ///
@@ -695,26 +731,32 @@ class AgentBridge {
     }
   }
 
-  /// **ask_user 的回答通道**（2026-10-16 引入；**2026-10-21 改为选项式**）。
+  /// **ask_user 的回答通道**（2026-10-16 引入；**2026-10-23 改回进程内**）。
   ///
   /// 模型调 `ask_user` 工具时会**挂起等待** —— UI 收到 [kAskUser]
   /// 事件后弹**选项式**对话框，用户逐题点选后调用本方法。
   ///
-  /// ## 为什么参数从 `String` 变成 `Map<String, List<String>>`
+  /// ## ★ 2026-10-23：不再走 MethodChannel（原先这是第三个断点）
+  ///
+  /// 旧实现是 `_channel.invokeMethod('replyAsk')` —— 那个 Kotlin handler
+  /// 已随旧后端一起删除 ⇒ **回答永远回不到挂起的工具**（只能等 10 分钟超时）。
+  /// 现在直接完成本轮 [LocalAskGate] 上挂起的 completer。
+  ///
+  /// ## 参数形状（按题目 id → 选中的 label 列表）
   ///
   /// 用户原话：「ask 要是选项点击的……可以多选，单选，是 LLM 根据任务决定，
   /// 可以一次发多个 ask，回答完自动下一个问题」。
-  /// 一段文本表达不了"哪一题选了哪些项"，必须按**题目 id → 选中的 label 列表**回传。
+  /// 一段文本表达不了"哪一题选了哪些项"，所以是 `Map<String, List<String>>`。
   ///
-  /// 没有在跑的任务时调用是**无害的**（Kotlin 侧队列已置 null，直接丢弃）。
-  Future<void> replyAsk(Map<String, List<String>> answers) async {
-    try {
-      await _channel.invokeMethod<bool>('replyAsk', {'answers': answers});
-    } on MissingPluginException {
-      // 平台未实现（测试环境）—— 静默
-    } on PlatformException {
-      // 队列已作废（run 已结束）—— 回答无意义，丢弃
-    }
+  /// ## 返回值 = **如实**
+  ///
+  /// `true` = 确实交到了一个正在等待的提问；
+  /// `false` = 没有活动提问（run 已结束 / 已超时 / 先点了停止）。
+  /// **不静默成功** —— 调用方可以据此判断，而不是以为"已经交上去了"。
+  Future<bool> replyAsk(Map<String, List<String>> answers) async {
+    final gate = _currentAskGate;
+    if (gate == null) return false;
+    return gate.replyAsk(answers);
   }
 
   /// **危险操作审批通道**（2026-10-19）。
@@ -1101,6 +1143,10 @@ class AgentEvent {
     this.planClosedReason,
     this.questions,
     this.changeFiles,
+    this.beforeMessages,
+    this.afterMessages,
+    this.beforeTokens,
+    this.afterTokens,
   });
 
   /// 判别字段：轮级 `turn_started` / `model_output` / `tool_started` /
@@ -1209,6 +1255,39 @@ class AgentEvent {
   /// 数字来自**工具结果里的 diff**（不是模型自报）；空/坏数据由 UI 容错跳过。
   final List<Map<String, dynamic>>? changeFiles;
 
+  // ---- ★ 上下文压缩（2026-10-23）----
+  //
+  // 用户原话：「上下文压缩机制这个要做一下，如果上下文达到了 80% 必须先自动
+  // 压缩，然后继续任务，哪怕任务跑到一半」。
+  //
+  // 压缩是**有损**的（老消息被摘要成一段 XML，细节丢了），所以必须让用户看见，
+  // 否则表现只有两种：模型"突然忘了前面说的事"，或者他压根不知道发生过。
+
+  /// `context_compressed`：压缩**前**历史里有几条消息。
+  ///
+  /// ⚠️ 这是**消息条数**，不是轮次。
+  final int? beforeMessages;
+
+  /// `context_compressed`：压缩**后**历史里有几条消息。
+  ///
+  /// ⚠️ **不一定比 [beforeMessages] 小得多**：框架会把老消息删掉，但也会往
+  /// 保留段头部插入 2 条（摘要快照 + 一句确认），所以这是"前后各自的真实值"，
+  /// 不是"删掉了几条"。
+  final int? afterMessages;
+
+  /// `context_compressed`：压缩**前**估算的 token 数。
+  ///
+  /// ⚠️ **估算值，不是 provider 上报值**（此刻还没发请求）。
+  /// UI 别拿它跟顶栏的"缓存命中率"混在一起比 —— 那是两个口径。
+  final int? beforeTokens;
+
+  /// `context_compressed`：压缩**后**估算的 token 数。
+  ///
+  /// ⚠️ **可能比 [beforeTokens] 大**（摘要文本本身也占 token，
+  /// 若被压掉的老消息很短、摘要写得长就会反弹）。这不是 bug，UI 不要假设
+  /// "一定变少"，也不要在差值为负时显示成异常。
+  final int? afterTokens;
+
   // ------------------------------------------------------------ 判别辅助
 
   /// **一次 run 的变更报告**（写类工具按文件聚合，run 结束时发一条）。
@@ -1257,6 +1336,37 @@ class AgentEvent {
   /// 拒绝/超时 = 作为失败回填给模型（绝不谎称成功）。
   static const kApprovalRequest = 'approval_request';
 
+  /// **上下文已自动压缩**（2026-10-23）—— 让用户看得见"压缩真的发生了"。
+  ///
+  /// ## 为什么必须有这个事件
+  ///
+  /// 压缩是**有损**的：老消息被摘要成一段 XML 快照，细节丢了。在它之前，
+  /// 用户完全看不到发生过 —— 表现只有两种，都很糟：
+  ///
+  /// - 模型"突然忘了前面说过的事"（用户以为模型变笨了）；
+  /// - 或者什么都没察觉，直到发现上下文被悄悄改写过。
+  ///
+  /// 「到 80% 自动压缩然后继续任务」这个行为本身就该被看见：用户会明白
+  /// "哦，它压缩了，所以刚才那段细节它可能不记得了"，而不是困惑。
+  ///
+  /// ## 触发时机（重要）
+  ///
+  /// 框架在**每一轮循环的最开头、请求发出之前**检查并压缩
+  /// ⇒ 这个事件可能在一次 run 的**中间**到达（不是只在开头/结尾）。
+  /// UI 应按到达顺序插在对话流里，而不是堆到最后。
+  ///
+  /// ## 字段（**逐字，照这个名渲染**）
+  ///
+  /// | 字段 | 类型 | 含义 |
+  /// |---|---|---|
+  /// | `beforeMessages` | int | 压缩前消息条数 |
+  /// | `afterMessages` | int | 压缩后消息条数 |
+  /// | `beforeTokens` | int | 压缩前**估算** token |
+  /// | `afterTokens` | int | 压缩后**估算** token |
+  ///
+  /// ⚠️ `afterTokens` 可能 ≥ `beforeTokens`（摘要本身占 token），别假设一定变少。
+  static const kContextCompressed = 'context_compressed';
+
   // ---- token 级（2026-10-12）----
 
   /// 一个步骤开始（带 `stepId`，是逐字增量的归属锚点）
@@ -1292,6 +1402,7 @@ class AgentEvent {
     kStepDelta,
     kStepEnded,
     kChanges,
+    kContextCompressed,
   };
 
   /// `step_ended` 的三态取值（与 Kotlin 侧 `StepEnded.STATUS_*` 对齐）。
@@ -1368,6 +1479,12 @@ class AgentEvent {
           ?.whereType<Map>()
           .map((e) => e.cast<String, dynamic>())
           .toList(),
+      // ★ 上下文压缩（2026-10-23）：四个数**缺失就是 null**，不伪造 0 ——
+      //   0 条消息 / 0 token 是"真的空"，与"这条事件没带这个字段"是两件事。
+      beforeMessages: (m['beforeMessages'] as num?)?.toInt(),
+      afterMessages: (m['afterMessages'] as num?)?.toInt(),
+      beforeTokens: (m['beforeTokens'] as num?)?.toInt(),
+      afterTokens: (m['afterTokens'] as num?)?.toInt(),
     );
   }
 

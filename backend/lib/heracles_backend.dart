@@ -33,6 +33,10 @@
 library;
 
 export 'src/agent/heracles_agent.dart';
+// 会话历史 → 框架消息（2026-10-23）。宿主读会话文件后交给 `run(history:)`。
+export 'src/agent/session_history.dart';
+// 多模态输入边界类型（2026-10-23）。宿主演把图片压成 base64，框架类型不出 backend。
+export 'src/agent/multimodal.dart';
 export 'src/capability/capabilities.dart';
 export 'src/context/deterministic_json.dart';
 export 'src/context/window_ratio_compressor.dart';

@@ -6,6 +6,7 @@ import androidx.documentfile.provider.DocumentFile
 import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
 import java.io.File
 
 /**
@@ -69,6 +70,16 @@ class DeviceFs(
          */
         const val MAX_BINARY_BYTES: Long = 64L * 1024 * 1024
 
+        /**
+         * SAF 追加写（`openOutputStream(uri, "wa")`）的**上界**（毫秒）。
+         *
+         * 第三方 provider（网盘 / 部分 ROM 的 Downloads provider）可能既不成功
+         * 也不抛错，就那样挂着 —— 真机上表现为"发消息后一个事件都没有"。
+         * 超时后按"不支持追加"回报，让 Dart 侧回落到读改写（已验证路径）。
+         * 1.5s 对本地/provider 正常写入足够宽裕（正常是毫秒级）。
+         */
+        const val SAF_APPEND_TIMEOUT_MS: Long = 1_500L
+
         /** `fs.list` 在调用方没给上限时的默认条数。 */
         const val DEFAULT_MAX_ENTRIES: Int = 500
 
@@ -77,6 +88,23 @@ class DeviceFs(
 
         /** 递归列举的最大深度（防目录成环 / 病态深树）。 */
         const val MAX_DEPTH: Int = 32
+
+        /**
+         * 一次 `readTailLines` 最多返回多少**行**的硬上限。
+         *
+         * 防调用方传个天文数字进来（`maxLines = 1_000_000` 等于"读全文件"，
+         * 那就退化成没有优化）。20_000 行足够覆盖任何真实会话。
+         */
+        const val HARD_MAX_TAIL_LINES: Int = 20_000
+
+        /**
+         * `readTailLines` 在调用方没给 `maxLines`（或给 <= 0）时的默认行数。
+         *
+         * 400 的来源：一条真实的长会话大约 250–400 条消息（每轮 = 1 用户 +
+         * 1 步骤 + 1 工具 + 1 回答）。400 能让"最近几十轮"完整可见，
+         * 又不至于把几 MB 塞进内存。**Dart 侧会显式传值**，这里只是兜底。
+         */
+        const val DEFAULT_TAIL_LINES: Int = 400
 
     }
 
@@ -297,6 +325,136 @@ class DeviceFs(
         readTextInternal(normalize(path) ?: throw IllegalArgumentException("路径为空"))
     }
 
+    // ================================================================ readTailLines
+
+    /**
+     * `fs.readTailLines` → `{ok, text, truncated, totalLines?}`
+     *
+     * ## 为什么需要"从末尾读"
+     *
+     * 会话 `.jsonl` 是**只追加**的，越用越长（几百条消息能到几 MB）。
+     * 而 UI 每次切会话都要"显示最近这些条" —— 用 [readText] 的话必须
+     * **整文件读进来再切尾巴**，内存峰值 = 2× 文件大小（原始 String + split 出的
+     * List<String>），几百条会话在真机上就是明显的掉帧甚至 OOM。
+     *
+     * 这个方法只把**最后 N 行**读进内存：
+     *
+     * | 路由 | 做法 | 复杂度 |
+     * |---|---|---|
+     * | POSIX | `RandomAccessFile` 从文件尾**反向按块 seek**，数够 N 个换行就停 | O(尾部字节) |
+     * | SAF | `InputStream` 顺序流 + **环形缓冲**保留最后 N 行 | O(全文件) 时间 / O(N) 内存 |
+     *
+     * SAF 那条拿不到随机访问（provider 给的是顺序流，长度还可能报 0），
+     * 所以退成"读完但只留尾巴" —— 时间不省，**内存**仍是 O(N)。
+     * 这条差异如实记在这里，不假装两条一样快。
+     *
+     * @param maxLines 最多返回多少行（从末尾数）；`<= 0` 用默认 400，
+     *                 硬上限 [HARD_MAX_TAIL_LINES]
+     * @param defaultLines 调用方没给 `maxLines` 时用多少（由 Dart 决定并显式传，
+     *                     这里只做兜底）
+     */
+    suspend fun readTailLines(
+        path: String,
+        maxLines: Int,
+        defaultLines: Int = DEFAULT_TAIL_LINES,
+    ): Map<String, Any?> = guard {
+        val p = normalize(path) ?: throw IllegalArgumentException("路径为空")
+        val want = (if (maxLines <= 0) defaultLines else maxLines)
+            .coerceIn(1, HARD_MAX_TAIL_LINES)
+
+        val saf = registry.matchSaf(p)
+        if (saf != null) {
+            val doc = resolveSaf(saf.first, saf.second)
+                ?: throw IllegalArgumentException("文件不存在：$p")
+            if (doc.isDirectory) throw IllegalArgumentException("不是文件：$p")
+            val ins = context.contentResolver.openInputStream(doc.uri)
+                ?: throw IllegalStateException("无法打开：$p")
+            val all = ins.use { streamTailLines(it, want) }
+            return@guard ok(
+                "text" to all.joinToString("\n"),
+                "truncated" to (all.size >= want),
+                "route" to "saf",
+            )
+        }
+
+        val f = File(p)
+        if (!f.exists()) throw IllegalArgumentException("文件不存在：$p")
+        if (f.isDirectory) throw IllegalArgumentException("不是文件：$p")
+        if (f.length() == 0L) {
+            return@guard ok("text" to "", "truncated" to false, "route" to "posix")
+        }
+
+        val tail = readTailFromRandomAccess(f, want)
+        ok(
+            "text" to tail.joinToString("\n"),
+            // 拿满了 want 行 ⇒ 前面**可能**还有，如实置 truncated。
+            // 注意这条语义是"可能还有更多"，不是"确定还有"：正好 N 行的文件
+            // 也会置 true。要精确判断需要多读一行，代价不值得 ——
+            // 调用方拿到 true 只会多显示一句"更早的消息未加载"，不会出错。
+            "truncated" to (tail.size >= want),
+            "route" to "posix",
+        )
+    }
+
+    /** 从文件尾反向读最后 [want] 行（POSIX）。 */
+    private fun readTailFromRandomAccess(file: File, want: Int): List<String> {
+        java.io.RandomAccessFile(file, "r").use { raf ->
+            val len = raf.length()
+            if (len == 0L) return emptyList()
+
+            // 末尾是换行时先跳过它，否则会多出一个"空行"占掉一行额度
+            var pos = len
+            raf.seek(len - 1)
+            if (raf.read() == '\n'.code) pos = len - 1
+
+            val chunks = ArrayDeque<String>()
+            val buf = ByteArray(8 * 1024)
+            var newlines = 0
+            var readTo = pos
+
+            while (readTo > 0) {
+                val chunkLen = minOf(buf.size.toLong(), readTo).toInt()
+                val start = readTo - chunkLen
+                raf.seek(start)
+                raf.readFully(buf, 0, chunkLen)
+
+                // 从块尾往前扫，数换行
+                var i = chunkLen - 1
+                var cut = chunkLen
+                while (i >= 0) {
+                    if (buf[i] == '\n'.code.toByte()) {
+                        newlines++
+                        if (newlines > want) {
+                            // 已经数够 ⇒ 这一行之后的部分就是尾巴
+                            val piece = String(buf, i + 1, cut - (i + 1), Charsets.UTF_8)
+                            if (piece.isNotEmpty()) chunks.addFirst(piece)
+                            return chunks.toList()
+                        }
+                        cut = i
+                    }
+                    i--
+                }
+                val piece = String(buf, 0, cut, Charsets.UTF_8)
+                if (piece.isNotEmpty()) chunks.addFirst(piece)
+                readTo = start
+            }
+            return chunks.toList()
+        }
+    }
+
+    /** 顺序读到底，只保留最后 [want] 行（SAF；内存 O(want)）。 */
+    private fun streamTailLines(input: java.io.InputStream, want: Int): List<String> {
+        val ring = ArrayDeque<String>()
+        input.bufferedReader(Charsets.UTF_8).use { r ->
+            while (true) {
+                val line = r.readLine() ?: break
+                ring.addLast(line)
+                if (ring.size > want) ring.removeFirst()
+            }
+        }
+        return ring.toList()
+    }
+
     // ================================================================ readBytes
 
     /** `fs.readBytes` → `{ok, bytes}`（**不截断**，超限报错） */
@@ -346,6 +504,114 @@ class DeviceFs(
     /** `fs.writeText` → `{ok}` */
     suspend fun writeText(path: String, text: String): Map<String, Any?> =
         writeBytes(path, text.toByteArray(Charsets.UTF_8))
+
+    /**
+     * `fs.appendText` → `{ok}` —— **真正的追加入口**（2026-10-23 新增）。
+     *
+     * ## 为什么必须加这一个方法（会话卡顿的根因）
+     *
+     * 会话 `.jsonl` 是**严格 append-only** 的，但通道过去只有 `fs.writeText`
+     * （整体覆盖）。于是 Dart 侧每次追加一条消息都要
+     * 「读全文 → 拼一行 → 写全文」：
+     *
+     * | 消息条数 | 每次 append 搬运的量 |
+     * |---|---|
+     * | 10 | ~2 KB |
+     * | 200 | ~40 KB |
+     * | 1000 | ~200 KB ×2（读 + 写） |
+     *
+     * 一轮对话有 3–5 次 append（用户消息 / 每步 / 每个工具 / 回答），
+     * ⇒ **O(n²)**：长会话越聊越卡，且每次都要过一趟 1MB 文本上限那道闸
+     * （超过就**拒绝写入**，会话从此"卡住不动"）。
+     *
+     * 这个方法把代价降成 O(追加量)：
+     *
+     * | 路由 | 做法 |
+     * |---|---|
+     * | POSIX | `FileOutputStream(f, append = true)` —— 真正的 O(1) 追加 |
+     * | SAF | `openOutputStream(uri, "wa")`（append 模式） |
+     *
+     * ## 与 [writeBytes] 的两个有意差异
+     *
+     * 1. **父目录不自动创建**：追加的目标文件必须已存在或在已存在的目录里。
+     *    父目录不存在 ⇒ 明确报错（调用方应先用 `fs.writeText` 建首行）。
+     *    理由：静默 mkdir 会让"路径打错"表现为"写成功了但读不到"。
+     * 2. **不做文件名改写防护**：追加不创建文件，provider 没有机会改名。
+     *
+     * ⚠️ SAF 的 `"wa"` 模式**不是所有 provider 都支持**。不支持时抛异常，
+     * 这里会如实回 `{ok:false}`，Dart 侧**回落到读改写**（那条路仍然正确，
+     * 只是慢）。**绝不假装追加成功** —— 那会让会话丢行。
+     */
+    suspend fun appendText(path: String, text: String): Map<String, Any?> = guard {
+        val p = normalize(path) ?: throw IllegalArgumentException("路径为空")
+        val bytes = text.toByteArray(Charsets.UTF_8)
+        if (bytes.size.toLong() > MAX_BINARY_BYTES) {
+            throw IllegalArgumentException("追加过大（${bytes.size}B）：$p")
+        }
+
+        val saf = registry.matchSaf(p)
+        if (saf != null) {
+            val (entry, rel) = saf
+            val fileName = rel.substringAfterLast('/')
+            if (fileName.isEmpty()) throw IllegalArgumentException("路径指向工作区根，无法追加：$p")
+            val parentRel = rel.substringBeforeLast('/', "")
+            val parent = resolveSaf(entry, parentRel)
+                ?: throw IllegalArgumentException("父目录不存在：$p")
+            val existing = findChild(parent, fileName)
+                ?: throw IllegalArgumentException("文件不存在：$p（追加不会创建新文件）")
+            // "wa" = write + append。不支持时抛，交给 Dart 侧回落
+            //
+            // ★ 2026-10-23 真机修复：**SAF 的 "wa" 会阻塞，不只是抛**。
+            //
+            // ## 现场
+            // 用户工作区是 SAF 选中的目录。会话追加改走 `fs.appendText` 之后，
+            // 发消息只出现用户气泡、模型**零事件**、顶栏用量 `— 0%` ——
+            // 因为 `appendMessage`（写用户消息那一行）卡在这里，run 根本没开始。
+            //
+            // ## 为什么不能只靠 Dart 侧的回落
+            // `session_store` 早就为"不支持追加"准备了回落（读改写，老路径、
+            // 已验证可用），但那只在**抛错**时触发；provider 选择**阻塞**时
+            // 永远等不到回错 ⇒ 回落根本没机会跑。
+            //
+            // ## 所以
+            // 给这次**外部 provider 调用**加上界，超时按"不支持追加"回报
+            // （文案必须带 `不支持追加`，Dart 侧靠它判定回落）。
+            // ⚠️ 超时在这里的意义不是"掩盖逻辑问题"，而是**把控制权交回
+            //   已验证的正确路径**；POSIX 分支仍然走真追加，一点不受影响。
+            val wrote = withTimeoutOrNull(SAF_APPEND_TIMEOUT_MS) {
+                val out = context.contentResolver.openOutputStream(existing.uri, "wa")
+                    ?: throw IllegalStateException("该位置不支持追加写入：$p")
+                out.use {
+                    it.write(bytes)
+                    it.flush()
+                }
+                true
+            }
+            if (wrote != true) {
+                throw IllegalStateException("该位置不支持追加写入（provider 超时）：$p")
+            }
+            return@guard ok("mode" to "append")
+        }
+
+        val f = File(p)
+        if (f.isDirectory) throw IllegalArgumentException("不是文件：$p")
+        if (!f.exists()) {
+            // 文件不存在**不**替它创建：调用方应先用 writeText 写首行。
+            // 但如果是"父目录在、文件还没建"的第一次追加，建一个空文件是合理的
+            val parent = f.parentFile
+            if (parent == null || !parent.isDirectory) {
+                throw IllegalArgumentException("父目录不存在：$p（追加不会创建目录）")
+            }
+            if (!f.createNewFile()) {
+                throw IllegalStateException("无法创建文件：$p")
+            }
+        }
+        java.io.FileOutputStream(f, /* append = */ true).use { out ->
+            out.write(bytes)
+            out.flush()
+        }
+        ok("mode" to "append")
+    }
 
     /**
      * `fs.writeBytes` → `{ok}`

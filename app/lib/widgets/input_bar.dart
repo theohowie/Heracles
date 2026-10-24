@@ -659,51 +659,131 @@ class _PermissionIconButton extends StatelessWidget {
     // 随旧类一起删掉了（**安全护栏的回归**，测试抓回来的）。现在它属于
     // 这个图标按钮：**换到 fullAccess 就必须停下来确认，不管入口长什么样**。
     if (picked == PermissionMode.fullAccess) {
-      // ⚠️ 没用 showIosDialog：它透不出 barrierDismissible:false（这里**必须**
-      //   显式选择，点外面不算确认），也拿不回 bool 结果 —— 手写同款
-      //   CupertinoAlertDialog，视觉与 showIosDialog 一致。
+      // ★★ 2026-10-23：**自绘宽弹窗**（用户原话：「文字要居左，
+      //   而且现在太窄了，又高又窄」）。
+      //
+      // ## 为什么不再用 `CupertinoAlertDialog`
+      //
+      // iOS alert 宽度只有约 270dp，且正文默认**居中**：下面这段长文案
+      // 会被挤成又高又窄的一条，左右空白比字还多。
+      //
+      // ## 安全语义**一字不变**（这条是护栏，改样式不许改行为）
+      //
+      // · `barrierDismissible: false` —— 点遮罩不算确认
+      // · 只有明确点「我已了解风险，继续」才回 true；取消/返回键 = 不改
+      // · 文案一字不改；返回值仍是 bool，调用方判定不变
       final confirmed = await showCupertinoDialog<bool>(
         // 安全理由：本组件无 mounted 可查；回调/主题已在 gap 前抓成局部值，
         // 这个 context 只用来挂载对话框（Navigator 仍持有它）；
         // barrierDismissible:false 保证必须显式选择。
         context: context, // ignore: use_build_context_synchronously
         barrierDismissible: false, // 必须显式选择，点外面不算确认
-        builder: (ctx) => CupertinoTheme(
-          data: CupertinoThemeData(
-            brightness: h.dark ? Brightness.dark : Brightness.light,
-            primaryColor: h.accent,
-          ),
-          child: CupertinoAlertDialog(
-            // iOS 弹窗标题不带图标 —— 危险语义改由下方红色动作按钮承担
-            // （kit 约定：isDestructiveAction 就是 iOS 的"警告色动作"）。
-            title: Text('确认切换到「完全访问」？',
-                style: TextStyle(color: h.text, fontSize: 17)),
-            content: Text(
-              // ⚠️ 纯 Text 不解析 Markdown —— 强调用措辞，不能写 `**`
-              '选这个档位后，agent 的操作不再逐条询问你：\n\n'
-              '· 它修改文件、执行命令都不会再确认\n'
-              '· 出错或越界时没有拦截点\n'
-              '· 这个选择会持续到你自己改回来\n\n'
-              '${PermissionMode.fullAccess.description}\n\n'
-              '确定要继续吗？',
-              style: TextStyle(fontSize: 13, height: 1.55, color: h.textDim),
+        builder: (ctx) {
+          // 输入条的键盘可能正开着 —— 弹窗整体上移，正文按**剩余**高度限高，
+          // 否则"固定行数 × 1.5 行高"在键盘上会溢出（BOTTOM OVERFLOWED）。
+          final insets = MediaQuery.viewInsetsOf(ctx).bottom;
+          final available = MediaQuery.sizeOf(ctx).height - insets;
+          return CupertinoTheme(
+            data: CupertinoThemeData(
+              brightness: h.dark ? Brightness.dark : Brightness.light,
+              primaryColor: h.accent,
             ),
-            actions: [
-              CupertinoDialogAction(
-                // 危险操作的安全默认是"不做"
-                // （旧版靠 TextButton autofocus 强调；CupertinoDialogAction
-                //   无 autofocus —— 触屏上点「取消」或直接点不动都是"不做"）
-                onPressed: () => navigator.pop(false),
-                child: Text('取消', style: TextStyle(color: h.textDim)),
+            child: Padding(
+              padding: EdgeInsets.only(bottom: insets),
+              child: Center(
+                child: Container(
+                  // 屏宽 88% —— 比 iOS alert 宽一倍多，长句不再被挤成窄条
+                  width: MediaQuery.sizeOf(ctx).width * 0.88,
+                  padding: const EdgeInsets.fromLTRB(
+                      HSpace.xl, HSpace.lg, HSpace.xl, HSpace.md),
+                  decoration: BoxDecoration(
+                    color: h.surfaceAlt,
+                    borderRadius: BorderRadius.circular(16),
+                    border: Border.all(color: h.border),
+                  ),
+                  child: Column(
+                    mainAxisSize: MainAxisSize.min,
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      // 标题：**居左加粗**（原 iOS alert 是居中）
+                      Text(
+                        '确认切换到「完全访问」？',
+                        textAlign: TextAlign.left,
+                        style: TextStyle(
+                          color: h.text,
+                          fontSize: 16,
+                          fontWeight: FontWeight.w600,
+                        ),
+                      ),
+                      const SizedBox(height: HSpace.md),
+                      // 正文：左对齐、行高 1.5；键盘/大字号时内部滚动
+                      ConstrainedBox(
+                        constraints: BoxConstraints(
+                          maxHeight: available * 0.40,
+                        ),
+                        child: SingleChildScrollView(
+                          child: Text(
+                            // ⚠️ 纯 Text 不解析 Markdown —— 强调用措辞，不能写 `**`
+                            '选这个档位后，agent 的操作不再逐条询问你：\n\n'
+                            '· 它修改文件、执行命令都不会再确认\n'
+                            '· 出错或越界时没有拦截点\n'
+                            '· 这个选择会持续到你自己改回来\n\n'
+                            '${PermissionMode.fullAccess.description}\n\n'
+                            '确定要继续吗？',
+                            textAlign: TextAlign.left,
+                            style: TextStyle(
+                              fontSize: 14.5,
+                              height: 1.5,
+                              color: h.textDim,
+                            ),
+                          ),
+                        ),
+                      ),
+                      const SizedBox(height: HSpace.lg),
+                      // 按钮区：**右下、纵向两个** CupertinoButton。
+                      // 危险动作红色（iOS 惯例）；取消用次要色。
+                      // 顺序与旧 alert 一致，且「取消」在上、红色在下 ——
+                      // 触屏上离拇指更近的是"不做"，误触代价最小。
+                      Align(
+                        alignment: Alignment.centerRight,
+                        child: Column(
+                          mainAxisSize: MainAxisSize.min,
+                          crossAxisAlignment: CrossAxisAlignment.end,
+                          children: [
+                            CupertinoButton(
+                              padding: const EdgeInsets.symmetric(
+                                  horizontal: HSpace.lg, vertical: 6),
+                              onPressed: () => navigator.pop(false),
+                              child: Text(
+                                '取消',
+                                style: TextStyle(
+                                    fontSize: 15, color: h.textDim),
+                              ),
+                            ),
+                            CupertinoButton(
+                              padding: const EdgeInsets.symmetric(
+                                  horizontal: HSpace.lg, vertical: 6),
+                              onPressed: () => navigator.pop(true),
+                              child: Text(
+                                '我已了解风险，继续',
+                                style: TextStyle(
+                                  fontSize: 15,
+                                  fontWeight: FontWeight.w600,
+                                  // 危险动作 = 红色（不随主题变，两种主题都够对比度）
+                                  color: HColors.errorOn(h.dark),
+                                ),
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
               ),
-              CupertinoDialogAction(
-                isDestructiveAction: true, // iOS 惯例：风险动作 = 红字
-                onPressed: () => navigator.pop(true),
-                child: const Text('我已了解风险，继续'),
-              ),
-            ],
-          ),
-        ),
+            ),
+          );
+        },
       );
       // 取消 = 什么都不改
       if (confirmed != true) return;

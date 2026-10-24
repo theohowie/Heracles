@@ -485,8 +485,8 @@ class TurnMetrics {
   ///
   /// | 数 | 算法 | 展示位置 |
   /// |---|---|---|
-  /// | 本 getter（单轮） | 本轮的 `cached / (cached + prompt)` | 消息下方「本次用量」 |
-  /// | `SessionUsage.hitRate`（累计·加权） | `Σcached / Σ(cached+prompt)`，**全部轮次** | 标题栏圆圈 + 侧栏主标题 |
+  /// | 本 getter（单轮） | 本轮的 `cached / prompt` | 消息下方「本次用量」 |
+  /// | `SessionUsage.hitRate`（累计·加权） | `Σcached / Σprompt`，**全部轮次** | 标题栏圆圈 + 侧栏主标题 |
   /// | `AgentRunResult.steadyHitRate`（稳态·轮次平均） | `turns.drop(1)` 各轮命中率的**平均** | 侧栏「稳态命中率」 |
   ///
   /// ## 曾经的事故（用户原话）
@@ -495,10 +495,24 @@ class TurnMetrics {
   ///
   /// 这不是两个 bug，是**两个口径不同的数共用了同一个名字**。
   /// 现在三处各自带口径标签，不再都叫「缓存命中」。
+  ///
+  /// ## ★ 2026-10-23 修正：分母**不再加一次 cached**
+  ///
+  /// 旧公式是 `cached / (cached + prompt)` —— 那是**重复计数**：
+  /// `prompt` 本身就是**整段**（已经包含命中部分）。
+  ///
+  /// 真机实测（设备 `e35e48c6`，中转站原始 usage）：
+  /// ```
+  /// prompt_tokens: 5468, prompt_tokens_details: {cached_tokens: 5376}
+  /// ```
+  /// 真实命中率 = 5376/5468 = **98.3%**；旧公式给 5376/(5376+5468) = **49.6%**，
+  /// 于是顶栏长期显示 ~50%，用户报"命中缓存率太低了"。
+  ///
+  /// ⚠️ 前提：`promptTokens` 已被 backend 规范化成**整段**
+  /// （Anthropic 的 `input_tokens` 不含命中，由 `_fullPromptTokens` 加回来）。
   double? get hitRate {
     final c = cachedTokens;
     if (c == null) return null;
-    final total = c + promptTokens;
-    return total > 0 ? c / total : null;
+    return promptTokens > 0 ? c / promptTokens : null;
   }
 }

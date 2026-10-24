@@ -131,21 +131,55 @@ class SessionUsage {
   /// **绝不可以显示 0%**（那会让人以为缓存坏了）。
   bool get hasCacheData => reportedTurns > 0;
 
-  /// 总输入 token = 命中 + 未命中（**全部轮次**，用于展示"输入量"）
-  int get totalInputTokens =>
-      cachedTokens + reportedPromptTokens + unreportedPromptTokens;
+  /// 总输入 token（**整段**，全部轮次）—— 展示"一共喂进去多少"。
+  ///
+  /// ## ★ 2026-10-23 修正：**不再把 cached 加一遍**
+  ///
+  /// 旧定义是 `cachedTokens + reportedPromptTokens + unreportedPromptTokens`，
+  /// 前提是"`reportedPromptTokens` = 未命中部分"。但从 2026-10-23 起 backend
+  /// 把 `promptTokens` **规范化成整段**（含命中），于是这个加法把命中的
+  /// 16,128 算了两遍 ⇒ 侧栏显示 `Token 用量 33,157`，而真实只有 17,029。
+  ///
+  /// 用户正是**按侧栏这三个数自己算了一遍**才发现不对：
+  /// 「未缓存输入 16690、缓存读取 16128 ⇒ 命中率 49%，怎么会显示 97%？」
+  /// —— 他的算式没错，是**标签在撒谎**：那 16,690 是**整段输入**，
+  /// 真正的未命中只有 `16,690 − 16,128 = 562`。
+  ///
+  /// 现在语义统一为：`promptTokens` = 整段（含缓存），`cachedTokens` ⊆ 它。
+  int get totalInputTokens => reportedPromptTokens + unreportedPromptTokens;
+
+  /// **未命中输入** = 整段输入 − 命中缓存。
+  ///
+  /// 这才是「未缓存输入」那个标签真正该显示的数（上面那 562）。
+  /// 用 `clamp` 兜一下：若某家 provider 报了 `cached > prompt`（字段语义特殊），
+  /// 宁可显示 0 也不要出负数 —— 负数会被读成"算错了"。
+  int get uncachedInputTokens {
+    final v = totalInputTokens - cachedTokens;
+    return v > 0 ? v : 0;
+  }
 
   /// **累计命中率**。`null` = 不可用（没有任何已上报的轮次）。
   ///
-  /// 按 `:core` 的定义：`Σcached / Σ(cached + prompt)`，只统计已上报轮次。
-  /// 用**加权**（按 token 汇总）而不是"各轮命中率的平均"：
+  /// 口径：`Σcached / Σprompt`（`prompt` = **整段**，含命中部分），
+  /// 只统计已上报轮次。用**加权**（按 token 汇总）而不是"各轮命中率的平均"：
   /// 后者会让一个只有 10 token 的轮次与一个 5000 token 的轮次等权，
   /// 与用户对"整体省了多少"的直觉不符。
+  ///
+  /// ## ★ 2026-10-23 修正：分母**不再加一次 cached**
+  ///
+  /// 旧公式 `cached / (cached + prompt)` 是**重复计数** —— `prompt` 已经包含
+  /// 命中的那部分。真机实测（设备 `e35e48c6`）：
+  /// ```
+  /// prompt_tokens: 5468, prompt_tokens_details: {cached_tokens: 5376}
+  /// ```
+  /// 真值 98.3%，旧公式 49.6% ⇒ 顶栏长期显示 ~50%，用户报"命中缓存率太低"。
+  ///
+  /// ⚠️ 前提：`reportedPromptTokens` 由 backend 规范化成**整段**
+  /// （Anthropic 的 `input_tokens` 只含未命中部分，已在 `_fullPromptTokens` 加回）。
   double? get hitRate {
     if (!hasCacheData) return null;
-    final total = cachedTokens + reportedPromptTokens;
-    if (total <= 0) return null;
-    return cachedTokens / total;
+    if (reportedPromptTokens <= 0) return null;
+    return cachedTokens / reportedPromptTokens;
   }
 
   /// 输出速度（tok/s）—— 由 `Σoutput / ΣwallMs` 推出。
