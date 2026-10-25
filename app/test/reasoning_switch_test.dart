@@ -196,7 +196,7 @@ void main() {
 
       expect(find.text('DeepSeek 账号'), findsOneWidget,
           reason: '弹层列出 provider（2026-10-12 用户要求：模型可点选切换）');
-      expect(find.text('推理等级'), findsOneWidget,
+      expect(find.text('思考等级'), findsOneWidget,
           reason: '推理等级选项区在同一弹层里');
     });
 
@@ -242,7 +242,7 @@ void main() {
 
       await tester.tap(find.text('deepseek-flash'));
       await tester.pumpAndSettle();
-      await tester.tap(find.text('推理等级'));
+      await tester.tap(find.text('思考等级'));
       await tester.pumpAndSettle();
 
       for (final v in ReasoningLevel.values) {
@@ -267,7 +267,7 @@ void main() {
 
       await tester.tap(find.text('deepseek-flash'));
       await tester.pumpAndSettle();
-      await tester.tap(find.text('推理等级'));
+      await tester.tap(find.text('思考等级'));
       await tester.pumpAndSettle();
       await tester.tap(find.text('Low').last);
       await tester.pumpAndSettle();
@@ -416,14 +416,14 @@ void main() {
       await tester.pumpAndSettle();
 
       expect(
-        find.text('确认切换到「完全访问」？'),
+        find.text('开启完全访问？'),
         findsOneWidget,
         reason: 'fullAccess = agent 不再逐条询问，必须二次确认风险',
       );
       // 点取消 → 档位不变（安全默认）
       await tester.tap(find.text('取消'));
       await tester.pumpAndSettle();
-      expect(find.text('确认切换到「完全访问」？'), findsNothing);
+      expect(find.text('开启完全访问？'), findsNothing);
     });
   });
 

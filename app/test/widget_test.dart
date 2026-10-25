@@ -261,7 +261,7 @@ void main() {
 
     expect(find.text('通用设置'), findsOneWidget);
     expect(find.text('模型'), findsOneWidget);
-    expect(find.text('Theme / 外观'), findsOneWidget);
+    expect(find.text('外观'), findsOneWidget);
   });
 
   testWidgets('权限档位描述会被展示', (tester) async {
@@ -270,6 +270,9 @@ void main() {
     await tester.tap(find.text('通用设置'));
     await tester.pumpAndSettle();
 
+    // 默认权限在通用页页尾的「权限」组（原型六行之后）—— 滚到可见再断言
+    await tester.scrollUntilVisible(find.text('新会话的默认权限'), 120);
+    await tester.pumpAndSettle();
     expect(find.text('新会话的默认权限'), findsOneWidget);
   });
 }
