@@ -335,10 +335,7 @@ void main() {
 
     final label = find.text('所有文件访问');
     expect(label, findsOneWidget, reason: 'N8 六项里必须有这一行');
-    final size = tester.getSize(label);
-    expect(size.height, lessThan(40),
-        reason: '标签必须排成一行 —— 竖排时高度会是 ~6 行（>100dp）');
-    expect(size.width, greaterThan(60),
+    expect(tester.getSize(label).width, greaterThan(60),
         reason: '标签宽度不能被长状态文字挤到 0（<60dp 就会逐字换行）');
 
     // ★ 2026-10-25 真机复验追加（第一版 flex 3:5 的两个副作用）：
@@ -346,6 +343,7 @@ void main() {
     //      （真机实测该行 131px → 202px）；
     //   ② 状态用 `Flexible`（宽松）⇒ 单行短状态的盒子只有固有宽，`textAlign`
     //      在单行上看不出效果 ⇒ 状态**不贴右边缘**（真机右缘 1000 → 572）。
+    //   「一行」的判据取 <25dp：一行 ≈17dp、折两行 ≈34dp、竖排 120dp。
     for (final l in const [
       'Shizuku',
       '文件访问（授权目录）',
@@ -360,32 +358,59 @@ void main() {
           reason: '「$l」必须是一行 —— 折成两行说明标签列被压得太窄');
     }
 
-    // ★★ 2026-10-25 真机**第二版**复验追加（最隐蔽的一条，放在几何断言之前）：
-    //   **标签不得被省略号截断**。省略号是**绘制期**行为 —— `find.text` 仍命中、
-    //   盒子宽仍等于约束宽、高度仍是一行 ⇒ 上面那些断言**全都抓不到**它
-    //   （真机实测：`maxLines:1 + ellipsis` 把「文件访问（授权目录）」吃成
-    //   「文件访问（授权目…」，像素签名为末尾 3 个 5~6px 的小 run）。
-    //   这里用 `TextPainter` 量**完整文案需要多宽**，再与**标签盒子宽**比：
-    //   盒子窄于文案需求 ⇒ 真机上必然截断（与字体族、设备无关）。
+    // ★★ 真机**第二版**复验追加：**标签不得被省略号截断**。
+    //
+    //   省略号是**绘制期**行为 —— `find.text` 仍命中、盒子宽仍等于约束宽、
+    //   高度仍是一行 ⇒ 上面那些断言**全都抓不到**它（真机实测 `maxLines:1 +
+    //   ellipsis` 把「文件访问（授权目录）」吃成「文件访问（授权目…」，
+    //   像素签名为末尾 3 个 5~6px 的小 run）。
+    //
+    //   ⚠️ **语义边界（复核 2026-10-25 指出，必须写清）**：`tp.width` 量的是
+    //   **测试字体**下的固有宽（本机测试字体 1em/字形 ⇒ 10 字 = 140dp；
+    //   真机 MiSans ≈1.3em/字形 ⇒ ≈182dp）⇒ 它证明的是「在 320dp 测试面上
+    //   标签没有被宽度约束」，这是本修复（标签非 flex）的构造性质，
+    //   **不能**代替真机度量。
+    //   ⚠️ 样式必须取**控件真实生效的样式**（`DefaultTextStyle` 的
+    //   `letterSpacing` 等会算进去）；手抄 `const TextStyle(fontSize: 14)`
+    //   会漏掉 `bodyMedium.letterSpacing(0.25)` ⇒ 有效容差从 0.5dp 变成 ~3dp。
     for (final l in const ['文件访问（授权目录）', '所有文件访问']) {
-      final box = tester.getSize(find.text(l)).width;
+      final f = find.text(l);
+      final box = tester.getSize(f).width;
+      final ctx = tester.element(f);
+      final effective = DefaultTextStyle.of(ctx).style.merge(tester.widget<Text>(f).style);
       final tp = TextPainter(
-        text: TextSpan(text: l, style: const TextStyle(fontSize: 14)),
+        text: TextSpan(text: l, style: effective),
         textDirection: TextDirection.ltr,
+        textScaler: MediaQuery.textScalerOf(ctx),
       )..layout();
       expect(tp.width, lessThanOrEqualTo(box + 0.5),
           reason: '「$l」完整文案需要 ${tp.width}dp，标签盒子只有 $box dp '
-              '⇒ 真机上会被省略号吃掉（第二版就是这个缺陷）');
+              '⇒ 测试面上已**被宽度约束**（真机上就会是省略号截断，第二版即此）');
     }
 
-    // 短状态（「已授权」）必须贴住行的右边缘：状态盒子应当是**紧约束**
-    // （Expanded），而不是"只取固有宽的 Flexible"。
-    final row = find
-        .ancestor(of: find.text('所有文件访问'), matching: find.byType(Row))
-        .first;
-    final rowRight = tester.getRect(row).right;
-    final statusRight = tester.getRect(find.text('已授权').first).right;
-    expect((rowRight - statusRight).abs(), lessThan(1.5),
-        reason: '短状态必须贴右边缘（真机上第一版修法这里差了 ~300px）');
+    // ★★ 副作用②：状态必须**贴住它自己那一行的右边缘**。
+    //
+    //   ⚠️ 复核（2026-10-25）抓到的坑：这里必须**同一行**取"行右缘"与"状态右缘"。
+    //   早先写法 row 取自「所有文件访问」、状态却取 `find.text('已授权').first`
+    //   （树序最前者 = **Shizuku** 行，因为 allFiles 的状态永远是
+    //   「未开启（按设计，文件经授权目录访问）」）⇒ 断言测的是别的行：
+    //   复核变异③（只把被命名行的状态右缘挪 30dp）下**整个文件仍然 18/18 全绿**。
+    //   现在两处都从**同一行**取，并覆盖"短状态"与"长状态（会换行）"两种。
+    for (final l in const ['Shizuku', '所有文件访问']) {
+      final row =
+          find.ancestor(of: find.text(l), matching: find.byType(Row)).first;
+      final status = find.descendant(
+        of: row,
+        matching: find.byWidgetPredicate(
+          (w) => w is Text && w.data != null && w.data != l,
+          description: '同一行里的状态文本（排除标签自己）',
+        ),
+      );
+      expect(status, findsOneWidget, reason: '「$l」这一行必须有且只有一个状态文本');
+      final rowRight = tester.getRect(row).right;
+      final statusRight = tester.getRect(status).right;
+      expect((rowRight - statusRight).abs(), lessThan(1.5),
+          reason: '「$l」行的状态必须贴右边缘（第一版修法真机右缘 1000→572）');
+    }
   });
 }
