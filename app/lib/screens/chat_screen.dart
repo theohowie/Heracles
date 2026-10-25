@@ -1338,33 +1338,13 @@ class _ChatScreenState extends State<ChatScreen> {
   /// ★ 重命名 —— 之前是空实现
   Future<void> _renameSession(String workspaceId, String sessionId) async {
     final s = _findSession(workspaceId, sessionId);
-    final controller = TextEditingController(text: s?.title ?? '');
-    final h = Hue.of(context);
-    final name = await showCupertinoDialog<String>(
-      context: context,
-      builder: (ctx) => CupertinoAlertDialog(
-        title: const Text('重命名会话'),
-        content: Padding(
-          padding: const EdgeInsets.only(top: 8),
-          child: CupertinoTextField(
-            controller: controller,
-            autofocus: true,
-            placeholder: '会话名称',
-            style: TextStyle(color: h.text),
-          ),
-        ),
-        actions: [
-          CupertinoDialogAction(
-            onPressed: () => Navigator.of(ctx).pop(),
-            child: const Text('取消'),
-          ),
-          CupertinoDialogAction(
-            isDefaultAction: true,
-            onPressed: () => Navigator.of(ctx).pop(controller.text.trim()),
-            child: const Text('保存'),
-          ),
-        ],
-      ),
+    // 2026-10-25：居中弹窗改上拉输入抽屉（与全 App 弹层语言统一）
+    final name = await showBwTextInputSheet(
+      context,
+      title: '重命名会话',
+      initial: s?.title ?? '',
+      placeholder: '会话名称',
+      confirmLabel: '保存',
     );
     if (name == null || name.isEmpty) return;
     await _bridge.renameSession(workspaceId, sessionId, name,
@@ -1376,29 +1356,15 @@ class _ChatScreenState extends State<ChatScreen> {
 
   /// ★ 删除 —— 之前是空实现
   Future<void> _deleteSession(String workspaceId, String sessionId) async {
-    final h = Hue.of(context);
-    final ok = await showCupertinoDialog<bool>(
-      context: context,
-      builder: (ctx) => CupertinoAlertDialog(
-        title: const Text('删除会话'),
-        content: Text(
-          '这会删除该会话的记录。\n工作区里的文件不会被删除。',
-          style: TextStyle(fontSize: 13, height: 1.5, color: h.textDim),
-        ),
-        actions: [
-          CupertinoDialogAction(
-            onPressed: () => Navigator.of(ctx).pop(false),
-            child: const Text('取消'),
-          ),
-          CupertinoDialogAction(
-            isDestructiveAction: true,
-            onPressed: () => Navigator.of(ctx).pop(true),
-            child: const Text('删除'),
-          ),
-        ],
-      ),
+    // 2026-10-25：居中弹窗改上拉确认抽屉
+    final ok = await showBwConfirmSheet(
+      context,
+      title: '删除会话',
+      message: '这会删除该会话的记录。\n工作区里的文件不会被删除。',
+      confirmLabel: '删除',
+      destructive: true,
     );
-    if (ok != true) return;
+    if (!ok) return;
 
     await _bridge.deleteSession(workspaceId, sessionId,
         treeUri: _treeUriOf(workspaceId));
@@ -4625,15 +4591,15 @@ class _ChatScreenState extends State<ChatScreen> {
     // 降级：老版本 Kotlin / 解析失败 —— 只显示题干，没有选项可点
     if (questions == null || questions.isEmpty) {
       // 只有一个"知道了"按钮；关掉后回传空答案（= 全部未回答，绝不编造）
-      await showIosDialog(
+      // 2026-10-25：改上拉抽屉（单按钮形态），语义不变
+      await showBwConfirmSheet(
         context,
         title: '模型需要你的回答',
         message: fallbackText.isEmpty
             ? '（模型提了一个问题，但内容为空）'
             : fallbackText,
-        actions: [
-          const IosAction('知道了', isDefaultAction: true),
-        ],
+        confirmLabel: '知道了',
+        cancelLabel: null,
       );
       await _bridge.replyAsk(const {});
       return;

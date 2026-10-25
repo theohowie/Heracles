@@ -10,6 +10,7 @@ import '../services/global_memory.dart';
 import '../services/settings_controller.dart';
 import '../theme/app_theme.dart';
 import '../theme/cupertino_kit.dart';
+import '../widgets/bw_approval.dart';
 
 /// 设置主页 —— 分类列表（对应参考图的侧栏结构）。
 class SettingsScreen extends StatelessWidget {
@@ -886,19 +887,18 @@ class _GlobalMemoryPageState extends State<GlobalMemoryPage> {
     });
   }
 
-  /// 清空**不可逆** —— 先弹 iOS 确认框，破坏性动作用红色（iOS 的规矩）。
+  /// 清空**不可逆** —— 先弹确认抽屉（2026-10-25 起统一走上拉抽屉，
+  /// 不再用居中弹窗），破坏性按钮红色实心。
   Future<void> _confirmClear() async {
-    await showIosDialog(
+    final ok = await showBwConfirmSheet(
       context,
       title: '清空全局记忆？',
       message: '所有跨会话记忆都会被删除，无法恢复。'
           '之后的新会话不再带着这些内容开始。',
-      actions: [
-        const IosAction('取消'),
-        IosAction('清空记忆',
-            isDestructiveAction: true, onTap: _doClear),
-      ],
+      confirmLabel: '清空记忆',
+      destructive: true,
     );
+    if (ok && mounted) await _doClear();
   }
 
   Future<void> _doClear() async {
@@ -916,23 +916,21 @@ class _GlobalMemoryPageState extends State<GlobalMemoryPage> {
   }
 
   Future<void> _confirmDelete(MemoryEntry e) async {
-    await showIosDialog(
+    final ok = await showBwConfirmSheet(
       context,
       title: '删除这条记忆？',
       message: e.text.length > 80 ? '${e.text.substring(0, 80)}…' : e.text,
-      actions: [
-        const IosAction('取消'),
-        IosAction('删除', isDestructiveAction: true, onTap: () async {
-          final r = await _memory.deleteEntry(e.id);
-          if (!mounted) return;
-          if (!r.ok) {
-            showIosToast(context, r.error ?? '删除失败');
-            return;
-          }
-          await _load();
-        }),
-      ],
+      confirmLabel: '删除',
+      destructive: true,
     );
+    if (!ok || !mounted) return;
+    final r = await _memory.deleteEntry(e.id);
+    if (!mounted) return;
+    if (!r.ok) {
+      showIosToast(context, r.error ?? '删除失败');
+      return;
+    }
+    await _load();
   }
 
   Future<void> _openEditor({MemoryEntry? entry}) async {
@@ -1602,17 +1600,15 @@ class _ProviderCard extends StatelessWidget {
     if (!context.mounted) return;
     if (confirmed == true) {
       // ★ 二次确认 —— 删除不可逆（连带清掉 Keystore 里的 Key）
-      await showIosDialog(
+      final ok = await showBwConfirmSheet(
         context,
         title: '删除这个提供商？',
         message: '「${provider.name.isEmpty ? "(未命名)" : provider.name}」的配置'
             '与已保存的 API Key 都会被清除，无法恢复。',
-        actions: [
-          const IosAction('取消'),
-          IosAction('删除',
-              isDestructiveAction: true, onTap: onDelete),
-        ],
+        confirmLabel: '删除',
+        destructive: true,
       );
+      if (ok && context.mounted) onDelete?.call();
     } else if (confirmed == false) {
       onEdit();
     }

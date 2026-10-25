@@ -108,20 +108,11 @@ void main() {
   ///
   /// 用**图标**定位而不是 `find.byTooltip('添加工作区')`：tooltip 要长按/悬浮
   /// 才可见，图标是用户真正点的那 36×36 热区。
-  ///
-  /// ★ 2026-10-25（过期 finder 修复）：Cupertino 改版后图标从 Material
-  ///   `Icons.create_new_folder_outlined` 换成 `CupertinoIcons.folder_badge_plus`
-  ///   —— 且抽屉里同款图标出现两次（`workspace_drawer.dart:874` size 18 =
-  ///   本按钮；`:370` size 35 = 空态装饰）⇒ 必须按 size 定位。**只换 finder，
-  ///   断言与测试体未动**。
+  /// （2026-10-25：图标已随全 App 图标体系换成 Cupertino 的
+  /// folder_badge_plus，finder 跟上；原 Material 图标早已不在树上，
+  /// 这 4 条用例因此一直红 —— 产品行为没变，是测试找错了图标。）
   Future<void> openAddMenu(WidgetTester tester) async {
-    await tester.tap(find.byWidgetPredicate(
-      (w) =>
-          w is Icon &&
-          w.icon == CupertinoIcons.folder_badge_plus &&
-          w.size == 18,
-      description: '工作区区块头的 ⊕ 菜单按钮（size 18）',
-    ));
+    await tester.tap(find.byIcon(CupertinoIcons.folder_badge_plus));
     await settle(tester);
   }
 

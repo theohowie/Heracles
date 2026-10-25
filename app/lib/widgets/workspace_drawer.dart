@@ -5,6 +5,7 @@ import '../models/view_options.dart';
 import '../models/workspace.dart';
 import '../theme/app_theme.dart';
 import '../theme/cupertino_kit.dart';
+import 'bw_approval.dart';
 
 /// 工作区侧边栏 —— 项目与会话管理。
 ///
@@ -102,35 +103,17 @@ class WorkspaceDrawer extends StatelessWidget {
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
             _header(context, h),
-            const SizedBox(height: HSpace.md),
-
-            Padding(
-              padding: const EdgeInsets.symmetric(horizontal: HSpace.lg),
-              child: _NewSessionButton(
-                h: h,
-                onTap: () {
-                  if (workspaces.isEmpty) {
-                    onAddWorkspace?.call();
-                    return;
-                  }
-                  onNewSession(workspaces.first.id);
-                },
-              ),
-            ),
-            const SizedBox(height: HSpace.md),
+            const SizedBox(height: HSpace.sm),
 
             // ⚠️ 2026-10-19：这里原有「插件 / 自动化任务 / 上下文洞察」三个入口，
             //   但它们的 `onTap` 都是空实现 —— 界面上承诺了、点了没反应。
             //   在真有功能之前**不画**（假入口比没有入口更伤信任）。
-            const SizedBox(height: HSpace.sm),
-            const Divider(height: 1),
-
             _SectionHeader(
               h: h,
               searching: searchQuery.isNotEmpty,
               onAdd: onAddWorkspace,
               onAddApp: onAddAppWorkspace,
-              onSearch: () => _openSearch(context, h),
+              onSearch: () => _openSearch(context),
               onViewOptions: () => _openViewOptions(context, h),
             ),
 
@@ -146,10 +129,19 @@ class WorkspaceDrawer extends StatelessWidget {
                     horizontal: HSpace.xl, vertical: HSpace.lg),
                 child: Row(
                   children: [
-                    Icon(AppIcons.settings, size: 19, color: h.textDim),
-                    const SizedBox(width: HSpace.md + 2),
+                    // 原型 04：齿轮放浅灰圆角方砖里，文字用正色
+                    Container(
+                      width: 30,
+                      height: 30,
+                      decoration: BoxDecoration(
+                        color: h.surface,
+                        borderRadius: BorderRadius.circular(9),
+                      ),
+                      child: Icon(AppIcons.settings, size: 17, color: h.text),
+                    ),
+                    const SizedBox(width: HSpace.md),
                     Text('设置',
-                        style: TextStyle(fontSize: 14, color: h.textDim)),
+                        style: TextStyle(fontSize: 15, color: h.text)),
                   ],
                 ),
               ),
@@ -322,7 +314,8 @@ class WorkspaceDrawer extends StatelessWidget {
     }
 
     return ListView.builder(
-      padding: const EdgeInsets.only(bottom: HSpace.lg),
+      padding: const EdgeInsets.fromLTRB(
+          HSpace.sm, 0, HSpace.sm, HSpace.lg),
       itemCount: rows.length,
       itemBuilder: (_, i) {
         final (w, s) = rows[i];
@@ -341,8 +334,6 @@ class WorkspaceDrawer extends StatelessWidget {
             (wid, sid) => onToggleArchive?.call(wid, sid),
             (wid, sid) => onDeleteSession?.call(wid, sid),
           ),
-          onDelete: () => onDeleteSession?.call(w.id, s.id),
-          onStar: () => onToggleStar?.call(w.id, s.id),
         );
       },
     );
@@ -416,35 +407,68 @@ class WorkspaceDrawer extends StatelessWidget {
         ),
       );
 
+  // 头部（原型 04，2026-10-25 按用户指定式样重做）：App 图标 +
+  // Heracles / 端侧智能体两行标题，右上角黑方钮 = 新建会话
+  // （不再单占一整行描边大按钮，也没有 × —— 关抽屉靠滑/点遮罩）。
   Widget _header(BuildContext context, Hue h) => Padding(
-        padding: const EdgeInsets.fromLTRB(HSpace.lg, HSpace.md, HSpace.sm, 0),
+        padding: const EdgeInsets.fromLTRB(HSpace.lg, HSpace.md, HSpace.lg, 0),
         child: Row(
           children: [
             // ★ 真实 App 图标（2026-10-24 黑白改版）：不再用字母/符号占位
             ClipRRect(
-              borderRadius: BorderRadius.circular(8),
+              borderRadius: BorderRadius.circular(9),
               child: Image.asset(
                 'assets/branding/app_icon_source.png',
-                width: 30,
-                height: 30,
+                width: 34,
+                height: 34,
                 fit: BoxFit.cover,
               ),
             ),
-            const SizedBox(width: HSpace.sm),
-            Text(
-              'Heracles',
-              style: TextStyle(
-                fontSize: 17,
-                fontWeight: FontWeight.w700,
-                letterSpacing: -0.3,
-                color: h.text,
-              ),
+            const SizedBox(width: HSpace.md),
+            Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Text(
+                  'Heracles',
+                  style: TextStyle(
+                    fontSize: 16.5,
+                    fontWeight: FontWeight.w700,
+                    letterSpacing: -0.3,
+                    color: h.text,
+                  ),
+                ),
+                const SizedBox(height: 1),
+                Text(
+                  '端侧智能体',
+                  style: TextStyle(fontSize: 11.5, color: h.textFaint),
+                ),
+              ],
             ),
             const Spacer(),
-            CupertinoButton(
-              padding: const EdgeInsets.all(8),
-              onPressed: onClose ?? () => Navigator.of(context).pop(),
-              child: Icon(AppIcons.close, size: 21, color: h.textFaint),
+            Material(
+              color: h.text,
+              borderRadius: BorderRadius.circular(10),
+              child: InkWell(
+                // 语义沿用旧大按钮：无工作区时先去加工作区
+                onTap: () {
+                  if (workspaces.isEmpty) {
+                    onAddWorkspace?.call();
+                    return;
+                  }
+                  onNewSession(workspaces.first.id);
+                },
+                borderRadius: BorderRadius.circular(10),
+                child: SizedBox(
+                  width: 34,
+                  height: 34,
+                  child: Icon(
+                    AppIcons.add,
+                    size: 19,
+                    color: h.dark ? const Color(0xFF0A0A0B) : Colors.white,
+                  ),
+                ),
+              ),
             ),
           ],
         ),
@@ -475,45 +499,15 @@ class WorkspaceDrawer extends StatelessWidget {
 
   // ------------------------------------------------------------ 搜索
 
-  Future<void> _openSearch(BuildContext context, Hue h) async {
-    final controller = TextEditingController(text: searchQuery);
-    // ⚠️ 没用 showIosDialog：它的 content 只能放一段 String，
-    //   而这里要在弹窗里**放输入框**（并拿回输入的 String）——
-    //   直接手写同款的 CupertinoAlertDialog，视觉与 showIosDialog 一致。
-    final q = await showCupertinoDialog<String>(
-      context: context,
-      builder: (ctx) => CupertinoTheme(
-        // 弹窗跟随 App 的深浅色（App 是 MaterialApp，没有现成的 CupertinoTheme）
-        data: CupertinoThemeData(
-          brightness: h.dark ? Brightness.dark : Brightness.light,
-          primaryColor: h.accent,
-        ),
-        child: CupertinoAlertDialog(
-          title: Text('搜索会话', style: TextStyle(color: h.text, fontSize: 16)),
-          content: Padding(
-            padding: const EdgeInsets.only(top: HSpace.sm),
-            child: CupertinoTextField(
-              controller: controller,
-              autofocus: true,
-              style: TextStyle(color: h.text),
-              placeholder: '输入标题关键词',
-              placeholderStyle: TextStyle(color: h.textFaint),
-              onSubmitted: (v) => Navigator.of(ctx).pop(v),
-            ),
-          ),
-          actions: [
-            CupertinoDialogAction(
-              onPressed: () => Navigator.of(ctx).pop(''),
-              child: Text('清除', style: TextStyle(color: h.textDim)),
-            ),
-            CupertinoDialogAction(
-              isDefaultAction: true,
-              onPressed: () => Navigator.of(ctx).pop(controller.text),
-              child: const Text('搜索'),
-            ),
-          ],
-        ),
-      ),
+  Future<void> _openSearch(BuildContext context) async {
+    // 2026-10-25：居中弹窗改上拉输入抽屉（清除 = 返回空串，沿用旧语义）
+    final q = await showBwTextInputSheet(
+      context,
+      title: '搜索会话',
+      initial: searchQuery,
+      placeholder: '输入标题关键词',
+      confirmLabel: '搜索',
+      clearLabel: '清除',
     );
     if (q != null) onSearchChanged(q.trim());
   }
@@ -726,43 +720,6 @@ void _sessionMenu(
 
 // ------------------------------------------------------------ 小组件
 
-class _NewSessionButton extends StatelessWidget {
-  const _NewSessionButton({required this.onTap, required this.h});
-
-  final VoidCallback onTap;
-  final Hue h;
-
-  @override
-  Widget build(BuildContext context) {
-    return Material(
-      color: Colors.transparent,
-      child: InkWell(
-        onTap: onTap,
-        borderRadius: BorderRadius.circular(HRadius.lg),
-        child: Container(
-          height: 46,
-          decoration: BoxDecoration(
-            borderRadius: BorderRadius.circular(HRadius.lg),
-            border: Border.all(color: h.border),
-          ),
-          child: Row(
-            mainAxisAlignment: MainAxisAlignment.center,
-            children: [
-              Icon(CupertinoIcons.plus_circle, size: 19, color: h.text),
-              const SizedBox(width: HSpace.sm),
-              Text('新会话',
-                  style: TextStyle(
-                      fontSize: 14,
-                      fontWeight: FontWeight.w600,
-                      color: h.text)),
-            ],
-          ),
-        ),
-      ),
-    );
-  }
-}
-
 class _SectionHeader extends StatelessWidget {
   const _SectionHeader({
     required this.h,
@@ -904,27 +861,24 @@ class _MiniAction extends StatelessWidget {
     required this.h,
     this.onTap,
     this.color,
-    this.size = 36,
   });
 
   final IconData icon;
   final Hue h;
   final VoidCallback? onTap;
   final Color? color;
-  final double size;
 
   @override
   Widget build(BuildContext context) {
     return SizedBox(
-      width: size,
-      height: size,
+      width: 36,
+      height: 36,
       child: Material(
         color: Colors.transparent,
         child: InkWell(
           onTap: onTap,
           borderRadius: BorderRadius.circular(HRadius.sm),
-          child: Icon(icon,
-              size: size <= 30 ? 17 : 18, color: color ?? h.textFaint),
+          child: Icon(icon, size: 18, color: color ?? h.textFaint),
         ),
       ),
     );
@@ -959,24 +913,34 @@ class _WorkspaceGroup extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    // 「当前」标记 = 含活跃会话的那个工作区（原型 04：行尾小字）
+    final isCurrent = workspace.sessions.any((ss) => ss.active);
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
         InkWell(
           onTap: onToggle,
+          // 工作区操作（新建会话 / 从列表移除 / 路径）收进长按菜单，
+          // 行面保持干净（原型 04，2026-10-25）
+          onLongPress: () => _workspaceMenu(context),
           child: Padding(
-            padding: const EdgeInsets.fromLTRB(HSpace.sm, 0, HSpace.xs, 0),
+            padding: const EdgeInsets.symmetric(
+                horizontal: HSpace.sm, vertical: HSpace.sm + 2),
             child: Row(
               children: [
                 Icon(
                   workspace.expanded
                       ? AppIcons.chevronDown
                       : AppIcons.chevronRight,
-                  size: 23,
+                  size: 22,
                   color: h.textFaint,
                 ),
                 const SizedBox(width: 2),
-                Icon(AppIcons.folder, size: 18, color: h.accent),
+                Icon(
+                  CupertinoIcons.folder_fill,
+                  size: 19,
+                  color: isCurrent ? h.text : h.textDim,
+                ),
                 const SizedBox(width: HSpace.sm + 2),
                 Expanded(
                   child: Column(
@@ -992,7 +956,19 @@ class _WorkspaceGroup extends StatelessWidget {
                             fontWeight: FontWeight.w600,
                             color: h.text),
                       ),
-                      if (!workspace.writable)
+                      // 常规副标题（已授权文件夹 / 路径尾）按原型去掉；
+                      // 异常态仍要明说：失效（红字）与只读（警示色），
+                      // 这是 2026-10-20 真机 bug 的教训，不能跟着一起删。
+                      if (!workspace.exists)
+                        Text(
+                          '工作区已失效 · 文件夹不存在',
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style: TextStyle(
+                              fontSize: 10.5,
+                              color: HColors.errorOn(h.dark)),
+                        )
+                      else if (!workspace.writable)
                         Row(
                           children: [
                             Icon(CupertinoIcons.lock,
@@ -1009,48 +985,25 @@ class _WorkspaceGroup extends StatelessWidget {
                               ),
                             ),
                           ],
-                        )
-                      else
-                        // 用户选的文件夹没有真实路径可展示时，如实说明来源
-                        Text(
-                          // ★ 失效的工作区要**明说**（2026-10-20）：
-                          //   目录被删后这条记录仍留在列表里（不再凭空消失），
-                          //   副标题直接写"工作区已失效"，用户一眼知道发生了什么。
-                          !workspace.exists
-                              ? '工作区已失效 · 文件夹不存在'
-                              : (workspace.isSaf
-                                  ? '已授权文件夹'
-                                  : _tail(workspace.path)),
-                          maxLines: 1,
-                          overflow: TextOverflow.ellipsis,
-                          style: TextStyle(
-                            fontSize: 10.5,
-                            // 失效用警示色，与其他状态区分开
-                            color: workspace.exists
-                                ? h.textFaint
-                                : HColors.errorOn(h.dark),
-                          ),
                         ),
                     ],
                   ),
                 ),
-                _MiniAction(
-                  icon: AppIcons.more,
-                  h: h,
-                  onTap: () => _workspaceMenu(context),
-                ),
-                _MiniAction(
-                    icon: AppIcons.add, h: h, onTap: onNewSession),
+                if (isCurrent)
+                  Text(
+                    '当前',
+                    style: TextStyle(fontSize: 11.5, color: h.textFaint),
+                  ),
+                const SizedBox(width: HSpace.xs),
               ],
             ),
           ),
         ),
-
         if (workspace.expanded)
           if (workspace.sessions.isEmpty)
             Padding(
-              padding:
-                  const EdgeInsets.fromLTRB(50, HSpace.sm, HSpace.lg, HSpace.md),
+              padding: const EdgeInsets.fromLTRB(
+                  46, HSpace.sm, HSpace.lg, HSpace.md),
               child: Text(
                 '还没有会话\n直接发消息就会新建一个',
                 style: TextStyle(
@@ -1058,34 +1011,43 @@ class _WorkspaceGroup extends StatelessWidget {
               ),
             )
           else
-            ...workspace.sessions.map(
-              (s) => _SessionRow(
-                session: s,
-                h: h,
-                onTap: () => onSelectSession(s.id),
-                onMenu: () => _sessionMenu(
-                  context,
-                  h,
-                  workspace,
-                  s,
-                  (wid, sid) => onStar(sid),
-                  (wid, sid) => onRename(sid),
-                  (wid, sid) => onArchive(sid),
-                  (wid, sid) => onDelete(sid),
+            // 会话挂在工作区下：左侧连续竖线 + 缩进（原型 04）
+            Padding(
+              padding: const EdgeInsets.only(left: 21, right: HSpace.sm),
+              child: Container(
+                decoration: BoxDecoration(
+                  border: Border(
+                    left: BorderSide(color: h.border, width: 1.5),
+                  ),
                 ),
-                onDelete: () => onDelete(s.id),
-                onStar: () => onStar(s.id),
+                padding: const EdgeInsets.only(left: HSpace.md),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.stretch,
+                  children: [
+                    for (final ss in workspace.sessions)
+                      _SessionRow(
+                        session: ss,
+                        h: h,
+                        onTap: () => onSelectSession(ss.id),
+                        onMenu: () => _sessionMenu(
+                          context,
+                          h,
+                          workspace,
+                          ss,
+                          (wid, sid) => onStar(sid),
+                          (wid, sid) => onRename(sid),
+                          (wid, sid) => onArchive(sid),
+                          (wid, sid) => onDelete(sid),
+                        ),
+                      ),
+                  ],
+                ),
               ),
             ),
       ],
     );
   }
 
-  static String _tail(String path) {
-    final parts = path.split('/').where((p) => p.isNotEmpty).toList();
-    if (parts.length <= 2) return path;
-    return '…/${parts.sublist(parts.length - 2).join('/')}';
-  }
 
   void _workspaceMenu(BuildContext context) {
     showModalBottomSheet<void>(
@@ -1147,17 +1109,16 @@ class _SessionRow extends StatelessWidget {
     required this.h,
     required this.onTap,
     required this.onMenu,
-    required this.onDelete,
-    required this.onStar,
     this.subtitle,
   });
 
   final HSession session;
   final Hue h;
   final VoidCallback onTap;
+
+  /// 长按 → 会话菜单（收藏 / 重命名 / 归档 / 删除都在里面）。
+  /// 行面上不再摆一排图标 —— 原型 04（2026-10-25 用户指定式样）。
   final VoidCallback onMenu;
-  final VoidCallback onDelete;
-  final VoidCallback onStar;
 
   /// 单列表模式下显示归属工作区
   final String? subtitle;
@@ -1165,106 +1126,68 @@ class _SessionRow extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final active = session.active;
-    final grouped = subtitle == null;
-
-    return Padding(
-      padding: EdgeInsets.only(left: grouped ? 22 : 0),
-      child: Row(
-        children: [
-          if (grouped)
-            Container(
-              width: 2,
-              height: 42,
-              decoration: BoxDecoration(
-                color: active ? h.accent : h.border,
-                borderRadius: BorderRadius.circular(1),
-              ),
-            ),
-          if (grouped) const SizedBox(width: HSpace.sm),
-
-          // 会话主体必须在 Expanded 里，否则右侧图标会被挤出屏幕
-          Expanded(
-            child: Material(
-              color: active ? h.surface : Colors.transparent,
-              borderRadius: BorderRadius.circular(HRadius.sm),
-              child: InkWell(
-                onTap: onTap,
-                borderRadius: BorderRadius.circular(HRadius.sm),
-                child: Padding(
-                  padding: const EdgeInsets.symmetric(
-                      horizontal: HSpace.md, vertical: HSpace.sm + 2),
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    mainAxisSize: MainAxisSize.min,
-                    children: [
-                      Row(
-                        children: [
-                          if (session.archived)
-                            Padding(
-                              padding: const EdgeInsets.only(right: 4),
-                              child: Icon(CupertinoIcons.archivebox,
-                                  size: 13, color: h.textFaint),
-                            ),
-                          Expanded(
-                            child: Text(
-                              session.title,
-                              maxLines: 1,
-                              overflow: TextOverflow.ellipsis,
-                              style: TextStyle(
-                                fontSize: 13.5,
-                                fontWeight:
-                                    active ? FontWeight.w600 : FontWeight.w400,
-                                color: active ? h.text : h.textDim,
-                              ),
-                            ),
-                          ),
-                          if (session.relativeTime.isNotEmpty) ...[
-                            const SizedBox(width: HSpace.sm),
-                            Text(
-                              session.relativeTime,
-                              style:
-                                  TextStyle(fontSize: 11, color: h.textFaint),
-                            ),
-                          ],
-                        ],
+    // 第二行小字：[工作区名 ·] 时间 [· 当前]（原型 04 的两行式）
+    final second = [
+      ?subtitle,
+      if (session.relativeTime.isNotEmpty) session.relativeTime,
+      if (active) '当前',
+    ].join(' · ');
+    return Material(
+      // 当前会话 = 整块浅灰高亮（原型 04）
+      color: active ? h.surface : Colors.transparent,
+      borderRadius: BorderRadius.circular(12),
+      child: InkWell(
+        onTap: onTap,
+        onLongPress: onMenu,
+        borderRadius: BorderRadius.circular(12),
+        child: Padding(
+          padding: const EdgeInsets.symmetric(
+              horizontal: HSpace.md, vertical: 9),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Row(
+                children: [
+                  if (session.starred)
+                    Padding(
+                      padding: const EdgeInsets.only(right: 4),
+                      child: Icon(AppIcons.star,
+                          size: 11, color: HColors.warnOn(h.dark)),
+                    ),
+                  if (session.archived)
+                    Padding(
+                      padding: const EdgeInsets.only(right: 4),
+                      child: Icon(CupertinoIcons.archivebox,
+                          size: 13, color: h.textFaint),
+                    ),
+                  Expanded(
+                    child: Text(
+                      session.title,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: TextStyle(
+                        fontSize: 14,
+                        fontWeight:
+                            active ? FontWeight.w600 : FontWeight.w500,
+                        color: h.text,
                       ),
-                      if (subtitle != null)
-                        Text(
-                          subtitle!,
-                          maxLines: 1,
-                          overflow: TextOverflow.ellipsis,
-                          style: TextStyle(fontSize: 10.5, color: h.textFaint),
-                        ),
-                    ],
+                    ),
                   ),
-                ),
+                ],
               ),
-            ),
+              if (second.isNotEmpty) ...[
+                const SizedBox(height: 2),
+                Text(
+                  second,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: TextStyle(fontSize: 11.5, color: h.textFaint),
+                ),
+              ],
+            ],
           ),
-
-          _MiniAction(
-            icon: session.starred
-                ? AppIcons.star
-                : CupertinoIcons.star,
-            h: h,
-            size: 30,
-            color: session.starred ? HColors.warnOn(h.dark) : null,
-            onTap: onStar,
-          ),
-          _MiniAction(
-            icon: AppIcons.trash,
-            h: h,
-            size: 30,
-            onTap: onDelete,
-          ),
-          _MiniAction(
-            icon: AppIcons.more,
-            h: h,
-            size: 30,
-            onTap: onMenu,
-          ),
-          const SizedBox(width: HSpace.xs),
-        ],
+        ),
       ),
     );
   }
