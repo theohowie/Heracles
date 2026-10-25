@@ -17,13 +17,14 @@
 /// ```
 ///
 /// **这条是错的**，因为它把 `promptTokens` 当成了"总输入"。而 `:core` 的定义是
-/// （`CacheStats.kt` / `02-契约规范.md` §3.4）：
+/// ## ★ 2026-10-23 口径修正（唯一现行口径）
 ///
-/// > `promptTokens`：实际参与计算的输入 token（**不含命中部分**）
-/// > `hitRate = cachedTokens / (cachedTokens + promptTokens)`
+/// > `promptTokens`：**整段输入**（含已命中部分 —— backend 已规范化）
+/// > `hitRate = cachedTokens / promptTokens`
 ///
-/// 即"总输入 = 命中 + 未命中"。按 `docs/24` 原式，若某轮 cached=900 / prompt=100，
-/// 会算出 **900%**。
+/// 旧式（`cached/(cached+prompt)`）来自 Kotlin 时代"`promptTokens`=仅未命中"
+/// 的约定 —— 2026-10-23 起 promptTokens 语义变为整段后，旧式会把命中部分
+/// **双重计入**（实测顶栏曾因此显示 ~50% 假低值，真机 98.3%）。
 ///
 /// 所以这里按 **`:core`（权威）** 实现：
 ///

@@ -21,6 +21,8 @@ Future<bool> showFullAccessConfirmSheet(BuildContext context) async {
     // 安全语义不变：必须显式选择，点遮罩/下滑都不算确认
     isDismissible: false,
     enableDrag: false,
+    // 矮屏（小屏/横屏/分屏）下内容可滚，不溢出
+    isScrollControlled: true,
     shape: const RoundedRectangleBorder(
       borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
     ),
@@ -46,9 +48,10 @@ class _FullAccessConfirmSheetState extends State<_FullAccessConfirmSheet> {
   Widget build(BuildContext context) {
     final h = widget.h;
     return SafeArea(
-      child: Padding(
-        padding: const EdgeInsets.fromLTRB(20, 10, 20, 16),
-        child: Column(
+      child: SingleChildScrollView(
+        child: Padding(
+          padding: const EdgeInsets.fromLTRB(20, 10, 20, 16),
+          child: Column(
           mainAxisSize: MainAxisSize.min,
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
@@ -146,6 +149,7 @@ class _FullAccessConfirmSheetState extends State<_FullAccessConfirmSheet> {
               ],
             ),
           ],
+          ),
         ),
       ),
     );

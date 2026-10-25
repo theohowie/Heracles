@@ -1,4 +1,5 @@
 import 'dart:convert';
+import 'package:flutter/cupertino.dart';
 
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -66,7 +67,7 @@ void main() {
     await tester.pumpWidget(_wrap(c, ChatScreen(settings: c)));
 
     await tester.pump(const Duration(milliseconds: 300));
-    await tester.enterText(find.byType(TextField), '创建 hello.py');
+    await tester.enterText(find.byType(CupertinoTextField), '创建 hello.py');
     await tester.testTextInput.receiveAction(TextInputAction.send);
     await tester.pump(const Duration(milliseconds: 100));
 
@@ -80,7 +81,7 @@ void main() {
     await tester.pumpWidget(_wrap(c, ChatScreen(settings: c)));
 
     await tester.pump(const Duration(milliseconds: 300));
-    await tester.enterText(find.byType(TextField), '你好');
+    await tester.enterText(find.byType(CupertinoTextField), '你好');
     await tester.testTextInput.receiveAction(TextInputAction.send);
     await tester.pump(const Duration(milliseconds: 200));
 
@@ -101,10 +102,12 @@ void main() {
         reason: '未上报必须为 null —— 0 会误报缓存坏了（02-契约规范.md 3.4）');
   });
 
-  test('缓存指标正常计算命中率', () {
+  test('缓存指标正常计算命中率（2026-10-23 口径：promptTokens=整段）', () {
+    // 口径：promptTokens 含命中部分（backend 2026-10-23 规范化），
+    // hitRate = cached / prompt —— 不再把 cached 加进分母（那会双重计入）。
     const m = TurnMetrics(
       cachedTokens: 1024,
-      promptTokens: 223,
+      promptTokens: 1247, // 整段 = 命中 1024 + 未命中 223
       outputTokens: 49,
       wallMs: 1001,
     );

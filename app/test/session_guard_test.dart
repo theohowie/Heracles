@@ -1,5 +1,6 @@
 import 'dart:async';
 
+import 'package:flutter/cupertino.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -226,7 +227,7 @@ void main() {
   ///
   /// `TextField.enabled` 是 `bool?`（null = 默认可用），所以 `!= false`。
   bool inputEnabled(WidgetTester tester) =>
-      tester.widget<TextField>(find.byType(TextField)).enabled != false;
+      tester.widget<CupertinoTextField>(find.byType(CupertinoTextField)).enabled != false;
 
   tearDown(() {
     final messenger =
@@ -273,13 +274,13 @@ void main() {
     await settle(tester);
 
     // 发消息（当前没有 active session → Kotlin 侧会自动建 A）
-    await tester.enterText(find.byType(TextField).first, '帮我写个文件');
+    await tester.enterText(find.byType(CupertinoTextField).first, '帮我写个文件');
     await tester.testTextInput.receiveAction(TextInputAction.done);
     await settle(tester);
 
     // 此刻 A 的工具卡片已实时出现，且 run 还没返回
     //   （运行中的标题是「正在…」形态，2026-10-13 人话标题）
-    expect(find.text('正在修改文件代码'), findsOneWidget,
+    expect(find.textContaining('正在修改文件代码'), findsOneWidget,
         reason: '实时路径应当先画出 A 的卡片');
 
     // ---- 用户在等待中切到会话 B ----
@@ -288,7 +289,7 @@ void main() {
     // 切过去之后 B 显示自己的历史
     expect(find.text('这是 B 原本的内容'), findsOneWidget);
     // ★ A 的卡片**必须**已经消失（切会话清了列表）
-    expect(find.text('正在修改文件代码'), findsNothing,
+    expect(find.textContaining('正在修改文件代码'), findsNothing,
         reason: '切到 B 之后不该再看到 A 的工具卡片');
 
     // ---- 放行：A 的 run 此刻返回 ----
@@ -322,7 +323,7 @@ void main() {
     await tester.pumpWidget(wrap(c, ChatScreen(settings: c)));
     await settle(tester);
 
-    await tester.enterText(find.byType(TextField).first, '帮我写个文件');
+    await tester.enterText(find.byType(CupertinoTextField).first, '帮我写个文件');
     await tester.testTextInput.receiveAction(TextInputAction.done);
     await settle(tester);
     await tester.pump(const Duration(milliseconds: 400));
@@ -355,7 +356,7 @@ void main() {
     await tester.pumpWidget(wrap(c, ChatScreen(settings: c)));
     await settle(tester);
 
-    await tester.enterText(find.byType(TextField).first, '写文件');
+    await tester.enterText(find.byType(CupertinoTextField).first, '写文件');
     await tester.testTextInput.receiveAction(TextInputAction.done);
     await settle(tester);
     expect(gateReady, isTrue);
@@ -412,7 +413,7 @@ void main() {
     await tester.pumpWidget(wrap(c, ChatScreen(settings: c)));
     await settle(tester);
 
-    await tester.enterText(find.byType(TextField).first, '写文件');
+    await tester.enterText(find.byType(CupertinoTextField).first, '写文件');
     await tester.testTextInput.receiveAction(TextInputAction.done);
     await settle(tester);
 
@@ -465,7 +466,7 @@ void main() {
     await tester.pumpWidget(wrap(c, ChatScreen(settings: c)));
     await settle(tester);
 
-    await tester.enterText(find.byType(TextField).first, '写文件');
+    await tester.enterText(find.byType(CupertinoTextField).first, '写文件');
     await tester.testTextInput.receiveAction(TextInputAction.done);
     await settle(tester);
 
@@ -557,7 +558,7 @@ void main() {
     await settle(tester);
 
     // 发消息 → 在途
-    await tester.enterText(find.byType(TextField).first, '写文件');
+    await tester.enterText(find.byType(CupertinoTextField).first, '写文件');
     await tester.testTextInput.receiveAction(TextInputAction.done);
     await settle(tester);
 
@@ -624,7 +625,7 @@ void main() {
     await settle(tester);
 
     // 在会话 A 发消息
-    await tester.enterText(find.byType(TextField).first, '写个文件');
+    await tester.enterText(find.byType(CupertinoTextField).first, '写个文件');
     await tester.testTextInput.receiveAction(TextInputAction.done);
     await settle(tester);
 
@@ -665,7 +666,7 @@ void main() {
     await tester.pumpWidget(wrap(c, ChatScreen(settings: c)));
     await settle(tester);
 
-    await tester.enterText(find.byType(TextField).first, '写个文件');
+    await tester.enterText(find.byType(CupertinoTextField).first, '写个文件');
     await tester.testTextInput.receiveAction(TextInputAction.done);
     await settle(tester);
     // 2026-10-13：排队发送模式下运行中也可用（见上一条测试）
@@ -714,7 +715,7 @@ void main() {
     await tester.pumpWidget(wrap(c, ChatScreen(settings: c)));
     await settle(tester);
 
-    await tester.enterText(find.byType(TextField).first, '写个文件');
+    await tester.enterText(find.byType(CupertinoTextField).first, '写个文件');
     await tester.testTextInput.receiveAction(TextInputAction.done);
     await settle(tester);
 
@@ -805,7 +806,7 @@ void main() {
     await settle(tester);
 
     // 发第一条（卡住）
-    await tester.enterText(find.byType(TextField).first, '第一条');
+    await tester.enterText(find.byType(CupertinoTextField).first, '第一条');
     await tester.testTextInput.receiveAction(TextInputAction.done);
     await settle(tester);
     expect(runStarts.length, 1);
@@ -814,7 +815,7 @@ void main() {
         reason: '前提：忙 + 输入框为空 = 停止态');
 
     // ★ 在输入框里打字（不发送）—— 按钮应当**变成发送**
-    await tester.enterText(find.byType(TextField).first, '第二条');
+    await tester.enterText(find.byType(CupertinoTextField).first, '第二条');
     await tester.pump();
 
     expect(find.byIcon(Icons.stop_rounded), findsNothing,
@@ -872,7 +873,7 @@ void main() {
     await settle(tester);
 
     // 第一条 → 卡住
-    await tester.enterText(find.byType(TextField).first, '第一条');
+    await tester.enterText(find.byType(CupertinoTextField).first, '第一条');
     await tester.testTextInput.receiveAction(TextInputAction.done);
     await settle(tester);
     expect(runStarts.length, 1);
@@ -882,7 +883,7 @@ void main() {
         reason: '排队发送：运行中必须还能输入');
 
     // 第二条 → 应当进队列（**不**并行）
-    await tester.enterText(find.byType(TextField).first, '第二条');
+    await tester.enterText(find.byType(CupertinoTextField).first, '第二条');
     await tester.testTextInput.receiveAction(TextInputAction.done);
     await settle(tester);
 

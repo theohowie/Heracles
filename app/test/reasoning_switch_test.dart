@@ -1,5 +1,6 @@
 import 'dart:convert';
 
+import 'package:flutter/cupertino.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -196,7 +197,7 @@ void main() {
       expect(find.text('DeepSeek 账号'), findsOneWidget,
           reason: '弹层列出 provider（2026-10-12 用户要求：模型可点选切换）');
       expect(find.text('推理等级'), findsOneWidget,
-          reason: '推理等级 ChoiceChip 区在同一弹层里');
+          reason: '推理等级选项区在同一弹层里');
     });
 
     testWidgets('★★ 点选另一个 provider → 回调 id（切换后端）', (tester) async {
@@ -348,36 +349,37 @@ void main() {
   // ==================================================================
 
   group('★ 权限按钮（图标形态）', () {
-    testWidgets('★ 图标随档位变化：需提权 = 盾+叹号（gpp_maybe）',
+    testWidgets('★ 图标随档位变化：需提权 = 盾+叹号（exclamationmark_shield）',
         (tester) async {
       await tester.pumpWidget(wrap(barWith(
         level: ReasoningLevel.auto,
         permission: PermissionMode.fullAccess,
       )));
       await tester.pump();
-      expect(find.byIcon(Icons.gpp_maybe_outlined), findsOneWidget,
+      expect(find.byIcon(CupertinoIcons.exclamationmark_shield),
+          findsOneWidget,
           reason: '完全访问 = 盾+叹号（用户参考图3）—— 不用点开就知道要小心');
     });
 
-    testWidgets('★ 普通档位用盾+管理图标（工作区内 = admin_panel）',
+    testWidgets('★ 普通档位用盾+锁图标（工作区内 = lock_shield）',
         (tester) async {
       await tester.pumpWidget(wrap(barWith(
         level: ReasoningLevel.auto,
         permission: PermissionMode.workspaceAuto,
       )));
       await tester.pump();
-      // Material 无"盾+笔"——用盾+管理（受控放行）近似，已向用户说明
-      expect(find.byIcon(Icons.admin_panel_settings_outlined), findsOneWidget);
+      // Cupertino 无"盾+笔"——用盾+锁（受控放行）近似，已向用户说明
+      expect(find.byIcon(CupertinoIcons.lock_shield), findsOneWidget);
     });
 
-    testWidgets('★ 手动审批 = 盾+勾（gpp_good，用户参考图1）',
+    testWidgets('★ 手动审批 = 盾+勾（checkmark_shield，用户参考图1）',
         (tester) async {
       await tester.pumpWidget(wrap(barWith(
         level: ReasoningLevel.auto,
         permission: PermissionMode.manual,
       )));
       await tester.pump();
-      expect(find.byIcon(Icons.gpp_good_outlined), findsOneWidget);
+      expect(find.byIcon(CupertinoIcons.checkmark_shield), findsOneWidget);
     });
 
     testWidgets('★ 点图标 → 底部弹层三档 → 点选回调', (tester) async {
@@ -390,7 +392,7 @@ void main() {
       )));
       await tester.pump();
 
-      await tester.tap(find.byIcon(Icons.admin_panel_settings_outlined));
+      await tester.tap(find.byIcon(CupertinoIcons.lock_shield));
       await tester.pumpAndSettle();
       await tester.tap(find.text('手动审批').last);
       await tester.pumpAndSettle();
@@ -408,7 +410,7 @@ void main() {
       )));
       await tester.pump();
 
-      await tester.tap(find.byIcon(Icons.admin_panel_settings_outlined));
+      await tester.tap(find.byIcon(CupertinoIcons.lock_shield));
       await tester.pumpAndSettle();
       await tester.tap(find.text('完全访问').last);
       await tester.pumpAndSettle();
@@ -562,20 +564,21 @@ void main() {
           reason: '云端按轮计费 ⇒ 必须提示花钱更多，不能只让用户看到"更多轮次"');
     });
 
-    /// 点某个轮次**芯片**。
+    /// 点某个轮次**选项胶囊**（现实现是自绘 _PillOption，不是 ChoiceChip）。
     ///
     /// ⚠️ **不能**直接 `find.text('40')`：当前档位非自动时，行尾也会显示
     /// "40"（`_maxTurnsLabel`），于是同一个文本有两个 widget →
     /// `tap()` 报 "ambiguously found multiple matching widgets"。
-    /// （这不是产品缺陷，是测试的定位问题 —— 用户点的是芯片，不是行尾文字。）
+    /// （这不是产品缺陷，是测试的定位问题 —— 用户点的是胶囊，不是行尾文字。）
+    /// 胶囊 = GestureDetector 包着 Text，行尾文字不在 GestureDetector 里，
+    /// 所以按「GestureDetector 里的 Text」定位。
     Future<void> tapChip(WidgetTester tester, String label) async {
-      await tester.tap(find.byWidgetPredicate(
-        (w) =>
-            w is ChoiceChip &&
-            w.label is Text &&
-            (w.label as Text).data == label,
-        description: 'ChoiceChip("$label")',
-      ));
+      await tester.tap(find
+          .ancestor(
+            of: find.text(label),
+            matching: find.byType(GestureDetector),
+          )
+          .first);
       await tester.pumpAndSettle();
     }
 

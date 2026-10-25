@@ -74,7 +74,7 @@ class _DynamicIslandState extends State<DynamicIsland>
     final h = Hue.of(context);
     final bg = h.text;
     final fg = h.dark ? const Color(0xFF0A0A0B) : Colors.white;
-    final dim = fg.withOpacity(0.55);
+    final dim = fg.withValues(alpha: 0.55);
     return GestureDetector(
       onTap: widget.onToggle,
       child: AnimatedSize(
@@ -89,7 +89,7 @@ class _DynamicIslandState extends State<DynamicIsland>
             borderRadius: BorderRadius.circular(widget.collapsed ? 999 : 24),
             boxShadow: [
               BoxShadow(
-                color: Colors.black.withOpacity(0.25),
+                color: Colors.black.withValues(alpha: 0.25),
                 blurRadius: 22,
                 offset: const Offset(0, 10),
               ),
@@ -112,7 +112,7 @@ class _DynamicIslandState extends State<DynamicIsland>
                         shape: BoxShape.circle,
                         boxShadow: [
                           BoxShadow(
-                            color: fg.withOpacity(0.35 * (1 - _pulse.value)),
+                            color: fg.withValues(alpha: 0.35 * (1 - _pulse.value)),
                             blurRadius: 6 * _pulse.value,
                             spreadRadius: 2 * _pulse.value,
                           ),

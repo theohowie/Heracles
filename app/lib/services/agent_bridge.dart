@@ -948,6 +948,30 @@ class AgentBridge {
   Future<({int usedBytes, int maxBytes})> memoryCapacity() =>
       const GlobalMemory().capacity();
 
+  /// **N8 设备权限统一查询**（2026-10-25，INTERFACE.md §4.N8）。
+  ///
+  /// 返回每项 `granted / denied / unknown`（unknown = 探测不了，如 Shizuku
+  /// 未启动）。权限项清单（新增先登记到 INTERFACE.md）：
+  /// · `shizuku` —— 提权通道（binder 活且已授权）
+  /// · `files` —— SAF 工作区读写（本 App 模式下恒 granted）
+  /// · `allFiles` —— Android 11+「所有文件访问」（**我们按设计不申请**，
+  ///   denied 是正常态——前端别渲染成红色警告）
+  /// · `notifications` —— 通知（前台服务/构建进度依赖）
+  /// · `accessibility` —— 无障碍服务
+  /// · `overlay` —— 悬浮窗
+  ///
+  /// 「去开启」走既有拉起流程（如 [shizukuGrant]），本方法只读。
+  Future<Map<String, String>> devicePermissions() async {
+    try {
+      final raw = await _channel.invokeMapMethod<String, String>('devicePermissions');
+      return raw ?? const {};
+    } on MissingPluginException {
+      return const {}; // 测试环境
+    } on PlatformException {
+      return const {};
+    }
+  }
+
   /// **拉取后端的可用模型列表**（2026-10-14，接入第三方 API 服务）。
   /// ## 为什么需要它
   ///
