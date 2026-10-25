@@ -2,6 +2,7 @@ import 'dart:convert';
 import 'package:flutter/cupertino.dart';
 
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
@@ -271,5 +272,73 @@ void main() {
     await tester.pumpAndSettle();
 
     expect(find.text('新会话的默认权限'), findsOneWidget);
+  });
+
+  // ---------------------------------------------------------- N8 权限总览
+
+  /// ★★ **真机踩到的布局缺陷**（2026-10-25，N8 冒烟时发现）：
+  ///
+  /// 六项总览里「所有文件访问」那一行的**状态文案最长**（18 字：
+  /// `未开启（按设计，文件经授权目录访问）`）。原先该行是
+  /// `Row(Expanded(Text(标签)), Text(状态))` —— 状态文字不定宽，先把宽度吃掉，
+  /// `Expanded` 只剩近 0 宽 ⇒ Flutter **逐字换行** ⇒ 标签
+  /// 「所/有/文/件/访/问」竖排成一列，整行从 ~47px 撑到 ~400px。
+  /// 其余五行状态文字短，同样结构没露出来 ⇒ 是**边界触发**，不是普遍错。
+  ///
+  /// 真机证据：`staging/n8/smoke-s06-permission-top.png` +
+  /// `staging/n8/N8-真机冒烟结果-2026-10-25.md`（扫文字带得 11 条，期望 7）。
+  ///
+  /// 这条用**几何**钉住修复：标签必须是一行（高度小）且宽度不被挤没。
+  /// 竖排时高度约 6 行（>100dp）；被挤到 0 宽时宽度 < 20dp。
+  testWidgets('★★ 设备权限页六项标签不得竖排（真机 2026-10-25 缺陷）',
+      (tester) async {
+    const commandChannel = MethodChannel('heracles/command');
+    final messenger =
+        TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger;
+    messenger.setMockMethodCallHandler(commandChannel, (call) async {
+      switch (call.method) {
+        case 'devicePermissions':
+          return <String, String>{
+            'shizuku': 'granted',
+            'files': 'granted',
+            'allFiles': 'denied',
+            'notifications': 'granted',
+            'accessibility': 'denied',
+            'overlay': 'denied',
+          };
+        case 'devicePermission':
+          return <String, dynamic>{
+            'writeSecureSettings': false,
+            'guidance': '',
+          };
+        default:
+          return null;
+      }
+    });
+    addTearDown(
+        () => messenger.setMockMethodCallHandler(commandChannel, null));
+
+    // ⚠️ 夹具宽度为什么是 320dp 而不是真机的 411dp：
+    //   `flutter_test` 的默认测试字体每个字形都是 **1em 方块**（Ahem），
+    //   而真机上的 CJK 实际度量更宽 —— 真机 411dp 时状态文案就把
+    //   `Expanded` 挤到近 0 宽了，测试字体下同样条件要更窄才会出现。
+    //   所以这里取 320dp **确定性地复现"状态比行宽还贪心"这个条件**，
+    //   而不是照抄真机宽度去赌字体度量。（320dp 本身也是真实存在的小屏宽度。）
+    await tester.binding.setSurfaceSize(const Size(320, 800));
+    addTearDown(() => tester.binding.setSurfaceSize(null));
+
+    final c = await _freshController();
+    await tester.pumpWidget(_wrap(c, const DevicePermissionPage()));
+    for (var i = 0; i < 10; i++) {
+      await tester.pump(const Duration(milliseconds: 60));
+    }
+
+    final label = find.text('所有文件访问');
+    expect(label, findsOneWidget, reason: 'N8 六项里必须有这一行');
+    final size = tester.getSize(label);
+    expect(size.height, lessThan(40),
+        reason: '标签必须排成一行 —— 竖排时高度会是 ~6 行（>100dp）');
+    expect(size.width, greaterThan(60),
+        reason: '标签宽度不能被长状态文字挤到 0（<60dp 就会逐字换行）');
   });
 }

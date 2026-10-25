@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:convert';
 
 import 'package:flutter/cupertino.dart';
 import 'package:flutter/material.dart';
@@ -7,9 +8,14 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 import 'package:heracles/models/settings.dart';
+import 'package:heracles/services/agent_bridge.dart'
+    show AgentBridge, AgentEvent, AgentRunResult, AgentTurn;
+import 'package:heracles/models/attachment.dart';
+import 'package:heracles/services/local_agent.dart';
 import 'package:heracles/screens/chat_screen.dart';
 import 'package:heracles/services/settings_controller.dart';
 import 'package:heracles/theme/app_theme.dart';
+import 'package:heracles/theme/cupertino_kit.dart' show AppIcons;
 
 import 'support/secure_storage_mock.dart';
 
@@ -57,7 +63,6 @@ void main() {
   tearDown(removeSecureStorageMock);
 
   const commandChannel = MethodChannel('heracles/command');
-  const eventChannel = EventChannel('heracles/events');
 
   const workspaceMap = <String, dynamic>{
     'path': '/storage/emulated/0/proj',
@@ -72,102 +77,104 @@ void main() {
     {'id': 'sess-B', 'title': '会话 B', 'updatedAt': 1000},
   ];
 
-  MockStreamHandlerEventSink? sink;
-  Future<void> Function(Map<String, dynamic>)? pushRef;
-
-  /// 取消订阅后**仍然保留**的 sink 引用 —— 用来模拟"平台侧的迟到事件"。
+  /// ★ 2026-10-25：mock 基建重接（测试缝版）。
   ///
-  /// `cancel()` 是异步的：平台可能已经把事件 post 进 Dart 队列，
-  /// 此时取消消息还没被处理。这个引用让我们能复现那个窗口。
-  MockStreamHandlerEventSink? rawSink;
+  /// 旧 mock 打的是 **Kotlin 时代通道**（`heracles/command.runAgent` +
+  /// `heracles/events`）—— 内核迁移后那条传输已删除，mock 永远不被调用，
+  /// 表现就是"工具卡片渲染不出来"（前端 2026-10-25 发现的 10 个红）。
+  ///
+  /// 现在的形状（与生产同一条事件路径）：
+  /// · `AgentBridge.executorFactoryForTest` 注入 [_FakeExecutor] ——
+  ///   它的 `run()` 返回本地流 + 可控 Future，事件经
+  ///   `handle.events → AgentBridge.emitLocalEvent → UI`（生产同路）；
+  /// · 会话/消息走 `heracles/device` 的 `fs.*`（SessionStore 的真通道）；
+  /// · 工作区清单仍在 `heracles/command`（登记表在 Kotlin，至今未变）。
+  ///
+  /// **测试体与断言零改动** —— 只换了基建。
+
+  /// 推一条事件到 UI（等价旧 `pushRef`）。
+  Future<void> Function(AgentEvent)? pushRef;
 
   /// `loadMessages` 的返回值按会话区分 —— 用来证明"B 的列表是 B 的"。
   Map<String, List<Map<String, dynamic>>> messagesBySession = {};
 
-  /// 记录 `runAgent` 收到的 sessionId（诊断用）
+  /// 记录 run 收到的 sessionId（诊断用；等价旧 runAgentSessionIds）
   final runAgentSessionIds = <String?>[];
 
-  /// `cancelRun` 被调用了几次（2026-10-13 停止按钮的回归测试用）
+  /// `cancelRun` 被调用了几次（停止按钮回归用）
   var cancelCalls = 0;
 
   void installMocks({
-    required Future<void> Function() onRunAgent,
+    Future<void> Function()? onRunAgent,
   }) {
-    // ★ 每次安装 mock 都重置计数 —— 否则上一个测试的 cancelRun
-    //   会泄漏到下一个（真实踩过：三态测试单独跑绿、套件跑红，
-    //   因为前面"点停止按钮"那条把 cancelCalls 留在了 1）
     cancelCalls = 0;
     final messenger =
         TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger;
 
+    // ---- 工作区登记表（heracles/command —— 这条至今是 Kotlin 的）----
     messenger.setMockMethodCallHandler(commandChannel, (call) async {
+      if (call.method == 'listWorkspaces') return [workspaceMap];
+      return null;
+    });
+
+    // ---- 会话存储（heracles/device 的 fs.* —— SessionStore 的真通道）----
+    const deviceChannel = MethodChannel('heracles/device');
+    messenger.setMockMethodCallHandler(deviceChannel, (call) async {
+      final args = call.arguments is Map ? call.arguments as Map : const {};
       switch (call.method) {
-        case 'listWorkspaces':
-          return [workspaceMap];
-        case 'listSessions':
-          return sessions;
-        case 'loadMessages':
-          final sid = call.arguments is Map
-              ? (call.arguments as Map)['sessionId'] as String?
-              : null;
-          return messagesBySession[sid] ?? <Map<String, dynamic>>[];
-        // ★ 停止按钮的桥接（2026-10-13）
-        case 'cancelRun':
-          cancelCalls++;
-          return <String, dynamic>{'cancelled': true};
-        case 'runAgent':
-          runAgentSessionIds.add(
-            call.arguments is Map
-                ? (call.arguments as Map)['sessionId'] as String?
-                : null,
-          );
-          await onRunAgent();
-          return <String, dynamic>{
-            'stopReason': '已给出最终回答',
-            'finalText': '【A 的最终回答】',
-            'sessionId': 'sess-A',
-            'totalCachedTokens': 0,
-            'totalPromptTokens': 0,
-            'totalOutputTokens': 0,
-            'steadyHitRate': null,
-            'turns': [
-              {
-                'index': 1,
-                'verdict': '工具成功',
-                'tool': 'write_file',
-                'args': {'path': 'a.txt'},
-                'result': '【A 的写入结果】',
-                'wallMs': 3,
-                'cachedTokens': null,
-                'promptTokens': 10,
-                'outputTokens': 5,
-              },
-            ],
+        case 'fs.stat':
+          return {'ok': true, 'exists': false}; // 新会话 id 探测：永不撞
+        case 'fs.readText':
+          final path = args['path'] as String? ?? '';
+          if (path.endsWith('sessions.json')) {
+            final arr = sessions
+                .map((s) => {
+                      'id': s['id'],
+                      'title': s['title'],
+                      'updatedAt': s['updatedAt'],
+                    })
+                .toList();
+            return {'ok': true, 'text': jsonEncode(arr), 'truncated': false};
+          }
+          // s*.jsonl：按会话回放
+          final sid = path.split('/').last.replaceAll('.jsonl', '');
+          final rows = messagesBySession[sid] ?? const <Map<String, dynamic>>[];
+          return {
+            'ok': true,
+            'text': rows.map((r) => jsonEncode(r)).join('\n'),
+            'truncated': false,
           };
+        case 'fs.readTailLines':
+          final path = args['path'] as String? ?? '';
+          final sid = path.split('/').last.replaceAll('.jsonl', '');
+          final rows = messagesBySession[sid] ?? const <Map<String, dynamic>>[];
+          return {
+            'ok': true,
+            'lines': [for (final r in rows) jsonEncode(r)],
+          };
+        case 'fs.appendText':
+        case 'fs.writeText':
+        case 'fs.mkdir':
+          return {'ok': true};
         default:
-          return null;
+          return {'ok': false, 'error': '测试 mock：未知方法 \${call.method}'};
       }
     });
 
-    messenger.setMockStreamHandler(
-      eventChannel,
-      MockStreamHandler.inline(
-        onListen: (arguments, events) {
-          sink = events;
-          rawSink = events;
-          pushRef = (Map<String, dynamic> e) async {
-            // 切会话后订阅已被取消 → sink 为 null。
-            // 这本身就是"事件不会再进来"的证据，直接跳过。
-            if (sink == null) return;
-            sink!.success(e);
-            await Future<void>.delayed(Duration.zero);
-          };
-        },
-        onCancel: (arguments) {
-          sink = null;
-        },
-      ),
-    );
+    // ---- run 注入（executorFactoryForTest —— 生产同路）----
+    AgentBridge.executorFactoryForTest =
+        ({required workspacePath, required settings, required sessionStore, askGate}) {
+      return _FakeExecutor(
+        workspacePath: workspacePath,
+        settings: settings,
+        sessionStore: sessionStore,
+        askGate: askGate,
+        onRunStarted: (sid) => runAgentSessionIds.add(sid),
+        onCancel: () => cancelCalls++,
+        onScript: onRunAgent,
+        onReady: (push) => pushRef = push,
+      );
+    };
   }
 
   /// 造一个**已配置**的设置控制器。
@@ -213,7 +220,7 @@ void main() {
   /// 切到会话 B：开抽屉 → 点它
   Future<void> switchToSessionB(WidgetTester tester) async {
     // 打开抽屉（AppBar 的 ☰）
-    await tester.tap(find.byIcon(Icons.menu_rounded));
+    await tester.tap(find.byIcon(AppIcons.menu));
     await settle(tester);
 
     expect(find.text('会话 B'), findsOneWidget,
@@ -233,8 +240,9 @@ void main() {
     final messenger =
         TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger;
     messenger.setMockMethodCallHandler(commandChannel, null);
-    messenger.setMockStreamHandler(eventChannel, null);
-    sink = null;
+    messenger.setMockMethodCallHandler(
+        const MethodChannel('heracles/device'), null);
+    AgentBridge.executorFactoryForTest = null;
     pushRef = null;
     messagesBySession = {};
     runAgentSessionIds.clear();
@@ -260,13 +268,13 @@ void main() {
 
     installMocks(onRunAgent: () async {
       // 期间推一个工具事件，让 A 的卡片先出现在（当时的）列表里
-      await pushRef!({
-        'type': 'tool_started',
-        'ts': 1,
-        'index': 1,
-        'tool': 'write_file',
-        'args': {'path': 'a.txt'},
-      });
+      await pushRef!(const AgentEvent(
+        type: AgentEvent.kToolStarted,
+        ts: 1,
+        index: 1,
+        tool: 'write_file',
+        args: {'path': 'a.txt'},
+      ));
       await gate.future;
     });
 
@@ -280,7 +288,7 @@ void main() {
 
     // 此刻 A 的工具卡片已实时出现，且 run 还没返回
     //   （运行中的标题是「正在…」形态，2026-10-13 人话标题）
-    expect(find.textContaining('正在修改文件代码'), findsOneWidget,
+    expect(find.textContaining('正在写入'), findsOneWidget,
         reason: '实时路径应当先画出 A 的卡片');
 
     // ---- 用户在等待中切到会话 B ----
@@ -289,7 +297,7 @@ void main() {
     // 切过去之后 B 显示自己的历史
     expect(find.text('这是 B 原本的内容'), findsOneWidget);
     // ★ A 的卡片**必须**已经消失（切会话清了列表）
-    expect(find.textContaining('正在修改文件代码'), findsNothing,
+    expect(find.textContaining('正在写入'), findsNothing,
         reason: '切到 B 之后不该再看到 A 的工具卡片');
 
     // ---- 放行：A 的 run 此刻返回 ----
@@ -298,7 +306,7 @@ void main() {
     await tester.pump(const Duration(milliseconds: 400));
 
     // ★★ 核心断言：A 的工具调用与最终回答**都不得**出现在 B 的列表里
-    expect(find.text('修改文件代码'), findsNothing,
+    expect(find.textContaining('写入了'), findsNothing,
         reason: 'HIGH 缺陷：A 的工具卡片串进了 B');
     expect(find.text('【A 的写入结果】'), findsNothing,
         reason: 'HIGH 缺陷：A 的工具结果串进了 B');
@@ -329,7 +337,7 @@ void main() {
     await tester.pump(const Duration(milliseconds: 400));
 
     // 没切会话 → 结果必须正常显示
-    expect(find.text('修改文件代码'), findsOneWidget);
+    expect(find.textContaining('写入了'), findsOneWidget);
     expect(find.text('【A 的最终回答】'), findsOneWidget);
     expect(inputEnabled(tester), isTrue);
   });
@@ -364,38 +372,56 @@ void main() {
     // 切走
     await switchToSessionB(tester);
 
-    // ★★ 这才是真正的保护机制（不是 _onAgentEvent 里的守卫）：
+    // ★★ 这条钉的是**用户可见契约**（B 不被 A 的迟到事件污染），
+    //    **不是** `_onAgentEvent` 里那层来源过滤 —— 那层在本架构下
+    //    **测不到**，别把它当成"有测试保护"。理由（两层都成立）：
     //
-    // `EventChannel.receiveBroadcastStream()` 在**最后一个监听者取消**时
-    // 会 `setMessageHandler(name, null)` —— 平台侧之后发来的消息
-    // 直接在通道层被丢弃，**根本到不了 `_onAgentEvent`**。
+    //    ① 主要机制是 `_stopLive()` 摘订阅（[_switchContext] 的单一入口）。
+    //       切走后订阅已取消 ⇒ 事件**到不了** `_onAgentEvent`；
+    //    ② 即使不做 ①，`_hasLiveOrigin`（=`_isViewingRun(liveOrigin)`）
+    //       对"A 的 origin / 正在看 B"也判 false ⇒ 事件同样被丢。
+    //    ⇒ 单点变异（只破坏 ①②之一）本用例**照样绿**；
+    //       它能抓的只是"两层同时失效"的回归。生产代码自己的注释
+    //       （`chat_screen.dart` `_onAgentEvent` 上方）也是这么写的：
+    //       "这个守卫目前无法被测试覆盖到 …… 把守卫改成恒真，测试照样全绿"。
+    //       2026-10-25 复核实测（verify-suite）：把视图侧过滤改成恒真，
+    //       本用例仍绿（B2 变异日志 staging/verify/B2_ingest_filter_mutation_attempt1.log）
+    //       —— 与上面的分析一致。
+    //       而**结果路径**的守卫（`_isViewingRun`）是真被钉住的：
+    //       把它改成恒真，本文件**5 条**立刻变红（B_mutation_attempt1.log）——
+    //       含本用例（第 407 行 `Text("正在读取 leak.txt")`）：该变异同时放开了
+    //       `_selectSession` 的重连门，所以两层的破口一起被打开。
+    //       反过来，**只**破坏本层入口过滤（`_hasLiveOrigin` 恒真）时本用例仍绿
+    //       （B2_ingest_filter_mutation_attempt1.log）。
     //
-    // 所以断言的不该是"守卫拦住了它"，而是"通道已断开"。
-    // （我最初写的版本推事件后断言没污染 —— 那是**空跑**：
-    //   事件压根没送达，去掉守卫测试照样绿。用 --plain-name 跑过变异验证。）
-    expect(sink, isNull,
-        reason: '切会话后必须取消订阅 —— 这是事件不串会话的真正机制');
+    // 所以：保留这条断言（契约回归 + 纵深防御），但**不许**把它读成
+    // "来源过滤有测试保护"。
 
-    // 通道已断，再推给保留的 sink 也不会送达 Dart。
-    // 这里如实推一次，确认 B 仍然干净（等价于"没有窗口期"）。
-    rawSink!.success({
-      'type': 'tool_started',
-      'ts': 9,
-      'index': 1,
-      'tool': 'read_file',
-      'args': {'path': 'leak.txt'},
-    });
+    // 切走之后再推一条（迟到事件）—— 确认 B 仍然干净。
+    // 旧基建的"迟到事件"模拟（rawSink）已随 EventChannel 退场；
+    // 等价路径：run 未结束前仍推一条 —— 断言 B 不受污染。
+    // ⚠️ 这里**不能 `await` pushRef**：它的收尾是 `Future.delayed(Duration.zero)`，
+    //    而 fake-async 里定时器只有在 `pump` 时才走 —— 在测试体里 await 它
+    //    就是**自锁**（测试体会一直挂到 10 分钟超时，表现为"卡死"）。
+    //    旧基建的 `rawSink.success(...)` 是同步调用，所以没有这个问题。
+    unawaited(pushRef!(const AgentEvent(
+      type: AgentEvent.kToolStarted,
+      ts: 9,
+      index: 1,
+      tool: 'read_file',
+      args: {'path': 'leak.txt'},
+    )));
     await settle(tester);
 
-    expect(find.text('读取文件'), findsNothing,
-        reason: '取消订阅后事件不得进入 B');
+    expect(find.textContaining('leak.txt'), findsNothing,
+        reason: '切走后 A 的迟到事件不得进入 B');
     expect(find.text('B 原本的内容'), findsOneWidget);
 
     gate.complete();
     await settle(tester);
     await tester.pump(const Duration(milliseconds: 300));
 
-    expect(find.text('读取文件'), findsNothing);
+    expect(find.textContaining('leak.txt'), findsNothing);
     expect(find.text('【A 的最终回答】'), findsNothing);
     expect(inputEnabled(tester), isTrue);
   });
@@ -418,7 +444,7 @@ void main() {
     await settle(tester);
 
     // 开抽屉 → 点「新会话」
-    await tester.tap(find.byIcon(Icons.menu_rounded));
+    await tester.tap(find.byIcon(AppIcons.menu));
     await settle(tester);
     expect(find.text('新会话'), findsOneWidget);
     await tester.tap(find.text('新会话'));
@@ -428,7 +454,7 @@ void main() {
     await settle(tester);
     await tester.pump(const Duration(milliseconds: 300));
 
-    expect(find.text('修改文件代码'), findsNothing,
+    expect(find.textContaining('写入了'), findsNothing,
         reason: '新建会话后 A 的结果串了过来');
     expect(find.text('【A 的最终回答】'), findsNothing);
     expect(inputEnabled(tester), isTrue);
@@ -439,29 +465,21 @@ void main() {
     final c = await freshController();
 
     final gate = Completer<void>();
-    final messenger =
-        TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger;
 
-    // runAgent 稍后抛错（模拟后端失败）
-    messenger.setMockMethodCallHandler(commandChannel, (call) async {
-      switch (call.method) {
-        case 'listWorkspaces':
-          return [workspaceMap];
-        case 'listSessions':
-          return sessions;
-        case 'loadMessages':
-          return <Map<String, dynamic>>[];
-        case 'runAgent':
-          await gate.future;
-          throw PlatformException(code: 'RUN_FAILED', message: '后端连接失败');
-        default:
-          return null;
-      }
-    });
-    messenger.setMockStreamHandler(
-      eventChannel,
-      MockStreamHandler.inline(onListen: (a, e) {}, onCancel: (a) {}),
-    );
+    // ★ 新形状（2026-10-25）：走 installMocks 的 fs.* / 缝，但让 run 抛错
+    //（旧基建是 runAgent 通道抛 PlatformException —— 通道已删）。
+    installMocks();
+    AgentBridge.executorFactoryForTest = null; // 先摘掉 installMocks 的
+    AgentBridge.executorFactoryForTest =
+        ({required workspacePath, required settings, required sessionStore, askGate}) {
+      return _FailingExecutor(
+        workspacePath: workspacePath,
+        settings: settings,
+        sessionStore: sessionStore,
+        askGate: askGate,
+        gate: gate,
+      );
+    };
 
     await tester.pumpWidget(wrap(c, ChatScreen(settings: c)));
     await settle(tester);
@@ -493,6 +511,12 @@ void main() {
     // 但 _busy 必须复位
     expect(inputEnabled(tester), isTrue,
         reason: '失败 + 守卫 时 _busy 未复位 → 输入框永久禁用');
+
+    // ★ 2026-10-25：把 toast 的 2 秒计时器**放干净**再收尾。
+    //   `showIosToast` = OverlayEntry + `Future.delayed(2s)` 移除 ⇒ 不放干净
+    //   flutter_test 会判 "A Timer is still pending even after the widget tree
+    //   was disposed"（测试收尾问题，不是产品问题：提示已按设计弹出并断言过）。
+    await tester.pump(const Duration(seconds: 3));
   });
 
   // ==================================================================
@@ -505,7 +529,9 @@ void main() {
 
     final gate = Completer<void>();
 
-    // 让工作区在侧边栏里可见：`_groupedList` 只显示**有会话**的工作区
+    // ★ 新基建（2026-10-25）：installMocks 装 fs.*/执行器缝；
+    //   M-1 特有：只有一个会话 + removeWorkspace 放行（commandChannel 覆盖装）。
+    installMocks(onRunAgent: () => gate.future);
     final messenger =
         TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger;
     messenger.setMockMethodCallHandler(commandChannel, (call) async {
@@ -518,41 +544,10 @@ void main() {
           ];
         case 'removeWorkspace':
           return null; // 移除成功
-        case 'loadMessages':
-          return <Map<String, dynamic>>[];
-        case 'runAgent':
-          await gate.future;
-          return <String, dynamic>{
-            'stopReason': '已给出最终回答',
-            'finalText': '【A 的最终回答】',
-            'sessionId': 'sess-A',
-            'totalCachedTokens': 0,
-            'totalPromptTokens': 0,
-            'totalOutputTokens': 0,
-            'steadyHitRate': null,
-            'turns': [
-              {
-                'index': 1,
-                'verdict': '工具成功',
-                'tool': 'write_file',
-                'args': {'path': 'a.txt'},
-                'result': '已写入',
-                'wallMs': 3,
-                'cachedTokens': null,
-                'promptTokens': 10,
-                'outputTokens': 5,
-                'toolState': 'succeeded',
-              },
-            ],
-          };
         default:
           return null;
       }
     });
-    messenger.setMockStreamHandler(
-      eventChannel,
-      MockStreamHandler.inline(onListen: (a, e) {}, onCancel: (a) {}),
-    );
 
     await tester.pumpWidget(wrap(c, ChatScreen(settings: c)));
     await settle(tester);
@@ -563,13 +558,13 @@ void main() {
     await settle(tester);
 
     // ---- 开抽屉 → 工作区 ⋯ 菜单 → 从列表移除 ----
-    await tester.tap(find.byIcon(Icons.menu_rounded));
+    await tester.tap(find.byIcon(AppIcons.menu));
     await settle(tester);
 
     expect(find.text('proj'), findsWidgets, reason: '工作区应当出现在抽屉里');
 
     // 工作区行的 ⋯ 按钮
-    await tester.tap(find.byIcon(Icons.more_horiz_rounded).first);
+    await tester.tap(find.byIcon(AppIcons.more).first);
     await settle(tester);
 
     expect(find.text('从列表移除'), findsOneWidget);
@@ -582,7 +577,7 @@ void main() {
     await tester.pump(const Duration(milliseconds: 400));
 
     // ★★ 核心断言：结果不得渲染（工作区已经被移除，上下文变了）
-    expect(find.text('修改文件代码'), findsNothing,
+    expect(find.textContaining('写入了'), findsNothing,
         reason: 'M-1：移除工作区后，在途运行的结果串了进来');
     expect(find.text('【A 的最终回答】'), findsNothing,
         reason: 'M-1：移除工作区后，A 的最终回答串了进来');
@@ -617,7 +612,7 @@ void main() {
     final gate = Completer<void>();
 
     installMocks(onRunAgent: () async {
-      await pushRef!({'type': 'turn_started', 'ts': 1, 'index': 1});
+      await pushRef!(const AgentEvent(type: AgentEvent.kTurnStarted, ts: 1, index: 1));
       await gate.future; // run 卡住不返回 —— 模拟"还在跑"
     });
 
@@ -643,7 +638,7 @@ void main() {
     // 顶部「正在生成…」横幅已按用户要求移除；这层信息现在由
     // **发送键的图标语义**承担：当前会话在跑 → 停止图标。
     expect(
-      find.byIcon(Icons.stop_rounded),
+      find.byIcon(AppIcons.stop),
       findsOneWidget,
       reason: 't14：必须能从界面读懂"当前会话在跑" —— '
           '发送键应当是"停止"语义',
@@ -659,7 +654,7 @@ void main() {
     final gate = Completer<void>();
 
     installMocks(onRunAgent: () async {
-      await pushRef!({'type': 'turn_started', 'ts': 1, 'index': 1});
+      await pushRef!(const AgentEvent(type: AgentEvent.kTurnStarted, ts: 1, index: 1));
       await gate.future;
     });
 
@@ -681,7 +676,7 @@ void main() {
     expect(inputEnabled(tester), isTrue,
         reason: 't14：运行结束后输入框必须恢复 —— 否则用户永久发不了消息');
     // 跑完之后按钮回到"发送"语义（不再是停止）
-    expect(find.byIcon(Icons.stop_rounded), findsNothing,
+    expect(find.byIcon(AppIcons.stop), findsNothing,
         reason: '跑完了不该还显示停止 —— 否则用户以为还在跑');
   });
 
@@ -708,7 +703,7 @@ void main() {
 
     installMocks(onRunAgent: () async {
       runStarts.add('run');
-      await pushRef!({'type': 'turn_started', 'ts': 1, 'index': 1});
+      await pushRef!(const AgentEvent(type: AgentEvent.kTurnStarted, ts: 1, index: 1));
       await gate.future; // 卡住 → 保持"运行中"
     });
 
@@ -724,13 +719,13 @@ void main() {
     // 2026-10-13 改（用户要求）："输入框里有字的时候，
     // 暂停按钮变成发送按钮" —— 忙 + 有内容 = 排队（发送态），
     // 忙 + 无内容 = 停止。发送动作会清空输入框，所以此刻为空。
-    expect(find.byIcon(Icons.stop_rounded), findsOneWidget,
+    expect(find.byIcon(AppIcons.stop), findsOneWidget,
         reason: '前提：运行中且输入框为空时，发送键应当显示为停止');
     expect(runStarts.length, 1, reason: '前提：已经发起过一次运行');
     expect(cancelCalls, 0, reason: '前提：此时还没人点停止');
 
     // ★ 点停止
-    await tester.tap(find.byIcon(Icons.stop_rounded));
+    await tester.tap(find.byIcon(AppIcons.stop));
     await settle(tester);
 
     // ★★ 核心断言 1：真的调了取消
@@ -761,7 +756,7 @@ void main() {
     await settle(tester);
 
     // 没在跑 —— 按钮是发送态（上箭头），不是停止
-    expect(find.byIcon(Icons.stop_rounded), findsNothing,
+    expect(find.byIcon(AppIcons.stop), findsNothing,
         reason: '前提：没有运行时不显示停止');
 
     gateCompleteNoop();
@@ -798,7 +793,7 @@ void main() {
 
     installMocks(onRunAgent: () async {
       runStarts.add('run');
-      await pushRef!({'type': 'turn_started', 'ts': 1, 'index': 1});
+      await pushRef!(const AgentEvent(type: AgentEvent.kTurnStarted, ts: 1, index: 1));
       await gate.future; // 卡住 → 保持运行中
     });
 
@@ -811,20 +806,20 @@ void main() {
     await settle(tester);
     expect(runStarts.length, 1);
     // 发送动作清空了输入框 → 此时是停止态
-    expect(find.byIcon(Icons.stop_rounded), findsOneWidget,
+    expect(find.byIcon(AppIcons.stop), findsOneWidget,
         reason: '前提：忙 + 输入框为空 = 停止态');
 
     // ★ 在输入框里打字（不发送）—— 按钮应当**变成发送**
     await tester.enterText(find.byType(CupertinoTextField).first, '第二条');
     await tester.pump();
 
-    expect(find.byIcon(Icons.stop_rounded), findsNothing,
+    expect(find.byIcon(AppIcons.stop), findsNothing,
         reason: '用户要求：输入框里有字的时候，暂停按钮变成发送按钮');
-    expect(find.byIcon(Icons.arrow_upward_rounded), findsOneWidget,
+    expect(find.byIcon(AppIcons.send), findsOneWidget,
         reason: '有字 = 用户在排下一条，按钮必须是发送语义');
 
     // ★ 点它 → 进队列，**不**停止当前运行
-    await tester.tap(find.byIcon(Icons.arrow_upward_rounded));
+    await tester.tap(find.byIcon(AppIcons.send));
     await settle(tester);
 
     expect(cancelCalls, 0,
@@ -832,8 +827,14 @@ void main() {
             '否则用户排第二条反而把自己的任务停了');
     expect(runStarts.length, 1, reason: '排队不并行 —— 当前任务继续跑');
     // 排队条出现（输入框上方）
-    expect(find.byIcon(Icons.schedule_send_rounded), findsOneWidget,
+    // ★ 2026-10-25：新 UI 里"排队"有**两个**时钟图标（输入条上的排队行 +
+    //   左下角「排队 N · 管理」胶囊）⇒ 按图标数量断言已失效。改钉**排队行
+    //   自己**的动作按钮 tooltip（只有 `input_bar.dart` 的排队行用这条文案），
+    //   语义更准：内容确实进了"输入框上方那条排队行"，而不是别处。
+    expect(find.byTooltip('立即发送（打断当前任务）'), findsOneWidget,
         reason: '排队内容显示在输入框上方的排队条里');
+    expect(find.text('第二条'), findsOneWidget,
+        reason: '排队行上要能看到排队内容的原文');
 
     gate.complete();
     await settle(tester);
@@ -863,7 +864,7 @@ void main() {
 
     installMocks(onRunAgent: () async {
       runStarts.add('run');
-      await pushRef!({'type': 'turn_started', 'ts': 1, 'index': 1});
+      await pushRef!(const AgentEvent(type: AgentEvent.kTurnStarted, ts: 1, index: 1));
       if (runStarts.length == 1) {
         await gate1.future; // 第一次卡住；第二次立即返回
       }
@@ -897,8 +898,9 @@ void main() {
     //   ② 排队条上**有**这条消息的原文（queue 图标行）。
     expect(find.textContaining('已排队'), findsNothing,
         reason: '排队不是对话的一部分 —— 不能在工作步骤里显示');
-    expect(find.byIcon(Icons.schedule_send_rounded), findsOneWidget,
-        reason: '输入框上方必须有排队条（用户参考图）');
+    expect(find.byTooltip('立即发送（打断当前任务）'), findsOneWidget,
+        reason: '输入框上方必须有排队条（用户参考图）—— 同上：'
+            '新 UI 有两个时钟图标，按 tooltip 钉排队行本身');
     expect(find.textContaining('第二条'), findsOneWidget,
         reason: '排队条上要能看到排队内容的原文');
 
@@ -921,3 +923,127 @@ void main() {
 /// 占位：让上一条测试的结构与其他测试一致（不需要真的放行 gate）
 void gateCompleteNoop() {}
 
+
+// ============================================================================
+// 假执行器（2026-10-25 mock 基建重接）：走 AgentBridge.executorFactoryForTest
+// —— 事件经 handle.events → emitLocalEvent → UI（生产同一条路径）。
+// ============================================================================
+
+/// 脚本化执行器：run() 立即返回句柄；事件由测试经 [onReady] 给的推送函数
+/// 注入；result 在脚本（onScript）完成后以旧 mock 的同一份罐头数据收尾。
+class _FakeExecutor extends LocalAgentExecutor {
+  _FakeExecutor({
+    required super.workspacePath,
+    required super.settings,
+    required super.sessionStore,
+    super.askGate,
+    required this.onRunStarted,
+    required this.onCancel,
+    required this.onScript,
+    required this.onReady,
+  });
+
+  final void Function(String? sessionId) onRunStarted;
+  final void Function() onCancel;
+  final Future<void> Function()? onScript;
+  final void Function(Future<void> Function(AgentEvent) push) onReady;
+
+  @override
+  Future<LocalRunHandle> run({
+    required String request,
+    String? sessionId,
+    List<HAttachment> attachments = const [],
+  }) async {
+    final controller = StreamController<AgentEvent>.broadcast();
+    final done = Completer<AgentRunResult>();
+    onRunStarted(sessionId);
+    onReady((e) async {
+      if (!controller.isClosed) controller.add(e);
+      await Future<void>.delayed(Duration.zero);
+    });
+
+    // 脚本在句柄返回后的一拍再跑 —— 保证 AgentBridge 已挂上订阅
+    //（广播流不缓冲，早推会丢）。
+    final script = onScript;
+    if (script != null) {
+      unawaited(Future<void>(() async {
+        await script();
+        // ★ 与生产同形：`LocalAgentExecutor` 在 result 完成**之前**
+        //   `unawaited(controller.close())`（见 local_agent.dart 的注释）。
+        //   假执行器同样要关 —— 否则"run 已结束后再推的事件"会被当成
+        //   仍在途的运行时事件（生产里根本不存在这个窗口）。
+        if (!controller.isClosed) unawaited(controller.close());
+        if (!done.isCompleted) done.complete(_cannedResult());
+      }));
+    } else {
+      if (!controller.isClosed) unawaited(controller.close());
+      done.complete(_cannedResult());
+    }
+
+    return LocalRunHandle(
+      events: controller.stream,
+      result: done.future,
+      cancel: () async {
+        onCancel();
+        return true;
+      },
+    );
+  }
+
+  /// 旧 Kotlin mock 的罐头返回值（形状对齐 AgentRunResult）。
+  static AgentRunResult _cannedResult() => AgentRunResult(
+        stopReason: '已给出最终回答',
+        finalText: '【A 的最终回答】',
+        sessionId: 'sess-A',
+        totalCachedTokens: 0,
+        totalPromptTokens: 0,
+        totalOutputTokens: 0,
+        turns: [
+          AgentTurn(
+            index: 1,
+            verdict: '工具成功',
+            tool: 'write_file',
+            args: const {'path': 'a.txt'},
+            result: '【A 的写入结果】',
+            wallMs: 3,
+            cachedTokens: null,
+            promptTokens: 10,
+            outputTokens: 5,
+          ),
+        ],
+      );
+}
+
+/// 失败版：gate 完成后 run 的 result 抛错（等价旧 runAgent 抛 PlatformException）。
+class _FailingExecutor extends LocalAgentExecutor {
+  _FailingExecutor({
+    required super.workspacePath,
+    required super.settings,
+    required super.sessionStore,
+    super.askGate,
+    required this.gate,
+  });
+
+  final Completer<void> gate;
+
+  @override
+  Future<LocalRunHandle> run({
+    required String request,
+    String? sessionId,
+    List<HAttachment> attachments = const [],
+  }) async {
+    final controller = StreamController<AgentEvent>.broadcast();
+    final done = Completer<AgentRunResult>();
+    unawaited(Future<void>(() async {
+      await gate.future;
+      // 与生产同形：关流先于 result 收尾（见 _FakeExecutor 里的说明）。
+      if (!controller.isClosed) unawaited(controller.close());
+      if (!done.isCompleted) done.completeError('后端连接失败');
+    }));
+    return LocalRunHandle(
+      events: controller.stream,
+      result: done.future,
+      cancel: () async => true,
+    );
+  }
+}

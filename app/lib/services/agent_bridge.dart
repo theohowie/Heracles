@@ -495,7 +495,8 @@ class AgentBridge {
     //   白名单在宿主侧（gate）判定，backend 的 `_ApprovalHook` 只管"要批谁"。
     askGate.seedAllowed(await alwaysAllowedTools());
     askGate.onAlwaysAllow = _rememberAlwaysAllow;
-    final executor = LocalAgentExecutor(
+    final executor = (AgentBridge.executorFactoryForTest ??
+            LocalAgentExecutor.new)(
       workspacePath: workspacePath,
       settings: settings,
       sessionStore: SessionStore(workspaceRoot: workspacePath),
@@ -530,7 +531,21 @@ class AgentBridge {
             : -1;
         return r;
       } finally {
-        await pump.cancel();
+        // ★ 2026-10-25：**不再 `await` 这个 cancel**。
+        //
+        // 我们需要的保证是「cancel 之后事件不再投递给 UI」，而这条在
+        // `cancel()` **被调用的那一刻**就已经生效（broadcast 流无缓冲队列，
+        // 投递是同步的）。返回的 Future 只表示"取消操作收尾完成"，**完成时机
+        // 未定义** —— 实测：在 `flutter_test` 的 fake-async 里它**永不完成**
+        // （`testWidgets` 里 await 会一直挂到测试结束），于是 `run()` 的 Future
+        // 永不 resolve ⇒ 界面永远停在"运行中"、结果永不渲染。
+        // 也就是说：把它放在返回路径上，等于让"一次运行能不能收尾"取决于一个
+        // 没有时序保证的 Future。
+        //
+        // 所以照旧调用 `cancel()`（订阅确实被摘掉），只是不让它挡住返回。
+        // ⚠️ 这不是"为了测试放宽生产行为"：生产（真 async）里它本来就是
+        //    立即完成的（对照实测），改动后生产可观测行为**不变**。
+        unawaited(pump.cancel());
         _currentHandle = null;
       }
     } catch (e) {
@@ -545,6 +560,20 @@ class AgentBridge {
 
   /// 当前在跑的句柄（**唯一**取消入口）。
   LocalRunHandle? _currentHandle;
+
+  /// ★ **测试缝**（2026-10-25）：注入替身执行器 —— mock 基建回家。
+  ///
+  /// 旧测试 mock 的是 **Kotlin 时代的通道**（`heracles/command` 的
+  /// `runAgent` / `heracles/events`），内核迁移后这条传输已删除 ⇒ mock
+  /// 永远不被调用、事件永远不出现。这个缝让测试注入假执行器，事件走
+  /// **与生产同一条路径**（handle.events → [emitLocalEvent] → UI 订阅），
+  /// 断言的 UI 行为不变。生产恒为 null（真 [LocalAgentExecutor]）。
+  static LocalAgentExecutor Function({
+    required String workspacePath,
+    required AppSettings settings,
+    required SessionStore sessionStore,
+    hb.AskGate? askGate,
+  })? executorFactoryForTest;
 
   /// **当前 run 的提问门禁**（2026-10-23）。
   ///

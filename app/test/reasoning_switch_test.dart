@@ -1,13 +1,15 @@
+import 'dart:async';
 import 'dart:convert';
 
 import 'package:flutter/cupertino.dart';
 import 'package:flutter/material.dart';
-import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
+import 'package:heracles/models/attachment.dart';
 import 'package:heracles/models/settings.dart';
 import 'package:heracles/services/agent_bridge.dart';
+import 'package:heracles/services/local_agent.dart';
 import 'package:heracles/services/settings_controller.dart';
 import 'package:heracles/theme/app_theme.dart';
 import 'package:heracles/widgets/input_bar.dart';
@@ -726,47 +728,52 @@ void main() {
           ],
         );
 
-    /// **通道参数**，与界面无关 —— 直接调 `AgentBridge().run()` 更准，
-    /// 也恰好绕开那个环境限制。
+    /// **测试缝：捕获"真正交给执行器的设置"**（2026-10-25，见下面两条用例的说明）。
     ///
-    /// ⚠️ 这条**必须**在 `runAgent` 的 arguments 里看到 `maxTurns`：
-    /// 缺陷根因就是"参数根本不存在"（UI 做得再漂亮也没用）。
-    testWidgets('★★★ runAgent 通道参数里真的带上了 maxTurns',
-        (tester) async {
-      const commandChannel = MethodChannel('heracles/command');
-      final messenger =
-          TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger;
+    /// 也顺带解决本文件的一个老问题：本机 **ChatScreen 的 widget 测试一律
+    /// 卡首帧**（`实测-03` 坑 35），所以这两条**不走 ChatScreen**，
+    /// 直接调 `AgentBridge().run()`。
+    void installCaptureExecutor(List<AppSettings> sink) {
+      // 白名单读取走 SharedPreferences —— 给个空 mock，避免依赖真通道
+      SharedPreferences.setMockInitialValues({});
+      AgentBridge.executorFactoryForTest =
+          ({required workspacePath, required settings, required sessionStore, askGate}) {
+        sink.add(settings);
+        return _NoNetworkExecutor(
+          workspacePath: workspacePath,
+          settings: settings,
+          sessionStore: sessionStore,
+          askGate: askGate,
+        );
+      };
+      addTearDown(() => AgentBridge.executorFactoryForTest = null);
+    }
 
-      final seen = <Map<dynamic, dynamic>>[];
-      messenger.setMockMethodCallHandler(commandChannel, (call) async {
-        if (call.method == 'runAgent') {
-          seen.add(Map<dynamic, dynamic>.from(call.arguments as Map));
-          return <String, dynamic>{
-            'stopReason': '已给出最终回答',
-            'finalText': 'ok',
-            'sessionId': 's',
-            'totalCachedTokens': 0,
-            'totalPromptTokens': 0,
-            'totalOutputTokens': 0,
-            'turns': <Map<String, dynamic>>[],
-          };
-        }
-        return null;
-      });
-      addTearDown(
-          () => messenger.setMockMethodCallHandler(commandChannel, null));
+    /// **参数流向**：这两条原先把断言打在 `heracles/command` 的 `runAgent`
+    /// **通道参数**上 —— 内核迁到进程内 Dart 后**那条通道不再被调用**：
+    ///   · 断言恒不可达（捕获列表永远是空 ⇒ 抓不到任何东西）；
+    ///   · 更糟的是 `AgentBridge.run()` 会真的构造 `LocalAgentExecutor`
+    ///     拿 `sk-test` 去打网络 ⇒ 在 fake-async 里**挂死满 10 分钟**
+    ///     （2026-10-25 复核实测；之前被记成"坑 23，两边环境都卡"，与实测不符）。
+    /// 现在改用**测试缝** `AgentBridge.executorFactoryForTest`（与
+    /// `session_guard_test.dart` 同款）：断言"**真正交给执行器的
+    /// `AppSettings`** 带上了这两个成本参数" —— 这正是它们今天的流向
+    /// （`AppSettings` → `BackendConfig`）。**断言意图未变**。
+    testWidgets('★★★ 交给执行器的设置里真的带上了 maxTurns', (tester) async {
+      final captured = <AppSettings>[];
+      installCaptureExecutor(captured);
 
-      // 「自动」= 0，也必须显式传（让"自动"这个选择可观测）
+      // 「自动」= 0，也必须显式带着（让"自动"这个选择可观测）
       await AgentBridge().run(
         workspacePath: '/w',
         request: 'hi',
         settings: withProvider(maxTurns: 0),
       );
-      expect(seen, hasLength(1));
-      expect(seen.single.containsKey('maxTurns'), isTrue,
-          reason: '★ 缺陷根因就是"参数根本不存在" —— 必须出现这个键');
-      expect(seen.single['maxTurns'], 0,
-          reason: '0 = 按后端自动（Kotlin Contract.Budget：本地 8 / 云端 40）');
+      expect(captured, hasLength(1));
+      expect(captured.single.maxTurns, 0,
+          reason: '0 = 按后端自动（Contract.Budget：本地 8 / 云端 40）');
+      expect(captured.single.maxTurns, isA<int>(),
+          reason: '必须是 int —— 类型错了会静默回落');
 
       // 用户显式选的档位必须原样送到
       await AgentBridge().run(
@@ -774,39 +781,15 @@ void main() {
         request: 'hi',
         settings: withProvider(maxTurns: 40),
       );
-      expect(seen, hasLength(2));
-      expect(seen.last['maxTurns'], 40,
-          reason: '用户选的那一档必须原样传给 Kotlin，不能被界面吞掉');
-
-      // 类型也必须是 int —— Kotlin 侧按 Int 读，传字符串会静默回落
-      expect(seen.last['maxTurns'], isA<int>(),
-          reason: '通道里必须是 int（Kotlin 按 Int 读）');
+      expect(captured, hasLength(2));
+      expect(captured.last.maxTurns, 40,
+          reason: '用户选的那一档必须原样传下去，不能被界面吞掉');
     });
 
-    testWidgets('★★ runAgent 里 maxTurns 与 reasoningLevel 并存（不能互相顶掉）',
+    testWidgets('★★ maxTurns 与 reasoningLevel 并存（不能互相顶掉）',
         (tester) async {
-      const commandChannel = MethodChannel('heracles/command');
-      final messenger =
-          TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger;
-
-      Map<dynamic, dynamic>? args;
-      messenger.setMockMethodCallHandler(commandChannel, (call) async {
-        if (call.method == 'runAgent') {
-          args = Map<dynamic, dynamic>.from(call.arguments as Map);
-          return <String, dynamic>{
-            'stopReason': 'x',
-            'finalText': '',
-            'sessionId': 's',
-            'totalCachedTokens': 0,
-            'totalPromptTokens': 0,
-            'totalOutputTokens': 0,
-            'turns': <Map<String, dynamic>>[],
-          };
-        }
-        return null;
-      });
-      addTearDown(
-          () => messenger.setMockMethodCallHandler(commandChannel, null));
+      final captured = <AppSettings>[];
+      installCaptureExecutor(captured);
 
       await AgentBridge().run(
         workspacePath: '/w',
@@ -817,9 +800,9 @@ void main() {
         ),
       );
 
-      expect(args, isNotNull);
-      expect(args!['maxTurns'], 16);
-      expect(args!['reasoningLevel'], 'high',
+      expect(captured, hasLength(1));
+      expect(captured.single.maxTurns, 16);
+      expect(captured.single.reasoningLevel, ReasoningLevel.high,
           reason: '两个"成本参数"必须同时在场 —— 加新参数时最容易顶掉旧的');
     });
   });
@@ -841,4 +824,42 @@ void main() {
       }
     });
   });
+}
+
+/// **不出网、立刻收尾**的执行器替身（2026-10-25）。
+///
+/// 只用来做"设置有没有传到位"的观测点：事件流建成即关、result 立即完成，
+/// 绝不碰网络 —— 这正是原来那两条用例挂死 10 分钟的根因（真执行器拿
+/// `sk-test` 去打 api.deepseek.com）。
+class _NoNetworkExecutor extends LocalAgentExecutor {
+  _NoNetworkExecutor({
+    required super.workspacePath,
+    required super.settings,
+    required super.sessionStore,
+    super.askGate,
+  });
+
+  @override
+  Future<LocalRunHandle> run({
+    required String request,
+    String? sessionId,
+    List<HAttachment> attachments = const [],
+  }) async {
+    final controller = StreamController<AgentEvent>.broadcast();
+    // 与生产同形：关流先于 result 完成（见 `local_agent.dart` 的收尾注释）
+    unawaited(controller.close());
+    return LocalRunHandle(
+      events: controller.stream,
+      result: Future<AgentRunResult>.value(AgentRunResult(
+        stopReason: '已给出最终回答',
+        finalText: '',
+        sessionId: sessionId ?? 's',
+        totalCachedTokens: 0,
+        totalPromptTokens: 0,
+        totalOutputTokens: 0,
+        turns: <AgentTurn>[],
+      )),
+      cancel: () async => true,
+    );
+  }
 }

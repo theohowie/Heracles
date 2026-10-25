@@ -1,3 +1,4 @@
+import 'package:flutter/cupertino.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -6,6 +7,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 import 'package:heracles/screens/chat_screen.dart';
 import 'package:heracles/services/settings_controller.dart';
 import 'package:heracles/theme/app_theme.dart';
+import 'package:heracles/theme/cupertino_kit.dart' show AppIcons;
 
 import 'support/secure_storage_mock.dart';
 
@@ -17,22 +19,38 @@ import 'support/secure_storage_mock.dart';
 ///
 /// ```
 /// Navigator.pop()                       // 先关抽屉
-/// → _bridge.ensureAppWorkspace()        // MethodChannel 'ensureAppWorkspace'（无参数）
-///   ├─ null / path 为空 ⇒ 只 setState 错误，**不再调任何其他通道**
+/// → _bridge.ensureAppWorkspace()        // MethodChannel 'heracles/command'
+///                                       //   'ensureAppWorkspace'（无参数）
+///   ├─ null / path 为空 ⇒ 只 setState 错误，**不建会话**
 ///   └─ 有 path ⇒ _switchContext()
-///                → createSession(path, '新会话', treeUri: …)
+///                → _bridge.createSession(path, '新会话', treeUri: …)
 ///                → 选中该会话 + _reload()
 /// ```
+///
+/// ## ★ 2026-10-25：会话落盘**已不在 `heracles/command` 上**
+///
+/// `AgentBridge.createSession` 现在直接走 Dart `SessionStore` ⇒
+/// **`heracles/device` 的 `fs.*`**（写 `<ws>/.heracles/sessions.json`）；
+/// `heracles/command` 上只剩工作区登记表那几个方法（`ensureAppWorkspace` /
+/// `listWorkspaces` / `removeWorkspace` / `consumePendingOpen`）。
+/// 所以本文件的夹具必须**两条通道一起 mock**，否则：
+///   · 成功路径会去调真通道 ⇒ 断言恒红（旧夹具就是这样红的）；
+///   · 反向断言（"不该建会话"）会**空跑**变绿 —— 因为那条通道上永远不会再出现
+///     建会话的痕迹。
+/// 现在"有没有建会话"的判据是**设备通道上有没有写会话索引**，比旧判据更接近事实。
+///
+/// ⚠️ `treeUri` 也**不再往下传**：Dart 只把它当缓存键的一部分，真正的
+/// SAF/POSIX 路由由 Kotlin `DeviceFs` 按登记表决定（见 `agent_bridge.dart`
+/// 的 `createSession` 与 `_storeFor` 注释）。所以本文件不再断言"treeUri 透传"。
 ///
 /// ## 为什么必须在**通道层**断言，而不是只测 WorkspaceDrawer
 ///
 /// WorkspaceDrawer 只管"把回调接出去"（已由 `workspace_drawer_add_menu_test.dart`
 /// 覆盖）。真正会伤到用户的是**接线之后那一段**：
 ///   · `ensureAppWorkspace` 建不出目录（真机上 SAF/分区存储会这样）时，
-///     若代码继续往下调 `createSession`，用户就会看到一个**假会话**
+///     若代码继续往下建会话，用户就会看到一个**假会话**
 ///     —— 点进去发消息必然失败，且没有任何提示。
-///   · 反之若建得出来，`createSession` 必须拿到**正确的 path 与 treeUri**
-///     （漏传 treeUri 会走 `java.io.File` → `EPERM`，真机实测过两次）。
+///   · 反之若建得出来，会话索引必须写在**通道返回的那个 path** 下。
 ///
 /// 所以这里记录**被调用过的通道方法名与参数**，断言的是行为序列，
 /// 而不是"某个 widget 存在"。
@@ -46,7 +64,8 @@ void main() {
   tearDown(removeSecureStorageMock);
 
   const commandChannel = MethodChannel('heracles/command');
-  const eventChannel = EventChannel('heracles/events');
+  /// 会话存储走的通道（`SessionStore` 的 `fs.*`）—— 见文件头说明。
+  const deviceChannel = MethodChannel('heracles/device');
 
   /// 内置默认工作区在真机上的形状（`Android/data/<pkg>/files/...`）。
   ///
@@ -55,13 +74,17 @@ void main() {
   const appWorkspacePath =
       '/storage/emulated/0/Android/data/com.theohowie.heracles/files/app-workspace';
   const appWorkspaceTreeUri = 'content://com.android.externalstorage.documents/tree/x';
-  const createdSessionId = 'sess-app-1';
 
   /// 被调用过的通道方法名，**按调用顺序**。
+  ///
+  /// 两条通道都往里写（含下面那条"索引写入"的合成事件名），
+  /// 这样"先 ensure 再建会话"的顺序断言仍然成立。
   late List<String> calls;
 
-  /// 每次 `createSession` 收到的参数（用来核对 path / title / treeUri）。
-  late List<Map<dynamic, dynamic>> createSessionArgs;
+  /// 会话索引的写入（`heracles/device` 的 `fs.writeText` → `<ws>/.heracles/sessions.json`）。
+  ///
+  /// ★ 这是"**到底有没有建会话**"的判据（见文件头说明）。
+  late List<Map<dynamic, dynamic>> indexWrites;
 
   /// `ensureAppWorkspace` 的返回值 —— 每个用例自己决定（null / map / 抛异常）。
   late Future<Object?> Function() onEnsureAppWorkspace;
@@ -70,9 +93,12 @@ void main() {
   /// `find.text('选择文件夹')` 只会命中 ⊕ 菜单那一项（不会与空态按钮撞名）。
   late List<Map<String, dynamic>> workspaces;
 
+  /// 循环里要按顺序追加 `calls` 的合成事件名。
+  const indexWriteCall = 'fs.writeText:sessions.json';
+
   void installMocks() {
     calls = <String>[];
-    createSessionArgs = <Map<dynamic, dynamic>>[];
+    indexWrites = <Map<dynamic, dynamic>>[];
     workspaces = <Map<String, dynamic>>[];
 
     final messenger =
@@ -83,26 +109,45 @@ void main() {
       switch (call.method) {
         case 'ensureAppWorkspace':
           return await onEnsureAppWorkspace();
-        case 'createSession':
-          createSessionArgs.add(Map<dynamic, dynamic>.from(call.arguments as Map));
-          return createdSessionId;
         case 'listWorkspaces':
           return workspaces;
-        case 'listSessions':
-          return <Map<String, dynamic>>[];
-        case 'loadMessages':
-          return <Map<String, dynamic>>[];
         default:
           return null;
       }
     });
 
-    // 事件通道也要给个 mock —— 否则 EventChannel 在测试里会报
-    // "MissingPluginException"（真实存在的通道，只是测试里没有平台侧）。
-    messenger.setMockStreamHandler(
-      eventChannel,
-      MockStreamHandler.inline(onListen: (arguments, events) {}, onCancel: (arguments) {}),
-    );
+    // ★ 会话存储的真通道（`SessionStore` 走这里，见文件头说明）。
+    messenger.setMockMethodCallHandler(deviceChannel, (call) async {
+      final args =
+          call.arguments is Map ? Map<dynamic, dynamic>.from(call.arguments as Map) : <dynamic, dynamic>{};
+      final path = args['path'] as String? ?? '';
+      switch (call.method) {
+        case 'fs.stat':
+          // 新会话 id 探测：永不撞（`SessionStore._newId`）
+          return <String, dynamic>{'ok': true, 'exists': false};
+        case 'fs.readText':
+          // 索引读回来是空数组 ⇒ 建会话时列表为空（符合"新工作区"场景）
+          return <String, dynamic>{'ok': true, 'text': '[]', 'truncated': false};
+        case 'fs.writeText':
+          if (path.endsWith('.heracles/sessions.json')) {
+            calls.add(indexWriteCall);
+            indexWrites.add(args);
+          }
+          return <String, dynamic>{'ok': true};
+        case 'fs.appendText':
+        case 'fs.mkdir':
+        case 'fs.delete':
+          return <String, dynamic>{'ok': true};
+        default:
+          return <String, dynamic>{
+            'ok': false,
+            'error': '测试 mock：未知方法 ${call.method}',
+          };
+      }
+    });
+
+    // 事件通道 mock 已随内核迁移退场（`heracles/events` 在 app/lib 里
+    // **零构造**，见 agent_bridge.dart 的说明）—— 留着反而误导后来人。
   }
 
   Future<SettingsController> freshController() async {
@@ -139,23 +184,26 @@ void main() {
 
   /// 抽屉里 **⊕ 那个菜单按钮**（不是空态里那个大装饰图标）。
   ///
-  /// ⚠️ 同一个 `Icons.create_new_folder_outlined` 在抽屉里出现**两次**：
-  ///   · `workspace_drawer.dart:842` **size: 17** ← 头部的 ⊕ 菜单按钮（可点）
-  ///   · `workspace_drawer.dart:301` **size: 34** ← 空态里的装饰（不可点）
+  /// ⚠️ 同一个 `CupertinoIcons.folder_badge_plus` 在抽屉里出现**两次**：
+  ///   · `workspace_drawer.dart:874` **size: 18** ← 头部的 ⊕ 菜单按钮（可点）
+  ///   · `workspace_drawer.dart:370` **size: 35** ← 空态里的装饰（不可点）
   /// 裸 `find.byIcon` 会 "ambiguously found multiple matching widgets"。
-  /// 这里按 size 定位 —— 与 `reasoning_switch_test.dart` 里
-  /// 用 widget 谓词点 ChoiceChip 是同一类修法。
+  /// 这里按 size 定位。
+  ///
+  /// ★ 2026-10-25：图标随 Cupertino 改版换过（旧 Material
+  ///   `Icons.create_new_folder_outlined` size 17 → 现在是
+  ///   `CupertinoIcons.folder_badge_plus` size 18）—— **只换 finder，断言未动**。
   Finder drawerAddButton() => find.byWidgetPredicate(
         (w) =>
             w is Icon &&
-            w.icon == Icons.create_new_folder_outlined &&
-            w.size == 17,
-        description: '抽屉头部的 ⊕ 菜单按钮（size 17）',
+            w.icon == CupertinoIcons.folder_badge_plus &&
+            w.size == 18,
+        description: '抽屉头部的 ⊕ 菜单按钮（size 18）',
       );
 
   /// 驱动用户真正走的路径：开抽屉 → 点 ⊕ → 点「默认工作区」。
   Future<void> pickAppWorkspace(WidgetTester tester) async {
-    await tester.tap(find.byIcon(Icons.menu_rounded)); // AppBar 的 ☰
+    await tester.tap(find.byIcon(AppIcons.menu)); // AppBar 的 ☰（Cupertino 化后）
     await settle(tester);
 
     await tester.tap(drawerAddButton()); // ⊕
@@ -171,7 +219,7 @@ void main() {
     final messenger =
         TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger;
     messenger.setMockMethodCallHandler(commandChannel, null);
-    messenger.setMockStreamHandler(eventChannel, null);
+    messenger.setMockMethodCallHandler(deviceChannel, null);
   });
 
   // ==================================================================
@@ -198,7 +246,7 @@ void main() {
   });
 
   // ==================================================================
-  // 2) 建不出目录 ⇒ 如实报错，**不**调 createSession
+  // 2) 建不出目录 ⇒ 如实报错，**不**建会话
   // ==================================================================
 
   /// ## 这是本组最重要的一条
@@ -208,7 +256,7 @@ void main() {
   /// 的会话 —— 发消息必然失败，而且没有任何解释。
   ///
   /// 正确行为：只显示错误、不碰其他通道。
-  testWidgets('★★ ensureAppWorkspace 返回 null → 显示错误、不调 createSession',
+  testWidgets('★★ ensureAppWorkspace 返回 null → 显示错误、不建会话',
       (tester) async {
     installMocks();
     await usePhoneSurface(tester);
@@ -221,8 +269,13 @@ void main() {
     await pickAppWorkspace(tester);
 
     expect(calls, contains('ensureAppWorkspace'));
-    expect(calls, isNot(contains('createSession')),
-        reason: '建不出目录却调了 createSession → 会给用户一个假会话');
+    // ★ 2026-10-25：判据换成"设备通道上有没有写会话索引"（见文件头）——
+    //   旧判据（command 通道上 `createSession`）在内核迁移后**恒不成立**，
+    //   也就是反向断言会空跑变绿。
+    expect(indexWrites, isEmpty,
+        reason: '建不出目录却建了会话 → 会给用户一个假会话');
+    expect(calls, isNot(contains(indexWriteCall)),
+        reason: '同上：会话索引**一个字都没写**才算数');
 
     // 用户**必须被告知**（静默失败等于界面坏了）
     expect(find.textContaining('无法创建默认工作区'), findsOneWidget,
@@ -236,7 +289,7 @@ void main() {
   /// 同样的守卫，但走"map 里 path 是空串"这一支 ——
   /// 与"返回 null"是**两条不同的代码路径**（`ws?['path']` vs `ws == null`），
   /// 只测一条会漏掉另一半。
-  testWidgets('★★ ensureAppWorkspace 返回 path 为空串 → 同样只报错、不调 createSession',
+  testWidgets('★★ ensureAppWorkspace 返回 path 为空串 → 同样只报错、不建会话',
       (tester) async {
     installMocks();
     await usePhoneSurface(tester);
@@ -252,24 +305,28 @@ void main() {
 
     await pickAppWorkspace(tester);
 
-    expect(calls, isNot(contains('createSession')),
+    expect(indexWrites, isEmpty,
         reason: 'path 为空 = 建不出目录，绝不能建会话');
     expect(find.textContaining('无法创建默认工作区'), findsOneWidget);
     expect(tester.takeException(), isNull);
   });
 
   // ==================================================================
-  // 3) 建得出 ⇒ 调 createSession，参数正确
+  // 3) 建得出 ⇒ 真的把会话写进该 path 下的索引
   // ==================================================================
 
   /// 成功路径要**三件事同时**对，少一件在真机上都会出问题：
-  ///   · 调了 `createSession`
-  ///   · `workspacePath` 是通道返回的那个 path（不是空串/占位串）
-  ///   · **带上了 treeUri**（漏传 → Kotlin 侧走 `java.io.File` → `EPERM`）
+  ///   · 走了 `ensureAppWorkspace`（拿到 path）
+  ///   · 会话索引写在**通道返回的那个 path** 下（不是空串/占位串）
+  ///   · 写进去的索引里**有那条「新会话」**
   ///
-  /// 位置参数也不能错：`createSession(workspacePath, title, {treeUri})`
-  /// —— 第 2 个位置参数是 title `'新会话'`。
-  testWidgets('★★ ensureAppWorkspace 返回带 path 的 map → 调 createSession 且参数正确',
+  /// ⚠️ 2026-10-25 口径变更：旧版本断言"`createSession` 通道参数里有
+  /// `workspacePath` / `treeUri`"。内核迁移后 `createSession` 不再走
+  /// `heracles/command`（改走 Dart `SessionStore` → `heracles/device` 的
+  /// `fs.*`），`treeUri` 也不再往下传（SAF/POSIX 路由由 Kotlin `DeviceFs`
+  /// 按登记表决定，见 `agent_bridge.dart`）。所以断言换成**落盘事实**：
+  /// 索引文件路径 + 内容。这比旧断言更接近"用户到底有没有得到会话"。
+  testWidgets('★★ ensureAppWorkspace 返回带 path 的 map → 会话写进该 path 的索引',
       (tester) async {
     const ws = <String, dynamic>{
       'path': appWorkspacePath,
@@ -289,23 +346,21 @@ void main() {
     await pickAppWorkspace(tester);
 
     expect(calls, contains('ensureAppWorkspace'));
-    expect(calls, contains('createSession'),
+    // ★ 2026-10-25：判据 = 设备通道上真的把新会话写进了**该 path 下**的索引。
+    expect(indexWrites, hasLength(1),
         reason: '拿到 path 之后必须真的建一个会话 —— '
             '否则侧边栏只渲染有会话的工作区，用户点完什么都看不到');
 
-    expect(createSessionArgs, hasLength(1),
-        reason: '只该建一个会话（重复建会出现两条一模一样的"新会话"）');
+    final written = indexWrites.single;
+    expect(written['path'], '$appWorkspacePath/.heracles/sessions.json',
+        reason: '会话索引必须写在通道返回的那个 path 下 —— '
+            '写错地方等于用户看不到自己的会话');
+    expect(written['text'], contains('"title":"新会话"'),
+        reason: '写进去的索引里必须有这次建的那条会话（标题「新会话」）');
 
-    final args = createSessionArgs.single;
-    expect(args['workspacePath'], appWorkspacePath,
-        reason: 'createSession 必须拿到通道返回的那个 path');
-    expect(args['title'], '新会话');
-    expect(args['treeUri'], appWorkspaceTreeUri,
-        reason: 'treeUri 必须透传 —— 漏传则 Kotlin 侧走 java.io.File → EPERM（真机实测过）');
-
-    // 顺序也要对：先 ensure 再 create（反过来就是"先建会话才想起要目录"）
+    // 顺序也要对：先 ensure 再建会话（反过来就是"先建会话才想起要目录"）
     expect(calls.indexOf('ensureAppWorkspace'),
-        lessThan(calls.indexOf('createSession')));
+        lessThan(calls.indexOf(indexWriteCall)));
 
     expect(tester.takeException(), isNull);
     expect(find.textContaining('无法创建默认工作区'), findsNothing,
@@ -313,12 +368,12 @@ void main() {
   });
 
   // ==================================================================
-  // 4) 通道抛异常 ⇒ 不崩、不调 createSession
+  // 4) 通道抛异常 ⇒ 不崩、不建会话
   // ==================================================================
 
   /// 真机上"建不出目录"也可能是**抛异常**（PlatformException）而不是返回 null。
   /// 这条钉住 catch 分支：报错但不崩、也不建假会话。
-  testWidgets('★ ensureAppWorkspace 抛 PlatformException → 不崩、不调 createSession',
+  testWidgets('★ ensureAppWorkspace 抛 PlatformException → 不崩、不建会话',
       (tester) async {
     installMocks();
     await usePhoneSurface(tester);
@@ -331,7 +386,7 @@ void main() {
 
     await pickAppWorkspace(tester);
 
-    expect(calls, isNot(contains('createSession')),
+    expect(indexWrites, isEmpty,
         reason: 'ensure 失败时绝不能建会话');
     expect(tester.takeException(), isNull,
         reason: '通道异常必须被 catch —— 未捕获异常在真机上就是崩溃');

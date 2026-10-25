@@ -290,18 +290,35 @@ class _DevicePermissionPageState extends State<DevicePermissionPage> {
                   padding: const EdgeInsets.symmetric(
                       horizontal: HSpace.md, vertical: 11),
                   child: Row(
+                    // ★ 2026-10-25 真机修复：标签**不能**是"裸 `Expanded` +
+                    //   不定宽的状态文字"。真机（Android 17 / 逻辑宽 ~411dp）
+                    //   实测：「所有文件访问」被 18 字的状态文案挤到近 0 宽 ⇒
+                    //   Flutter 逐字换行 ⇒ **标签竖排**（该行从 ~47px 撑到 ~400px，
+                    //   六个字一列一个）。其余五行状态文字短，同样结构就没露出来。
+                    //
+                    //   修法：**两侧都参与 flex 分配**（标签 3 : 状态 5）——
+                    //   标签至少拿到 3/8 宽度，长状态在自己的列里换行（右对齐），
+                    //   两个都不会被对方挤成 0。取证：`staging/n8/smoke-s06-permission-top.png`
+                    //   + `staging/n8/N8-真机冒烟结果-2026-10-25.md`。
+                    crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
                       Expanded(
+                        flex: 3,
                         child: Text(
                           order[i].$2,
                           style:
                               TextStyle(fontSize: 14, color: h.text),
                         ),
                       ),
-                      Text(
-                        statusOf(order[i].$1).$1,
-                        style: TextStyle(
-                            fontSize: 13, color: statusOf(order[i].$1).$2),
+                      const SizedBox(width: HSpace.sm),
+                      Flexible(
+                        flex: 5,
+                        child: Text(
+                          statusOf(order[i].$1).$1,
+                          textAlign: TextAlign.right,
+                          style: TextStyle(
+                              fontSize: 13, color: statusOf(order[i].$1).$2),
+                        ),
                       ),
                     ],
                   ),
