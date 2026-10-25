@@ -340,5 +340,37 @@ void main() {
         reason: '标签必须排成一行 —— 竖排时高度会是 ~6 行（>100dp）');
     expect(size.width, greaterThan(60),
         reason: '标签宽度不能被长状态文字挤到 0（<60dp 就会逐字换行）');
+
+    // ★ 2026-10-25 真机复验追加的两条（第一版修法 flex 3:5 的副作用）：
+    //   ① 标签只给 3/8 宽 ⇒ 10 字那行「文件访问（授权目录）」被折成 **2 行**
+    //      （真机实测该行 131px → 202px）；
+    //   ② 状态用 `Flexible`（宽松）⇒ 单行短状态的盒子只有固有宽，`textAlign`
+    //      在单行上看不出效果 ⇒ 状态**不贴右边缘**（真机实测 x∈[440,572]，
+    //      修复前是贴右的 [868,975]）。
+    //   所以：六项标签**逐个**都得是一行（<25dp 才是真一行），且**短状态**
+    //   必须贴住行的右边缘。
+    for (final l in const [
+      'Shizuku',
+      '文件访问（授权目录）',
+      '所有文件访问',
+      '通知',
+      '无障碍',
+      '悬浮窗',
+    ]) {
+      final f = find.text(l);
+      expect(f, findsOneWidget, reason: '六项里必须有「$l」这一行');
+      expect(tester.getSize(f).height, lessThan(25),
+          reason: '「$l」必须是一行 —— 折成两行说明标签列被压得太窄');
+    }
+
+    // 短状态（「已授权」）必须贴住行的右边缘：状态盒子应当是**紧约束**
+    // （Expanded），而不是"只取固有宽的 Flexible"。
+    final row = find
+        .ancestor(of: find.text('所有文件访问'), matching: find.byType(Row))
+        .first;
+    final rowRight = tester.getRect(row).right;
+    final statusRight = tester.getRect(find.text('已授权').first).right;
+    expect((rowRight - statusRight).abs(), lessThan(1.5),
+        reason: '短状态必须贴右边缘（真机上第一版修法这里差了 ~300px）');
   });
 }

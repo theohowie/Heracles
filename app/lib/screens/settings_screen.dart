@@ -290,29 +290,42 @@ class _DevicePermissionPageState extends State<DevicePermissionPage> {
                   padding: const EdgeInsets.symmetric(
                       horizontal: HSpace.md, vertical: 11),
                   child: Row(
-                    // ★ 2026-10-25 真机修复：标签**不能**是"裸 `Expanded` +
-                    //   不定宽的状态文字"。真机（Android 17 / 逻辑宽 ~411dp）
-                    //   实测：「所有文件访问」被 18 字的状态文案挤到近 0 宽 ⇒
-                    //   Flutter 逐字换行 ⇒ **标签竖排**（该行从 ~47px 撑到 ~400px，
-                    //   六个字一列一个）。其余五行状态文字短，同样结构就没露出来。
+                    // ★ 2026-10-25 真机修复（第二版；第一版 flex 3:5 有副作用）。
                     //
-                    //   修法：**两侧都参与 flex 分配**（标签 3 : 状态 5）——
-                    //   标签至少拿到 3/8 宽度，长状态在自己的列里换行（右对齐），
-                    //   两个都不会被对方挤成 0。取证：`staging/n8/smoke-s06-permission-top.png`
-                    //   + `staging/n8/N8-真机冒烟结果-2026-10-25.md`。
+                    // 原始缺陷：`Row(Expanded(Text(标签)), Text(状态))` —— 状态文字
+                    // **不定宽**，先把宽度吃掉，`Expanded` 只剩近 0 宽 ⇒ Flutter
+                    // 逐字换行 ⇒ 「所有文件访问」标签**竖排**（真机该行 47px→~400px；
+                    // 取证 `staging/n8/N8-真机冒烟结果-2026-10-25.md`）。
+                    //
+                    // 第一版修法给标签 flex 3、状态 Flexible(flex 5)，真机复验虽然
+                    // 竖排消失，但留下两个观感副作用（复验报告 §5）：
+                    //   ① 标签只有 3/8 宽 ⇒ 10 字的「文件访问（授权目录）」被折成 2 行
+                    //      （该行 131px→202px）；
+                    //   ② 状态用 `Flexible`（宽松）⇒ 单行状态的盒子只有固有宽，
+                    //      `textAlign` 在单行上不可见 ⇒ 短状态**不贴右边缘**。
+                    //
+                    // 第二版（现在这版）三件事一起满足：
+                    //   · 标签 `Flexible`（宽松，flex 1）+ `maxLines:1 / softWrap:false`
+                    //     ⇒ **永不换行**（够宽就全显示，不够才省略号），绝不会竖排；
+                    //   · 状态 `Expanded`（**紧约束**，flex 1）+ `textAlign:right`
+                    //     ⇒ 单行也贴住右边缘，长文案在自己列内换行（右对齐）；
+                    //   · `spaceBetween` ⇒ 标签不足其份额时，余量落到两列之间，
+                    //     状态仍贴右边缘。
                     crossAxisAlignment: CrossAxisAlignment.start,
+                    mainAxisAlignment: MainAxisAlignment.spaceBetween,
                     children: [
-                      Expanded(
-                        flex: 3,
+                      Flexible(
                         child: Text(
                           order[i].$2,
+                          maxLines: 1,
+                          softWrap: false,
+                          overflow: TextOverflow.ellipsis,
                           style:
                               TextStyle(fontSize: 14, color: h.text),
                         ),
                       ),
                       const SizedBox(width: HSpace.sm),
-                      Flexible(
-                        flex: 5,
+                      Expanded(
                         child: Text(
                           statusOf(order[i].$1).$1,
                           textAlign: TextAlign.right,
