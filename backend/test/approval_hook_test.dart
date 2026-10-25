@@ -385,11 +385,14 @@ class _FakeGate implements AskGate {
   Future<String?> askUser(List<AskQuestion> questions) async => null;
 
   @override
-  Future<bool> requestApproval(
-    String toolName,
-    Map<String, String> args,
-    String detail,
-  ) async {
+  Future<bool> requestApproval({
+    required String callId,
+    required String toolName,
+    required Map<String, String> args,
+    required String risk,
+    required String detail,
+    required bool workspaceInside,
+  }) async {
     asks.add(toolName);
     return approve;
   }

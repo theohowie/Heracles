@@ -289,6 +289,115 @@ void main() {
   // ==========================================================================
   // 工具历史回填（2026-10-24）：tool_call / tool(带 id) 行 → 配对重建
   // ==========================================================================
+  // ==========================================================================
+  // /compact 手动压缩（2026-10-24）：compact 标记行 + 会话摘要
+  // ==========================================================================
+  group('M2 —— 计划落盘（plan 行回填恢复）', () {
+    test('★★★ plan 行 ⇒ 末尾合成一条"恢复会话"消息，含状态标注', () {
+      final h = sessionRowsToHistory([
+        {'role': 'user', 'text': '做个功能'},
+        {
+          'role': 'plan',
+          'steps': [
+            {'text': '查结构', 'status': 'done'},
+            {'text': '写实现', 'status': 'active'},
+            {'text': '验证', 'status': 'pending'},
+          ],
+        },
+        {'role': 'assistant', 'text': '进行中。'},
+      ]);
+
+      final plan = h.whereType<UserMessage>().last;
+      final t = _textOf(plan);
+      expect(t, contains('[恢复会话]'));
+      expect(t, contains('1. [已完成] 查结构'));
+      expect(t, contains('2. [进行中] 写实现'));
+      expect(t, contains('3. [待办] 验证'));
+      expect(t, contains('write_todos'), reason: '告诉模型可以继续更新');
+      // 顺序：合成消息在末尾（它是最新状态）
+    });
+
+    test('★★ 多条 plan 行 ⇒ 只有最后一条生效；无 plan 行 ⇒ 无合成消息', () {
+      final withPlan = sessionRowsToHistory([
+        {'role': 'plan', 'steps': [{'text': '旧', 'status': 'pending'}]},
+        {'role': 'plan', 'steps': [{'text': '新', 'status': 'active'}]},
+      ]);
+      final texts = withPlan.map(_textOfAny).join(' | ');
+      expect(texts, contains('新'));
+      expect(texts, isNot(contains('旧')), reason: '只有最后一次计划是现状');
+
+      final noPlan = sessionRowsToHistory([
+        {'role': 'user', 'text': '问'},
+        {'role': 'assistant', 'text': '答'},
+      ]);
+      expect(noPlan.map(_textOfAny).join(' | '), isNot(contains('恢复会话')));
+    });
+
+    test('★★ 合成消息在 dropLastUserIfMatches **之后** —— 不挡本轮去重', () {
+      final h = sessionRowsToHistory([
+        {'role': 'user', 'text': '上一轮'},
+        {
+          'role': 'plan',
+          'steps': [{'text': '步骤', 'status': 'pending'}],
+        },
+        {'role': 'user', 'text': '本轮请求'},
+      ], dropLastUserIfMatches: '本轮请求');
+
+      final texts = h.map(_textOfAny).toList();
+      expect(texts, isNot(contains('本轮请求')),
+          reason: '本轮请求必须被去重（合成消息在之后追加，不能挡住它）');
+      expect(texts.last, contains('[恢复会话]'),
+          reason: '合成计划消息是回填的最后一条');
+    });
+  });
+
+  group('/compact —— compact 标记行回填与摘要调用', () {
+    test('★★★ compact 标记 ⇒ 丢弃此前一切，只带摘要进场；之后的行照常追加', () {
+      final h = sessionRowsToHistory([
+        {'role': 'user', 'text': '很久以前的问题'},
+        {'role': 'assistant', 'text': '很久以前的回答'},
+        {'role': 'tool_call', 'id': 'c1', 'tool': 't', 'args': {}},
+        {'role': 'tool', 'id': 'c1', 'tool': 't', 'result': 'x', 'ok': true},
+        {'role': 'compact', 'summary': '用户在做 X，已完成 A，剩余 B。'},
+        {'role': 'user', 'text': '压缩后的新问题'},
+      ]);
+
+      expect(h, hasLength(2), reason: '标记之前的一切（含半批工具）都不进历史');
+      expect(_textOfAny(h[0]), contains('用户在做 X'),
+          reason: '摘要以 user 消息进场');
+      expect(_textOfAny(h[0]), contains('/compact'));
+      expect(_textOfAny(h[1]), '压缩后的新问题');
+    });
+
+    test('★★ summary 为空的标记行（异常产物）被忽略，不清历史', () {
+      final rows = [
+        {'role': 'user', 'text': '问题'},
+        {'role': 'compact', 'summary': ''},
+      ];
+      final h = sessionRowsToHistory(rows);
+      expect(h, hasLength(1));
+      expect(_textOfAny(h.single), '问题');
+    });
+
+    test('★★★ summarizeTranscript：把记录交给摘要器，返回修剪后的正文', () async {
+      final client = _ScriptedClient(reply: '  摘要正文。  ');
+      final out = await HeraclesAgent.summarizeTranscript(
+        config: const BackendConfig(apiKey: 'k', modelName: 'm'),
+        transcript: '用户：做 X\n助手：做完 A',
+              // ★ 注入替身 —— 不注入就会打真实 API（dio 重试到超时）
+        client: client,
+);
+      expect(out, '摘要正文。', reason: '首尾空白要修剪');
+      // 第 0 条 = system（摘要指令），第 1 条 = user（transcript 原文）
+      final sys = client.calls[0].whereType<SystemMessage>().single;
+      expect(sys.content, contains('摘要'));
+      expect(sys.content, contains('未完成'));
+      final user = client.calls[0].whereType<UserMessage>().single;
+      expect(_textOf(user), contains('做 X'));
+      expect(_textOf(user), contains('做完 A'));
+    });
+  });
+
   group('工具历史 —— tool_call/tool 行按 id 配对回填（取舍① 的解除）', () {
     test('★★★ 单个调用：tool_call + tool ⇒ 一对消息，结果进上下文', () {
       final h = sessionRowsToHistory([

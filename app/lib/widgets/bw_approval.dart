@@ -153,19 +153,26 @@ class _FullAccessConfirmSheetState extends State<_FullAccessConfirmSheet> {
 }
 
 /// 运行时审批请求的决定（与 INTERFACE.md N1 的 replyApproval 对齐）。
-enum ApprovalDecision { deny, once, always }
+///
+/// `stop` 是前端本地语义：拒绝并停止整个任务 —— 调用方映射为
+/// 先回 deny、再停 run，不直接上行后端。
+enum ApprovalDecision { deny, once, always, stop }
 
-/// 运行时审批请求弹窗：拒绝 / 允许一次 / 始终允许。
+/// 运行时审批请求弹窗：拒绝 / 允许一次 / 始终允许（可带「停止任务」）。
 ///
 /// 调用方在后端 N1 的 `approval_required` 事件到达时弹出；
 /// 用户选「始终允许」后调用方负责写 alwaysAllowedTools。
 /// 超时/断线时调用方按 fail-closed 处理（拒绝），本 UI 不擅自决定。
+/// [allowStop] 为 true 时多一个「停止任务」入口（返回 [ApprovalDecision.stop]），
+/// 解决审批弹窗盖住输入栏停止键、用户物理上停不下来的问题。
 Future<ApprovalDecision?> showApprovalRequestSheet(
   BuildContext context, {
   required String tool,
   required String argsPreview,
   String? risk,
+  String? note,
   bool workspaceInside = true,
+  bool allowStop = false,
 }) {
   final h = Hue.of(context);
   return showModalBottomSheet<ApprovalDecision>(
@@ -205,9 +212,18 @@ Future<ApprovalDecision?> showApprovalRequestSheet(
                   fontSize: 15, fontWeight: FontWeight.w600),
             ),
             const SizedBox(height: 6),
-            Text(
-              argsPreview,
-              style: TextStyle(fontSize: 13.5, height: 1.6, color: h.textDim),
+            // 参数全文不截断（审批的意义是看清再签字）；过长时内部滚动
+            ConstrainedBox(
+              constraints: BoxConstraints(
+                maxHeight: MediaQuery.sizeOf(sheetCtx).height * 0.35,
+              ),
+              child: SingleChildScrollView(
+                child: Text(
+                  argsPreview,
+                  style: TextStyle(
+                      fontSize: 13.5, height: 1.6, color: h.textDim),
+                ),
+              ),
             ),
             if (risk != null) ...[
               const SizedBox(height: 8),
@@ -215,6 +231,13 @@ Future<ApprovalDecision?> showApprovalRequestSheet(
                 risk,
                 style: TextStyle(
                     fontSize: 13.5, color: HColors.warnOn(h.dark)),
+              ),
+            ],
+            if (note != null && note.isNotEmpty) ...[
+              const SizedBox(height: 8),
+              Text(
+                note,
+                style: TextStyle(fontSize: 13, height: 1.5, color: h.textDim),
               ),
             ],
             const SizedBox(height: 8),
@@ -265,6 +288,21 @@ Future<ApprovalDecision?> showApprovalRequestSheet(
                 ),
               ],
             ),
+            if (allowStop) ...[
+              const SizedBox(height: 4),
+              Center(
+                child: CupertinoButton(
+                  padding: const EdgeInsets.symmetric(vertical: 8),
+                  onPressed: () => Navigator.of(sheetCtx)
+                      .pop(ApprovalDecision.stop),
+                  child: Text(
+                    '停止任务',
+                    style: TextStyle(
+                        fontSize: 14, color: HColors.errorOn(h.dark)),
+                  ),
+                ),
+              ),
+            ],
           ],
         ),
       ),

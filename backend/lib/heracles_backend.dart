@@ -41,6 +41,8 @@ export 'src/capability/capabilities.dart';
 export 'src/context/deterministic_json.dart';
 export 'src/context/window_ratio_compressor.dart';
 export 'src/prompt/system_prompt.dart';
+// 内置技能（S1/S2/S3 的 Skill 层，2026-10-24）。宿主开 RunOptions.enableSkills 后进目录。
+export 'src/prompt/builtin_skills.dart';
 export 'src/agent/tools/apk_tools.dart';
 export 'src/agent/tools/file_manage_tools.dart';
 export 'src/agent/tools/file_tools.dart';
@@ -56,4 +58,8 @@ export 'src/tools/tool_factory.dart';
 // 不会跟进，而且不会有任何编译错误提醒。App 侧的 `DeviceWorkspaceCapability`
 // 正是需要 `ContractWorkspace.lineNumberWidth` 来对齐行号前缀的。
 export 'src/contract/contract.dart';
+// 统一 Guardrails 门面（SEC5）：输入侧静态校验聚合入口 + 防线清单。
+export 'src/guard/guardrails.dart';
+// 词法检索索引（R1-R3，用户拍板词法口径）。
+export 'src/rag/workspace_index.dart';
 

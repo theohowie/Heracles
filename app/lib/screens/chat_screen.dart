@@ -23,12 +23,14 @@ import '../theme/cupertino_kit.dart';
 import 'settings_screen.dart';
 import '../widgets/bw_topbar.dart';
 import '../widgets/bw_usage_sheet.dart';
+import '../widgets/bw_approval.dart';
 import '../widgets/themed_background.dart';
 import '../widgets/input_bar.dart';
 import '../widgets/message_row.dart';
 import '../widgets/tool_call_card.dart'
     show
         ToolGroupRow,
+        friendlyToolName,
         kStepRowArrowGap,
         kStepRowArrowSize,
         kStepRowHPad,
@@ -112,6 +114,9 @@ class _ChatScreenState extends State<ChatScreen> {
 
   /// 当前进行中的步（0 起）；-1 = 全部完成
   int _planActive = 0;
+
+  /// 已取消步骤的下标（plan_updated 帧的 cancelled 状态，N4 追加值）
+  Set<int> _planCancelled = const {};
 
   /// 用户收起了清单
   bool _planCollapsed = false;
@@ -1149,6 +1154,31 @@ class _ChatScreenState extends State<ChatScreen> {
   /// {"role":"assistant","text":"...","cached":1024,"prompt":1200,"out":50,"ms":6530}
   /// ```
   List<HMessage> _toMessages(List<Map<String, dynamic>> raw) {
+    // ★ 计划恢复（M2，2026-10-24）：取**最后一条** plan 行还原顶部清单。
+    //   副作用写在转换器里（重载必经之路）；实时路径不受影响
+    //   （plan_created 事件照常覆盖这些字段）。
+    for (final m in raw) {
+      if ((m['role'] as String?) != 'plan') continue;
+      final steps = m['steps'];
+      if (steps is! List || steps.isEmpty) continue;
+      final texts = <String>[];
+      var done = 0;
+      var active = -1;
+      for (final s in steps) {
+        if (s is! Map) continue;
+        final t = ((s['text'] as String?) ?? '').trim();
+        if (t.isEmpty) continue;
+        texts.add(t);
+        final st = (s['status'] as String?) ?? 'pending';
+        if (st == 'done') done++;
+        if (st == 'active') active = texts.length - 1;
+      }
+      if (texts.isNotEmpty) {
+        _planSteps = texts;
+        _planDone = done;
+        _planActive = active;
+      }
+    }
     final out = <HMessage>[];
     for (final m in raw) {
       final role = (m['role'] as String?) ?? '';
@@ -2073,6 +2103,54 @@ class _ChatScreenState extends State<ChatScreen> {
           }
         });
 
+      // ---- ★ 计划完整帧（N4，2026-10-25 后端升级形状）----
+      //
+      // `plan_updated` 是计划的**唯一权威帧**：只读最后一帧，不做增量
+      // 拼接（契约 N4）。空数组 = 无计划（灵动岛收起）；status 含追加值
+      // `cancelled`，未知值按 pending 渲染。上面的 plan_created /
+      // plan_advanced 是老后端的兼容路径，保留不删。
+      case AgentEvent.kPlanUpdated:
+        final detailed = e.planStepsDetailed;
+        if (detailed != null) {
+          setState(() {
+            if (detailed.isEmpty) {
+              _planSteps = null;
+              _planDone = 0;
+              _planActive = -1;
+              _planCancelled = const {};
+            } else {
+              _planSteps = [for (final s in detailed) s['title'] ?? ''];
+              _planDone = detailed
+                  .where((s) =>
+                      s['status'] == 'done' || s['status'] == 'cancelled')
+                  .length;
+              _planActive =
+                  detailed.indexWhere((s) => s['status'] == 'active');
+              _planCancelled = {
+                for (var i = 0; i < detailed.length; i++)
+                  if (detailed[i]['status'] == 'cancelled') i,
+              };
+            }
+          });
+        }
+
+      // ---- ★ 上下文分项帧（N2，2026-10-25 后端升级形状）----
+      //
+      // `context_updated` 每轮一帧：breakdown（7 固定键）+ limit /
+      // limitSource。用量抽屉的环图直接吃这里存下的分项；打开抽屉时
+      // 的刷新拉取保留为兜底（还没跑过时帧还没到）。
+      case AgentEvent.kContextUpdated:
+        setState(() {
+          if (e.breakdown != null) _contextBreakdown = e.breakdown!;
+          final lim = e.limit;
+          if (lim != null && lim > 0) {
+            _contextLimit = lim;
+            if (e.limitSource != null) {
+              _contextLimitSource = e.limitSource!;
+            }
+          }
+        });
+
       // ---- ★ 上下文压缩（2026-10-23，用户要求「压缩机制要可见」）----
       //
       // 用户原话：「上下文压缩机制这个要做一下，如果上下文达到了 80% 必须先
@@ -2124,12 +2202,15 @@ class _ChatScreenState extends State<ChatScreen> {
       // 到达时机：Kotlin 侧已经**挂起**在审批队列上（工具返回 NeedsApproval）。
       // 允许 ⇒ 重新执行该工具；拒绝/关弹窗 ⇒ 作为失败回填，模型不会以为做成了。
       // 不弹窗的后果：队列等 10 分钟后超时 —— 用户只看到任务卡死。
-      case AgentEvent.kApprovalRequest:
+      case AgentEvent.kApprovalRequired:
         unawaited(_showApprovalDialog(
           context,
+          callId: e.callId ?? '',
           tool: e.tool,
           args: e.args,
           reason: e.reason ?? e.message ?? '',
+          message: e.message,
+          workspaceInside: e.workspaceInside ?? true,
         ));
 
       // ---- 收尾：撤掉占位 ----
@@ -2646,6 +2727,7 @@ class _ChatScreenState extends State<ChatScreen> {
       _planSteps = null;
       _planDone = 0;
       _planActive = 0;
+      _planCancelled = const {};
       _planReachedGoal = null;
       _planClosedReason = null;
       // ★ 2026-10-23：换上下文 = 换了一份消息列表 —— 「是否跟随底部」与
@@ -3433,11 +3515,65 @@ class _ChatScreenState extends State<ChatScreen> {
     }
   }
 
+  /// **/compact 手动压缩**（2026-10-24）—— 输入框敲 `/compact` 触发。
+  ///
+  /// ## 为什么拦截在 `_runAgent` 而不是输入框组件
+  ///
+  /// 输入框只管收集文本；"什么文本是命令"属于会话层语义 —— 与排队/
+  /// 忙碌行为（BusySendBehavior）同一层。放这里，`/compact` 也自然继承
+  /// 排队语义（忙时按设置排队或中断，与普通消息一致）。
+  ///
+  /// ## 展示
+  ///
+  /// 摘要结果以**助手消息**形式插入当前屏幕（不落盘 —— 它不是模型回答，
+  /// 落盘会污染重放；真正的持久化是会话尾部的 compact 标记行）。
+  Future<void> _doCompact() async {
+    final ws = _activeWorkspace;
+    final sid = _activeSessionId;
+    if (ws == null) {
+      setState(() => _error = '请先选择一个工作区');
+      return;
+    }
+    if (sid == null || sid.isEmpty) {
+      setState(() {
+        _messages.add(HAssistantMessage(
+          id: _nextId(),
+          text: '当前还没有会话（先发一条消息创建），无需压缩。',
+        ));
+      });
+      _followBottomIfNeeded();
+      return;
+    }
+    setState(() => _busy = true);
+    try {
+      final note = await _bridge.compactSession(
+        workspacePath: ws.path,
+        sessionId: sid,
+        settings: widget.settings.value,
+      );
+      if (!mounted) return;
+      setState(() {
+        _messages.add(HAssistantMessage(id: _nextId(), text: note));
+      });
+      _followBottomIfNeeded();
+    } catch (e) {
+      if (mounted) setState(() => _error = '压缩失败：$e');
+    } finally {
+      if (mounted) setState(() => _busy = false);
+    }
+  }
+
   /// ★ **真实运行** —— 调用 Kotlin 侧的 `AgentLoop`。
   ///
   /// **没有会话时 Kotlin 会自动新建** —— 这就是
   /// "在工作区里直接发消息"的行为，与桌面版一致。
   Future<void> _runAgent(String request) async {
+    // ★ /compact 手动压缩（2026-10-24，C2 的 P2 欠账）：拦截在**落用户气泡
+    //   之前** —— /compact 是命令不是对话内容，不该出现在会话流里。
+    if (request.trim().toLowerCase() == '/compact') {
+      await _doCompact();
+      return;
+    }
     setState(() {
       final names = _attachments.map((a) => a.name).join('、');
       final label = _attachments.isEmpty
@@ -3966,6 +4102,8 @@ class _ChatScreenState extends State<ChatScreen> {
             //   「你标题上面的这个本地模型名称还放着那干嘛？」——
             //   BackendBadge（[本地|qwen3.5-4b] 绿胶囊）移除。
             //   模型信息在输入框的模型选择框里已经有了，标题不重复。
+            // ★ 灵动岛不在顶栏（2026-10-25 移位）：展开态在固定高度的
+            //   AppBar 里会溢出，改为浮在消息列表顶部正中（见 body 的 Stack）。
             Flexible(
               child: Text(
                 _activeSession?.title ?? _workspaceName,
@@ -3978,22 +4116,6 @@ class _ChatScreenState extends State<ChatScreen> {
                 ),
               ),
             ),
-            // ★ 灵动岛（2026-10-24 黑白改版）：计划从列表顶部移到顶栏胶囊，
-            //   收起只显示当前步骤，点击展开完整清单（数据与 PlanChecklist 同源）。
-            if (_planSteps != null && _planSteps!.isNotEmpty)
-              Padding(
-                padding: const EdgeInsets.only(left: 8),
-                child: DynamicIsland(
-                  steps: _planSteps!,
-                  doneCount: _planDone,
-                  activeIndex: _planActive,
-                  collapsed: _planCollapsed,
-                  onToggle: () =>
-                      setState(() => _planCollapsed = !_planCollapsed),
-                  reachedGoal: _planReachedGoal,
-                  closedReason: _planClosedReason,
-                ),
-              ),
           ],
         ),
         actions: [
@@ -4108,6 +4230,31 @@ class _ChatScreenState extends State<ChatScreen> {
                       onTap: _resumeAutoScroll,
                       h: h,
                       hasNewContent: _hasNewContent,
+                    ),
+                  ),
+                // ---- 灵动岛（2026-10-25 从顶栏移入）----
+                //   浮在消息列表顶部正中：收起是小胶囊（当前步骤 + 进度），
+                //   点开是完整清单面板，盖在消息之上、不挤占布局高度
+                //   （顶栏固定高度放不下展开态）。数据吃 plan_updated
+                //   完整帧（见事件处理）。
+                if (_planSteps != null && _planSteps!.isNotEmpty)
+                  Positioned(
+                    top: 6,
+                    left: 0,
+                    right: 0,
+                    child: Center(
+                      child: DynamicIsland(
+                        steps: _planSteps!,
+                        doneCount: _planDone,
+                        activeIndex: _planActive,
+                        collapsed: _planCollapsed,
+                        onToggle: () => setState(
+                            () => _planCollapsed = !_planCollapsed),
+                        reachedGoal: _planReachedGoal,
+                        closedReason: _planClosedReason,
+                        cancelledIndices: _planCancelled,
+                        onAdjust: _prefillPlanAdjust,
+                      ),
                     ),
                   ),
               ],
@@ -4794,11 +4941,24 @@ class _ChatScreenState extends State<ChatScreen> {
   ///
   /// 无论走哪条路都必须回一个决定 —— 否则队列干等 10 分钟，
   /// 用户看到的是"任务卡死"，且模型得不到任何反馈。
+  /// 「调整计划」（后端推荐路径，2026-10-25）：v1 不新增编辑 API ——
+  /// 预填一条用户消息，用户补完发出去，模型用 write_todos 更新计划，
+  /// 前端随即收到新的 plan_updated 完整帧。零新接口、天然一致。
+  void _prefillPlanAdjust() {
+    _inputCtrl.text = '请调整当前计划：';
+    _inputCtrl.selection = TextSelection.collapsed(
+      offset: _inputCtrl.text.length,
+    );
+  }
+
   Future<void> _showApprovalDialog(
     BuildContext context, {
+    required String callId,
     required String? tool,
     required Map<String, String>? args,
     required String reason,
+    String? message,
+    bool workspaceInside = true,
   }) async {
     // ★★ 2026-10-21（BUG-1）：**完全访问档绝不弹窗** ★★
     //
@@ -4830,11 +4990,10 @@ class _ChatScreenState extends State<ChatScreen> {
       // ignore: avoid_print
       print('[heracles][approval] 完全访问档收到审批请求（tool=$tool）'
           '⇒ 直接放行、不弹窗（Kotlin 侧漏判档位时由这里兜住）');
-      await _bridge.replyApproval('allow');
+      await _bridge.replyApproval(callId: callId, decision: 'once');
       return;
     }
 
-    final h = Hue.of(context);
     // ★★ 2026-10-21：**不再截断**审批内容 ★★
     //
     // ## 修的是什么
@@ -4866,141 +5025,34 @@ class _ChatScreenState extends State<ChatScreen> {
         .join('\n')
         .trim();
     final shownDetail = detail;
-    // 摘要行用的短预览（只在正文过长时显示，帮用户判断"这次改的是哪一块"）
-    final summaryLine = detail.length > 160
-        ? '${detail.substring(0, 160).replaceAll('\n', ' ')}…'
-        : '';
 
-    final decision = await showCupertinoDialog<String>(
-      context: context,
-      barrierDismissible: true,
-      builder: (dlgCtx) => CupertinoAlertDialog(
-        title: Row(
-          children: [
-            Icon(AppIcons.shield, size: 20, color: h.accent),
-            const SizedBox(width: HSpace.sm),
-            const Text('需要你确认', style: TextStyle(fontSize: 16)),
-          ],
-        ),
-        // ★★ 内容必须**可滚动 + 限高**（2026-10-20 真机修）★★
-        //
-        // ## 修的是什么
-        //
-        // 真机实测（设备 e35e48c6，手动审批档，模型连续 apply_patch）：
-        // 参数一长，弹窗就报 **`BOTTOM OVERFLOWED BY 346 PIXELS`**（另有 281/309/325 三种读数），
-        // 内容被黄色警示条截断 —— **用户看不到完整的 patch，却在被要求对这次修改签字**。
-        // 那不是"观感问题"：审批的全部意义就是"看清楚再点允许"。
-        //
-        // ## 为什么用 `Flexible` + `SingleChildScrollView` 而不是直接限高
-        //
-        // `AlertDialog` 的 content 在 Column 里是**无界**的 —— 子组件想多高就多高。
-        // 套一层 `ConstrainedBox` 只给出**上限**，再让 `SingleChildScrollView` 吃掉超出部分：
-        // · 短内容 ⇒ 弹窗照常按内容收缩（不出现空白滚动区）
-        // · 长内容 ⇒ 到 60% 屏高就停，内部可滚，**按钮永远可见**
-        // 60% 是取"不把底部按钮挤出屏幕"的经验上限，与系统弹窗的观感一致。
-        content: ConstrainedBox(
-          constraints: BoxConstraints(
-            maxHeight: MediaQuery.sizeOf(context).height * 0.6,
-          ),
-          child: SingleChildScrollView(
-            child: Column(
-              mainAxisSize: MainAxisSize.min,
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Text(
-                  reason.isEmpty ? '这个操作需要你确认后才会执行。' : reason,
-                  style: TextStyle(fontSize: 14, height: 1.5, color: h.text),
-                ),
-                // ★ 摘要行：给一个"这次改的是哪一块"的短预览。
-                //   正文在下面给**全文**（可滚动）—— 摘要行只是为了快速定位，
-                //   绝不替代正文。
-                if (summaryLine.isNotEmpty) ...[
-                  const SizedBox(height: 4),
-                  Text(
-                    summaryLine,
-                    style: TextStyle(fontSize: 12, color: h.textFaint),
-                  ),
-                ],
-                if (shownDetail.isNotEmpty) ...[
-                  const SizedBox(height: HSpace.sm),
-                  Container(
-                    width: double.infinity,
-                    padding: const EdgeInsets.all(HSpace.sm),
-                    decoration: BoxDecoration(
-                      color: h.surface,
-                      borderRadius: BorderRadius.circular(HRadius.sm),
-                    ),
-                    child: Text(
-                      shownDetail,
-                      style: TextStyle(
-                        fontSize: 12,
-                        height: 1.4,
-                        fontFamily: 'monospace',
-                        color: h.textDim,
-                      ),
-                    ),
-                  ),
-                ],
-                const SizedBox(height: HSpace.sm),
-                Text(
-                  '允许：执行这次调用；拒绝：本次不执行（模型会收到"被拒绝"）。',
-                  style: TextStyle(fontSize: 12, color: h.textFaint),
-                ),
-              ],
-            ),
-          ),
-        ),
-        actions: [
-          CupertinoDialogAction(
-            onPressed: () => Navigator.of(dlgCtx).pop('deny'),
-            child: const Text('拒绝'),
-          ),
-          // ★ 「本会话始终允许」（2026-10-19）：同一工具 + 同一关键参数不再问。
-          //   只在本 run 内有效（不落盘）—— 跨任务的持久白名单是另一个安全决定。
-          CupertinoDialogAction(
-            onPressed: () => Navigator.of(dlgCtx).pop('allow_always'),
-            child: const Text('本会话始终允许'),
-          ),
-          CupertinoDialogAction(
-            isDefaultAction: true,
-            onPressed: () => Navigator.of(dlgCtx).pop('allow'),
-            child: const Text('允许'),
-          ),
-          // ★★ 停止入口（2026-10-20 真机修）★★
-          //
-          // ## 修的是什么
-          //
-          // 真机实测（e35e48c6，手动审批档）：一个"写多段文章"的任务会**连续**触发
-          // `write_file` / `apply_patch` 审批。每个弹窗都盖住整屏（含底部输入栏的停止键）
-          // ⇒ 用户**物理上点不到停止**，只能反复点「允许」或「拒绝」。
-          //
-          // 而用户要的恰恰是「暂停打断」—— 这个档位反而让它**不可达**。
-          //
-          // ## 为什么放在弹窗里，而不是做成悬浮层
-          //
-          // 悬浮层要盖在 modal barrier 之上，得走 `Overlay` 手动插条，还要自己处理
-          // 位置 / 安全区 / 被键盘顶起 —— 换来的只是"少一次点击的距离"。
-          // 放进 actions 是**同一个模态会话内的入口**：语义清楚（"我不想继续了"），
-          // 不引入第二套层级，也不和弹窗抢点击。
-          //
-          // ## 语义边界（不许含糊）
-          //
-          // 这里**只**停 agent 运行，**不**替用户做审批决定：
-          // 先 `pop('deny')` 让挂起的 `approve()` 立刻拿到结果（否则它会等满 10 分钟），
-          // 再 `_stopRun()` 停整个 run。**拒绝 + 停止**是两件事，顺序也要对。
-          CupertinoDialogAction(
-            isDestructiveAction: true,
-            onPressed: () {
-              Navigator.of(dlgCtx).pop('deny');
-              unawaited(_stopRun());
-            },
-            child: const Text('停止任务'),
-          ),
-        ],
-      ),
+    // ★ 2026-10-25：弹窗换新版底部抽屉（黑白改版的审批样式，三按钮 +
+    //   「停止任务」）。保留的旧语义一条不少：
+    //   · 参数给**全文**（shownDetail 不截断，抽屉内可滚动）；
+    //   · 「停止任务」= 先 deny 让挂起的审批立刻返回、再停整个 run；
+    //   · 关抽屉/无决定（null）⇒ 按**拒绝**处理（安全默认，绝不放行）。
+    final decision = await showApprovalRequestSheet(
+      context,
+      tool: friendlyToolName(tool ?? ''),
+      argsPreview: shownDetail.isEmpty ? '（无参数）' : shownDetail,
+      risk: reason.isEmpty ? null : reason,
+      note: (message != null && message.isNotEmpty && message != reason)
+          ? message
+          : null,
+      workspaceInside: workspaceInside,
+      allowStop: true,
     );
-    // null = 点外面/返回键 ⇒ 按**拒绝**处理（安全默认，绝不放行）
-    await _bridge.replyApproval(decision ?? 'deny');
+    if (decision == ApprovalDecision.stop) {
+      await _bridge.replyApproval(callId: callId, decision: 'deny');
+      unawaited(_stopRun());
+      return;
+    }
+    final wire = switch (decision) {
+      ApprovalDecision.once => 'once',
+      ApprovalDecision.always => 'always',
+      _ => 'deny',
+    };
+    await _bridge.replyApproval(callId: callId, decision: wire);
   }
 
   /// **目录选模型**（2026-10-14，二级弹层）。

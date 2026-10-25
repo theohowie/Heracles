@@ -122,10 +122,33 @@ class _UsageSheetState extends State<_UsageSheet> {
 }
 
 /// 第 1 页：上下文环图。
+///
+/// 数据优先吃后端 `context_updated` 的分项（N2，7 固定键）：
+/// 有分项就按分项画多段环图；没有（老后端/还没跑过）退回
+/// 冻结/对话两分的老口径，不画假数。
 class _ContextPage extends StatelessWidget {
   const _ContextPage({required this.contextUsage});
 
   final ContextUsage contextUsage;
+
+  static const _keyOrder = [
+    'system',
+    'toolDefs',
+    'toolResults',
+    'reasoning',
+    'assistant',
+    'user',
+    'summary',
+  ];
+  static const _keyLabels = {
+    'system': '系统提示',
+    'toolDefs': '工具定义',
+    'toolResults': '工具结果',
+    'reasoning': '思考',
+    'assistant': '助手回复',
+    'user': '用户消息',
+    'summary': '历史摘要',
+  };
 
   @override
   Widget build(BuildContext context) {
@@ -136,6 +159,44 @@ class _ContextPage extends StatelessWidget {
     final remaining = limit > 0
         ? (limit - contextUsage.used).clamp(0, limit)
         : 0;
+
+    // 分项段：固定键按序取非零值，未知键合并为「其他」。
+    final breakdown = contextUsage.breakdown;
+    final segments = <({String label, double value, Color color})>[];
+    if (breakdown != null && breakdown.values.any((v) => v > 0)) {
+      final ramp = <Color>[
+        h.text,
+        h.textDim,
+        h.textFaint,
+        h.accent,
+        Color.lerp(h.text, h.surface, 0.55)!,
+        Color.lerp(h.text, h.surface, 0.75)!,
+        h.border,
+      ];
+      var ci = 0;
+      for (final key in _keyOrder) {
+        final v = breakdown[key] ?? 0;
+        if (v <= 0) continue;
+        segments.add((
+          label: _keyLabels[key] ?? key,
+          value: v.toDouble(),
+          color: ramp[ci++ % ramp.length],
+        ));
+      }
+      var other = 0;
+      for (final e in breakdown.entries) {
+        if (!_keyOrder.contains(e.key) && e.value > 0) other += e.value;
+      }
+      if (other > 0) {
+        segments.add((
+          label: '其他',
+          value: other.toDouble(),
+          color: ramp[ci % ramp.length],
+        ));
+      }
+    }
+    final hasBreakdown = segments.isNotEmpty;
+
     return SingleChildScrollView(
       padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 8),
       child: Column(
@@ -150,11 +211,22 @@ class _ContextPage extends StatelessWidget {
                 CustomPaint(
                   size: const Size(168, 168),
                   painter: _DonutPainter(
-                    frozen: contextUsage.frozenTokens.toDouble(),
-                    conversation: contextUsage.conversationTokens.toDouble(),
+                    segments: hasBreakdown
+                        ? [
+                            for (final s in segments)
+                              (value: s.value, color: s.color),
+                          ]
+                        : [
+                            (
+                              value: contextUsage.frozenTokens.toDouble(),
+                              color: h.text,
+                            ),
+                            (
+                              value: contextUsage.conversationTokens.toDouble(),
+                              color: h.textDim,
+                            ),
+                          ],
                     total: limit > 0 ? limit.toDouble() : null,
-                    frozenColor: h.text,
-                    conversationColor: h.textDim,
                     trackColor: h.border,
                   ),
                 ),
@@ -179,11 +251,17 @@ class _ContextPage extends StatelessWidget {
             ),
           ),
           const SizedBox(height: 20),
-          _kv(h, '冻结内容', '~${formatTokensCompact(contextUsage.frozenTokens)}',
-              swatch: h.text),
-          _kv(h, '对话内容',
-              '~${formatTokensCompact(contextUsage.conversationTokens)}',
-              swatch: h.textDim),
+          if (hasBreakdown) ...[
+            for (final s in segments)
+              _kv(h, s.label, '~${formatTokensCompact(s.value.round())}',
+                  swatch: s.color),
+          ] else ...[
+            _kv(h, '冻结内容', '~${formatTokensCompact(contextUsage.frozenTokens)}',
+                swatch: h.text),
+            _kv(h, '对话内容',
+                '~${formatTokensCompact(contextUsage.conversationTokens)}',
+                swatch: h.textDim),
+          ],
           _kv(h, '剩余',
               limit > 0 ? '~${formatTokensCompact(remaining)}' : '未知',
               swatch: h.border),
@@ -316,19 +394,13 @@ Widget _kv(Hue h, String k, String v, {Color? swatch}) {
 /// total 为 null（上限未知）时只画灰环，不画假进度。
 class _DonutPainter extends CustomPainter {
   const _DonutPainter({
-    required this.frozen,
-    required this.conversation,
+    required this.segments,
     required this.total,
-    required this.frozenColor,
-    required this.conversationColor,
     required this.trackColor,
   });
 
-  final double frozen;
-  final double conversation;
+  final List<({double value, Color color})> segments;
   final double? total;
-  final Color frozenColor;
-  final Color conversationColor;
   final Color trackColor;
 
   @override
@@ -345,30 +417,30 @@ class _DonutPainter extends CustomPainter {
     if (t == null || t <= 0) return;
     const gap = 0.04; // 段与段之间的空隙（弧度）
     var start = -math.pi / 2;
-    void arc(double value, Color color) {
-      final sweep = (value / t).clamp(0.0, 1.0) * 2 * math.pi;
-      if (sweep <= gap) return;
+    for (final seg in segments) {
+      final sweep = (seg.value / t).clamp(0.0, 1.0) * 2 * math.pi;
+      if (sweep <= gap) {
+        start += sweep;
+        continue;
+      }
       canvas.drawArc(
         rect,
         start + gap / 2,
         sweep - gap,
         false,
         Paint()
-          ..color = color
+          ..color = seg.color
           ..style = PaintingStyle.stroke
           ..strokeWidth = 14
           ..strokeCap = StrokeCap.round,
       );
       start += sweep;
     }
-
-    arc(frozen, frozenColor);
-    arc(conversation, conversationColor);
   }
 
   @override
   bool shouldRepaint(_DonutPainter old) =>
-      old.frozen != frozen ||
-      old.conversation != conversation ||
-      old.total != total;
+      old.total != total ||
+      old.segments.length != segments.length ||
+      old.segments.toString() != segments.toString();
 }

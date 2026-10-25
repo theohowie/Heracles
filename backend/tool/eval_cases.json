@@ -1,0 +1,37 @@
+{
+  "说明": "E1 评估用例集（2026-10-24 脚手架）。expectContains 是要点命中的粗筛（冒烟级判据，不是质量结论）；expectFileContains 在 run 结束后读工作区文件核对 —— 验证'真的改了文件'而不是'嘴上说改了'。",
+  "cases": [
+    {
+      "id": "locate-function",
+      "task": "工作区里有个函数叫 add，告诉我它定义在哪个文件（相对路径）。",
+      "expectContains": [
+        "lib/math.dart"
+      ]
+    },
+    {
+      "id": "readme-command",
+      "task": "README 里写的运行命令是什么？原样告诉我这条命令。",
+      "expectContains": [
+        "dart run"
+      ]
+    },
+    {
+      "id": "import-relation",
+      "task": "bin/main.dart 导入了哪个文件？只答相对路径。",
+      "expectContains": [
+        "lib/math.dart"
+      ]
+    },
+    {
+      "id": "small-edit",
+      "task": "在 lib/math.dart 里加一个函数：int multiply(int a, int b) => a * b; 要求保留 add 原样不动，用 edit 工具做小步修改。",
+      "expectContains": [
+        "multiply"
+      ],
+      "expectFileContains": {
+        "path": "lib/math.dart",
+        "contains": "int multiply(int a, int b) => a * b;"
+      }
+    }
+  ]
+}

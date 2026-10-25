@@ -13,6 +13,7 @@ library;
 import 'package:dart_agent_core/dart_agent_core.dart';
 
 import '../../capability/capabilities.dart';
+import '../../contract/contract.dart';
 import '../../tools/tool_factory.dart';
 
 /// 明确禁止的命令模式。
@@ -48,10 +49,12 @@ String? checkCommandSafety(String command) {
 /// 构建 shell 工具。
 List<Tool> buildShellTools(ToolFactory f, Capabilities caps) {
   final shell = caps.shell;
+  final ws = caps.workspace;
   return [
     f.build(
       name: 'run_shell_command',
       description: '在工作区里执行一条 shell 命令，返回标准输出与错误输出。'
+          '返回：合并的 stdout/stderr 文本 + 退出码；超时附超时说明。'
           '适合跑构建、测试、git、文件操作等。'
           '⚠️ 命令是非交互的：不要用需要输入的命令（如 vim、交互式 git rebase）。'
           '⚠️ 输出较长时会被完整返回，注意不要打印超大文件。',
@@ -84,9 +87,30 @@ List<Tool> buildShellTools(ToolFactory f, Capabilities caps) {
         }
 
         final timeoutSec = optionalInt(args, 'timeout_seconds') ?? 300;
-        return shell!.run(
+        final r = await shell!.run(
           command,
           timeout: Duration(seconds: timeoutSec),
+        );
+        if (r is! CapabilitySuccess) return r;
+
+        // ★ C4（2026-10-24）：超长输出**落盘引用** —— 截断防窗口爆、
+        //   完整内容存工作区可取回（read_file 分段读），两头都顾。
+        var data = r.data;
+        if (data.length > ContractShell.overflowChars && ws != null) {
+          final rel = '${ContractShell.overflowDir}/'
+              'shell-${DateTime.now().millisecondsSinceEpoch}.txt';
+          await ws.mkdir(ContractShell.overflowDir);
+          await ws.write(rel, data);
+          data = '${data.substring(0, ContractShell.overflowChars)}'
+              '\n\n⚠️ 输出共 ${data.length} 字符，已截断。'
+              '完整输出已存到工作区 `$rel`，需要后续段用 read_file 读。';
+        }
+
+        // ★ SEC1（2026-10-24）：命令输出是"外部内容" —— 无条件包裹。
+        //   工作区里 cat 到的不可信文件、curl 到的网页都可能夹带指令。
+        return CapabilitySuccess(
+          '【命令输出开始】\n$data\n【命令输出结束】',
+          metadata: r.metadata,
         );
       },
     ),

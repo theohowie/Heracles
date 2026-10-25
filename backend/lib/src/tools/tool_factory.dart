@@ -241,3 +241,50 @@ bool? optionalBool(Map<String, dynamic> args, String key) {
   if (v is bool) return v;
   throw ArgumentError('参数 `$key` 应是布尔值，收到 ${v.runtimeType}（值：$v）');
 }
+
+/// **"先读再改"追踪器**（2026-10-24，K1 的工具层强制 —— Claude Code
+/// FileEditTool 的形态："把正确用法从靠 LLM 自觉变成靠工具强制"）。
+///
+/// ## 规则
+///
+/// · `edit` / `apply_patch`：目标路径必须**被读过**或**被本会话写过**；
+/// · `write_file`：目标文件**已存在**时同上；新文件随便写；
+/// · `read_file` 成功 ⇒ 记入已读；写成功 ⇒ 同时记入已读+已写
+///   （自己写的内容就是"知道的"，不必再读一遍）；
+/// · `delete_path` ⇒ 忘掉该路径；`move_path` ⇒ 迁移记录。
+///
+/// ## 边界（如实记录）
+///
+/// · 只认**路径字符串**：同一文件经不同相对写法（`a/../b.dart`）进来
+///   会被当成两个路径 —— 能力层反正会归一化拒绝越界，这里从宽；
+/// · 无 mtime 防陈旧：读之后文件被外部改动，本层不察觉
+///   （Claude Code 有 stale 检查，v1 不做，记为已知边界）；
+/// · 子代理与主线程**共享**同一个 tracker（工具对象相同）：
+///   worker 读过的文件主线程也算读过 —— 从宽取向，避免重复读浪费。
+class EditReadTracker {
+  final _read = <String>{};
+  final _written = <String>{};
+
+  void markRead(String path) => _read.add(path);
+
+  void markWritten(String path) {
+    _read.add(path);
+    _written.add(path);
+  }
+
+  void forget(String path) {
+    _read.remove(path);
+    _written.remove(path);
+  }
+
+  void moved(String from, String to) {
+    if (_read.remove(from)) _read.add(to);
+    if (_written.remove(from)) _written.add(to);
+  }
+
+  /// edit/apply_patch/write(已存在) 的准入判定。
+  bool canEdit(String path) => _read.contains(path) || _written.contains(path);
+
+  /// 该文件是否被本会话写过（= 内容已知，无需再读）。
+  bool wasWrittenByUs(String path) => _written.contains(path);
+}

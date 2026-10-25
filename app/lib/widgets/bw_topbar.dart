@@ -25,6 +25,8 @@ class DynamicIsland extends StatefulWidget {
     required this.onToggle,
     this.reachedGoal,
     this.closedReason,
+    this.cancelledIndices = const {},
+    this.onAdjust,
   });
 
   final List<String> steps;
@@ -34,6 +36,13 @@ class DynamicIsland extends StatefulWidget {
   final VoidCallback onToggle;
   final bool? reachedGoal;
   final String? closedReason;
+
+  /// 已取消步骤的下标（plan_updated 的 cancelled 状态）；渲染为删除线。
+  final Set<int> cancelledIndices;
+
+  /// 「调整计划」回调（后端推荐路径：预填一条用户消息让模型改计划，
+  /// 不新增编辑 API）。为 null 时不显示调整入口。
+  final VoidCallback? onAdjust;
 
   @override
   State<DynamicIsland> createState() => _DynamicIslandState();
@@ -143,11 +152,13 @@ class _DynamicIslandState extends State<DynamicIsland>
                     child: Row(
                       children: [
                         _StepDot(
-                          state: i < widget.doneCount
-                              ? _StepState.done
-                              : i == widget.activeIndex
-                                  ? _StepState.active
-                                  : _StepState.todo,
+                          state: widget.cancelledIndices.contains(i)
+                              ? _StepState.cancelled
+                              : i < widget.doneCount
+                                  ? _StepState.done
+                                  : i == widget.activeIndex
+                                      ? _StepState.active
+                                      : _StepState.todo,
                           fg: fg,
                           bg: bg,
                           dim: dim,
@@ -158,15 +169,39 @@ class _DynamicIslandState extends State<DynamicIsland>
                             widget.steps[i],
                             style: TextStyle(
                               fontSize: 13,
-                              color: i < widget.doneCount || i == widget.activeIndex
-                                  ? fg
-                                  : dim,
+                              decoration: widget.cancelledIndices.contains(i)
+                                  ? TextDecoration.lineThrough
+                                  : null,
+                              color: widget.cancelledIndices.contains(i)
+                                  ? dim
+                                  : i < widget.doneCount ||
+                                          i == widget.activeIndex
+                                      ? fg
+                                      : dim,
                             ),
                           ),
                         ),
                       ],
                     ),
                   ),
+                if (widget.onAdjust != null) ...[
+                  const SizedBox(height: 10),
+                  GestureDetector(
+                    onTap: widget.onAdjust,
+                    behavior: HitTestBehavior.opaque,
+                    child: Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        Icon(Icons.edit_outlined, size: 13, color: dim),
+                        const SizedBox(width: 5),
+                        Text(
+                          '调整计划',
+                          style: TextStyle(fontSize: 12.5, color: dim),
+                        ),
+                      ],
+                    ),
+                  ),
+                ],
                 if (widget.reachedGoal == false && widget.closedReason != null)
                   Padding(
                     padding: const EdgeInsets.only(top: 8),
@@ -184,7 +219,7 @@ class _DynamicIslandState extends State<DynamicIsland>
   }
 }
 
-enum _StepState { done, active, todo }
+enum _StepState { done, active, todo, cancelled }
 
 class _StepDot extends StatelessWidget {
   const _StepDot({
@@ -233,6 +268,16 @@ class _StepDot extends StatelessWidget {
             border: Border.all(color: dim, width: 2),
             shape: BoxShape.circle,
           ),
+        );
+      case _StepState.cancelled:
+        return Container(
+          width: 16,
+          height: 16,
+          decoration: BoxDecoration(
+            border: Border.all(color: dim, width: 2),
+            shape: BoxShape.circle,
+          ),
+          child: Icon(Icons.close, size: 10, color: dim),
         );
     }
   }

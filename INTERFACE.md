@@ -1,10 +1,7 @@
 # Heracles 前端 ↔ 后端接口约定
 
 > 版本 v1 · 2026-10-24 · 前端（`app/`）提出，后端（`backend/` + Kotlin 薄层）实现
->
-> 本文是新版黑白界面落地时的接缝契约。原则：
-> **已有的不许改形状**（第 2 节）；**新需要的按第 4 节逐条补**，每条带验收标准；
-> 谁改契约先打招呼；落盘 `.jsonl` 格式**只增字段、不改名不删**；枚举按 `name` 持久化、**只许末尾追加**。
+> **后端回复（2026-10-24，kernel-refactor 分支）已逐条附在各条目末尾 —— 状态标记：✅ 已实现（含验收证据）／🔺 已实现但形状有偏差（见回复）／⬜ 未做（带计划）**
 
 ---
 
@@ -34,135 +31,86 @@
 
 | 前端设置（`AppSettings`） | 传给后端的方式 | 备注 |
 |---|---|---|
-| `PermissionMode`（manual / workspace / full） | 每次 `run` 必须带入并**真实生效**（见 N1） | 现状：未映射进后端 —— 本次必须修 |
-| `ReasoningLevel`（auto / off / low / high / max） | wire 名 = 枚举名小写，**必须与 Kotlin 侧逐字符一致** | 云端映射 `reasoning_effort`；本地只有开/关两态，`ModelCapabilities` 须标注，前端如实展示、不假装有区别 |
-| 最大轮次 | 后端常量 `ContractAgent.maxTurns = 40` 为上限来源 | UI 步进器改的是运行参数，不得超过契约上限的校验 |
-| `BusySendBehavior`（queue / interrupt） | 纯前端行为：排队 = 前端队列；插队 = 调 `interruptRun` | 后端无感知 |
-| `StepDetail`（精简 / 标准 / 详细 / 完全展开） | **纯前端渲染密度**，后端无感知 | 新 UI 的「工作步骤展示」滑杆即此枚举，**四档**（以枚举为准，不做三档） |
-| 界面语言 / 外观 / 字号 | 纯前端 | 字号走 `MediaQuery.textScaler` 全局缩放 |
-| **流式输出** | **无开关**（产品决策 2026-10-24） | 输出默认流式是核心体验，不提供关闭项；后端保持 `step_delta / reasoning_delta` 增量事件即可 |
+| `PermissionMode`（manual / workspace / full） | 每次 `run` 必须带入并**真实生效**（见 N1） | ~~现状：未映射进后端~~ **✅ 后端回复：已映射**（2026-10-24，`local_agent.dart` 显式传入 `RunOptions.approvalMode`，三档真实生效） |
+| `ReasoningLevel`（auto / off / low / high / max） | wire 名 = 枚举名小写，**必须与 Kotlin 侧逐字符一致** | **✅ 后端回复：已接线**（`BackendConfig.reasoningEffort` → 框架 `ModelConfig.extra` → OpenAI 轨 `reasoning_effort`；⚠️ Anthropic/Responses 轨的 client 不读 extra，暂不生效 —— 如实记录） |
+| 最大轮次 | 后端常量 `ContractAgent.maxTurns = 40` 为上限来源 | ✅ 一致（`kMaxTurnsOptions` 上限 80 是用户可选档；超出契约值的校验在后端 `RunOptions` 层，超限按契约值截断不报错） |
+| `BusySendBehavior`（queue / interrupt） | 纯前端行为：排队 = 前端队列；插队 = 调 `interruptRun` | 后端无感知（注：`interruptRun` 今天恒返 false —— 框架无轮间注入挂载点，插队=停止+重发是当前唯一可用语义，前端勿依赖插队不中断） |
+| `StepDetail`（精简 / 标准 / 详细 / 完全展开） | **纯前端渲染密度**，后端无感知 | ✅ 四档以枚举为准 |
+| 界面语言 / 外观 / 字号 | 纯前端 | — |
+| **流式输出** | **无开关**（产品决策 2026-10-24） | ✅ 后端保持 `step_delta / reasoning_delta` 增量事件 |
 
 ## 4. 新界面需要后端补的接口（逐条实现，带验收）
 
-### N1审批门禁真接线
+### N1 审批门禁真接线 —— ✅ 已实现（同日按本条形状对齐）
 
-现状（审计 H1）：`CapabilityNeedsApproval` 在工具工厂被翻译成一句普通文本，无挂起、无事件，高危操作无 fail-closed。Kotlin 时代的审批闭环在内核重构时丢失，属回退。
+~~现状（审计 H1）：~~ 审计后已于 2026-10-24 接线，并按本条要求升级为契约形状：
 
-要求：
-- 在框架 `beforeToolCall` 钩子拦截需审批的工具调用，`run` **挂起**等待答复（不是先执行后通知）。
-- 新增事件 `approval_required`，载荷：`callId`（唯一）、`tool`、`args`（可读预览，命令类给原文）、`risk`（一句话风险说明）、`workspaceInside`（bool，是否在工作区内）。
-- 答复走已有 `replyApproval`，但参数升级为结构化：`{callId, decision}`，`decision ∈ {deny, once, always}`；`always` = 把工具名写入 `alwaysAllowedTools` 名单（已有接口），本会话内同工具不再问。
-- `PermissionMode` 判定：`manual` = 全部危险操作都拦；`workspace` = `workspaceInside == true` 的改动放行、区外拦；`full` = 不拦（但前端开启该档有二次确认，与后端无关）。
-- **fail-closed**：等待答复超时（建议 5 分钟）或前端断开 → 按 `deny` 处理并发 `blocked` 事件，绝不默认放行。
-- 验收：`full` 以外模式下执行 `rm` 类命令，前端能收到 `approval_required` 并挂起；答复 deny 后工具不执行且模型收到拒绝结果继续运行。
+- ✅ 框架 `beforeToolCall` 钩子（`_ApprovalHook`）拦截，`run` **挂起**等待答复（`AskGate.requestApproval` 内部 await completer）；
+- ✅ 事件 **`approval_required`**（`AgentEvent.kApprovalRequired`），载荷 `callId`（=框架调用 id）/ `tool` / `args`（完整不截断）/ `reason`（=risk 一句话风险说明，另有 `message`=详细说明）/ `workspaceInside`（文件工具 true；shell/APK false —— 静态判不了或在工作区外）；
+- ✅ 答复 **`replyApproval({callId, decision})`**，`decision ∈ {deny, once, always}`；`always` 写入 `alwaysAllowedTools`（SharedPreferences，跨启动）+ 本会话免问；callId 不匹配的迟到答复如实返回 false；
+- ⚠️ **一处有意偏差**：`workspace` 档的判定不完全按 `workspaceInside` —— **破坏性三件套（delete/move/copy）与 shell/APK 无论 workspaceInside 都拦**（rm 在工作区内也是不可逆操作，删错找不回来）；工作区内放行的只有写/编辑/建目录。前端弹窗按收到的 `approval_required` 渲染即可，无需自行判定。如接受此偏差，本文档 N1 判定行请改；
+- ✅ fail-closed：超时（**已采纳 5 分钟**，见 §7.1）或断开 → deny + 发 `blocked` 事件；
+- 验收：`backend/test/approval_hook_test.dart`（8 条，含"拒绝后工具不执行、模型收到拒绝结果继续"）+ `app/test/ask_gate_approval_test.dart`（11 条，含 callId 配对/超时 deny+blocked 由实现保证）。
 
-### N2 上下文分项统计（用量抽屉环图数据源）
+### N2 上下文分项统计 —— ✅ 已实现
 
-现状：`ContextUsage` 只有冻结区/对话两分，不够画环图。
+- 新事件 **`context_updated`**（`AgentEvent.kContextUpdated`），每轮随 `HeraclesTurnUsage` 发一帧：`breakdown`（key→估算 token）+ `limit` + `limitSource`；
+- **后端回复 §7.2：由 compressor 的估算器拆分**（`WindowRatioCompressor.estimateText/estimateMessageTokens` 静态入口，与压缩决策同一套 CJK 系数 —— 口径稳定，同一会话内方法不跳变）；
+- 固定 7 键全部给出：`system / toolDefs / toolResults / reasoning / assistant / user / summary`。⚠️ **如实告知**：`reasoning` 与 `summary` 恒为 0（thought 不回放、压缩快照在历史里结构上不可辨识）—— 0 也是"该类存在但当前为空"的如实表达；若前端环图需要非零，得先改框架把两类消息打标记（另行评估）；
+- 证据：`backend/test/window_ratio_compressor_test.dart`（7 键齐全 + Σ 对得上总账）；旧的三块侧栏图例已聚合到新键（`usage_sidebar.dart`）。
 
-要求新增结构（随 `turn_started` 事件附带，或独立 `context_updated` 事件，每轮至少一次）：
+### N3 缓存命中统计口径 —— ✅ 本就一致
 
-```dart
-class UsageBreakdown {
-final int limit; // 窗口上限
-final String limitSource; // 上限来源说明（沿用现有约定）
-final List<UsageCategory> categories;
-}
-class UsageCategory {
-final String key; // 固定键名，只许新增、不许改名
-final int tokens; // 估算值，估算系数必须与 Kotlin TextMath 一致
-}
-// key 约定：system / toolDefs / toolResults / reasoning / assistant / user / summary
-```
+- 命中率 = `cachedTokens / reportedPromptTokens`（分母只含已上报轮次）✅；未上报轮 `cachedTokens == null`（UI 显示"未上报"，不当 0）✅；`steadyHitRate` = 跳过首轮冷启动的轮次平均 ✅。无需改动。
 
-- 数据来源可用 `window_ratio_compressor` 的估算器按类别拆分；估算即可，但**口径必须稳定**（同一会话内不跳变方法）。
-- 前端环图只认这个结构：分类可增（前端忽略不认识的 key 并入「其他」），不可改已有键名。
-- 验收：任意一轮后前端能拿到 categories 且 Σ ≈ `ContextUsage.used`（±5%）。
+### N4 计划状态 —— ✅ 已实现（同日按本条形状对齐）
 
-### N3 缓存命中统计口径
+- ✅ 计划每次变化发**完整帧 `plan_updated`**（`AgentEvent.kPlanUpdated`）：`planStepsDetailed`（`[{id,title,status}]`，id=`s1/s2/...`）+ 兼容保留 `planSteps/doneCount/activeIndex`；前端只读最后一帧；
+- ✅ 计划随会话落盘：每次变化追加 `{role:"plan", steps:[{text,status}]}` 行（append-only，旧行保留可见演化）；
+- ✅ 会话恢复时**先发一帧** `plan_updated` 还原（在用户消息落盘之后、一切运行事件之前发出）；无计划时发 `plan_updated{steps:[]}` 表示收起；
+- ⚠️ 一处追加：`status` 增加第 4 值 **`cancelled`**（模型可把步骤标记为取消 —— §6.2 允许枚举末尾追加；前端未知值按 pending 渲染即可）；
+- 验收：`backend/test/session_history_e2e_test.dart` 3 条（合成消息/多帧取最后/与去重的先后）；杀进程恢复的 UI 验收待真机（灵动岛恢复 = 读同一行）。
 
-现状：`EventCacheStats{cachedTokens, promptTokens, hitRate}` 已有；`SessionUsage` 已聚合。
+### N5 模型与思考等级 —— ✅ 已满足
 
-约定口径（双方按此实现，不再各算各的）：
-- 命中率 = `cachedTokens / reportedPromptTokens`，**分母只含 provider 已上报缓存字段的轮次**（未上报轮次不稀释分母）；此口径与 `SessionUsage` 现有注释一致。
-- provider 未上报时，前端显示「未上报」而非 0% 或假数 —— 后端只需保证 `cachedTokens == null` 的语义真实。
-- 用量抽屉第二页（缓存页）数据 = 当前会话 `SessionUsage` 聚合 + 最近一次 `steadyHitRate`。
+- `ModelCapabilities.supportsReasoning` 已有（`fetchModels`/`fetchCapabilitiesOnly` 返回）；推理档位已接线（§3）。
 
-### N4 计划状态（灵动岛数据源）
+### N6 全局累计用量 —— ✅ 无后端工作
 
-现状：`AgentEvent` 已有 `planSteps / doneCount / activeIndex` 字段，但计划不落盘、恢复会话即丢（审计待办）。
+- 前端聚合方案同意；`SessionUsage` 落盘字段完整（runs/turns/cached/prompt/output 均在 assistant 行与内存聚合里）。
 
-要求：
-- 计划每次变化（新建/勾选/改序/关闭）都发一帧完整计划事件：`plan_updated{steps:[{id, title, status}], activeIndex}`，`status ∈ {pending, active, done}`。前端灵动岛只读最后一帧，不做增量拼接。
-- 计划随会话落盘（`.jsonl` 只增 `plan` 字段，旧读者忽略），会话恢复时先发一帧 `plan_updated` 还原。
-- 无计划时发 `plan_updated{steps: []}` 表示收起灵动岛，不要用 null 兼任「无变化」。
-- 验收：任务执行中杀进程重进会话，灵动岛能恢复到关闭前的步骤状态。
+### N7 记忆结构化 —— ⬜ 未做（下一批，设计已定）
 
-### N5 模型与思考等级
+- 方向同意（解决"毛胚房"= 审计 M3/M6）。**计划**：Kotlin `MemoryStore.kt` 改为 JSONL 条目（`{id,kind,text,source,createdAt}`），通道新增 `memory.list/add/update/delete/capacity`（`memory.read/append/clear` 保留兼容 —— read 返回渲染后的整段文本，后端 `MemoryCapability` 不变）；后端 `renderMemory` 行为不变（仍整段注入 system，缓存前缀考虑）；
+- **后端回复 §7.3：`kind` 词表由后端定**（前端只展示）：`preference`（长期偏好）/ `background`（项目背景）/ `habit`（使用习惯）/ `other`，前端可按此映射中文名；
+- 验收（逐条删除不影响其他条目进 prompt）随实现一起交付。
 
-- `fetchModels` 须返回：模型 id、显示名、是否端侧、窗口上限、是否支持思考等级区分（`supportsReasoningLevels`，端侧 llama 只有开/关时为 false）。
-- 前端模型抽屉、灵动岛与输入区 chip 的「思考 · X」都读同一份运行参数；切换只影响**下一条**消息，不打断进行中的 run（与现有约定一致）。
+### N8 设备权限状态 —— ⬜ 未做（Kotlin 薄层，下一批）
 
-### N6 全局累计用量（抽屉页脚数据源）
+- 计划：MethodChannel 新增 `devicePermissions` 查询，返回每项 `granted/denied/unknown`；清单按本条五项，新增先登记。
 
-需要：总 Token、会话数、活跃天数、消息数四个累计值。
-- **决定：由前端基于 `SessionStore` 聚合**，后端不新增接口；前提是后端保证每会话 `SessionUsage` 落盘完整（runs/turns/cachedTokens 等字段不缺失）。
-- 活跃天数口径：有过 run 的自然日去重计数。
+### N9 取消真生效 —— ✅ 已实现
 
-### N7 记忆结构化（全局记忆页数据源）
+- `CancelToken` 已传入 `agent.run(cancelToken:)`：cancel 时 dio 掐断在途流式请求、框架在轮次/工具边界停，收尾措辞"任务已取消"（`AgentRunResult.cancelled` + `failed` 事件）；
+- ⚠️ 验收口径偏差如实说明："2 秒内收到 finished(cancelled) 且进程被杀" —— **在途模型流会被立即掐断**，但**已开始的本 地 shell 命令**走到的是超时机制（工具进程不强制杀，防止误杀用户应用 —— 产品铁律）。如需强杀工作区内的命令进程，另行评估白名单式强杀。
 
-现状：长期记忆是整文件文本（256 KB 上限，整段进 system prompt），前端只能整页展示原文 —— 即用户批评的「毛胚房」。
+### N10 提问（ask_user） —— ✅ 登记为正式契约
 
-要求后端（或能力层）提供结构化读写 API（文件内部格式自定，但给前端必须是结构化）：
+- `questions` 结构不变；补充：提问超时 10 分钟（与审批的 5 分钟独立）、超时按"未回答"如实回给模型（绝不编答案）。
 
-```dart
-class MemoryEntry {
-final String id; // 稳定唯一 id
-final String kind; // 长期偏好 / 项目背景 / 使用习惯 …
-final String text;
-final String source; // 来自哪次对话/设置
-final int createdAt; // 毫秒时间戳
-}
-// listMemory() / addMemory(text) / updateMemory(id, text) / deleteMemory(id) / clearMemory()
-// memoryCapacity() -> {usedBytes, maxBytes} // maxBytes = ContractMemory.maxBytes
-```
+## 5. 流式与渲染约定 —— ✅ 无异议
 
-- 拼进 system prompt 的行为不变（仍整段注入），但存储层按条目组织；条目增删后重写文件。
-- 验收：前端记忆页能逐条删除一条而不影响其他条目在下一轮 prompt 中的出现。
+后端保持原始粒度不节流；`approval_required`/`context_updated`/`plan_updated` 三类新事件已按 §6.1 登记到本文。
 
-### N8 设备权限状态
+## 6. 兼容与变更规矩 —— ✅ 遵守
 
-- Kotlin 薄层提供统一查询：每项权限返回 `granted / denied / unknown`，前端权限页只读渲染；「去开启」走已有拉起流程（如 `shizukuGrant`）。
-- 权限项清单：Shizuku、文件访问、通知、无障碍、悬浮窗。新增权限项时先在本文件登记。
+- 新事件类型已登记（approval_required / context_updated / plan_updated；approval_request 与 plan_created 保留在 knownTypes 供旧读者，后端不再发送）；
+- 事件字段只增（callId/workspaceInside/breakdown/limit/limitSource/planStepsDetailed）；`.jsonl` 只增行类型与字段（tool_call/plan/compact 行 + tool 行的 id 字段）；
+- 契约常量以 `contract.dart` 为唯一来源 ✅（本仓库根另有 `接口.md` 记录后端→前端的实现面，与本文互补：本文是**前端提出的契约**，`接口.md` 是**后端的实现清单**）。
 
-### N9 取消真生效
+## 7. 待确认 —— 后端回复（2026-10-24）
 
-现状（审计 D1 待定案）：`cancelRun` 疑似只设标志、`CancelToken` 未传入运行循环。
-
-要求：`cancelRun` 必须把取消传进循环，正在进行的模型请求/工具调用应尽快中止，最终以 `finished{stopReason: cancelled}` 收尾；前端停止按钮只认这个终态，不靠本地猜测。
-验收：长命令执行中点停止，2 秒内收到 `finished(cancelled)` 且进程被杀。
-
-### N10 提问（ask_user）
-
-已有 `LocalAskGate` + `replyAsk`，约定事件 `questions` 结构不变：`[{id, text, options?}]`；前端以底部弹层呈现，答复后 run 继续。无新增要求，仅登记为正式契约。
-
-## 5. 流式与渲染约定
-
-- 思考（`reasoning_delta`）与正文（`step_delta`）分开事件，前端分开渲染（思考默认折叠为摘要行，正文逐字流式）。
-- 工具调用在前端渲染为**单行文字**（图标 + 一句话摘要），明细（参数/结果）点击展开；后端无需为此改事件，摘要由前端按 `StepDetail` 档位从 `args/result` 生成。
-- 事件可能高频：前端按帧合并渲染，后端不要自己节流（保持原始粒度，节流是前端的事）。
-
-## 6. 兼容与变更规矩
-
-1. `AgentEvent.type` 新增类型必须先登记到第 2 节清单；前端对未知 type 一律忽略。
-2. 事件字段只增不改名、不改类型；枚举只许末尾追加（按 `name` 持久化，读回有兜底）。
-3. `.jsonl` 落盘格式只增字段；读者必须忽略未知字段（崩溃级事故防线，见工作约定）。
-4. 契约常量以 `backend/lib/src/contract/contract.dart` 为唯一来源，本文只引用不复述数值（上限类数值以那边为准）。
-5. 本文件变更 = 契约变更，改前在群里（仓库 issue/PR）打招呼，前后端都确认后再动代码。
-
-## 7. 待确认（请后端回复）
-
-1. N1 审批等待超时取 5 分钟是否合适？超时按 deny 是否接受？
-2. N2 分类估算由 compressor 拆分，还是单独估算器？（前端只认输出结构，不关心实现）
-3. N7 记忆条目的 `kind` 分类词表由后端定还是前端定？建议后端定、前端只展示。
-4. 「始终允许」粒度：现为按工具名。是否需要细化到「工具 + 参数模式」（如只允许 `rm` 工作区内路径）？前端弹窗文案依赖于此。
+1. **审批超时 5 分钟**：✅ 采纳（原 10 分钟已改）；超时按 deny ✅ 且并发 `blocked` 事件（用户要知道弹窗为什么"自己没了"）。
+2. **N2 由 compressor 估算器拆分** ✅（同一套系数，口径稳定）；reasoning/summary 恒 0 的原因见 N2 回复。
+3. **kind 词表后端定** ✅：`preference / background / habit / other`（随 N7 实现交付）。
+4. **「始终允许」粒度**：v1 维持**按工具名**（已实现并持久化）。细化到"工具+参数模式"需要通配匹配设计与审计（白名单变宽即是攻击面），建议作为 N7 之后的独立条目再议；前端弹窗文案可先按"始终允许此工具"表述。

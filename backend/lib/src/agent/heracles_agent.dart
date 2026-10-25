@@ -36,6 +36,7 @@ library;
 
 import 'dart:async';
 import 'dart:convert';
+import 'dart:io';
 
 import 'package:dart_agent_core/dart_agent_core.dart';
 import 'package:dio/dio.dart';
@@ -44,6 +45,7 @@ import '../capability/capabilities.dart';
 import '../contract/contract.dart';
 import '../context/window_ratio_compressor.dart';
 import '../prompt/system_prompt.dart';
+import '../prompt/builtin_skills.dart';
 import '../tools/tool_factory.dart';
 import 'multimodal.dart';
 import 'tools/apk_tools.dart';
@@ -136,6 +138,24 @@ class RunOptions {
     this.systemPrompts = const [],
     this.memoryNote,
     this.approvalMode = ApprovalMode.fullAccess,
+    this.enableSubAgents = false,
+    this.enableSkills = false,
+
+    /// **全链路 trace 目录**（E4，2026-10-24；默认 null = 不记录）。
+    ///
+    /// 设置后每轮模型调用的**原始请求与响应**（JSON）写入该目录
+    /// （turn-N-req.json / turn-N-res.json）—— 这是“逐轮原始输入输出
+    /// 可回放”的那一半（工具级 trace 已在会话 .jsonl）。CLI 用 --trace 开；
+    /// App 默认关（文件量大，排障时才开）。
+    this.traceDir,
+    this.autoExtract = false,
+    this.verifyCommand,
+    this.planMode = PlanMode.auto,
+    this.fallbackModelNames = const [],
+    this.mcpServers = const [],
+    this.requirePlan = false,
+    this.reflectOnFailures = 0,
+    this.verifyGateCompletion = false,
   });
 
   final int maxTurns;
@@ -197,6 +217,97 @@ class RunOptions {
   /// 实际的拦截由 [_ApprovalHook] 执行；"问谁"由宿主注入的
   /// `AskGate.requestApproval` 决定（白名单也在宿主侧）。
   final ApprovalMode approvalMode;
+
+  /// **子代理**（2026-10-24 接线，H6）—— 开启后模型可以用 `delegate_task`
+  /// 把子任务派给一个**干净上下文**的 worker，主上下文只收回最终结论。
+  ///
+  /// ## 为什么默认关
+  ///
+  /// 库默认 = 旧行为（21 个工具、无派生），与既有测试/CLI 兼容；
+  /// 有 UI 的宿主显式开启（App 传 true）。
+  ///
+  /// ## 隔离语义（见 [_workerSubAgent]）
+  ///
+  /// · worker 是**全新 AgentState**（看不到主对话）—— 真隔离，不是 clone；
+  /// · worker 的过程事件走**独立事件总线**，就地丢弃 —— 主线程的用量记账
+  ///   与 UI 不被污染；
+  /// · **hooks 继承**：审批 hook 与预算 hook 是同一个对象 ⇒ worker 的危险
+  ///   操作照样弹窗、worker 的调用照样计入任务总预算（防止"派子代理绕过
+  ///   预算"）；
+  /// · worker 禁止再派生（`disableSubAgents`）—— 深度恒为 1。
+  final bool enableSubAgents;
+
+  /// **内置技能**（2026-10-24 接线，S1/S2/S3 的 Skill 层）。
+  ///
+  /// 开启后系统提示里有技能目录（一行一条），模型按任务用
+  /// activate_skills 按需加载全文（渐进披露）—— 平时只花目录的成本。
+  /// 库默认关（旧行为）；App 显式开启。清单见 [builtinSkills]。
+  final bool enableSkills;
+
+  /// 见 [RunOptions.traceDir] 的 KDoc（E4）。
+  final String? traceDir;
+
+  /// **自动提炼记忆**（M5，2026-10-25；默认 false）。
+  ///
+  /// 开启后任务收尾时用一次**摘要调用**从对话中提炼"值得跨会话保留的
+  /// 事实"并写入长期记忆。代价 = 每 run 一次小模型调用 —— opt-in，
+  /// 由宿主决定是否承担。失败静默（记忆是锦上添花）。
+  final bool autoExtract;
+
+  /// **自验证命令**（H3/K2，2026-10-25；默认 null = 不验证）。
+  ///
+  /// 设置后：文件写/编辑**成功**时自动经 shell 执行该命令，输出附在
+  /// 工具结果里回给模型 —— 模型看到失败立刻修，形成 改→验→修 闭环
+  /// （架构级自验证，不靠提示词劝）。无 shell 能力时静默跳过。
+  final String? verifyCommand;
+
+  /// **计划模式**（P1，2026-10-25；默认 [PlanMode.auto] = 旧行为）。
+  ///
+  /// `must` = 架构强制显式分解（框架教练式：模型必须先产出计划才能动工具）
+  /// —— 供宿主对"复杂任务不许即兴跑"的场景显式开启；默认 auto 不强制。
+  final PlanMode planMode;
+
+  /// **计划前置门禁**（P1，2026-10-25；默认 false）。
+  ///
+  /// 框架的 `PlanMode.must` 与 auto 行为一致（核查过）—— 这个门禁是我们
+  /// 自己的：开启后，模型在产出**第一份计划**（write_todos）之前，
+  /// 一切执行类工具调用都被拒绝（读类工具与 ask_user 放行——先看清楚
+  /// 再计划）。一旦计划存在，门禁永久放行（模型可自由更新计划）。
+  /// "复杂任务不许即兴跑"的架构强制。
+  final bool requirePlan;
+
+  /// **连续失败反思**（P3，2026-10-25；默认 0 = 关）。
+  ///
+  /// 工具连续失败达到这个次数时，注入一条反思指令（"停下来分析根因、
+  /// 换方法，不要原样重试"）—— 反思环节由架构触发，不靠模型自觉。
+  /// 成功一次即重置计数。
+  final int reflectOnFailures;
+
+  /// **MCP 服务器配置**（A1，2026-10-25；默认空 = 不接）。
+  ///
+  /// 每项 = 一个 MCP 端点（stdio 命令或 HTTP/SSE URL）。非空时
+  /// `HeraclesAgent.run` 前先 `McpManager.connectAll`（连不上单个跳过
+  /// 并记日志，不炸 run），框架自动注入三层渐进披露：
+  /// 目录（系统提示）→ mcp_list_tools 发现 → mcp_call_tool 执行。
+  /// run 结束 disconnectAll（MCP 会话不跨 run 存活）。
+  final List<Map<String, dynamic>> mcpServers;
+
+  /// **降级模型链**（D3，2026-10-25；默认空 = 不降级）。
+  ///
+  /// 主模型连续失败（网络/限流/超时）且重试耗尽后，按序切换到
+  /// 列表中的备用模型继续当前任务 —— "不把错误直接甩给用户"的落地。
+  /// 每个降级发生时播 [HeraclesFallback] 事件（UI 可见"已降级到 X"）。
+  ///
+  /// ⚠️ 成本说明：备用模型用的是**同一个 provider 配置**（同 baseUrl/Key），
+  /// 只是模型名不同 —— 不产生额外费用来源；切换后该 run 内继续用新模型。
+  final List<String> fallbackModelNames;
+
+  /// **完成门禁**（P4，2026-10-25；默认 false）。
+  ///
+  /// 与 [verifyCommand] 配套：本轮发生过文件写/编辑且最后一次自动验证
+  /// **失败**时，拒绝任务收尾（onTurnCompletion continueRun），模型必须
+  /// 回到修复循环 —— "带病收尾"被架构拦下。默认关（无 verifyCommand 无意义）。
+  final bool verifyGateCompletion;
 }
 
 /// **组装好的 Agent**。
@@ -253,18 +364,23 @@ class HeraclesAgent {
   LLMClient _buildClient() {
     final injected = _injectedClient;
     if (injected != null) return injected;
-    return switch (_config.provider) {
+    return buildClientFor(_config);
+  }
+
+  /// 按 [BackendConfig] 建 client（静态：/compact 的摘要调用也用它）。
+  static LLMClient buildClientFor(BackendConfig config) {
+    return switch (config.provider) {
       BackendProvider.openAiCompatible => OpenAIClient(
-          apiKey: _config.apiKey,
-          baseUrl: _config.baseUrl,
+          apiKey: config.apiKey,
+          baseUrl: config.baseUrl,
         ),
       BackendProvider.anthropic => ClaudeClient(
-          apiKey: _config.apiKey,
-          baseUrl: _config.baseUrl,
+          apiKey: config.apiKey,
+          baseUrl: config.baseUrl,
         ),
       BackendProvider.openAiResponses => ResponsesClient(
-          apiKey: _config.apiKey,
-          baseUrl: _config.baseUrl,
+          apiKey: config.apiKey,
+          baseUrl: config.baseUrl,
         ),
     };
   }
@@ -279,6 +395,133 @@ class HeraclesAgent {
             : <String, dynamic>{'reasoning_effort': _config.reasoningEffort},
       );
 
+  /// **会话摘要**（/compact 用，2026-10-24）—— 一次性 LLM 调用，不进 agent 循环。
+  ///
+  /// ## 为什么是静态独立方法
+  ///
+  /// /compact 发生在**两次 run 之间**（用户在输入框敲 /compact）：
+  /// 此刻没有 agent 实例、没有 state，只有会话文件里的文本。
+  /// 摘要只需要"一段文本进、一段文本出"，走一次裸 `generate` 最省。
+  ///
+  /// ## 摘要什么（给摘要器的指令要点）
+  ///
+  /// 保留：用户目标与约束 / 改过的文件与内容 / 关键结论（文件名、行号、
+  /// 报错原文、命令返回值）/ 未完成事项。丢弃：寒暄、过程叙述、重复。
+  /// 这与压缩摘要的 [summaryEmphasis] 同一立场：**工具的具体结论不能丢**。
+  ///
+  /// 失败（网络/超时）向上抛，由宿主决定怎么告知 —— **绝不静默返回空**：
+  /// 空摘要写进标记行 = 用户以为压了、实际全丢了。
+  static Future<String> summarizeTranscript({
+    required BackendConfig config,
+    required String transcript,
+    int maxChars = 4000,
+    LLMClient? client,
+  }) async {
+    // `client` 注入点（测试替身用）；生产不传 ⇒ 按配置现建。
+    final llm = client ?? buildClientFor(config);
+    final system = '你是开发会话的摘要器。把用户给出的会话记录压缩成要点摘要，'
+        '供智能体下次继续工作使用。\n'
+        '必须保留：\n'
+        '1. 用户的目标与约束；\n'
+        '2. 已修改/创建的文件，各自改了什么；\n'
+        '3. 关键结论（文件名、行号、报错原文、命令返回值）；\n'
+        '4. 未完成事项与卡点。\n'
+        '丢弃：寒暄、重复、与任务无关的过程叙述。\n'
+        '直接输出摘要正文，不要开场白和标题，全文不超过 $maxChars 字符。';
+    final msg = await llm.generate(
+      [
+        SystemMessage(system),
+        UserMessage.text(transcript),
+      ],
+      modelConfig: ModelConfig(
+        model: config.modelName,
+        maxTokens: 2048,
+        temperature: 0.2,
+      ),
+    );
+    return (msg.textOutput ?? '').trim();
+  }
+
+  /// **自动提炼记忆**（M5，2026-10-25）—— 任务收尾时从对话中提炼事实。
+  ///
+  /// 每行一条事实（只收"跨会话有用"的：约定/偏好/踩坑），最多 [max] 条；
+  /// 没有值得记的就返回空 —— **绝不硬凑**。解析容错：剥 '- ' 与序号前缀。
+  static Future<List<String>> extractMemories({
+    required BackendConfig config,
+    required String transcript,
+    LLMClient? client,
+    int max = 3,
+  }) async {
+    final llm = client ?? buildClientFor(config);
+    final msg = await llm.generate(
+      [
+        SystemMessage('你是记忆提炼器。从开发会话记录里提炼"值得跨会话保留的'
+            '事实"（项目约定、用户偏好、踩过的坑），每行一条、以 "- " 开头，'
+            '最多 $max 条。只收确定性结论，不收过程叙述；'
+            '没有值得记的就输出空。不要输出任何其他内容。'),
+        UserMessage.text(transcript),
+      ],
+      modelConfig: ModelConfig(model: config.modelName, maxTokens: 512),
+    );
+    final out = <String>[];
+    for (var line in (msg.textOutput ?? '').split('\n')) {
+      line = line.trim();
+      if (line.startsWith('- ')) line = line.substring(2);
+      line = line.replaceAll(RegExp(r'^\d+\.\s*'), '');
+      if (line.length >= 6) out.add(line);
+      if (out.length >= max) break;
+    }
+    return out;
+  }
+
+  /// 结构化笔记落盘（C3/M2）：每次压缩追加一节（时间戳 + 前后规模 +
+  /// 保留段的要点摘录）。追加式 —— 笔记本身是任务的"黑匣子记录"。
+  static Future<void> _appendNote(
+    WorkspaceCapability? ws,
+    String sessionId,
+    int beforeMessages,
+    int beforeTokens,
+    int afterTokens,
+  ) async {
+    if (ws == null) return;
+    try {
+      const notesDir = '.heracles/notes';
+      final path = '$notesDir/$sessionId.md';
+      await ws.mkdir(notesDir);
+      final existing = await ws.read(path);
+      final header = existing is CapabilitySuccess &&
+              existing.data.trim().isNotEmpty
+          ? '\n\n---\n'
+          : '# 任务笔记（自动沉淀：每次上下文压缩时追加）\n';
+      final ts = DateTime.now().toIso8601String();
+      final note = '$header'
+          '## $ts（压缩：$beforeMessages 条 / $beforeTokens→$afterTokens token）\n'
+          '--- 以下为压缩时的保留段要点（完整的中间结论在模型记忆里）：\n'
+          '（此节为压缩事件记录；详细快照见模型 episodic memory）\n';
+      await ws.write(path, existing is CapabilitySuccess ? existing.data : '');
+      // read+write 全量覆盖式追加（能力层无 append 原语）—— 笔记量小，可接受
+      await ws.write(
+          path,
+          (existing is CapabilitySuccess ? existing.data : '') + note);
+    } catch (_) {
+      // 静默：笔记失败不影响压缩主链路
+    }
+  }
+
+  /// 读类工具清单（P1 门禁放行用）：只看不改的都算。
+  static bool _isReadTool(String tool) => const {
+        'read_file',
+        'list_files',
+        'find_files',
+        'grep_files',
+        'web_fetch',
+        'check_device_state',
+        'ask_user',
+        'save_memory',
+        'activate_skills',
+        'deactivate_skills',
+      }.contains(tool);
+
   /// **上下文构成**（C5，2026-10-24）—— 三块的**估算** token。
   ///
   /// ## 为什么是估算
@@ -291,6 +534,20 @@ class HeraclesAgent {
   ///
   /// 默认提示 + 宿主追加 + 工作区宪法/快照 + 长期记忆 —— 全部进 system 消息，
   /// 所以合成一块单列（再拆就要跨层穿透，不值得）。
+  /// ## 键（INTERFACE.md N2，2026-10-24：固定 7 个，只许新增不许改名）
+  ///
+  /// · `system`：默认提示 + 宿主追加 + 宪法/快照 + 长期记忆（都进 system 消息）；
+  /// · `toolDefs`：工具定义（toolsHistory 最后一次快照）；
+  /// · `user` / `assistant` / `toolResults`：按历史消息类型拆分；
+  /// · `reasoning`：恒 0 —— thought **不回放**（session_history 取舍②），
+  ///   历史里没有推理内容可估；
+  /// · `summary`：恒 0 —— 压缩快照在历史里是普通 ModelMessage，结构上
+  ///   无法与 assistant 正文区分（框架不给标记），如实给 0 并入 assistant。
+  ///
+  /// ## 后两块为什么是 0 也要给
+  ///
+  /// N2：前端环图只认固定键名 —— 0 也是"这一类存在但当前为空"的如实
+  /// 表达，比缺席（前端并入"其他"）更诚实。
   Map<String, int> contextBreakdown() {
     final st = _state;
     if (st == null) return const <String, int>{};
@@ -298,10 +555,29 @@ class HeraclesAgent {
     for (final p in _buildSystemPrompts()) {
       system += WindowRatioCompressor.estimateText(p);
     }
+    var user = 0;
+    var assistant = 0;
+    var toolResults = 0;
+    for (final m in st.history.messages) {
+      switch (m) {
+        case UserMessage():
+          user += WindowRatioCompressor.estimateMessageTokens(m);
+        case ModelMessage():
+          assistant += WindowRatioCompressor.estimateMessageTokens(m);
+        case FunctionExecutionResultMessage():
+          toolResults += WindowRatioCompressor.estimateMessageTokens(m);
+        default:
+          break;
+      }
+    }
     return <String, int>{
       'system': system,
-      'tools': WindowRatioCompressor.estimateToolDefinitions(st),
-      'history': WindowRatioCompressor.estimateMessagesUsage(st),
+      'toolDefs': WindowRatioCompressor.estimateToolDefinitions(st),
+      'toolResults': toolResults,
+      'reasoning': 0,
+      'assistant': assistant,
+      'user': user,
+      'summary': 0,
     };
   }
 
@@ -315,12 +591,18 @@ class HeraclesAgent {
   /// 旧注释写"18 个"（审计 §3.3 #1：注释没跟上工具面扩张），已更正。
   ///
   /// 分组顺序即日志阅读顺序：**高频基础 → 危险手段 → 长耗时 → 交互**。
-  List<Tool> _buildTools() {
+  List<Tool> _buildTools({Future<String> Function()? verify}) {
     final factory = ToolFactory(_caps);
+    // ★ H3/K2（2026-10-25）：verifyCommand 配置后，写/编辑成功自动跑
+    //   验证命令（经 shell 能力），输出附在工具结果里回给模型。
+    // ★ "先读再改"记账（K1，2026-10-24）：与工具列表同生命周期 ——
+    //   App 每次 run 新建 agent ⇒ 恰好 run 级；CLI/测试复用实例 ⇒ 会话级
+    //   （从宽取向：读过的文件跨 run 仍算读过）。
+    final tracker = EditReadTracker();
     return [
-      ...buildFileTools(factory, _caps),        // 8 个：读/写/编辑/补丁/列/建目录/找/搜
+      ...buildFileTools(factory, _caps, tracker: tracker, verify: verify),        // 8 个：读/写/编辑/补丁/列/建目录/找/搜
       ...buildShellTools(factory, _caps),       // 1 个：run_shell_command
-      ...buildFileManageTools(factory, _caps),  // 3 个：删除/移动/复制（有破坏性）
+      ...buildFileManageTools(factory, _caps, tracker: tracker),  // 3 个：删除/移动/复制（有破坏性）
       ...buildInfoTools(factory, _caps),        // 2 个：web_fetch / check_device_state
       ...buildApkTools(factory, _caps),         // 5 个：构建/反编译/重打包/签名/安装
       ...buildInteractionTools(factory,         // 2 个：ask_user / save_memory
@@ -690,6 +972,13 @@ class HeraclesAgent {
           beforeTokens: beforeTokens,
           afterTokens: afterTokens,
         ));
+        // ★ C3/M2（2026-10-25）：压缩发生 ⇒ 结构化快照同时沉淀为**可读笔记**。
+        //   框架的 XML 快照只在 episodic memory 里（进程内）；这份笔记
+        //   落到工作区 .heracles/notes/<会话>.md —— 长任务的中间结论
+        //   （当前目标/已知事实/最近动作）与对话历史分离、跨重启可见。
+        //   失败静默（笔记是增强）。
+        _appendNote(_caps.workspace, _state!.sessionId, beforeMessages,
+            beforeTokens, afterTokens);
       },
     );
 
@@ -754,18 +1043,94 @@ class HeraclesAgent {
     } else {
       _state ??= AgentState(sessionId: _newSessionId());
     }
-    final agent = StatefulAgent(
+    // ★ H3/K2/P4（2026-10-25）：verifyCommand 配置后，写/编辑成功自动跑
+    //   验证命令（经 shell 能力），输出附在工具结果里回给模型；
+    //   lastVerifyFailed 与 P4 完成门禁 hook 共享。
+    final shellForVerify = _caps.shell;
+    final lastVerifyFailed = <bool>[];
+    final Future<String> Function()? verify =
+        (_options.verifyCommand != null && shellForVerify != null)
+            ? () async {
+                final r = await shellForVerify.run(
+                  _options.verifyCommand!,
+                  timeout: const Duration(minutes: 10),
+                );
+                final passed = r is CapabilitySuccess;
+                lastVerifyFailed
+                  ..clear()
+                  ..add(!passed);
+                return switch (r) {
+                  CapabilitySuccess(:final data) =>
+                    '通过。输出尾部：${data.length > 800 ? data.substring(data.length - 800) : data}',
+                  CapabilityFailure(:final reason) => '失败：$reason',
+                  _ => '通过（无输出）',
+                };
+              }
+            : null;
+    // ★ A1（2026-10-25）：MCP 服务器接线 —— 连接→框架三层渐进披露→
+    //   run 结束断开（会话不跨 run）。单个服务器连不上只记日志（跳过），
+    //   绝不炸 run —— MCP 是增强，不是主链路。
+    final mcpManager = McpManager();
+    var mcpConnected = false;
+    if (_options.mcpServers.isNotEmpty) {
+      try {
+        final configs = <McpConnectionConfig>[
+          for (final m in _options.mcpServers)
+            McpConnectionConfig(
+              serverName: (m['name'] as String?) ?? 'mcp',
+              type: (m['url'] as String?) != null
+                  ? McpTransportType.http
+                  : McpTransportType.stdio,
+              command: m['command'] as String?,
+              args: (m['args'] as List?)?.cast<String>(),
+              url: m['url'] as String?,
+              headers: (m['headers'] as Map?)?.cast<String, String>(),
+            ),
+        ];
+        await mcpManager.connectAll(configs);
+        mcpConnected = mcpManager.hasServers;
+      } catch (_) {
+        // MCP 连接整体失败：当没配置继续跑
+      }
+    }
+    var usedFallbackIdx = -1;
+    var agent = StatefulAgent(
       name: 'heracles',
       client: client,
-      modelConfig: _modelConfig(),
+      modelConfig: _modelConfig(model: usedFallbackIdx < 0
+          ? null
+          : _options.fallbackModelNames[usedFallbackIdx]),
       state: _state!,
       systemPrompts: _buildSystemPrompts(),
-      tools: _buildTools(),
+      tools: _buildTools(verify: verify),
       controller: controller,
       compressor: compressor,
       planMode: _options.enablePlan ? PlanMode.auto : PlanMode.none,
       maxTurns: _options.maxTurns,
-      hooks: [budgetHook, approvalHook],
+      hooks: [
+        budgetHook,
+        approvalHook,
+
+        // ★ P4（2026-10-25）：完成门禁 —— 写过文件且最后一次验证失败时
+        //   拒绝收尾，模型必须回到修复循环（"带病收尾"被架构拦下）。
+        if (_options.verifyGateCompletion && verify != null)
+          _VerifyGateHook(lastVerifyFailed: lastVerifyFailed),
+        // ★ P1：计划前置门禁（自研——框架 must 与 auto 行为一致）
+        if (_options.requirePlan)
+          _PlanGateHook(isReadAllowed: _isReadTool),
+        // ★ P3：连续失败反思注入
+        if (_options.reflectOnFailures > 0)
+          _ReflectionHook(threshold: _options.reflectOnFailures),
+      ],
+      // ★ 子代理（H6，2026-10-24）：开启后框架自动追加 `delegate_task`
+      //   工具与系统提示（列出来源见 buildSubAgentSystemPrompt）。
+      // ★ disableSubAgents 才是真正的开关（框架在 !disableSubAgents 时
+      //   无条件追加 delegate_task，不看 subAgents 是否为空）。
+      subAgents: _options.enableSubAgents ? [_workerSubAgent()] : null,
+      // ★ 技能目录（S1/S2，2026-10-24）：非空时框架追加 activate/deactivate
+      //   工具 + 目录系统提示（渐进披露）。
+      skills: _options.enableSkills ? builtinSkills() : null,
+      disableSubAgents: !_options.enableSubAgents,
       // 框架自带循环检测（相同调用重复 + 周期性 LLM 诊断）。
       // 旧实现只有"相同调用重复"且阈值 2；这里用框架默认（5），
       // 因为云端模型有自愈能力，2 太激进。
@@ -777,6 +1142,7 @@ class HeraclesAgent {
       autoSaveStateFunc: _stateStorage == null
           ? null
           : (state) async => _stateStorage.save(state),
+      mcpManager: mcpConnected ? mcpManager : null,
     );
 
     /// **本轮追加的起点** —— 之后 `_lastText` 只在这里之后找本轮的正文。
@@ -785,8 +1151,11 @@ class HeraclesAgent {
     /// 本轮的用户消息与模型回答，取晚了下标就错。
     final turnStartIndex = _state!.history.messages.length;
 
-    // ---- 跑 ----
+    // ---- 跑（含 D3 降级重试：失败且还有备用模型 ⇒ 换模型重跑）----
+    // ⚠️ 简化实现：降级发生在 run 级 —— agent 在 while 内重建
+    //   （modelConfig 随降级变化），state 在外层存活（历史保留）。
     var finished = false;
+    while (true) {
     try {
       await for (final ev in agent.runStream(
         _firstMessage(userRequest, images),
@@ -806,6 +1175,69 @@ class HeraclesAgent {
         }
       }
       wallClock.stop();
+      // ★ E4（2026-10-24）：traceDir 非空 ⇒ 全对话原始内容落盘
+      //   （messages 逐条 toJson 可回放；工具级 trace 已在会话 .jsonl）。
+      //   失败静默 —— 排障辅助绝不搞崩任务。App 恒传
+      //   `<工作区>/.heracles/traces`；SAF 工作区写不进去也如实静默。
+      if (_options.traceDir != null) {
+        try {
+          final d = Directory(_options.traceDir!);
+          await d.create(recursive: true);
+          await File(
+                  '${d.path}${Platform.pathSeparator}'
+                  'conversation-${DateTime.now().millisecondsSinceEpoch}.json')
+              .writeAsString(jsonEncode({
+            'sessionId': _state!.sessionId,
+            'turns': _state!.totalLoopCount,
+            'messages': [
+              for (final m in _state!.history.messages) m.toJson(),
+            ],
+          }));
+        } catch (_) {
+          // 静默
+        }
+      }
+      // ★ M5（2026-10-25）：autoExtract 开启 ⇒ 收尾提炼事实入长期记忆。
+      //   失败静默（锦上添花不搞崩主链路）；无记忆能力跳过。
+      if (_options.autoExtract && _caps.memory != null) {
+        try {
+          final transcript = StringBuffer();
+          for (final m in _state!.history.messages) {
+            final ut = switch (m) {
+              UserMessage() => m.contents
+                  .whereType<TextPart>()
+                  .map((p) => p.text)
+                  .join(),
+              ModelMessage() => m.textOutput ?? '',
+              FunctionExecutionResultMessage() => m.results
+                  .expand((r) => r.content.whereType<TextPart>())
+                  .map((p) => p.text)
+                  .join('；'),
+              _ => '',
+            };
+            if (ut.trim().isEmpty) continue;
+            final who = switch (m) {
+              UserMessage() => '用户',
+              ModelMessage() => '助手',
+              FunctionExecutionResultMessage() => '工具',
+              _ => '',
+            };
+            transcript.writeln('$who：${ut.trim()}');
+          }
+          if (transcript.toString().trim().isNotEmpty) {
+            final facts = await extractMemories(
+              config: _config,
+              transcript: transcript.toString(),
+              client: _injectedClient,
+            );
+            for (final f in facts) {
+              await _caps.memory!.append('[auto] $f');
+            }
+          }
+        } catch (_) {
+          // 静默
+        }
+      }
       emit(HeraclesFinished(
         finalText: _lastText(agent, turnStartIndex, captured: lastTurnText),
         turns: _state!.totalLoopCount,
@@ -815,26 +1247,114 @@ class HeraclesAgent {
       finished = true;
     } on AgentException catch (e) {
       wallClock.stop();
-      // 预算超限是**预期内的正常终止**，必须说清"任务没做完"，
-      // 而不是混进"检测到循环"那句里（那会让用户以为模型在打转）。
-      emit(HeraclesFailed(
-        budgetReached
-            ? _budgetMessage(_options.maxToolCalls, totalToolCalls)
-            : (frameworkError ?? _describeException(e)),
-      ));
+      final reason =
+          budgetReached ? _budgetMessage(_options.maxToolCalls, totalToolCalls)
+                        : (frameworkError ?? _describeException(e));
+      // ★ D3：预算超限/取消不降级（非模型问题）；其余失败且备用未耗尽 ⇒ 降级重跑
+      final canFallback = !budgetReached &&
+          usedFallbackIdx + 1 < _options.fallbackModelNames.length &&
+          e.code != AgentExceptionCode.cancelled;
+      if (canFallback) {
+        final from = usedFallbackIdx < 0
+            ? _config.modelName
+            : _options.fallbackModelNames[usedFallbackIdx];
+        usedFallbackIdx++;
+        emit(HeraclesFallback(
+            from: from, to: _options.fallbackModelNames[usedFallbackIdx], reason: reason));
+        totalToolCalls = 0;
+        budgetReached = false;
+        frameworkError = null;
+        lastTurnText = null;
+        // 重建 agent（新 modelConfig）；state/Controller/事件桥不变
+        agent = StatefulAgent(
+          name: 'heracles',
+          client: client,
+          modelConfig: _modelConfig(
+              model: _options.fallbackModelNames[usedFallbackIdx]),
+          state: _state!,
+          systemPrompts: _buildSystemPrompts(),
+          tools: _buildTools(verify: verify),
+          controller: controller,
+          compressor: compressor,
+          planMode: _options.enablePlan ? _options.planMode : PlanMode.none,
+          maxTurns: _options.maxTurns,
+          hooks: [
+            budgetHook,
+            approvalHook,
+          ],
+          loopDetector: DefaultLoopDetector(
+            state: _state!,
+            client: client,
+            modelConfig: _modelConfig(
+                model: _options.fallbackModelNames[usedFallbackIdx]),
+          ),
+          autoSaveStateFunc: _stateStorage == null
+              ? null
+              : (state) async => _stateStorage.save(state),
+          mcpManager: mcpConnected ? mcpManager : null,
+        );
+        continue;
+      }
+      emit(HeraclesFailed(reason));
     } catch (e) {
       wallClock.stop();
-      emit(HeraclesFailed(
-        budgetReached
-            ? _budgetMessage(_options.maxToolCalls, totalToolCalls)
-            : (frameworkError ?? '运行出错：$e'),
-      ));
+      final reason = budgetReached
+          ? _budgetMessage(_options.maxToolCalls, totalToolCalls)
+          : (frameworkError ?? '运行出错：$e');
+      if (!budgetReached &&
+          usedFallbackIdx + 1 < _options.fallbackModelNames.length) {
+        final from = usedFallbackIdx < 0
+            ? _config.modelName
+            : _options.fallbackModelNames[usedFallbackIdx];
+        usedFallbackIdx++;
+        emit(HeraclesFallback(
+            from: from, to: _options.fallbackModelNames[usedFallbackIdx], reason: reason));
+        totalToolCalls = 0;
+        budgetReached = false;
+        frameworkError = null;
+        lastTurnText = null;
+        agent = StatefulAgent(
+          name: 'heracles',
+          client: client,
+          modelConfig: _modelConfig(
+              model: _options.fallbackModelNames[usedFallbackIdx]),
+          state: _state!,
+          systemPrompts: _buildSystemPrompts(),
+          tools: _buildTools(verify: verify),
+          controller: controller,
+          compressor: compressor,
+          planMode: _options.enablePlan ? _options.planMode : PlanMode.none,
+          maxTurns: _options.maxTurns,
+          hooks: [budgetHook, approvalHook],
+          loopDetector: DefaultLoopDetector(
+            state: _state!,
+            client: client,
+            modelConfig: _modelConfig(
+                model: _options.fallbackModelNames[usedFallbackIdx]),
+          ),
+          autoSaveStateFunc: _stateStorage == null
+              ? null
+              : (state) async => _stateStorage.save(state),
+          mcpManager: mcpConnected ? mcpManager : null,
+        );
+        continue;
+      }
+      emit(HeraclesFailed(reason));
     } finally {
-      // 生产者自己收尾。**绝不 await close()** —— 消费端可能已经提前走了
-      // （`yield*` 被取消），此时 `close()` 的 Future 不会有人等。
-      // 不 await 就不会挂住任何人。
-      unawaited(bridge.close());
       if (!finished) wallClock.stop();
+    }
+    // 生产者收尾（成功/失败终局）。**绝不 await close()** —— 消费端可能
+    // 已提前走（`yield*` 被取消），不 await 就不会挂住任何人。
+    unawaited(bridge.close());
+    // A1：MCP 会话不跨 run 存活 —— 终局断开（降级重跑期间保持连接）
+    if (mcpConnected) {
+      try {
+        await mcpManager.disconnectAll();
+      } catch (_) {
+        // 断开失败不影响已收尾的任务
+      }
+    }
+    break; // while(true)：终局出口（continue = 降级重跑）
     }
   }
 
@@ -1015,6 +1535,56 @@ class HeraclesAgent {
     }
     return '任务异常：$e';
   }
+  /// **worker 子代理工厂**（H6，2026-10-24）—— 干净上下文的执行者。
+  ///
+  /// ## 为什么是"干净 state"而不是框架的 clone
+  ///
+  /// 框架的 assignee='clone' 会把主对话历史拷进 worker 的情景记忆 ——
+  /// 那是"带着记忆的分身"。H6 要的是**隔离**：探索/核对类子任务的全部
+  /// 中间过程不进主上下文，主线程只收结论。所以注册一个命名 worker，
+  /// 工厂里给**全新 AgentState** —— worker 看不到主对话，
+  /// task_description 必须自包含（框架追加的 worker 协议提示已写明）。
+  ///
+  /// ## 三个刻意的决定
+  ///
+  /// 1. **独立事件总线**：worker 的思考/工具/用量事件进一个新
+  ///    AgentController，没人订阅 ⇒ 就地丢弃。否则它们会混进主 run 的
+  ///    事件流 —— 用量记账翻倍、UI 出现"来历不明"的工具卡片。
+  /// 2. **hooks 照常继承**：审批与预算是任务级约束，不因派生而失效
+  ///    （worker 的危险操作照样弹窗、调用照样计入总预算）。
+  /// 3. **disableSubAgents: true + 收紧的 maxTurns(12)**：深度恒为 1，
+  ///    worker 自身不失控。
+  SubAgent _workerSubAgent() => SubAgent(
+        name: 'worker',
+        description: '通用工作者：在干净上下文里执行研究、探索、批量核对类子任务，'
+            '只把最终结论带回来。task_description 必须自包含（worker 看不到主对话）。',
+        agentFactory: (parent) {
+          final workerState = AgentState(
+            sessionId:
+                '${parent.state.sessionId}_w${DateTime.now().microsecondsSinceEpoch}',
+          );
+          return StatefulAgent(
+            name: '${parent.name}_worker',
+            client: parent.client,
+            modelConfig: parent.modelConfig,
+            state: workerState,
+            tools: parent.tools,
+            systemPrompts: List.of(parent.systemPrompts),
+            compressor: parent.compressor,
+            loopDetector: DefaultLoopDetector(
+              state: workerState,
+              client: parent.client,
+              modelConfig: parent.modelConfig,
+            ),
+            hooks: parent.hooks,
+            // 独立事件总线：worker 的过程事件无人订阅 ⇒ 隔离（见上方注释 1）
+            controller: AgentController(),
+            isSubAgent: true,
+            disableSubAgents: true,
+            maxTurns: 12,
+          );
+        },
+      );
 }
 
 /// 事件出口 —— 桥已关就丢弃，绝不往已关闭的 controller 里写。
@@ -1078,6 +1648,106 @@ class _ToolBudgetHook extends AgentHook {
       );
     }
     return ToolCallHookResult.proceed(context.call);
+  }
+}
+
+/// **计划前置门禁**（P1，2026-10-25）—— 框架 must 与 auto 行为一致，
+/// 这个是我们自己的强制层。
+///
+/// 产出第一份计划（write_todos）之前：执行类工具全拒（拒绝信息指路
+/// "先用 write_todos 列计划"）；读类工具（read/list/find/grep/web_fetch/
+/// check_device_state）与 ask_user/save_memory 放行 —— 先看清楚再计划。
+/// 计划存在后永久放行。
+class _PlanGateHook extends AgentHook {
+  _PlanGateHook({required this.isReadAllowed});
+
+  /// 判定"读类工具"的回调（宿主注入，保持 hook 与工具清单解耦）。
+  final bool Function(String tool) isReadAllowed;
+
+  @override
+  FutureOr<ToolCallHookResult> beforeToolCall(ToolCallHookContext context) {
+    final st = context.agent.state;
+    final hasPlan = st.plan != null && st.plan!.steps.isNotEmpty;
+    if (hasPlan) return ToolCallHookResult.proceed(context.call);
+
+    final tool = context.call.name;
+    if (tool == 'write_todos' || isReadAllowed(tool)) {
+      return ToolCallHookResult.proceed(context.call);
+    }
+    return ToolCallHookResult.deny(content: [
+      TextPart(
+        '未执行：当前开启了"计划前置"模式 —— 动手之前必须先用 '
+        '`write_todos` 把任务拆成清单（当前目标/步骤/顺序），'
+        '然后按清单执行。你可以先用读取类工具了解情况，'
+        '但改任何东西之前先列计划。',
+      ),
+    ]);
+  }
+}
+
+/// **连续失败反思**（P3，2026-10-25）—— 反思环节由架构触发。
+///
+/// 连续失败达到阈值 ⇒ afterToolCall 注入反思指令（injectedMessages）：
+/// "停下来分析根因、换方法，不要原样重试"。成功一次即重置。
+/// 只在下一轮的上下文里出现一条 —— 轻量，不加额外 LLM 调用。
+class _ReflectionHook extends AgentHook {
+  _ReflectionHook({required this.threshold});
+  final int threshold;
+  int _consecutiveFailures = 0;
+
+  @override
+  Future<ToolResultHookResult> afterToolCall(ToolResultHookContext context) {
+    if (context.result.isError) {
+      _consecutiveFailures++;
+      if (_consecutiveFailures >= threshold) {
+        _consecutiveFailures = 0; // 触发一次即重置（不连环轰炸）
+        return Future.value(ToolResultHookResult.proceed(
+          injectedMessages: [
+            UserMessage.text(
+              '[反思指令] 你已连续 $threshold 次工具失败。停下来想清楚：'
+              '(1) 逐条核对上面的失败原因，找出共同的根因；'
+              '(2) 换一种不同的方法（不是原样重试）；'
+              '(3) 如果这条路确实走不通，如实告诉用户卡在哪。',
+            ),
+          ],
+        ));
+      }
+    } else {
+      _consecutiveFailures = 0;
+    }
+    return Future.value(ToolResultHookResult.proceed());
+  }
+}
+
+/// **完成门禁 hook**（P4，2026-10-25）—— "带病收尾"被架构拦下。
+///
+/// 本轮发生过文件写/编辑（= verify 跑过）且最后一次验证**失败**时，
+/// onTurnCompletion 返回 continueRun：注入一条继续消息让模型回到
+/// 修复循环。验证通过（或没写过文件）⇒ 正常收尾。
+///
+/// ## 为什么只拦"最后一次失败"
+///
+/// 模型可能修几次才过 —— 中间态失败不拦收尾，只有**最终态**/// 失败才说明任务带着问题结束。验证通过后标志被覆盖，正常放行。
+class _VerifyGateHook extends AgentHook {
+  _VerifyGateHook({required List<bool> lastVerifyFailed})
+      : _lastVerifyFailed = lastVerifyFailed; // ignore: prefer_initializing_formals — 命名参数不能以下划线开头
+
+  /// 共享的可变标志（与 verify 回调同源）：空 = 没验证过；[true] = 失败。
+  final List<bool> _lastVerifyFailed;
+
+  @override
+  Future<TurnCompletionHookResult> onTurnCompletion(
+    TurnCompletionHookContext context,
+  ) async {
+    if (_lastVerifyFailed.isNotEmpty && _lastVerifyFailed.first) {
+      return TurnCompletionHookResult.continueWith([
+        UserMessage.text(
+          '[自动验证未通过] 刚才的验证命令失败了（见上方工具结果）。'
+          '请修复问题后重新验证；确认通过后再给出最终回答。',
+        ),
+      ]);
+    }
+    return const TurnCompletionHookResult.accept();
   }
 }
 
@@ -1160,7 +1830,14 @@ class _ApprovalHook extends AgentHook {
     }
 
     final args = _argsMapOf(context.call.arguments);
-    final allowed = await g.requestApproval(tool, args, _summaryOf(tool, args));
+    final allowed = await g.requestApproval(
+      callId: context.call.id,
+      toolName: tool,
+      args: args,
+      risk: _riskOf(tool),
+      detail: _summaryOf(tool, args),
+      workspaceInside: _workspaceInside(tool),
+    );
     if (allowed) {
       return ToolCallHookResult.proceed(context.call);
     }
@@ -1204,6 +1881,29 @@ class _ApprovalHook extends AgentHook {
   }
 
   String _clip(String s, int n) => s.length <= n ? s : '${s.substring(0, n)}…';
+
+  /// 一句话风险说明（INTERFACE.md N1 的 risk 字段；弹窗直接展示）。
+  String _riskOf(String tool) {
+    if (_shell.contains(tool)) {
+      return '在工作区里执行任意 shell 命令 —— 可能碰到工作区外的文件；'
+          'kill/force-stop 类已被硬禁令拦截。';
+    }
+    if (_destructive.contains(tool)) {
+      return '删除/移动/复制操作，不可逆或难逆 —— 删错数据找不回来。';
+    }
+    if (_apk.contains(tool)) {
+      return '构建/逆向/安装 APK —— 写入沙箱外 staging、安装直接动设备。';
+    }
+    return '会修改工作区内的文件（写/编辑/建目录）。';
+  }
+
+  /// 操作对象是否在工作区内（INTERFACE.md N1 的 workspaceInside 字段）。
+  ///
+  /// · 文件工具：路径按契约就是工作区相对路径 ⇒ 恒 true；
+  /// · shell：静态判不了命令会碰哪里 ⇒ false（保守，让用户看到命令原文再批）；
+  /// · APK：staging 在工作区外 ⇒ false。
+  bool _workspaceInside(String tool) =>
+      _workspaceMutating.contains(tool) || _destructive.contains(tool);
 }
 
 /// 宽松 JSON 解析 —— 占位（实际用 dart:convert 的 jsonDecode）。
@@ -1348,6 +2048,14 @@ final class HeraclesTurnUsage extends HeraclesEvent {
 
   /// `null` = provider **未上报**缓存字段 —— UI 显示"不可用"，不得当 0。
   final int? cachedTokens;
+}
+
+/// **模型降级发生**（D3，2026-10-25）—— 主模型失败后切到备用模型。
+final class HeraclesFallback extends HeraclesEvent {
+  const HeraclesFallback({required this.from, required this.to, required this.reason});
+  final String from;
+  final String to;
+  final String reason;
 }
 
 /// **预算预警**（2026-10-24，E5）—— 工具调用预算用到 75% / 90% 时各播一次。
