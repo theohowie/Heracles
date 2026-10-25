@@ -155,6 +155,24 @@ List<Tool> buildFileTools(
               isRetryable: true,
             );
           }
+          // ★ K3（2026-10-25）：已读文件的大幅重写门禁 —— 读了之后再整文重写
+          //   大文件（> 200 行新内容且文件原本非空）仍然要求走 edit/apply_patch
+          //   的小步路径；确实需要全量替换时在 content 末尾加一行
+          //   `[FULL_REWRITE]` 显式声明（模型可见的软门禁，不是硬拒绝：
+          //   有些任务确实要全文重写，例如格式化）。
+          if (ex) {
+            final newLines = '\n'.allMatches(content).length + 1;
+            if (newLines > 200 &&
+                !content.contains('[FULL_REWRITE]')) {
+              return CapabilityFailure(
+                '未执行：这次 write_file 要写入 $newLines 行到**已存在的**文件 —— '
+                '大改写请优先用 edit / apply_patch 小步修改（保留原有结构，'
+                '出错可定位）。如果确实需要全文重写（如格式化、重新生成），'
+                '在 content 末尾加一行 "[FULL_REWRITE]" 再试。',
+                isRetryable: true,
+              );
+            }
+          }
         }
         final r = await ws!.write(path, content);
         if (tracker != null && r is CapabilitySuccess) {

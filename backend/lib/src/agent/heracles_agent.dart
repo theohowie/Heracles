@@ -152,6 +152,7 @@ class RunOptions {
     this.verifyCommand,
     this.planMode = PlanMode.auto,
     this.fallbackModelNames = const [],
+    this.mcpServers = const [],
     this.verifyGateCompletion = false,
   });
 
@@ -263,6 +264,15 @@ class RunOptions {
   /// `must` = 架构强制显式分解（框架教练式：模型必须先产出计划才能动工具）
   /// —— 供宿主对"复杂任务不许即兴跑"的场景显式开启；默认 auto 不强制。
   final PlanMode planMode;
+
+  /// **MCP 服务器配置**（A1，2026-10-25；默认空 = 不接）。
+  ///
+  /// 每项 = 一个 MCP 端点（stdio 命令或 HTTP/SSE URL）。非空时
+  /// `HeraclesAgent.run` 前先 `McpManager.connectAll`（连不上单个跳过
+  /// 并记日志，不炸 run），框架自动注入三层渐进披露：
+  /// 目录（系统提示）→ mcp_list_tools 发现 → mcp_call_tool 执行。
+  /// run 结束 disconnectAll（MCP 会话不跨 run 存活）。
+  final List<Map<String, dynamic>> mcpServers;
 
   /// **降级模型链**（D3，2026-10-25；默认空 = 不降级）。
   ///
@@ -984,6 +994,32 @@ class HeraclesAgent {
                 };
               }
             : null;
+    // ★ A1（2026-10-25）：MCP 服务器接线 —— 连接→框架三层渐进披露→
+    //   run 结束断开（会话不跨 run）。单个服务器连不上只记日志（跳过），
+    //   绝不炸 run —— MCP 是增强，不是主链路。
+    final mcpManager = McpManager();
+    var mcpConnected = false;
+    if (_options.mcpServers.isNotEmpty) {
+      try {
+        final configs = <McpConnectionConfig>[
+          for (final m in _options.mcpServers)
+            McpConnectionConfig(
+              serverName: (m['name'] as String?) ?? 'mcp',
+              type: (m['url'] as String?) != null
+                  ? McpTransportType.http
+                  : McpTransportType.stdio,
+              command: m['command'] as String?,
+              args: (m['args'] as List?)?.cast<String>(),
+              url: m['url'] as String?,
+              headers: (m['headers'] as Map?)?.cast<String, String>(),
+            ),
+        ];
+        await mcpManager.connectAll(configs);
+        mcpConnected = mcpManager.hasServers;
+      } catch (_) {
+        // MCP 连接整体失败：当没配置继续跑
+      }
+    }
     var usedFallbackIdx = -1;
     var agent = StatefulAgent(
       name: 'heracles',
@@ -1027,6 +1063,7 @@ class HeraclesAgent {
       autoSaveStateFunc: _stateStorage == null
           ? null
           : (state) async => _stateStorage.save(state),
+      mcpManager: mcpConnected ? mcpManager : null,
     );
 
     /// **本轮追加的起点** —— 之后 `_lastText` 只在这里之后找本轮的正文。
@@ -1175,6 +1212,7 @@ class HeraclesAgent {
           autoSaveStateFunc: _stateStorage == null
               ? null
               : (state) async => _stateStorage.save(state),
+          mcpManager: mcpConnected ? mcpManager : null,
         );
         continue;
       }
@@ -1218,6 +1256,7 @@ class HeraclesAgent {
           autoSaveStateFunc: _stateStorage == null
               ? null
               : (state) async => _stateStorage.save(state),
+          mcpManager: mcpConnected ? mcpManager : null,
         );
         continue;
       }
@@ -1228,6 +1267,14 @@ class HeraclesAgent {
     // 生产者收尾（成功/失败终局）。**绝不 await close()** —— 消费端可能
     // 已提前走（`yield*` 被取消），不 await 就不会挂住任何人。
     unawaited(bridge.close());
+    // A1：MCP 会话不跨 run 存活 —— 终局断开（降级重跑期间保持连接）
+    if (mcpConnected) {
+      try {
+        await mcpManager.disconnectAll();
+      } catch (_) {
+        // 断开失败不影响已收尾的任务
+      }
+    }
     break; // while(true)：终局出口（continue = 降级重跑）
     }
   }
