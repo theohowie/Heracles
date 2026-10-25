@@ -1,3 +1,4 @@
+import 'package:flutter/cupertino.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 
@@ -107,8 +108,11 @@ void main() {
   ///
   /// 用**图标**定位而不是 `find.byTooltip('添加工作区')`：tooltip 要长按/悬浮
   /// 才可见，图标是用户真正点的那 36×36 热区。
+  /// （2026-10-25：图标已随全 App 图标体系换成 Cupertino 的
+  /// folder_badge_plus，finder 跟上；原 Material 图标早已不在树上，
+  /// 这 4 条用例因此一直红 —— 产品行为没变，是测试找错了图标。）
   Future<void> openAddMenu(WidgetTester tester) async {
-    await tester.tap(find.byIcon(Icons.create_new_folder_outlined));
+    await tester.tap(find.byIcon(CupertinoIcons.folder_badge_plus));
     await settle(tester);
   }
 
