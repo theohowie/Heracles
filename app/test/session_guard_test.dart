@@ -235,6 +235,25 @@ void main() {
     await settle(tester);
   }
 
+  /// 打开**工作区行的长按菜单**（原型 04，2026-10-25）：
+  /// 工作区操作（路径 / 新建会话 / 从列表移除）收进**长按菜单**，行面不再有 ⊕/⋯ 按钮。
+  Future<void> openWorkspaceMenu(WidgetTester tester, String workspaceName) async {
+    // ⚠️ 别在**文本**上取 `.first`：工作区名会同时出现在**顶栏标题**里
+    //   （探针实测 `find.text('proj')` 命中 2 处，树序最前者是顶栏，
+    //   它没有 InkWell 祖先 ⇒ `Bad state: No element`）。
+    //   这里直接从**所有**同名文本找承载 `onLongPress` 的 InkWell —— 恰好 1 个。
+    final row = find
+        .ancestor(
+          of: find.text(workspaceName),
+          matching: find.byType(InkWell),
+        )
+        .first;
+    expect(row, findsOneWidget,
+        reason: '抽屉里必须有可长按的工作区行「$workspaceName」—— 没有说明抽屉又改了');
+    await tester.longPress(row);
+    await settle(tester, times: 20); // 长按菜单是弹出面板，多推几拍等动画
+  }
+
   /// 切到会话 B：开抽屉 → 点它
   Future<void> switchToSessionB(WidgetTester tester) async {
     await openDrawer(tester);
@@ -459,11 +478,14 @@ void main() {
     await tester.testTextInput.receiveAction(TextInputAction.done);
     await settle(tester);
 
-    // 开抽屉 → 点「新会话」
+    // 开抽屉 → 工作区行**长按菜单** → 点「新建会话」
+    // （原型 04，2026-10-25：工作区操作收进长按菜单，行面不再有 ⊕/⋯ 按钮）
     await openDrawer(tester);
     await settle(tester);
-    expect(find.text('新会话'), findsOneWidget);
-    await tester.tap(find.text('新会话'));
+    await openWorkspaceMenu(tester, 'proj');
+    expect(find.text('新建会话'), findsOneWidget,
+        reason: '长按工作区行必须出现「新建会话」项');
+    await tester.tap(find.text('新建会话'));
     await settle(tester);
 
     gate.complete();
@@ -573,15 +595,14 @@ void main() {
     await tester.testTextInput.receiveAction(TextInputAction.done);
     await settle(tester);
 
-    // ---- 开抽屉 → 工作区 ⋯ 菜单 → 从列表移除 ----
+    // ---- 开抽屉 → 工作区行长按菜单 → 从列表移除 ----
     await openDrawer(tester);
     await settle(tester);
 
     expect(find.text('proj'), findsWidgets, reason: '工作区应当出现在抽屉里');
 
-    // 工作区行的 ⋯ 按钮
-    await tester.tap(find.byIcon(AppIcons.more).first);
-    await settle(tester);
+    // 原型 04（2026-10-25）：工作区操作收进**长按菜单**（行面不再有 ⋯ 按钮）
+    await openWorkspaceMenu(tester, 'proj');
 
     expect(find.text('从列表移除'), findsOneWidget);
     await tester.tap(find.text('从列表移除'));
