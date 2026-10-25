@@ -1,3 +1,5 @@
+import 'dart:io';
+
 import 'package:flutter/cupertino.dart';
 import 'package:flutter/material.dart';
 
@@ -407,8 +409,16 @@ class _InputBarState extends State<InputBar> {
   }
 }
 
-/// 附件 chip 行 —— 横向滚动，避免多个附件挤压输入框
-class _AttachmentRow extends StatelessWidget {  const _AttachmentRow({
+/// 附件展示行（2026-10-25 晚按用户给的参考图定）：
+///
+/// · **图片** ⇒ 直接显示缩略图（圆角 + 右上角圆形 ×）—— 发之前能看清
+///   发的是哪张图，而不是一个文件名 chip；
+/// · **文件** ⇒ 文件卡（图标砖 + 文件名 + 大小 + 右上角圆形 ×）。
+///
+/// 横向滚动，多个附件不挤压输入框；参考图底部的「分析一下」快捷
+/// 建议胶囊**不做**（用户明确说不需要）。
+class _AttachmentRow extends StatelessWidget {
+  const _AttachmentRow({
     required this.attachments,
     required this.h,
     this.onRemove,
@@ -420,55 +430,165 @@ class _AttachmentRow extends StatelessWidget {  const _AttachmentRow({
 
   @override
   Widget build(BuildContext context) {
-    return SizedBox(
-      height: 44,
-      child: ListView.separated(
-        scrollDirection: Axis.horizontal,
-        padding: const EdgeInsets.symmetric(horizontal: HSpace.lg),
-        itemCount: attachments.length,
-        separatorBuilder: (_, _) => const SizedBox(width: HSpace.sm),
-        itemBuilder: (_, i) {
-          final a = attachments[i];
-          return Container(
-            margin: const EdgeInsets.symmetric(vertical: 4),
-            padding: const EdgeInsets.only(left: HSpace.sm, right: 2),
-            decoration: BoxDecoration(
+    return SingleChildScrollView(
+      scrollDirection: Axis.horizontal,
+      padding: const EdgeInsets.fromLTRB(HSpace.lg, 8, HSpace.lg, 4),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          for (var i = 0; i < attachments.length; i++) ...[
+            if (i > 0) const SizedBox(width: 10),
+            if (attachments[i].isImage)
+              _ImageThumb(a: attachments[i], h: h, onRemove: onRemove)
+            else
+              _FileCard(a: attachments[i], h: h, onRemove: onRemove),
+          ],
+        ],
+      ),
+    );
+  }
+}
+
+/// 图片附件：缩略图本体（读不到文件时退回图标砖，绝不崩）
+class _ImageThumb extends StatelessWidget {
+  const _ImageThumb({required this.a, required this.h, this.onRemove});
+
+  final HAttachment a;
+  final Hue h;
+  final void Function(String id)? onRemove;
+
+  @override
+  Widget build(BuildContext context) {
+    return Stack(
+      clipBehavior: Clip.none,
+      children: [
+        ClipRRect(
+          borderRadius: BorderRadius.circular(14),
+          child: Image.file(
+            File(a.path),
+            height: 88,
+            fit: BoxFit.cover,
+            // 未解码完先占位 88×88：否则宽度塌成 0，右上角的 × 会
+            // 落到 Stack 边界外（画得出来但点不中 —— hitTest 先查边界）
+            frameBuilder: (_, child, frame, _) => frame == null
+                ? Container(
+                    width: 88,
+                    height: 88,
+                    color: h.surface,
+                    alignment: Alignment.center,
+                    child: Icon(AppIcons.image, size: 26, color: h.textDim),
+                  )
+                : child,
+            errorBuilder: (_, _, _) => Container(
+              width: 88,
+              height: 88,
               color: h.surface,
-              borderRadius: BorderRadius.circular(HRadius.sm),
-              border: Border.all(color: h.border),
+              alignment: Alignment.center,
+              child: Icon(AppIcons.image, size: 26, color: h.textDim),
             ),
-            child: Row(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                Icon(
-                  a.isImage ? AppIcons.image : AppIcons.file,
-                  size: 15,
-                  color: h.accent,
+          ),
+        ),
+        if (onRemove != null)
+          Positioned(
+            top: 4,
+            right: 4,
+            child: _RemoveBadge(h: h, onTap: () => onRemove!(a.id)),
+          ),
+      ],
+    );
+  }
+}
+
+/// 文件附件：图标砖 + 名称 + 大小的卡片（宽度随内容，超长名省略）
+class _FileCard extends StatelessWidget {
+  const _FileCard({required this.a, required this.h, this.onRemove});
+
+  final HAttachment a;
+  final Hue h;
+  final void Function(String id)? onRemove;
+
+  @override
+  Widget build(BuildContext context) {
+    return Stack(
+      clipBehavior: Clip.none,
+      children: [
+        Container(
+          // 右上让出 6px：角标整颗落在边界内才点得中（见图片那条注释）
+          margin: const EdgeInsets.only(top: 6, right: 6),
+          constraints: const BoxConstraints(maxWidth: 232),
+          padding: const EdgeInsets.fromLTRB(10, 10, 14, 10),
+          decoration: BoxDecoration(
+            color: h.surface,
+            borderRadius: BorderRadius.circular(14),
+            border: Border.all(color: h.border),
+          ),
+          child: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Container(
+                width: 40,
+                height: 40,
+                decoration: BoxDecoration(
+                  color: h.surfaceAlt,
+                  borderRadius: BorderRadius.circular(10),
                 ),
-                const SizedBox(width: 6),
-                ConstrainedBox(
-                  constraints: const BoxConstraints(maxWidth: 140),
-                  child: Text(
-                    a.name,
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
-                    style: TextStyle(fontSize: 11.5, color: h.textDim),
-                  ),
+                child: Icon(AppIcons.file, size: 21, color: h.text),
+              ),
+              const SizedBox(width: 10),
+              Flexible(
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      a.name,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: TextStyle(
+                        fontSize: 13.5,
+                        fontWeight: FontWeight.w500,
+                        color: h.text,
+                      ),
+                    ),
+                    const SizedBox(height: 2),
+                    Text(
+                      a.sizeLabel,
+                      style: TextStyle(fontSize: 12, color: h.textFaint),
+                    ),
+                  ],
                 ),
-                const SizedBox(width: 4),
-                InkWell(
-                  onTap: onRemove == null ? null : () => onRemove!(a.id),
-                  borderRadius: BorderRadius.circular(HRadius.sm),
-                  child: Padding(
-                    padding: const EdgeInsets.all(4),
-                    child: Icon(AppIcons.close,
-                        size: 14, color: h.textFaint),
-                  ),
-                ),
-              ],
-            ),
-          );
-        },
+              ),
+            ],
+          ),
+        ),
+        if (onRemove != null)
+          Positioned(
+            top: 0,
+            right: 0,
+            child: _RemoveBadge(h: h, onTap: () => onRemove!(a.id)),
+          ),
+      ],
+    );
+  }
+}
+
+/// 附件右上角的圆形删除钮（深底白叉，与参考图同式；深色主题自动反色）
+class _RemoveBadge extends StatelessWidget {
+  const _RemoveBadge({required this.h, required this.onTap});
+
+  final Hue h;
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    return GestureDetector(
+      onTap: onTap,
+      behavior: HitTestBehavior.opaque,
+      child: Container(
+        width: 22,
+        height: 22,
+        decoration: BoxDecoration(color: h.text, shape: BoxShape.circle),
+        child: Icon(AppIcons.close, size: 12, color: h.bg),
       ),
     );
   }

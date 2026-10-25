@@ -179,18 +179,10 @@ class _FullAccessConfirmSheetState extends State<_FullAccessConfirmSheet> {
   }
 }
 
-/// 审批模式三档的图标（与 input_bar 的 PermissionModeIcon 同一套
-/// Cupertino 盾族；那边是 extension，这边抽屉独立成文件，用函数）。
-IconData permissionModeIcon(PermissionMode mode) => switch (mode) {
-      PermissionMode.manual => CupertinoIcons.checkmark_shield,
-      PermissionMode.workspaceAuto => CupertinoIcons.lock_shield,
-      PermissionMode.fullAccess => CupertinoIcons.exclamationmark_shield,
-    };
-
 /// 审批模式抽屉（原型 10，2026-10-25 按用户「严格按原型图」重做）。
 ///
 /// 结构：抓手 + 标题「审批模式」+ 副标题「危险操作执行前如何确认」
-/// + 三档自定义行（图标 + 名称 + 原型文案说明，当前档高亮带对勾）。
+/// + 三档单选行（圆圈 + 名称 + 原型文案说明，选中深描边 + 实心点）。
 /// 点前两档即选即关；点「完全访问」不关本抽屉，直接在其上叠出
 /// 二次确认抽屉（原型：「同高度新抽屉覆盖原抽屉」），确认后两层
 /// 一起关、取消只关确认层回到三档列表。
@@ -211,16 +203,23 @@ Future<void> showApprovalModeSheet(
   final picked = await showModalBottomSheet<PermissionMode>(
     context: context,
     backgroundColor: h.surfaceAlt,
+    isScrollControlled: true,
     shape: const RoundedRectangleBorder(
       borderRadius: BorderRadius.vertical(top: Radius.circular(24)),
     ),
     builder: (sheetCtx) => SafeArea(
-      child: Padding(
-        padding: const EdgeInsets.fromLTRB(20, 10, 20, 18),
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
+      child: ConstrainedBox(
+        // 矮屏上三档卡片放不下时内部滚动，不溢出（单选卡改高后
+        // 600 高的测试面溢出过 16px —— 小屏真机同理）
+        constraints: BoxConstraints(
+          maxHeight: MediaQuery.sizeOf(sheetCtx).height * 0.88,
+        ),
+        child: Padding(
+          padding: const EdgeInsets.fromLTRB(20, 10, 20, 18),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
             Center(
               child: Container(
                 width: 36,
@@ -246,6 +245,12 @@ Future<void> showApprovalModeSheet(
               style: TextStyle(fontSize: 12, color: h.textFaint),
             ),
             const SizedBox(height: 12),
+            Flexible(
+              child: SingleChildScrollView(
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
             for (final mode in PermissionMode.values) ...[
               _ApprovalModeRow(
                 h: h,
@@ -268,7 +273,12 @@ Future<void> showApprovalModeSheet(
               ),
               const SizedBox(height: 8),
             ],
-          ],
+                  ],
+                ),
+              ),
+            ),
+            ],
+          ),
         ),
       ),
     ),
@@ -278,6 +288,9 @@ Future<void> showApprovalModeSheet(
   }
 }
 
+/// 审批档位行（概念图 10 定式）：单选圆圈 + 标题 + 说明的描边卡片，
+/// 选中 = 深描边 + 圆圈实心点。不用图标、不用右上对勾（用户对着
+/// 真机图一与概念图二拍板改成图二样式）。
 class _ApprovalModeRow extends StatelessWidget {
   const _ApprovalModeRow({
     required this.h,
@@ -295,24 +308,46 @@ class _ApprovalModeRow extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final warn = mode == PermissionMode.fullAccess;
     return GestureDetector(
       onTap: onTap,
       behavior: HitTestBehavior.opaque,
       child: Container(
-        padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
+        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
         decoration: BoxDecoration(
-          color: selected ? h.surface : Colors.transparent,
-          border: Border.all(color: h.border),
-          borderRadius: BorderRadius.circular(14),
+          color: selected ? h.bg : Colors.transparent,
+          border: Border.all(
+            color: selected ? h.text : h.border,
+            width: 2,
+          ),
+          borderRadius: BorderRadius.circular(18),
         ),
         child: Row(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            Icon(
-              permissionModeIcon(mode),
-              size: 23,
-              color: warn ? HColors.warnOn(h.dark) : h.textDim,
+            // 单选圆圈：选中 = 深环 + 实心点
+            Container(
+              width: 22,
+              height: 22,
+              margin: const EdgeInsets.only(top: 1),
+              decoration: BoxDecoration(
+                shape: BoxShape.circle,
+                border: Border.all(
+                  color: selected ? h.text : h.border,
+                  width: 2,
+                ),
+              ),
+              child: selected
+                  ? Center(
+                      child: Container(
+                        width: 11,
+                        height: 11,
+                        decoration: BoxDecoration(
+                          shape: BoxShape.circle,
+                          color: h.text,
+                        ),
+                      ),
+                    )
+                  : null,
             ),
             const SizedBox(width: 12),
             Expanded(
@@ -323,26 +358,22 @@ class _ApprovalModeRow extends StatelessWidget {
                     mode.label,
                     style: TextStyle(
                       fontSize: 15,
-                      fontWeight: selected ? FontWeight.w600 : FontWeight.w400,
+                      fontWeight: FontWeight.w600,
                       color: h.text,
                     ),
                   ),
-                  const SizedBox(height: 2),
+                  const SizedBox(height: 3),
                   Text(
                     description,
                     style: TextStyle(
-                      fontSize: 12.5,
-                      height: 1.45,
+                      fontSize: 13,
+                      height: 1.55,
                       color: h.textFaint,
                     ),
                   ),
                 ],
               ),
             ),
-            if (selected) ...[
-              const SizedBox(width: 8),
-              Icon(CupertinoIcons.checkmark, size: 18, color: h.text),
-            ],
           ],
         ),
       ),
