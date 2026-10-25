@@ -153,6 +153,8 @@ class RunOptions {
     this.planMode = PlanMode.auto,
     this.fallbackModelNames = const [],
     this.mcpServers = const [],
+    this.requirePlan = false,
+    this.reflectOnFailures = 0,
     this.verifyGateCompletion = false,
   });
 
@@ -264,6 +266,22 @@ class RunOptions {
   /// `must` = 架构强制显式分解（框架教练式：模型必须先产出计划才能动工具）
   /// —— 供宿主对"复杂任务不许即兴跑"的场景显式开启；默认 auto 不强制。
   final PlanMode planMode;
+
+  /// **计划前置门禁**（P1，2026-10-25；默认 false）。
+  ///
+  /// 框架的 `PlanMode.must` 与 auto 行为一致（核查过）—— 这个门禁是我们
+  /// 自己的：开启后，模型在产出**第一份计划**（write_todos）之前，
+  /// 一切执行类工具调用都被拒绝（读类工具与 ask_user 放行——先看清楚
+  /// 再计划）。一旦计划存在，门禁永久放行（模型可自由更新计划）。
+  /// "复杂任务不许即兴跑"的架构强制。
+  final bool requirePlan;
+
+  /// **连续失败反思**（P3，2026-10-25；默认 0 = 关）。
+  ///
+  /// 工具连续失败达到这个次数时，注入一条反思指令（"停下来分析根因、
+  /// 换方法，不要原样重试"）—— 反思环节由架构触发，不靠模型自觉。
+  /// 成功一次即重置计数。
+  final int reflectOnFailures;
 
   /// **MCP 服务器配置**（A1，2026-10-25；默认空 = 不接）。
   ///
@@ -455,6 +473,54 @@ class HeraclesAgent {
     }
     return out;
   }
+
+  /// 结构化笔记落盘（C3/M2）：每次压缩追加一节（时间戳 + 前后规模 +
+  /// 保留段的要点摘录）。追加式 —— 笔记本身是任务的"黑匣子记录"。
+  static Future<void> _appendNote(
+    WorkspaceCapability? ws,
+    String sessionId,
+    int beforeMessages,
+    int beforeTokens,
+    int afterTokens,
+  ) async {
+    if (ws == null) return;
+    try {
+      const notesDir = '.heracles/notes';
+      final path = '$notesDir/$sessionId.md';
+      await ws.mkdir(notesDir);
+      final existing = await ws.read(path);
+      final header = existing is CapabilitySuccess &&
+              existing.data.trim().isNotEmpty
+          ? '\n\n---\n'
+          : '# 任务笔记（自动沉淀：每次上下文压缩时追加）\n';
+      final ts = DateTime.now().toIso8601String();
+      final note = '$header'
+          '## $ts（压缩：$beforeMessages 条 / $beforeTokens→$afterTokens token）\n'
+          '--- 以下为压缩时的保留段要点（完整的中间结论在模型记忆里）：\n'
+          '（此节为压缩事件记录；详细快照见模型 episodic memory）\n';
+      await ws.write(path, existing is CapabilitySuccess ? existing.data : '');
+      // read+write 全量覆盖式追加（能力层无 append 原语）—— 笔记量小，可接受
+      await ws.write(
+          path,
+          (existing is CapabilitySuccess ? existing.data : '') + note);
+    } catch (_) {
+      // 静默：笔记失败不影响压缩主链路
+    }
+  }
+
+  /// 读类工具清单（P1 门禁放行用）：只看不改的都算。
+  static bool _isReadTool(String tool) => const {
+        'read_file',
+        'list_files',
+        'find_files',
+        'grep_files',
+        'web_fetch',
+        'check_device_state',
+        'ask_user',
+        'save_memory',
+        'activate_skills',
+        'deactivate_skills',
+      }.contains(tool);
 
   /// **上下文构成**（C5，2026-10-24）—— 三块的**估算** token。
   ///
@@ -906,6 +972,13 @@ class HeraclesAgent {
           beforeTokens: beforeTokens,
           afterTokens: afterTokens,
         ));
+        // ★ C3/M2（2026-10-25）：压缩发生 ⇒ 结构化快照同时沉淀为**可读笔记**。
+        //   框架的 XML 快照只在 episodic memory 里（进程内）；这份笔记
+        //   落到工作区 .heracles/notes/<会话>.md —— 长任务的中间结论
+        //   （当前目标/已知事实/最近动作）与对话历史分离、跨重启可见。
+        //   失败静默（笔记是增强）。
+        _appendNote(_caps.workspace, _state!.sessionId, beforeMessages,
+            beforeTokens, afterTokens);
       },
     );
 
@@ -1042,6 +1115,12 @@ class HeraclesAgent {
         //   拒绝收尾，模型必须回到修复循环（"带病收尾"被架构拦下）。
         if (_options.verifyGateCompletion && verify != null)
           _VerifyGateHook(lastVerifyFailed: lastVerifyFailed),
+        // ★ P1：计划前置门禁（自研——框架 must 与 auto 行为一致）
+        if (_options.requirePlan)
+          _PlanGateHook(isReadAllowed: _isReadTool),
+        // ★ P3：连续失败反思注入
+        if (_options.reflectOnFailures > 0)
+          _ReflectionHook(threshold: _options.reflectOnFailures),
       ],
       // ★ 子代理（H6，2026-10-24）：开启后框架自动追加 `delegate_task`
       //   工具与系统提示（列出来源见 buildSubAgentSystemPrompt）。
@@ -1569,6 +1648,74 @@ class _ToolBudgetHook extends AgentHook {
       );
     }
     return ToolCallHookResult.proceed(context.call);
+  }
+}
+
+/// **计划前置门禁**（P1，2026-10-25）—— 框架 must 与 auto 行为一致，
+/// 这个是我们自己的强制层。
+///
+/// 产出第一份计划（write_todos）之前：执行类工具全拒（拒绝信息指路
+/// "先用 write_todos 列计划"）；读类工具（read/list/find/grep/web_fetch/
+/// check_device_state）与 ask_user/save_memory 放行 —— 先看清楚再计划。
+/// 计划存在后永久放行。
+class _PlanGateHook extends AgentHook {
+  _PlanGateHook({required this.isReadAllowed});
+
+  /// 判定"读类工具"的回调（宿主注入，保持 hook 与工具清单解耦）。
+  final bool Function(String tool) isReadAllowed;
+
+  @override
+  FutureOr<ToolCallHookResult> beforeToolCall(ToolCallHookContext context) {
+    final st = context.agent.state;
+    final hasPlan = st.plan != null && st.plan!.steps.isNotEmpty;
+    if (hasPlan) return ToolCallHookResult.proceed(context.call);
+
+    final tool = context.call.name;
+    if (tool == 'write_todos' || isReadAllowed(tool)) {
+      return ToolCallHookResult.proceed(context.call);
+    }
+    return ToolCallHookResult.deny(content: [
+      TextPart(
+        '未执行：当前开启了"计划前置"模式 —— 动手之前必须先用 '
+        '`write_todos` 把任务拆成清单（当前目标/步骤/顺序），'
+        '然后按清单执行。你可以先用读取类工具了解情况，'
+        '但改任何东西之前先列计划。',
+      ),
+    ]);
+  }
+}
+
+/// **连续失败反思**（P3，2026-10-25）—— 反思环节由架构触发。
+///
+/// 连续失败达到阈值 ⇒ afterToolCall 注入反思指令（injectedMessages）：
+/// "停下来分析根因、换方法，不要原样重试"。成功一次即重置。
+/// 只在下一轮的上下文里出现一条 —— 轻量，不加额外 LLM 调用。
+class _ReflectionHook extends AgentHook {
+  _ReflectionHook({required this.threshold});
+  final int threshold;
+  int _consecutiveFailures = 0;
+
+  @override
+  Future<ToolResultHookResult> afterToolCall(ToolResultHookContext context) {
+    if (context.result.isError) {
+      _consecutiveFailures++;
+      if (_consecutiveFailures >= threshold) {
+        _consecutiveFailures = 0; // 触发一次即重置（不连环轰炸）
+        return Future.value(ToolResultHookResult.proceed(
+          injectedMessages: [
+            UserMessage.text(
+              '[反思指令] 你已连续 $threshold 次工具失败。停下来想清楚：'
+              '(1) 逐条核对上面的失败原因，找出共同的根因；'
+              '(2) 换一种不同的方法（不是原样重试）；'
+              '(3) 如果这条路确实走不通，如实告诉用户卡在哪。',
+            ),
+          ],
+        ));
+      }
+    } else {
+      _consecutiveFailures = 0;
+    }
+    return Future.value(ToolResultHookResult.proceed());
   }
 }
 

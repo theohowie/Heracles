@@ -58,4 +58,6 @@ export 'src/tools/tool_factory.dart';
 // 不会跟进，而且不会有任何编译错误提醒。App 侧的 `DeviceWorkspaceCapability`
 // 正是需要 `ContractWorkspace.lineNumberWidth` 来对齐行号前缀的。
 export 'src/contract/contract.dart';
+// 统一 Guardrails 门面（SEC5）：输入侧静态校验聚合入口 + 防线清单。
+export 'src/guard/guardrails.dart';
 
