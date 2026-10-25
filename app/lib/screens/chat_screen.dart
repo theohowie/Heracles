@@ -2460,6 +2460,9 @@ class _ChatScreenState extends State<ChatScreen> {
               maxOutputTokens: e.value.maxOutputTokens,
               supportsTools: e.value.supportsTools,
               supportsReasoning: e.value.supportsReasoning,
+              // N5：档位只在 OpenAI 兼容轨真生效（后端 extra 通道）
+              reasoningLevelsEffective:
+                  p.protocol == ProviderProtocol.openaiChat,
             ),
       };
       await widget.settings.updateProvider(

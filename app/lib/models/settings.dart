@@ -227,6 +227,7 @@ class ModelCapability {
     this.maxOutputTokens,
     this.supportsTools,
     this.supportsReasoning,
+    this.reasoningLevelsEffective = false,
   });
 
   /// 上下文长度（token）—— 服务端权威值。`0` = 服务端未上报。
@@ -238,6 +239,15 @@ class ModelCapability {
   final bool? supportsTools;
   final bool? supportsReasoning;
 
+  /// **思考等级是否真的生效**（前端 N5 对齐，2026-10-25）。
+  ///
+  /// `supportsReasoning` 只说明模型会思考；这个字段说明**切档位（low/high/
+  /// max）是否真的改变行为**。后端接线：档位经 `ModelConfig.extra` 下发，
+  /// **只有 OpenAI 兼容轨的 client 读它**（→ reasoning_effort）；
+  /// Anthropic / Responses 轨不读 ⇒ 档位无效（前端只显示开/关，不假装有区别）。
+  /// 按 provider 协议在能力创建时定死。
+  final bool reasoningLevelsEffective;
+
   bool get hasContext => contextWindow > 0;
 
   /// 紧凑序列化（见类注释说明）。
@@ -246,6 +256,7 @@ class ModelCapability {
         if (maxOutputTokens != null) 'maxOut': maxOutputTokens,
         if (supportsTools != null) 'tools': supportsTools,
         if (supportsReasoning != null) 'reason': supportsReasoning,
+        'rLv': reasoningLevelsEffective,
       };
 
   factory ModelCapability.fromJson(Map<String, dynamic> j) => ModelCapability(
@@ -253,6 +264,7 @@ class ModelCapability {
         maxOutputTokens: (j['maxOut'] as num?)?.toInt(),
         supportsTools: j['tools'] as bool?,
         supportsReasoning: j['reason'] as bool?,
+        reasoningLevelsEffective: j['rLv'] == true,
       );
 }
 

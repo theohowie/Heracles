@@ -1474,6 +1474,9 @@ class _ProviderEditPageState extends State<ProviderEditPage> {
                 maxOutputTokens: e.value.maxOutputTokens,
                 supportsTools: e.value.supportsTools,
                 supportsReasoning: e.value.supportsReasoning,
+                // N5：档位只在 OpenAI 兼容轨真生效
+                reasoningLevelsEffective:
+                    _protocol == ProviderProtocol.openaiChat,
               ),
           };
         });
