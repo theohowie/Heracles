@@ -411,6 +411,13 @@ void main() {
       final statusRight = tester.getRect(status).right;
       expect((rowRight - statusRight).abs(), lessThan(1.5),
           reason: '「$l」行的状态必须贴右边缘（第一版修法真机右缘 1000→572）');
+      // ★ 复核（2026-10-25，task-7）实证的盲区：上面量的是 **Text 控件盒子**，
+      //   而 `Expanded` 让盒子 == 行右缘 ⇒ 它锁住的是**约束**，**锁不住 `textAlign`**。
+      //   变异：把状态 `textAlign: right` 改成 `left`（视觉上状态全靠左，正是本断言
+      //   想防的观感）⇒ 只量盒子的断言**仍然 18/18 全绿**。所以这里再钉一层：
+      //   状态控件的 `textAlign` 必须是 right。
+      expect(tester.widget<Text>(status).textAlign, TextAlign.right,
+          reason: '「$l」行的状态必须**右对齐**（盒子贴边 ≠ 文字贴边）');
     }
   });
 }
