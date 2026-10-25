@@ -306,8 +306,11 @@ class _InputBarState extends State<InputBar> {
                         //   想插队用排队条上的 ↑（打断当前）。
                         //   ⚠️ 措辞按用户反馈修正（"发送消息时引导不是截断"）：
                         //   原文案"继续输入排队"没说清"发送 = 排队"。
+                        // 2026-10-25：空态文案改原型 01 的「给 Heracles
+                        // 发消息…」（2026-10-12 的长文案被原型定稿覆盖）；
+                        // 排队态保留功能说明（说清发送 = 排队）。
                         placeholder: widget.queuedTexts.isEmpty
-                            ? '发送消息或点击 + 上传文件或图片'
+                            ? '给 Heracles 发消息…'
                             : '发送将排在队尾；↑ 可插队立即发送',
                         placeholderStyle:
                             TextStyle(color: h.textFaint, fontSize: 15),
@@ -516,10 +519,12 @@ class _SendButton extends StatelessWidget {
       width: 46,
       height: 46,
       // ★ 圆形（2026-10-12，参考图：发送键是圆的）
+      // 2026-10-25：原型 01 发送键 = 实心圆 + 反色箭头。旧版 accent 底
+      // 配深棕图标，在黑白主题下糊成一团（真机截图：黑圆里一团黑）。
       decoration: BoxDecoration(
-        color: active ? h.accent : h.surface,
+        color: active ? h.text : h.surface,
         shape: BoxShape.circle,
-        border: Border.all(color: active ? h.accent : h.border),
+        border: Border.all(color: active ? h.text : h.border),
       ),
       child: Material(
         color: Colors.transparent,
@@ -538,7 +543,9 @@ class _SendButton extends StatelessWidget {
                     : CupertinoIcons.hourglass)
                 : AppIcons.send,
             size: 21,
-            color: active ? const Color(0xFF1A0E08) : h.textFaint,
+            color: active
+                ? (h.dark ? const Color(0xFF0A0A0B) : Colors.white)
+                : h.textFaint,
           ),
         ),
       ),
@@ -637,8 +644,8 @@ class _PermissionIconButton extends StatelessWidget {
   }
 }
 
-/// **模型选择框** —— 带阴影边框的胶囊（模型名 + 思考档位），
-/// 点击打开模型与思考半抽屉（原型 09，见 bw_model_sheet.dart）。
+/// **模型选择框** —— 两枚并排胶囊（原型 01）：[模型名 ▾] [思考 · 高]，
+/// 点任意一枚都打开模型与思考半抽屉（原型 09，见 bw_model_sheet.dart）。
 class _ModelSelector extends StatelessWidget {
   const _ModelSelector({
     required this.label,
@@ -709,58 +716,69 @@ class _ModelSelector extends StatelessWidget {
     //   之前 GestureDetector(opaque)+Container(带 boxShadow) 在真机上
     //   tap 无响应（连 onTapDown 都没到 —— 有透明遮挡/竞技场差异），
     //   widget 测试却通过。改用与**对照组（盾牌）完全相同**的结构。
-    return SizedBox(
-      height: 38,
-      child: Material(
-        color: Colors.transparent,
-        child: InkWell(
-          onTap: () => _open(context),
+    // 胶囊外形（两枚共用）：浅底 + 边框 + 轻投影"托"起来
+    BoxDecoration pillDeco() => BoxDecoration(
+          color: h.surfaceAlt,
           borderRadius: BorderRadius.circular(HRadius.pill),
-          child: Container(
-            padding: const EdgeInsets.symmetric(horizontal: HSpace.md),
-            decoration: BoxDecoration(
-              color: h.surfaceAlt,
-              borderRadius: BorderRadius.circular(HRadius.pill),
-              border: Border.all(color: h.border),
-              boxShadow: [
-                // 参考图：模型框有**阴影** —— 轻投影把它从底色上"托"起来
-                BoxShadow(
-                  color: Colors.black.withValues(alpha: h.dark ? 0.30 : 0.08),
-                  blurRadius: 6,
-                  offset: const Offset(0, 2),
-                ),
-              ],
+          border: Border.all(color: h.border),
+          boxShadow: [
+            BoxShadow(
+              color: Colors.black.withValues(alpha: h.dark ? 0.30 : 0.08),
+              blurRadius: 6,
+              offset: const Offset(0, 2),
             ),
-            child: Row(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                // ★ 不给模型加前置图标（2026-10-12 用户明确要求）：
-                //   「不要给模型前面加一些没有意义的图标，
-                //     又不是大模型本身的图标」—— 六边形已移除。
-                ConstrainedBox(
-                  // 长模型名截断，不把发送键挤出屏幕
-                  constraints: const BoxConstraints(maxWidth: 130),
-                  child: Text(
-                    name,
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
-                    style: TextStyle(fontSize: 13, color: h.text),
-                  ),
-                ),
-                const SizedBox(width: HSpace.xs),
-                // ★ 思考强度直接写在 chip 上（原型 01）：不用打开
-                //   抽屉就知道当前档位。
-                Text(
-                  '· ${reasoningLevel.label}',
-                  style: TextStyle(fontSize: 11.5, color: h.textDim),
-                ),
-                const SizedBox(width: HSpace.xs),
-                Icon(AppIcons.chevronDown, size: 18, color: h.textDim),
-              ],
+          ],
+        );
+    // 思考档位的紧凑中文（原型 01 写法「思考 · 高」）
+    final thinkShort = switch (reasoningLevel) {
+      ReasoningLevel.auto => '自动',
+      ReasoningLevel.off => '关',
+      ReasoningLevel.low => '低',
+      ReasoningLevel.high => '高',
+      ReasoningLevel.max => '最高',
+    };
+    Widget pill(Widget child) => Material(
+          color: Colors.transparent,
+          child: InkWell(
+            onTap: () => _open(context),
+            borderRadius: BorderRadius.circular(HRadius.pill),
+            child: Container(
+              height: 38,
+              padding: const EdgeInsets.symmetric(horizontal: HSpace.md),
+              decoration: pillDeco(),
+              child: child,
             ),
           ),
-        ),
-      ),
+        );
+    return Row(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        // ★ 不给模型加前置图标（2026-10-12 用户明确要求）
+        pill(Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            ConstrainedBox(
+              // 两枚胶囊并排，长模型名截断，不把发送键挤出屏幕
+              constraints: const BoxConstraints(maxWidth: 104),
+              child: Text(
+                name,
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: TextStyle(fontSize: 13, color: h.text),
+              ),
+            ),
+            const SizedBox(width: HSpace.xs),
+            Icon(AppIcons.chevronDown, size: 18, color: h.textDim),
+          ],
+        )),
+        const SizedBox(width: HSpace.xs),
+        pill(Center(
+          child: Text(
+            '思考 · $thinkShort',
+            style: TextStyle(fontSize: 12, color: h.textDim),
+          ),
+        )),
+      ],
     );
   }
 }

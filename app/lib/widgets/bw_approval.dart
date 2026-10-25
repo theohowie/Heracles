@@ -507,3 +507,252 @@ Future<ApprovalDecision?> showApprovalRequestSheet(
     ),
   );
 }
+
+/// 通用确认抽屉（2026-10-25）：替代居中式 `CupertinoAlertDialog`
+/// （用户真机反馈「怎么还有古老弹窗」）。全 App 的确认类交互统一
+/// 走底部上拉抽屉：抓手 + 标题 + 说明 + 双按钮；破坏性确认的主
+/// 按钮用语义红实心。返回 true = 点了确认；取消/点遮罩/下滑 = false。
+Future<bool> showBwConfirmSheet(
+  BuildContext context, {
+  required String title,
+  String? message,
+  required String confirmLabel,
+  String? cancelLabel = '取消',
+  bool destructive = false,
+}) async {
+  final h = Hue.of(context);
+  final r = await showModalBottomSheet<bool>(
+    context: context,
+    backgroundColor: h.surfaceAlt,
+    shape: const RoundedRectangleBorder(
+      borderRadius: BorderRadius.vertical(top: Radius.circular(24)),
+    ),
+    builder: (sheetCtx) => SafeArea(
+      child: Padding(
+        padding: const EdgeInsets.fromLTRB(20, 10, 20, 16),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Center(
+              child: Container(
+                width: 36,
+                height: 4,
+                decoration: BoxDecoration(
+                  color: h.border,
+                  borderRadius: BorderRadius.circular(999),
+                ),
+              ),
+            ),
+            const SizedBox(height: 16),
+            Text(
+              title,
+              style: const TextStyle(fontSize: 17, fontWeight: FontWeight.w700),
+            ),
+            if (message != null && message.isNotEmpty) ...[
+              const SizedBox(height: 8),
+              Text(
+                message,
+                style: TextStyle(fontSize: 14, height: 1.55, color: h.textDim),
+              ),
+            ],
+            const SizedBox(height: 18),
+            Row(
+              children: [
+                if (cancelLabel != null) ...[
+                  Expanded(
+                    child: CupertinoButton(
+                      padding: const EdgeInsets.symmetric(vertical: 12),
+                      onPressed: () => Navigator.of(sheetCtx).pop(false),
+                      child: Text(cancelLabel,
+                          style: TextStyle(fontSize: 15, color: h.textDim)),
+                    ),
+                  ),
+                  const SizedBox(width: 12),
+                ],
+                Expanded(
+                  child: CupertinoButton(
+                    padding: const EdgeInsets.symmetric(vertical: 12),
+                    color: destructive ? HColors.errorOn(h.dark) : h.text,
+                    onPressed: () => Navigator.of(sheetCtx).pop(true),
+                    child: Text(
+                      confirmLabel,
+                      style: TextStyle(
+                        fontSize: 15,
+                        fontWeight: FontWeight.w600,
+                        color: destructive
+                            ? Colors.white
+                            : (h.dark
+                                ? const Color(0xFF0A0A0B)
+                                : Colors.white),
+                      ),
+                    ),
+                  ),
+                ),
+              ],
+            ),
+          ],
+        ),
+      ),
+    ),
+  );
+  return r == true;
+}
+
+/// 通用文本输入抽屉（2026-10-25）：替代带输入框的居中弹窗
+/// （重命名会话、抽屉搜索）。返回：保存/回车 → 去空格后的文本；
+/// [clearLabel] 非空时多一个清除按钮 → 返回空串；取消/关 = null。
+Future<String?> showBwTextInputSheet(
+  BuildContext context, {
+  required String title,
+  String initial = '',
+  String placeholder = '',
+  String confirmLabel = '保存',
+  String? clearLabel,
+}) {
+  final h = Hue.of(context);
+  return showModalBottomSheet<String>(
+    context: context,
+    backgroundColor: h.surfaceAlt,
+    isScrollControlled: true,
+    shape: const RoundedRectangleBorder(
+      borderRadius: BorderRadius.vertical(top: Radius.circular(24)),
+    ),
+    builder: (sheetCtx) => _BwTextInputSheet(
+      h: h,
+      title: title,
+      initial: initial,
+      placeholder: placeholder,
+      confirmLabel: confirmLabel,
+      clearLabel: clearLabel,
+    ),
+  );
+}
+
+class _BwTextInputSheet extends StatefulWidget {
+  const _BwTextInputSheet({
+    required this.h,
+    required this.title,
+    required this.initial,
+    required this.placeholder,
+    required this.confirmLabel,
+    required this.clearLabel,
+  });
+
+  final Hue h;
+  final String title;
+  final String initial;
+  final String placeholder;
+  final String confirmLabel;
+  final String? clearLabel;
+
+  @override
+  State<_BwTextInputSheet> createState() => _BwTextInputSheetState();
+}
+
+class _BwTextInputSheetState extends State<_BwTextInputSheet> {
+  late final TextEditingController _ctl =
+      TextEditingController(text: widget.initial);
+
+  @override
+  void dispose() {
+    _ctl.dispose();
+    super.dispose();
+  }
+
+  void _submit() => Navigator.of(context).pop(_ctl.text.trim());
+
+  @override
+  Widget build(BuildContext context) {
+    final h = widget.h;
+    return Padding(
+      padding: EdgeInsets.only(
+        bottom: MediaQuery.viewInsetsOf(context).bottom,
+      ),
+      child: SafeArea(
+        top: false,
+        child: Padding(
+          padding: const EdgeInsets.fromLTRB(20, 10, 20, 16),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Center(
+                child: Container(
+                  width: 36,
+                  height: 4,
+                  decoration: BoxDecoration(
+                    color: h.border,
+                    borderRadius: BorderRadius.circular(999),
+                  ),
+                ),
+              ),
+              const SizedBox(height: 16),
+              Text(
+                widget.title,
+                style:
+                    const TextStyle(fontSize: 17, fontWeight: FontWeight.w700),
+              ),
+              const SizedBox(height: 12),
+              CupertinoTextField(
+                controller: _ctl,
+                autofocus: true,
+                placeholder: widget.placeholder,
+                style: TextStyle(fontSize: 15, color: h.text),
+                padding:
+                    const EdgeInsets.symmetric(horizontal: 12, vertical: 12),
+                decoration: BoxDecoration(
+                  color: h.surface,
+                  border: Border.all(color: h.border),
+                  borderRadius: BorderRadius.circular(10),
+                ),
+                onSubmitted: (_) => _submit(),
+              ),
+              const SizedBox(height: 14),
+              Row(
+                children: [
+                  if (widget.clearLabel != null) ...[
+                    CupertinoButton(
+                      padding: const EdgeInsets.symmetric(
+                          horizontal: 8, vertical: 12),
+                      onPressed: () => Navigator.of(context).pop(''),
+                      child: Text(widget.clearLabel!,
+                          style: TextStyle(fontSize: 15, color: h.textDim)),
+                    ),
+                    const SizedBox(width: 4),
+                  ],
+                  Expanded(
+                    child: CupertinoButton(
+                      padding: const EdgeInsets.symmetric(vertical: 12),
+                      onPressed: () => Navigator.of(context).pop(),
+                      child: Text('取消',
+                          style: TextStyle(fontSize: 15, color: h.textDim)),
+                    ),
+                  ),
+                  const SizedBox(width: 12),
+                  Expanded(
+                    child: CupertinoButton(
+                      padding: const EdgeInsets.symmetric(vertical: 12),
+                      color: h.text,
+                      onPressed: _submit,
+                      child: Text(
+                        widget.confirmLabel,
+                        style: TextStyle(
+                          fontSize: 15,
+                          fontWeight: FontWeight.w600,
+                          color: h.dark
+                              ? const Color(0xFF0A0A0B)
+                              : Colors.white,
+                        ),
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}

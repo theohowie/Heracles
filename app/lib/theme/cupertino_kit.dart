@@ -15,8 +15,8 @@
 /// 2. **点击反馈**：iOS 没有波纹。全局主题已把 `splashFactory` 设为
 ///    [kNoSplash]（`app_theme.dart`），`InkWell` 可以保留不动；
 ///    需要"按下变暗"的地方用 [IosTap]。
-/// 3. **弹窗**：`AlertDialog` ⇒ [showIosDialog]（`CupertinoAlertDialog`，
-///    动作按钮竖排/横排由 iOS 自适应，破坏性动作用红色 `isDestructiveAction`）。
+/// 3. **弹层**：确认与文本输入一律底部上拉抽屉（`bw_approval.dart` 的
+///    `showBwConfirmSheet` / `showBwTextInputSheet`）；居中弹窗已退役。
 /// 4. **消息条**：`SnackBar` ⇒ [showIosToast]（顶部胶囊，2 秒自动消失 ——
 ///    iOS 没有底部黑条）。
 /// 5. **表单件**：`FilledButton` ⇒ [IosButton.filled]；`Switch` ⇒ `CupertinoSwitch`；
@@ -185,56 +185,10 @@ class _IosTapState extends State<IosTap> {
 // 弹窗 / 吐司 / 按钮
 // ============================================================================
 
-/// iOS 动作项（对应旧的 `TextButton` 弹窗按钮）。
-class IosAction {
-  const IosAction(
-    this.label, {
-    this.onTap,
-    this.isDefaultAction = false,
-    this.isDestructiveAction = false,
-  });
-
-  final String label;
-  final VoidCallback? onTap;
-
-  /// 蓝色加粗的主动作（iOS 的"默认按钮"）。
-  final bool isDefaultAction;
-
-  /// 红色破坏性动作（删除/清空）。iOS 里**必须**用它，而不是 Material 的红色文字。
-  final bool isDestructiveAction;
-}
-
-/// `CupertinoAlertDialog` 的统一入口（替换所有 `AlertDialog` + `showDialog`）。
-///
-/// 与旧代码的对应关系：
-/// · `actions: [TextButton(...)]` ⇒ `actions: [IosAction(...)]`
-/// · 返回选中动作：给 [IosAction.onTap] 传 `() => Navigator.pop(ctx, value)`。
-Future<void> showIosDialog(
-  BuildContext context, {
-  required String title,
-  String? message,
-  required List<IosAction> actions,
-}) {
-  return showCupertinoDialog<void>(
-    context: context,
-    builder: (ctx) => CupertinoAlertDialog(
-      title: Text(title),
-      content: message == null ? null : Text(message),
-      actions: [
-        for (final a in actions)
-          CupertinoDialogAction(
-            isDefaultAction: a.isDefaultAction,
-            isDestructiveAction: a.isDestructiveAction,
-            onPressed: () {
-              Navigator.of(ctx).pop();
-              a.onTap?.call();
-            },
-            child: Text(a.label),
-          ),
-      ],
-    ),
-  );
-}
+/// 居中式确认弹窗（旧 `showIosDialog` / `CupertinoAlertDialog`）已退役
+/// （2026-10-25，用户真机反馈「古老弹窗」）：确认与文本输入统一走
+/// 底部上拉抽屉 —— `widgets/bw_approval.dart` 的
+/// `showBwConfirmSheet` / `showBwTextInputSheet`，不要再引入居中弹窗。
 
 /// iOS 风格轻提示（替换 `ScaffoldMessenger.showSnackBar`）。
 ///

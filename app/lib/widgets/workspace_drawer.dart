@@ -5,6 +5,7 @@ import '../models/view_options.dart';
 import '../models/workspace.dart';
 import '../theme/app_theme.dart';
 import '../theme/cupertino_kit.dart';
+import 'bw_approval.dart';
 
 /// 工作区侧边栏 —— 项目与会话管理。
 ///
@@ -130,7 +131,7 @@ class WorkspaceDrawer extends StatelessWidget {
               searching: searchQuery.isNotEmpty,
               onAdd: onAddWorkspace,
               onAddApp: onAddAppWorkspace,
-              onSearch: () => _openSearch(context, h),
+              onSearch: () => _openSearch(context),
               onViewOptions: () => _openViewOptions(context, h),
             ),
 
@@ -475,45 +476,15 @@ class WorkspaceDrawer extends StatelessWidget {
 
   // ------------------------------------------------------------ 搜索
 
-  Future<void> _openSearch(BuildContext context, Hue h) async {
-    final controller = TextEditingController(text: searchQuery);
-    // ⚠️ 没用 showIosDialog：它的 content 只能放一段 String，
-    //   而这里要在弹窗里**放输入框**（并拿回输入的 String）——
-    //   直接手写同款的 CupertinoAlertDialog，视觉与 showIosDialog 一致。
-    final q = await showCupertinoDialog<String>(
-      context: context,
-      builder: (ctx) => CupertinoTheme(
-        // 弹窗跟随 App 的深浅色（App 是 MaterialApp，没有现成的 CupertinoTheme）
-        data: CupertinoThemeData(
-          brightness: h.dark ? Brightness.dark : Brightness.light,
-          primaryColor: h.accent,
-        ),
-        child: CupertinoAlertDialog(
-          title: Text('搜索会话', style: TextStyle(color: h.text, fontSize: 16)),
-          content: Padding(
-            padding: const EdgeInsets.only(top: HSpace.sm),
-            child: CupertinoTextField(
-              controller: controller,
-              autofocus: true,
-              style: TextStyle(color: h.text),
-              placeholder: '输入标题关键词',
-              placeholderStyle: TextStyle(color: h.textFaint),
-              onSubmitted: (v) => Navigator.of(ctx).pop(v),
-            ),
-          ),
-          actions: [
-            CupertinoDialogAction(
-              onPressed: () => Navigator.of(ctx).pop(''),
-              child: Text('清除', style: TextStyle(color: h.textDim)),
-            ),
-            CupertinoDialogAction(
-              isDefaultAction: true,
-              onPressed: () => Navigator.of(ctx).pop(controller.text),
-              child: const Text('搜索'),
-            ),
-          ],
-        ),
-      ),
+  Future<void> _openSearch(BuildContext context) async {
+    // 2026-10-25：居中弹窗改上拉输入抽屉（清除 = 返回空串，沿用旧语义）
+    final q = await showBwTextInputSheet(
+      context,
+      title: '搜索会话',
+      initial: searchQuery,
+      placeholder: '输入标题关键词',
+      confirmLabel: '搜索',
+      clearLabel: '清除',
     );
     if (q != null) onSearchChanged(q.trim());
   }
