@@ -150,6 +150,8 @@ class RunOptions {
     this.traceDir,
     this.autoExtract = false,
     this.verifyCommand,
+    this.planMode = PlanMode.auto,
+    this.verifyGateCompletion = false,
   });
 
   final int maxTurns;
@@ -254,6 +256,19 @@ class RunOptions {
   /// 工具结果里回给模型 —— 模型看到失败立刻修，形成 改→验→修 闭环
   /// （架构级自验证，不靠提示词劝）。无 shell 能力时静默跳过。
   final String? verifyCommand;
+
+  /// **计划模式**（P1，2026-10-25；默认 [PlanMode.auto] = 旧行为）。
+  ///
+  /// `must` = 架构强制显式分解（框架教练式：模型必须先产出计划才能动工具）
+  /// —— 供宿主对"复杂任务不许即兴跑"的场景显式开启；默认 auto 不强制。
+  final PlanMode planMode;
+
+  /// **完成门禁**（P4，2026-10-25；默认 false）。
+  ///
+  /// 与 [verifyCommand] 配套：本轮发生过文件写/编辑且最后一次自动验证
+  /// **失败**时，拒绝任务收尾（onTurnCompletion continueRun），模型必须
+  /// 回到修复循环 —— "带病收尾"被架构拦下。默认关（无 verifyCommand 无意义）。
+  final bool verifyGateCompletion;
 }
 
 /// **组装好的 Agent**。
@@ -489,26 +504,10 @@ class HeraclesAgent {
   /// 旧注释写"18 个"（审计 §3.3 #1：注释没跟上工具面扩张），已更正。
   ///
   /// 分组顺序即日志阅读顺序：**高频基础 → 危险手段 → 长耗时 → 交互**。
-  List<Tool> _buildTools() {
+  List<Tool> _buildTools({Future<String> Function()? verify}) {
     final factory = ToolFactory(_caps);
     // ★ H3/K2（2026-10-25）：verifyCommand 配置后，写/编辑成功自动跑
     //   验证命令（经 shell 能力），输出附在工具结果里回给模型。
-    final shellForVerify = _caps.shell;
-    final Future<String> Function()? verify =
-        (_options.verifyCommand != null && shellForVerify != null)
-            ? () async {
-                final r = await shellForVerify.run(
-                  _options.verifyCommand!,
-                  timeout: const Duration(minutes: 10),
-                );
-                return switch (r) {
-                  CapabilitySuccess(:final data) =>
-                    '通过。输出尾部：${data.length > 800 ? data.substring(data.length - 800) : data}',
-                  CapabilityFailure(:final reason) => '失败：$reason',
-                  _ => '通过（无输出）',
-                };
-              }
-            : null;
     // ★ "先读再改"记账（K1，2026-10-24）：与工具列表同生命周期 ——
     //   App 每次 run 新建 agent ⇒ 恰好 run 级；CLI/测试复用实例 ⇒ 会话级
     //   （从宽取向：读过的文件跨 run 仍算读过）。
@@ -950,13 +949,37 @@ class HeraclesAgent {
     } else {
       _state ??= AgentState(sessionId: _newSessionId());
     }
+    // ★ H3/K2/P4（2026-10-25）：verifyCommand 配置后，写/编辑成功自动跑
+    //   验证命令（经 shell 能力），输出附在工具结果里回给模型；
+    //   lastVerifyFailed 与 P4 完成门禁 hook 共享。
+    final shellForVerify = _caps.shell;
+    final lastVerifyFailed = <bool>[];
+    final Future<String> Function()? verify =
+        (_options.verifyCommand != null && shellForVerify != null)
+            ? () async {
+                final r = await shellForVerify.run(
+                  _options.verifyCommand!,
+                  timeout: const Duration(minutes: 10),
+                );
+                final passed = r is CapabilitySuccess;
+                lastVerifyFailed
+                  ..clear()
+                  ..add(!passed);
+                return switch (r) {
+                  CapabilitySuccess(:final data) =>
+                    '通过。输出尾部：${data.length > 800 ? data.substring(data.length - 800) : data}',
+                  CapabilityFailure(:final reason) => '失败：$reason',
+                  _ => '通过（无输出）',
+                };
+              }
+            : null;
     final agent = StatefulAgent(
       name: 'heracles',
       client: client,
       modelConfig: _modelConfig(),
       state: _state!,
       systemPrompts: _buildSystemPrompts(),
-      tools: _buildTools(),
+      tools: _buildTools(verify: verify),
       controller: controller,
       compressor: compressor,
       planMode: _options.enablePlan ? PlanMode.auto : PlanMode.none,
@@ -966,6 +989,10 @@ class HeraclesAgent {
         approvalHook,
         // ★ E4：traceDir 非空才挂（默认关）
         if (_options.traceDir != null) _TraceHook(_options.traceDir!),
+        // ★ P4（2026-10-25）：完成门禁 —— 写过文件且最后一次验证失败时
+        //   拒绝收尾，模型必须回到修复循环（"带病收尾"被架构拦下）。
+        if (_options.verifyGateCompletion && verify != null)
+          _VerifyGateHook(lastVerifyFailed: lastVerifyFailed),
       ],
       // ★ 子代理（H6，2026-10-24）：开启后框架自动追加 `delegate_task`
       //   工具与系统提示（列出来源见 buildSubAgentSystemPrompt）。
@@ -1441,6 +1468,38 @@ class _TraceHook extends AgentHook {
       }());
     }
     return ModelResponseHookResult.proceed(context.response);
+  }
+}
+
+/// **完成门禁 hook**（P4，2026-10-25）—— "带病收尾"被架构拦下。
+///
+/// 本轮发生过文件写/编辑（= verify 跑过）且最后一次验证**失败**时，
+/// onTurnCompletion 返回 continueRun：注入一条继续消息让模型回到
+/// 修复循环。验证通过（或没写过文件）⇒ 正常收尾。
+///
+/// ## 为什么只拦"最后一次失败"
+///
+/// 模型可能修几次才过 —— 中间态失败不拦收尾，只有**最终态**/// 失败才说明任务带着问题结束。验证通过后标志被覆盖，正常放行。
+class _VerifyGateHook extends AgentHook {
+  _VerifyGateHook({required List<bool> lastVerifyFailed})
+      : _lastVerifyFailed = lastVerifyFailed; // ignore: prefer_initializing_formals — 命名参数不能以下划线开头
+
+  /// 共享的可变标志（与 verify 回调同源）：空 = 没验证过；[true] = 失败。
+  final List<bool> _lastVerifyFailed;
+
+  @override
+  Future<TurnCompletionHookResult> onTurnCompletion(
+    TurnCompletionHookContext context,
+  ) async {
+    if (_lastVerifyFailed.isNotEmpty && _lastVerifyFailed.first) {
+      return TurnCompletionHookResult.continueWith([
+        UserMessage.text(
+          '[自动验证未通过] 刚才的验证命令失败了（见上方工具结果）。'
+          '请修复问题后重新验证；确认通过后再给出最终回答。',
+        ),
+      ]);
+    }
+    return const TurnCompletionHookResult.accept();
   }
 }
 
