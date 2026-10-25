@@ -151,6 +151,7 @@ class RunOptions {
     this.autoExtract = false,
     this.verifyCommand,
     this.planMode = PlanMode.auto,
+    this.fallbackModelNames = const [],
     this.verifyGateCompletion = false,
   });
 
@@ -262,6 +263,16 @@ class RunOptions {
   /// `must` = 架构强制显式分解（框架教练式：模型必须先产出计划才能动工具）
   /// —— 供宿主对"复杂任务不许即兴跑"的场景显式开启；默认 auto 不强制。
   final PlanMode planMode;
+
+  /// **降级模型链**（D3，2026-10-25；默认空 = 不降级）。
+  ///
+  /// 主模型连续失败（网络/限流/超时）且重试耗尽后，按序切换到
+  /// 列表中的备用模型继续当前任务 —— "不把错误直接甩给用户"的落地。
+  /// 每个降级发生时播 [HeraclesFallback] 事件（UI 可见"已降级到 X"）。
+  ///
+  /// ⚠️ 成本说明：备用模型用的是**同一个 provider 配置**（同 baseUrl/Key），
+  /// 只是模型名不同 —— 不产生额外费用来源；切换后该 run 内继续用新模型。
+  final List<String> fallbackModelNames;
 
   /// **完成门禁**（P4，2026-10-25；默认 false）。
   ///
@@ -973,10 +984,13 @@ class HeraclesAgent {
                 };
               }
             : null;
-    final agent = StatefulAgent(
+    var usedFallbackIdx = -1;
+    var agent = StatefulAgent(
       name: 'heracles',
       client: client,
-      modelConfig: _modelConfig(),
+      modelConfig: _modelConfig(model: usedFallbackIdx < 0
+          ? null
+          : _options.fallbackModelNames[usedFallbackIdx]),
       state: _state!,
       systemPrompts: _buildSystemPrompts(),
       tools: _buildTools(verify: verify),
@@ -1021,8 +1035,11 @@ class HeraclesAgent {
     /// 本轮的用户消息与模型回答，取晚了下标就错。
     final turnStartIndex = _state!.history.messages.length;
 
-    // ---- 跑 ----
+    // ---- 跑（含 D3 降级重试：失败且还有备用模型 ⇒ 换模型重跑）----
+    // ⚠️ 简化实现：降级发生在 run 级 —— agent 在 while 内重建
+    //   （modelConfig 随降级变化），state 在外层存活（历史保留）。
     var finished = false;
+    while (true) {
     try {
       await for (final ev in agent.runStream(
         _firstMessage(userRequest, images),
@@ -1114,26 +1131,104 @@ class HeraclesAgent {
       finished = true;
     } on AgentException catch (e) {
       wallClock.stop();
-      // 预算超限是**预期内的正常终止**，必须说清"任务没做完"，
-      // 而不是混进"检测到循环"那句里（那会让用户以为模型在打转）。
-      emit(HeraclesFailed(
-        budgetReached
-            ? _budgetMessage(_options.maxToolCalls, totalToolCalls)
-            : (frameworkError ?? _describeException(e)),
-      ));
+      final reason =
+          budgetReached ? _budgetMessage(_options.maxToolCalls, totalToolCalls)
+                        : (frameworkError ?? _describeException(e));
+      // ★ D3：预算超限/取消不降级（非模型问题）；其余失败且备用未耗尽 ⇒ 降级重跑
+      final canFallback = !budgetReached &&
+          usedFallbackIdx + 1 < _options.fallbackModelNames.length &&
+          e.code != AgentExceptionCode.cancelled;
+      if (canFallback) {
+        final from = usedFallbackIdx < 0
+            ? _config.modelName
+            : _options.fallbackModelNames[usedFallbackIdx];
+        usedFallbackIdx++;
+        emit(HeraclesFallback(
+            from: from, to: _options.fallbackModelNames[usedFallbackIdx], reason: reason));
+        totalToolCalls = 0;
+        budgetReached = false;
+        frameworkError = null;
+        lastTurnText = null;
+        // 重建 agent（新 modelConfig）；state/Controller/事件桥不变
+        agent = StatefulAgent(
+          name: 'heracles',
+          client: client,
+          modelConfig: _modelConfig(
+              model: _options.fallbackModelNames[usedFallbackIdx]),
+          state: _state!,
+          systemPrompts: _buildSystemPrompts(),
+          tools: _buildTools(verify: verify),
+          controller: controller,
+          compressor: compressor,
+          planMode: _options.enablePlan ? _options.planMode : PlanMode.none,
+          maxTurns: _options.maxTurns,
+          hooks: [
+            budgetHook,
+            approvalHook,
+          ],
+          loopDetector: DefaultLoopDetector(
+            state: _state!,
+            client: client,
+            modelConfig: _modelConfig(
+                model: _options.fallbackModelNames[usedFallbackIdx]),
+          ),
+          autoSaveStateFunc: _stateStorage == null
+              ? null
+              : (state) async => _stateStorage.save(state),
+        );
+        continue;
+      }
+      emit(HeraclesFailed(reason));
     } catch (e) {
       wallClock.stop();
-      emit(HeraclesFailed(
-        budgetReached
-            ? _budgetMessage(_options.maxToolCalls, totalToolCalls)
-            : (frameworkError ?? '运行出错：$e'),
-      ));
+      final reason = budgetReached
+          ? _budgetMessage(_options.maxToolCalls, totalToolCalls)
+          : (frameworkError ?? '运行出错：$e');
+      if (!budgetReached &&
+          usedFallbackIdx + 1 < _options.fallbackModelNames.length) {
+        final from = usedFallbackIdx < 0
+            ? _config.modelName
+            : _options.fallbackModelNames[usedFallbackIdx];
+        usedFallbackIdx++;
+        emit(HeraclesFallback(
+            from: from, to: _options.fallbackModelNames[usedFallbackIdx], reason: reason));
+        totalToolCalls = 0;
+        budgetReached = false;
+        frameworkError = null;
+        lastTurnText = null;
+        agent = StatefulAgent(
+          name: 'heracles',
+          client: client,
+          modelConfig: _modelConfig(
+              model: _options.fallbackModelNames[usedFallbackIdx]),
+          state: _state!,
+          systemPrompts: _buildSystemPrompts(),
+          tools: _buildTools(verify: verify),
+          controller: controller,
+          compressor: compressor,
+          planMode: _options.enablePlan ? _options.planMode : PlanMode.none,
+          maxTurns: _options.maxTurns,
+          hooks: [budgetHook, approvalHook],
+          loopDetector: DefaultLoopDetector(
+            state: _state!,
+            client: client,
+            modelConfig: _modelConfig(
+                model: _options.fallbackModelNames[usedFallbackIdx]),
+          ),
+          autoSaveStateFunc: _stateStorage == null
+              ? null
+              : (state) async => _stateStorage.save(state),
+        );
+        continue;
+      }
+      emit(HeraclesFailed(reason));
     } finally {
-      // 生产者自己收尾。**绝不 await close()** —— 消费端可能已经提前走了
-      // （`yield*` 被取消），此时 `close()` 的 Future 不会有人等。
-      // 不 await 就不会挂住任何人。
-      unawaited(bridge.close());
       if (!finished) wallClock.stop();
+    }
+    // 生产者收尾（成功/失败终局）。**绝不 await close()** —— 消费端可能
+    // 已提前走（`yield*` 被取消），不 await 就不会挂住任何人。
+    unawaited(bridge.close());
+    break; // while(true)：终局出口（continue = 降级重跑）
     }
   }
 
@@ -1759,6 +1854,14 @@ final class HeraclesTurnUsage extends HeraclesEvent {
 
   /// `null` = provider **未上报**缓存字段 —— UI 显示"不可用"，不得当 0。
   final int? cachedTokens;
+}
+
+/// **模型降级发生**（D3，2026-10-25）—— 主模型失败后切到备用模型。
+final class HeraclesFallback extends HeraclesEvent {
+  const HeraclesFallback({required this.from, required this.to, required this.reason});
+  final String from;
+  final String to;
+  final String reason;
 }
 
 /// **预算预警**（2026-10-24，E5）—— 工具调用预算用到 75% / 90% 时各播一次。

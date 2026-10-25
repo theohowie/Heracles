@@ -139,6 +139,8 @@ Future<void> main(List<String> args) async {
         stdout.writeln(_dim('（预算预警：已用 $used/$limit 次工具调用）'));
       case HeraclesRetrying(:final reason):
         stdout.writeln(_dim('（重试：$reason）'));
+      case HeraclesFallback(:final from, :final to):
+        stdout.writeln(_dim('（模型降级：$from → $to）'));
       case HeraclesTurnUsage():
         break; // Headless 不记账
       case HeraclesFinished(:final turns, :final wallClockMs):

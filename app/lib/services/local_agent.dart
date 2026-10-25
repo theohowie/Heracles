@@ -1007,6 +1007,8 @@ class LocalAgentExecutor {
               'ok': !isError,
               'ts': DateTime.now().millisecondsSinceEpoch,
             });
+          case HeraclesFallback(:final from, :final to, :final reason):
+            tr.fallbackNotice(from, to, reason);
           case HeraclesBudgetWarning(:final used, :final limit):
             tr.budgetWarning(used, limit);
           case HeraclesPlanUpdated(:final steps):
@@ -1517,6 +1519,17 @@ class _Translator {
       result: output,
       ok: !isError,
       wallMs: durationMs,
+    ));
+  }
+
+  /// **模型降级通知**（D3，2026-10-25）—— 复用 kBlocked 卡片。
+  void fallbackNotice(String from, String to, String reason) {
+    _sink(AgentEvent(
+      type: AgentEvent.kBlocked,
+      ts: _now,
+      tool: 'model_fallback',
+      reason: '模型 $from 失败，已自动切换到 $to 继续任务。'
+          '（原因：$reason）',
     ));
   }
 
