@@ -987,8 +987,7 @@ class HeraclesAgent {
       hooks: [
         budgetHook,
         approvalHook,
-        // ★ E4：traceDir 非空才挂（默认关）
-        if (_options.traceDir != null) _TraceHook(_options.traceDir!),
+
         // ★ P4（2026-10-25）：完成门禁 —— 写过文件且最后一次验证失败时
         //   拒绝收尾，模型必须回到修复循环（"带病收尾"被架构拦下）。
         if (_options.verifyGateCompletion && verify != null)
@@ -1428,46 +1427,6 @@ class _ToolBudgetHook extends AgentHook {
       );
     }
     return ToolCallHookResult.proceed(context.call);
-  }
-}
-
-/// **全链路 trace 钩子**（E4，2026-10-24）—— afterModelCall 落盘原始请求/响应。
-///
-/// 只在 RunOptions.traceDir 非空时挂。文件按轮编号（turn-N-*），
-/// JSON 用框架 toJson —— 回放时逐字段可还原。落盘失败**静默**
-/// （trace 是排障辅助，绝不能让排障工具本身搞崩任务）。
-class _TraceHook extends AgentHook {
-  _TraceHook(this.dir);
-  final String dir;
-  int _n = 0;
-
-  @override
-  Future<ModelResponseHookResult> afterModelCall(
-    ModelResponseHookContext context,
-  ) async {
-    try {
-      _n++;
-      final d = Directory(dir);
-      await d.create(recursive: true);
-      final req = {
-        'turn': _n,
-        'messages': [
-          for (final m in context.params.messages) m.toJson(),
-        ],
-      };
-      await File('${d.path}${Platform.pathSeparator}turn-$_n-req.json')
-          .writeAsString(jsonEncode(req));
-      await File('${d.path}${Platform.pathSeparator}turn-$_n-res.json')
-          .writeAsString(jsonEncode(context.response.toJson()));
-    } catch (e) {
-      // 静默：trace 失败不影响任务；但 debug 下打一行便于排障
-      assert(() {
-        // ignore: avoid_print
-        print("[heracles][trace] 落盘失败: $e");
-        return true;
-      }());
-    }
-    return ModelResponseHookResult.proceed(context.response);
   }
 }
 
