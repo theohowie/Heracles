@@ -352,10 +352,14 @@ class _InputBarState extends State<InputBar> {
                             enabled: widget.enabled,
                             onPicked: widget.onPermissionChanged,
                           ),
-                          const Spacer(),
-
-                          // ---- 模型选择框（带阴影的胶囊，紧贴发送键）----
-                          _ModelSelector(
+                          // ---- 模型选择框（双胶囊，紧贴发送键）----
+                          // ★ Expanded 独占剩余宽度是溢出防线（2026-10-25
+                          //   真机实测 RIGHT OVERFLOWED 8px）：不能再用
+                          //   Spacer + Flexible 对半分 —— 胶囊区只拿到一半
+                          //   空间照样溢出（窄屏回归测试实测 33px）。
+                          //   _ModelSelector 内部右对齐 + 首枚胶囊可收缩。
+                          Expanded(
+                            child: _ModelSelector(
                             label: widget.providerLabel,
                             reasoningLevel: widget.reasoningLevel,
                             h: h,
@@ -371,6 +375,7 @@ class _InputBarState extends State<InputBar> {
                             onProviderSelected: widget.onProviderSelected,
                             // ★ 两层菜单：点中转站 → 进它的模型目录
                             onOpenModelCatalog: widget.onOpenModelCatalog,
+                            ),
                           ),
                           const SizedBox(width: HSpace.sm),
 
@@ -751,26 +756,37 @@ class _ModelSelector extends StatelessWidget {
           ),
         );
     return Row(
-      mainAxisSize: MainAxisSize.min,
+      // 占满 Expanded 给的宽度并右对齐（胶囊组贴发送键一侧）
+      mainAxisAlignment: MainAxisAlignment.end,
       children: [
         // ★ 不给模型加前置图标（2026-10-12 用户明确要求）
-        pill(Row(
+        // 第一枚（模型名）可收缩：宽度不足时名字走省略号，
+        // 第二枚（思考档位）保持完整 —— 档位信息不能被截断。
+        Flexible(
+          child: pill(Row(
           mainAxisSize: MainAxisSize.min,
           children: [
-            ConstrainedBox(
-              // 两枚胶囊并排，长模型名截断，不把发送键挤出屏幕
-              constraints: const BoxConstraints(maxWidth: 104),
-              child: Text(
-                name,
-                maxLines: 1,
-                overflow: TextOverflow.ellipsis,
-                style: TextStyle(fontSize: 13, color: h.text),
+            // ★ 名字必须躺在 Flexible 里才能真的收缩：ConstrainedBox
+            //   只是上限，Row 给非弹性子级的宽度是无界的 —— 只套上限
+            //   时文本按上限宽度排版，胶囊被分到更窄时照样溢出
+            //   （窄屏回归实测：内层 Row 仅分到 24px 仍溢出 102px）。
+            Flexible(
+              child: ConstrainedBox(
+                // 两枚胶囊并排，长模型名截断，不把发送键挤出屏幕
+                constraints: const BoxConstraints(maxWidth: 104),
+                child: Text(
+                  name,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: TextStyle(fontSize: 13, color: h.text),
+                ),
               ),
             ),
             const SizedBox(width: HSpace.xs),
             Icon(AppIcons.chevronDown, size: 18, color: h.textDim),
           ],
-        )),
+          )),
+        ),
         const SizedBox(width: HSpace.xs),
         pill(Center(
           child: Text(
