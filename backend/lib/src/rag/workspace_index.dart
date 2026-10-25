@@ -27,7 +27,6 @@ library;
 import 'dart:convert';
 
 import '../capability/capabilities.dart';
-import '../contract/contract.dart';
 
 /// 工作区词法索引。
 class WorkspaceIndex {
