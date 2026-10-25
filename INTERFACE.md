@@ -71,15 +71,22 @@
 - ⚠️ 一处追加：`status` 增加第 4 值 **`cancelled`**（模型可把步骤标记为取消 —— §6.2 允许枚举末尾追加；前端未知值按 pending 渲染即可）；
 - 验收：`backend/test/session_history_e2e_test.dart` 3 条（合成消息/多帧取最后/与去重的先后）；杀进程恢复的 UI 验收待真机（灵动岛恢复 = 读同一行）。
 
+<<<<<<< HEAD
 ### N5 模型与思考等级 —— ✅ 已满足（2026-10-25 补 `reasoningLevelsEffective`）
 
 - `ModelCapabilities.supportsReasoning` 已有；推理档位已接线（§3）；
 - ★ **新增 `ModelCapability.reasoningLevelsEffective`**（持久化键 `rLv`，前端 N5 对齐）：**切档位（low/high/max）是否真的生效** —— 只有 OpenAI 兼容轨 true（`extra`→`reasoning_effort`），Anthropic/Responses 轨 false（client 不读）。**false 时前端把档位 chip 显示成仅开/关**（不假装有区别）——按前端要求如实标注；能力创建时按 provider 协议自动填。
+=======
+### N5 模型与思考等级 —— ✅ 已满足
+
+- `ModelCapabilities.supportsReasoning` 已有（`fetchModels`/`fetchCapabilitiesOnly` 返回）；推理档位已接线（§3）。
+>>>>>>> origin/muse/work
 
 ### N6 全局累计用量 —— ✅ 无后端工作
 
 - 前端聚合方案同意；`SessionUsage` 落盘字段完整（runs/turns/cached/prompt/output 均在 assistant 行与内存聚合里）。
 
+<<<<<<< HEAD
 ### N7 记忆结构化 —— ✅ 已落地（2026-10-25 确认形状定稿，前端可开工）
 
 > **给前端的确认**：形状已定稿并入库（`agent_bridge.dart` 的 API 全部可用），
@@ -94,6 +101,13 @@
   - SEC4：`addMemory/updateMemory` 疑似密钥拒收（返回 `MemoryWriteResult.failure`，`error` 字段带原因——前端直接展示）；
   - 存储：`memory.md` 每行一条 JSON（旧格式行读取时迁移为 legacy 条目，不丢内容）；
   - 验收：`listEntries/addEntry/updateEntry/deleteEntry` 单测在 `GlobalMemory`（App 侧），逐条删除不影响其他条目 ✓。
+=======
+### N7 记忆结构化 —— ⬜ 未做（下一批，设计已定）
+
+- 方向同意（解决"毛胚房"= 审计 M3/M6）。**计划**：Kotlin `MemoryStore.kt` 改为 JSONL 条目（`{id,kind,text,source,createdAt}`），通道新增 `memory.list/add/update/delete/capacity`（`memory.read/append/clear` 保留兼容 —— read 返回渲染后的整段文本，后端 `MemoryCapability` 不变）；后端 `renderMemory` 行为不变（仍整段注入 system，缓存前缀考虑）；
+- **后端回复 §7.3：`kind` 词表由后端定**（前端只展示）：`preference`（长期偏好）/ `background`（项目背景）/ `habit`（使用习惯）/ `other`，前端可按此映射中文名；
+- 验收（逐条删除不影响其他条目进 prompt）随实现一起交付。
+>>>>>>> origin/muse/work
 
 ### N8 设备权限状态 —— ⬜ 未做（Kotlin 薄层，下一批）
 
@@ -118,11 +132,15 @@
 - 事件字段只增（callId/workspaceInside/breakdown/limit/limitSource/planStepsDetailed）；`.jsonl` 只增行类型与字段（tool_call/plan/compact 行 + tool 行的 id 字段）；
 - 契约常量以 `contract.dart` 为唯一来源 ✅（本仓库根另有 `接口.md` 记录后端→前端的实现面，与本文互补：本文是**前端提出的契约**，`接口.md` 是**后端的实现清单**）。
 
+<<<<<<< HEAD
 ## 7. 待确认 —— 已关账（前端 2026-10-25 全部接受）
 
 > **关账记录**：四个回复（5 分钟超时按 deny / compressor 拆分 / kind 后端定 /
 > 白名单 v1 按工具名）前端全部接受；N1 有意偏差（破坏性三件套+shell/APK 无论
 > workspaceInside 都拦）接受，弹窗按事件渲染、前端不自行判定。以下原文留档。
+=======
+## 7. 待确认 —— 后端回复（2026-10-24）
+>>>>>>> origin/muse/work
 
 1. **审批超时 5 分钟**：✅ 采纳（原 10 分钟已改）；超时按 deny ✅ 且并发 `blocked` 事件（用户要知道弹窗为什么"自己没了"）。
 2. **N2 由 compressor 估算器拆分** ✅（同一套系数，口径稳定）；reasoning/summary 恒 0 的原因见 N2 回复。

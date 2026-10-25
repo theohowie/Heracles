@@ -21,19 +21,22 @@ import '../services/settings_controller.dart';
 import '../theme/app_theme.dart';
 import '../theme/cupertino_kit.dart';
 import 'settings_screen.dart';
+import '../widgets/bw_topbar.dart';
+import '../widgets/bw_usage_sheet.dart';
+import '../widgets/bw_approval.dart';
+import '../widgets/themed_background.dart';
 import '../widgets/input_bar.dart';
 import '../widgets/message_row.dart';
-import '../widgets/plan_checklist.dart';
 import '../widgets/tool_call_card.dart'
     show
         ToolGroupRow,
+        friendlyToolName,
         kStepRowArrowGap,
         kStepRowArrowSize,
         kStepRowHPad,
         kStepRowStatusGap,
         kStepRowStatusSize,
         kStepRowVPad;
-import '../widgets/usage_sidebar.dart';
 import '../widgets/workspace_drawer.dart';
 
 /// 会话主屏 —— 默认首屏（`06-UI界面设计.md` §6.1）。
@@ -111,6 +114,9 @@ class _ChatScreenState extends State<ChatScreen> {
 
   /// 当前进行中的步（0 起）；-1 = 全部完成
   int _planActive = 0;
+
+  /// 已取消步骤的下标（plan_updated 帧的 cancelled 状态，N4 追加值）
+  Set<int> _planCancelled = const {};
 
   /// 用户收起了清单
   bool _planCollapsed = false;
@@ -339,16 +345,17 @@ class _ChatScreenState extends State<ChatScreen> {
   /// 空 = 没有 run 过（侧栏退回两行旧图例）。
   Map<String, int> _contextBreakdown = const <String, int>{};
 
+<<<<<<< HEAD
   /// 右侧边栏**用按钮打开**（**不依赖边缘滑动**，见 `docs/24` §4.3）。
+=======
+  /// 用量半抽屉（2026-10-24 黑白改版）：点圆环打开，替代右侧边栏。
+>>>>>>> origin/muse/work
   ///
-  /// ⚠️ 刻意**不引入第二个 GlobalKey** ——
-  /// 我第一版加了个 `_endDrawerKey`，但它没挂到 `Scaffold` 上
-  /// （`Scaffold` 用的是 [_scaffoldKey]），于是 `currentState` 恒为 null、
-  /// 点指示器**静默无反应**。集成测试当场抓到了。
-  ///
-  /// 同一个 `Scaffold` 已经有 `_scaffoldKey`，`openEndDrawer()` 就在它上面 ——
-  /// 复用即可。多一个 GlobalKey 只是多一个能忘记挂的地方。
-  void _openUsageSidebar() => _scaffoldKey.currentState?.openEndDrawer();
+  /// 打开时先静默刷新上下文占用（原来挂在 onEndDrawerChanged 上）。
+  void _openUsageSidebar() {
+    unawaited(_refreshContextUsage());
+    showUsageSheet(context, _usage, _contextUsage);
+  }
 
   /// 当前会话的累计用量（没有则零元）。
   SessionUsage get _usage => _usageBySession[_activeSessionId ?? ''] ?? SessionUsage.empty;
@@ -2100,6 +2107,54 @@ class _ChatScreenState extends State<ChatScreen> {
           }
         });
 
+      // ---- ★ 计划完整帧（N4，2026-10-25 后端升级形状）----
+      //
+      // `plan_updated` 是计划的**唯一权威帧**：只读最后一帧，不做增量
+      // 拼接（契约 N4）。空数组 = 无计划（灵动岛收起）；status 含追加值
+      // `cancelled`，未知值按 pending 渲染。上面的 plan_created /
+      // plan_advanced 是老后端的兼容路径，保留不删。
+      case AgentEvent.kPlanUpdated:
+        final detailed = e.planStepsDetailed;
+        if (detailed != null) {
+          setState(() {
+            if (detailed.isEmpty) {
+              _planSteps = null;
+              _planDone = 0;
+              _planActive = -1;
+              _planCancelled = const {};
+            } else {
+              _planSteps = [for (final s in detailed) s['title'] ?? ''];
+              _planDone = detailed
+                  .where((s) =>
+                      s['status'] == 'done' || s['status'] == 'cancelled')
+                  .length;
+              _planActive =
+                  detailed.indexWhere((s) => s['status'] == 'active');
+              _planCancelled = {
+                for (var i = 0; i < detailed.length; i++)
+                  if (detailed[i]['status'] == 'cancelled') i,
+              };
+            }
+          });
+        }
+
+      // ---- ★ 上下文分项帧（N2，2026-10-25 后端升级形状）----
+      //
+      // `context_updated` 每轮一帧：breakdown（7 固定键）+ limit /
+      // limitSource。用量抽屉的环图直接吃这里存下的分项；打开抽屉时
+      // 的刷新拉取保留为兜底（还没跑过时帧还没到）。
+      case AgentEvent.kContextUpdated:
+        setState(() {
+          if (e.breakdown != null) _contextBreakdown = e.breakdown!;
+          final lim = e.limit;
+          if (lim != null && lim > 0) {
+            _contextLimit = lim;
+            if (e.limitSource != null) {
+              _contextLimitSource = e.limitSource!;
+            }
+          }
+        });
+
       // ---- ★ 上下文压缩（2026-10-23，用户要求「压缩机制要可见」）----
       //
       // 用户原话：「上下文压缩机制这个要做一下，如果上下文达到了 80% 必须先
@@ -2158,6 +2213,8 @@ class _ChatScreenState extends State<ChatScreen> {
           tool: e.tool,
           args: e.args,
           reason: e.reason ?? e.message ?? '',
+          message: e.message,
+          workspaceInside: e.workspaceInside ?? true,
         ));
 
       // ---- 收尾：撤掉占位 ----
@@ -2460,9 +2517,13 @@ class _ChatScreenState extends State<ChatScreen> {
               maxOutputTokens: e.value.maxOutputTokens,
               supportsTools: e.value.supportsTools,
               supportsReasoning: e.value.supportsReasoning,
+<<<<<<< HEAD
               // N5：档位只在 OpenAI 兼容轨真生效（后端 extra 通道）
               reasoningLevelsEffective:
                   p.protocol == ProviderProtocol.openaiChat,
+=======
+              reasoningLevelsEffective: p.protocol.reasoningLevelsEffective,
+>>>>>>> origin/muse/work
             ),
       };
       await widget.settings.updateProvider(
@@ -2677,6 +2738,7 @@ class _ChatScreenState extends State<ChatScreen> {
       _planSteps = null;
       _planDone = 0;
       _planActive = 0;
+      _planCancelled = const {};
       _planReachedGoal = null;
       _planClosedReason = null;
       // ★ 2026-10-23：换上下文 = 换了一份消息列表 —— 「是否跟随底部」与
@@ -3971,8 +4033,13 @@ class _ChatScreenState extends State<ChatScreen> {
     //    `InputBar.isLocalBackend` —— 两者都随本地后端删除（ADR-035 S4）。
     final provider = widget.settings.value.effectiveProvider;
 
-    return Scaffold(
+    // ★ 主题背景（2026-10-24）：光晕画在 Scaffold 底下，整屏透出
+    //   （黑白/柔雾无光晕时 ThemedBackground 就是一层纯色底，视觉不变）。
+    return ThemedBackground(
+      child: Scaffold(
       key: _scaffoldKey,
+      // 有光晕的主题：Scaffold 底透明，让光斑透出来
+      backgroundColor: h.glowColors.isEmpty ? null : Colors.transparent,
       // ★ 横滑呼出侧边栏（2026-10-10 实测定稿）
       //
       // ## 走过的弯路
@@ -4006,27 +4073,6 @@ class _ChatScreenState extends State<ChatScreen> {
       drawerEnableOpenDragGesture: true,
       drawerEdgeDragWidth: 200,
 
-      // ★ 右侧边栏：用量与上下文（2026-10-11，t13；`docs/24`）
-      //
-      // ## 为什么 `endDrawerEnableOpenDragGesture: false`
-      //
-      // `docs/24` §4.3 + `docs/21` §2.2 的教训：**右侧边缘是系统返回区**，
-      // 而"右滑关闭"又是抽屉的通用手势 —— 让"边缘右滑"同时承担
-      // "打开边栏"与"系统返回"两种含义，必然打架。
-      //
-      // 关掉它**只影响"关闭态的边缘打开手势"**（`DrawerController` 在
-      // `_controller.isDismissed` 分支里才挂那个 GestureDetector），
-      // **打开态的右滑关闭仍然有效**（另一个分支常驻）。
-      // 所以：**打开走按钮，关闭可右滑** —— 正是 `docs/24` 的建议。
-      endDrawerEnableOpenDragGesture: false,
-      endDrawer: UsageSidebar(
-        usage: _usage,
-        contextUsage: _contextUsage,
-        onClose: () => Navigator.of(context).pop(),
-      ),
-      onEndDrawerChanged: (open) {
-        if (open) unawaited(_refreshContextUsage());
-      },
       onDrawerChanged: (open) {
         // 抽屉打开时静默刷新 —— 会话可能在别处变化
         if (open && !_loading) _reload(silent: true);
@@ -4053,6 +4099,8 @@ class _ChatScreenState extends State<ChatScreen> {
         onSearchChanged: (q) => setState(() => _search = q),
       ),
       appBar: AppBar(
+        // 有光晕的主题：顶栏也透明，光斑从屏幕顶部透出来（同图一）
+        backgroundColor: h.glowColors.isEmpty ? null : Colors.transparent,
         titleSpacing: 0,
         leading: CupertinoButton(
           padding: const EdgeInsets.all(8),
@@ -4065,6 +4113,8 @@ class _ChatScreenState extends State<ChatScreen> {
             //   「你标题上面的这个本地模型名称还放着那干嘛？」——
             //   BackendBadge（[本地|qwen3.5-4b] 绿胶囊）移除。
             //   模型信息在输入框的模型选择框里已经有了，标题不重复。
+            // ★ 灵动岛不在顶栏（2026-10-25 移位）：展开态在固定高度的
+            //   AppBar 里会溢出，改为浮在消息列表顶部正中（见 body 的 Stack）。
             Flexible(
               child: Text(
                 _activeSession?.title ?? _workspaceName,
@@ -4080,15 +4130,11 @@ class _ChatScreenState extends State<ChatScreen> {
           ],
         ),
         actions: [
-          // ★ 常驻**紧凑指示器** → 点击打开右侧边栏（2026-10-11，t13）
-          //
-          // 为什么常驻的是它、而不是一个普通图标：
-          // 用户要"命中率显示在一个固定位置"。手机上放不下参考图那种
-          // 三簇状态条（`docs/24` §5），所以这里只放**一个数**，
-          // 详情进边栏。数本身可点 —— 少一次"先找图标"的认知成本。
-          UsageIndicator(
-            usage: _usage,
-            contextUsage: _contextUsage,
+          // ★ 上下文圆环（2026-10-24 黑白改版）：替代原来的 UsageIndicator 文字，
+          //   环的弧长 = 已用 / 上限，点按打开用量半抽屉。
+          ContextRing(
+            usedTokens: _contextUsage.used,
+            limitTokens: _contextUsage.limit,
             onTap: _openUsageSidebar,
           ),
           Tooltip(
@@ -4144,27 +4190,8 @@ class _ChatScreenState extends State<ChatScreen> {
           Expanded(
             child: Column(
               children: [
-                // ★ 任务计划清单（2026-10-14，harness）——
-                //   常驻列表**顶部**（不随消息滚走）：用户随时能看到
-                //   "还要做什么、现在在哪一步"。用户原话：
-                //   「顶部显示任务计划（1.查看结构 ✓ 2.写HTML ←进行中 3.验证）」
-                if (_planSteps != null && _planSteps!.isNotEmpty)
-                  Padding(
-                    padding: const EdgeInsets.fromLTRB(
-                        HSpace.lg, HSpace.md, HSpace.lg, 0),
-                    child: PlanChecklist(
-                      steps: _planSteps!,
-                      doneCount: _planDone,
-                      activeIndex: _planActive,
-                      collapsed: _planCollapsed,
-                      // ★ 收尾状态（2026-10-15，BUG-1）——
-                      //   false = 中断（显示警示，不画成成功）
-                      reachedGoal: _planReachedGoal,
-                      closedReason: _planClosedReason,
-                      onToggle: () =>
-                          setState(() => _planCollapsed = !_planCollapsed),
-                    ),
-                  ),
+                // ★ 任务计划清单已移入顶栏灵动岛（2026-10-24 黑白改版），
+                //   不再常驻列表顶部。数据仍由 _planSteps 等字段持有。
                 Expanded(
                   child: Stack(
               children: [
@@ -4214,6 +4241,31 @@ class _ChatScreenState extends State<ChatScreen> {
                       onTap: _resumeAutoScroll,
                       h: h,
                       hasNewContent: _hasNewContent,
+                    ),
+                  ),
+                // ---- 灵动岛（2026-10-25 从顶栏移入）----
+                //   浮在消息列表顶部正中：收起是小胶囊（当前步骤 + 进度），
+                //   点开是完整清单面板，盖在消息之上、不挤占布局高度
+                //   （顶栏固定高度放不下展开态）。数据吃 plan_updated
+                //   完整帧（见事件处理）。
+                if (_planSteps != null && _planSteps!.isNotEmpty)
+                  Positioned(
+                    top: 6,
+                    left: 0,
+                    right: 0,
+                    child: Center(
+                      child: DynamicIsland(
+                        steps: _planSteps!,
+                        doneCount: _planDone,
+                        activeIndex: _planActive,
+                        collapsed: _planCollapsed,
+                        onToggle: () => setState(
+                            () => _planCollapsed = !_planCollapsed),
+                        reachedGoal: _planReachedGoal,
+                        closedReason: _planClosedReason,
+                        cancelledIndices: _planCancelled,
+                        onAdjust: _prefillPlanAdjust,
+                      ),
                     ),
                   ),
               ],
@@ -4303,6 +4355,7 @@ class _ChatScreenState extends State<ChatScreen> {
           ),
         ],
       ),
+    ),
     );
   }
 
@@ -4899,12 +4952,24 @@ class _ChatScreenState extends State<ChatScreen> {
   ///
   /// 无论走哪条路都必须回一个决定 —— 否则队列干等 10 分钟，
   /// 用户看到的是"任务卡死"，且模型得不到任何反馈。
+  /// 「调整计划」（后端推荐路径，2026-10-25）：v1 不新增编辑 API ——
+  /// 预填一条用户消息，用户补完发出去，模型用 write_todos 更新计划，
+  /// 前端随即收到新的 plan_updated 完整帧。零新接口、天然一致。
+  void _prefillPlanAdjust() {
+    _inputCtrl.text = '请调整当前计划：';
+    _inputCtrl.selection = TextSelection.collapsed(
+      offset: _inputCtrl.text.length,
+    );
+  }
+
   Future<void> _showApprovalDialog(
     BuildContext context, {
     required String callId,
     required String? tool,
     required Map<String, String>? args,
     required String reason,
+    String? message,
+    bool workspaceInside = true,
   }) async {
     // ★★ 2026-10-21（BUG-1）：**完全访问档绝不弹窗** ★★
     //
@@ -4940,7 +5005,6 @@ class _ChatScreenState extends State<ChatScreen> {
       return;
     }
 
-    final h = Hue.of(context);
     // ★★ 2026-10-21：**不再截断**审批内容 ★★
     //
     // ## 修的是什么
@@ -4972,11 +5036,8 @@ class _ChatScreenState extends State<ChatScreen> {
         .join('\n')
         .trim();
     final shownDetail = detail;
-    // 摘要行用的短预览（只在正文过长时显示，帮用户判断"这次改的是哪一块"）
-    final summaryLine = detail.length > 160
-        ? '${detail.substring(0, 160).replaceAll('\n', ' ')}…'
-        : '';
 
+<<<<<<< HEAD
     final decision = await showCupertinoDialog<String>(
       context: context,
       barrierDismissible: true,
@@ -5107,6 +5168,35 @@ class _ChatScreenState extends State<ChatScreen> {
     );
     // null = 点外面/返回键 ⇒ 按**拒绝**处理（安全默认，绝不放行）
     await _bridge.replyApproval(callId: callId, decision: decision ?? 'deny');
+=======
+    // ★ 2026-10-25：弹窗换新版底部抽屉（黑白改版的审批样式，三按钮 +
+    //   「停止任务」）。保留的旧语义一条不少：
+    //   · 参数给**全文**（shownDetail 不截断，抽屉内可滚动）；
+    //   · 「停止任务」= 先 deny 让挂起的审批立刻返回、再停整个 run；
+    //   · 关抽屉/无决定（null）⇒ 按**拒绝**处理（安全默认，绝不放行）。
+    final decision = await showApprovalRequestSheet(
+      context,
+      tool: friendlyToolName(tool ?? ''),
+      argsPreview: shownDetail.isEmpty ? '（无参数）' : shownDetail,
+      risk: reason.isEmpty ? null : reason,
+      note: (message != null && message.isNotEmpty && message != reason)
+          ? message
+          : null,
+      workspaceInside: workspaceInside,
+      allowStop: true,
+    );
+    if (decision == ApprovalDecision.stop) {
+      await _bridge.replyApproval(callId: callId, decision: 'deny');
+      unawaited(_stopRun());
+      return;
+    }
+    final wire = switch (decision) {
+      ApprovalDecision.once => 'once',
+      ApprovalDecision.always => 'always',
+      _ => 'deny',
+    };
+    await _bridge.replyApproval(callId: callId, decision: wire);
+>>>>>>> origin/muse/work
   }
 
   /// **目录选模型**（2026-10-14，二级弹层）。

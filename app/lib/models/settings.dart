@@ -47,6 +47,21 @@ enum AppAppearance {
   final String label;
 }
 
+/// 主题风格（2026-10-24，用户拍板：外观页用主题选择代替强调色选择）。
+///
+/// 只改颜色与背景，不改布局结构。默认黑白；柔雾是 2026-10-23 定过的
+/// 方向；极光、活力来自概念图里的两套配色。
+enum AppThemeStyle {
+  bw('黑白', '默认：只用黑、白、灰'),
+  mist('柔雾', '奶油底 + 淡紫 + 薄荷'),
+  aurora('极光', '深色底 + 紫青极光'),
+  vitality('活力', '暖底 + 珊瑚橙');
+
+  const AppThemeStyle(this.label, this.description);
+  final String label;
+  final String description;
+}
+
 /// 工作步骤展示详细度 —— 用户设置截图里的四档。
 ///
 /// **行为落点**：工具调用卡片（`widgets/tool_call_card.dart`）的渲染密度，
@@ -239,6 +254,7 @@ class ModelCapability {
   final bool? supportsTools;
   final bool? supportsReasoning;
 
+<<<<<<< HEAD
   /// **思考等级是否真的生效**（前端 N5 对齐，2026-10-25）。
   ///
   /// `supportsReasoning` 只说明模型会思考；这个字段说明**切档位（low/high/
@@ -246,6 +262,11 @@ class ModelCapability {
   /// **只有 OpenAI 兼容轨的 client 读它**（→ reasoning_effort）；
   /// Anthropic / Responses 轨不读 ⇒ 档位无效（前端只显示开/关，不假装有区别）。
   /// 按 provider 协议在能力创建时定死。
+=======
+  /// 思考档位是否真生效（创建时按 provider 协议自动填，见
+  /// [ProviderProtocol.reasoningLevelsEffective]）。旧数据没有
+  /// 这个键 ⇒ 读回默认 false（宁可少显示，不假装有区别）。
+>>>>>>> origin/muse/work
   final bool reasoningLevelsEffective;
 
   bool get hasContext => contextWindow > 0;
@@ -256,7 +277,11 @@ class ModelCapability {
         if (maxOutputTokens != null) 'maxOut': maxOutputTokens,
         if (supportsTools != null) 'tools': supportsTools,
         if (supportsReasoning != null) 'reason': supportsReasoning,
+<<<<<<< HEAD
         'rLv': reasoningLevelsEffective,
+=======
+        if (reasoningLevelsEffective) 'rLv': true,
+>>>>>>> origin/muse/work
       };
 
   factory ModelCapability.fromJson(Map<String, dynamic> j) => ModelCapability(
@@ -264,7 +289,11 @@ class ModelCapability {
         maxOutputTokens: (j['maxOut'] as num?)?.toInt(),
         supportsTools: j['tools'] as bool?,
         supportsReasoning: j['reason'] as bool?,
+<<<<<<< HEAD
         reasoningLevelsEffective: j['rLv'] == true,
+=======
+        reasoningLevelsEffective: j['rLv'] as bool? ?? false,
+>>>>>>> origin/muse/work
       );
 }
 
@@ -308,6 +337,13 @@ enum ProviderProtocol {
 
   const ProviderProtocol(this.label);
   final String label;
+
+  /// 该协议下思考**档位**是否真生效（后端如实标注，2026-10-25）：
+  /// 只有 OpenAI Chat 轨把 `reasoning_effort` 真正下发并生效；
+  /// Anthropic / Responses 轨的 client 不读这个通道 —— 那两轨只有
+  /// 开/关两态，前端据此只显示两态，不假装五档有区别。
+  bool get reasoningLevelsEffective =>
+      this == ProviderProtocol.openaiChat;
 
   static ProviderProtocol parse(String? s) => ProviderProtocol.values.firstWhere(
         (v) => v.name == s,
@@ -524,6 +560,7 @@ class AppSettings {
     this.permission = PermissionMode.workspaceAuto,
     this.language = AppLanguage.zh,
     this.appearance = AppAppearance.dark,
+    this.themeStyle = AppThemeStyle.bw,
     this.fontSize = 15,
     this.stepDetail = StepDetail.standard,
     this.reasoningLevel = ReasoningLevel.auto,
@@ -538,6 +575,9 @@ class AppSettings {
   final PermissionMode permission;
   final AppLanguage language;
   final AppAppearance appearance;
+
+  /// 主题风格（颜色与背景；默认黑白）
+  final AppThemeStyle themeStyle;
 
   /// 会话内容字号（12–20）
   final double fontSize;
@@ -713,6 +753,7 @@ class AppSettings {
     PermissionMode? permission,
     AppLanguage? language,
     AppAppearance? appearance,
+    AppThemeStyle? themeStyle,
     double? fontSize,
     StepDetail? stepDetail,
     ReasoningLevel? reasoningLevel,
@@ -727,6 +768,7 @@ class AppSettings {
         permission: permission ?? this.permission,
         language: language ?? this.language,
         appearance: appearance ?? this.appearance,
+        themeStyle: themeStyle ?? this.themeStyle,
         fontSize: fontSize ?? this.fontSize,
         stepDetail: stepDetail ?? this.stepDetail,
         reasoningLevel: reasoningLevel ?? this.reasoningLevel,

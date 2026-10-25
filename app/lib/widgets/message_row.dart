@@ -9,6 +9,7 @@ import '../models/settings.dart';
 import '../theme/app_theme.dart';
 import '../theme/cupertino_kit.dart';
 import 'stream_step.dart';
+import 'bw_topbar.dart';
 import 'tool_call_card.dart';
 
 /// 消息行 —— 按类型分派到不同渲染。
@@ -61,8 +62,7 @@ class MessageRow extends StatelessWidget {
       HUserMessage(:final text) => _user(h, text, message.id, context),
       HAssistantMessage(:final text, :final changes) =>
           _assistant(h, text, changes),
-      HToolCall() =>
-        ToolCallCard(call: message as HToolCall, stepDetail: stepDetail),
+      HToolCall() => _toolLine(message as HToolCall, stepDetail),
       HProgress(:final label) => _progress(h, label),
       HStepStream() => StreamStepView(
           step: message as HStepStream,
@@ -75,6 +75,40 @@ class MessageRow extends StatelessWidget {
       // 旧数据兼容：独立一条的变更报告（新数据已挂进助手消息内部）
       HChanges(:final files) => _changesCard(h, files),
     };
+  }
+
+  /// 工具调用 → 纯文字行（2026-10-24 黑白改版，替代 ToolCallCard 卡片）。
+  ///
+  /// 摘要复用 `toolCallLabel`（动词表是唯一真相源）；明细按 StepDetail 档位：
+  /// 精简档不显示参数，非完整档截断结果，完全展开档另附模型原始输出。
+  Widget _toolLine(HToolCall call, StepDetail detail) {
+    final running = call.status == ToolStatus.running;
+    final failed = call.status == ToolStatus.failure;
+    final lines = <String>[];
+    if (detail.showArgs) {
+      for (final e in call.args.entries) {
+        lines.add('${e.key}: ${e.value}');
+      }
+    }
+    final result = call.result;
+    if (result != null && result.isNotEmpty) {
+      lines.add(detail.fullResult
+          ? result
+          : (result.length > 120 ? '${result.substring(0, 120)}…' : result));
+    }
+    final raw = call.rawOutput;
+    if (detail.showRawOutput && raw != null && raw.isNotEmpty) {
+      lines.add(raw);
+    }
+    return PlainToolLine(
+      icon: call.tool == 'run_shell_command'
+          ? AppIcons.terminal
+          : AppIcons.file,
+      summary: toolCallLabel(call.tool, call.args,
+          running: running, failed: failed),
+      detailLines: lines,
+      initialExpanded: detail == StepDetail.fullyExpanded,
+    );
   }
 
   /// **变更报告卡片**（2026-10-22，用户点名要参考界面那个"已编辑 N 个文件"）。
