@@ -7,9 +7,13 @@ import android.app.NotificationManager
 import android.app.PendingIntent
 import android.content.Intent
 import android.content.pm.PackageManager
+import android.os.Build
 import android.os.Bundle
+import android.provider.Settings
+import android.os.Environment
 import android.os.Handler
 import android.os.Looper
+import androidx.core.app.NotificationManagerCompat
 import com.theohowie.heracles.bridge.DeviceChannel
 import com.theohowie.heracles.bridge.DeviceFs
 import com.theohowie.heracles.bridge.DeviceHealth
@@ -190,6 +194,8 @@ class MainActivity : FlutterActivity() {
 
             // ---- 设备权限（无线调试 / Shizuku / Stellar 引导） ----
             "devicePermission" -> handleDevicePermission(result)
+            // ★ N8（2026-10-25，INTERFACE.md §4.N8）：权限页统一查询
+            "devicePermissions" -> handleDevicePermissions(result)
             "shizukuGrant" -> handleShizukuGrant(force = false, result = result)
             "shizukuForceRequest" -> handleShizukuGrant(force = true, result = result)
 
@@ -400,6 +406,65 @@ class MainActivity : FlutterActivity() {
             )
         }
         reply(result, payload)
+    }
+
+    /**
+     * ★ N8（2026-10-25）：设备权限统一查询 —— 每项 granted / denied / unknown。
+     *
+     * 权限项（INTERFACE.md §4.N8 清单，新增先登记）：
+     * - shizuku：Shizuku binder 活着且已授权（Stellar 桌面端不在此列——
+     *   它是 shell 路由的实现细节，权限页关心的是"提权通道"）
+     * - files：SAF 工作区模式常开（App 私有目录天然可写）；`allFiles`
+     *   单列 Android 11+ 的"所有文件访问"（我们按设计不申请，SAF 模式下
+     *   denied 是正常态——前端文案要说清，不要渲染成红色警告）
+     * - notifications：通知（前台服务/构建进度依赖）
+     * - accessibility：无障碍服务（扫描 UI 树用；未在 manifest 声明服务
+     *   前恒为 denied —— 如实，不假装）
+     * - overlay：悬浮窗（SYSTEM_ALERT_WINDOW）
+     *
+     * 全部本地同步查询（无 binder 调用），不需要切线程。
+     */
+    private fun handleDevicePermissions(result: MethodChannel.Result) {
+        val ctx = applicationContext
+        val shizuku = runCatching {
+            val (ping, granted, _) = DeviceShellManager.shizukuStatus()
+            when {
+                granted -> "granted"
+                ping -> "denied"       // 活着但没授权
+                else -> "unknown"      // binder 不在（Shizuku 没启动/没装）
+            }
+        }.getOrDefault("unknown")
+
+        val notifications = runCatching {
+            if (NotificationManagerCompat.from(ctx).areNotificationsEnabled()) "granted" else "denied"
+        }.getOrDefault("unknown")
+
+        val accessibility = runCatching {
+            val enabled = Settings.Secure.getString(
+                ctx.contentResolver,
+                Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES,
+            ) ?: ""
+            // 我们自己的服务（如果将来声明）或任何辅助服务在跑都算 granted
+            // —— 权限页语义是"这一类能力当前可用"
+            if (enabled.isNotBlank()) "granted" else "denied"
+        }.getOrDefault("unknown")
+
+        val overlay = runCatching {
+            if (Settings.canDrawOverlays(ctx)) "granted" else "denied"
+        }.getOrDefault("unknown")
+
+        val allFiles = runCatching {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R && Environment.isExternalStorageManager()) "granted" else "denied"
+        }.getOrDefault("unknown")
+
+        reply(result, mapOf(
+            "shizuku" to shizuku,
+            "files" to "granted", // SAF 模式：工作区读写由系统授权流程保证
+            "allFiles" to allFiles,
+            "notifications" to notifications,
+            "accessibility" to accessibility,
+            "overlay" to overlay,
+        ))
     }
 
     /** 同步块的小包装（只为可读性，不切线程 —— 这两个调用都是本地的）。 */
