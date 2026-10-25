@@ -612,6 +612,8 @@ class LocalAgentExecutor {
     // · 超限（截断）**如实标注**，模型要精查用 find_files；
     // · 内容随工作区变化 ⇒ 那一轮前缀重建（与宪法/记忆同一性质的税，记账不掩盖）。
     String? snapshotNote;
+    // R2：词法检索注入（相关片段 + 出处）—— 建在快照之后
+    String? ragNote;
     try {
       final raw = await const DeviceChannelClient()
           .call('fs.list', <String, Object?>{
@@ -639,6 +641,25 @@ class LocalAgentExecutor {
               '${truncated ? '，已截断' : ''})'
               '\n${lines.join('\n')}\n'
               '${truncated ? '（条目超过上限，未全部列出）' : ''}';
+
+          // ★ R1-R3（2026-10-25，词法口径）：用快照清单建索引 + 按任务检索
+          //   相关片段（正文命中 + 文件名加权）。预算硬上限，失败静默。
+          try {
+            final wsCaps = buildDeviceCapabilities(workspaceRoot: workspacePath);
+            final idx = WorkspaceIndex();
+            await idx.build(wsCaps.workspace!, lines)
+                .timeout(const Duration(seconds: 3));
+            final hits = idx.search(request, maxResults: 3);
+            if (hits.isNotEmpty) {
+              final buf = StringBuffer('## 工作区相关片段（词法检索，带出处）\n');
+              for (final h in hits) {
+                buf.writeln('- ${h.render()}');
+              }
+              ragNote = buf.toString().trimRight();
+            }
+          } catch (_) {
+            // 静默：检索是增强
+          }
         }
       }
     } catch (_) {
@@ -697,6 +718,7 @@ class LocalAgentExecutor {
         systemPrompts: [
           ?constitutionNote,
           ?snapshotNote,
+          ?ragNote,
         ],
         // ★ 审批档位（2026-10-24 接线）：从设置显式映射。
         //   backend 库默认 fullAccess（不拦，库没有 UI 可问）；
