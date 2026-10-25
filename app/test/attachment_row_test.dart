@@ -11,8 +11,9 @@ import 'package:heracles/widgets/input_bar.dart';
 
 /// **附件展示回归**（2026-10-25 晚，用户给参考图定）：
 ///
-/// · 图片附件 ⇒ 显示缩略图本体（不是文件名 chip），右上角圆形 × 可删
-/// · 文件附件 ⇒ 文件卡（文件名 + 大小），右上角圆形 × 可删
+/// · 图片附件 ⇒ 方形缩略图本体，右上角圆形 × 可删
+/// · 文件附件 ⇒ 方形 tile（扩展名徽标 + 文件名），右上角圆形 × 可删
+///   （2026-10-26 随 TRAE 式输入区改版，文件不再显大小）
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
 
@@ -66,7 +67,7 @@ void main() {
     expect(removed, 'img1');
   });
 
-  testWidgets('文件附件显示文件卡（名 + 大小），点 × 回调删除', (tester) async {
+  testWidgets('文件附件显示方形 tile（徽标 + 名），点 × 回调删除', (tester) async {
     String? removed;
     await tester.pumpWidget(wrap(InputBar(
       onSend: (_) {},
@@ -85,7 +86,10 @@ void main() {
 
     expect(tester.takeException(), isNull);
     expect(find.text('智能体开发对照表.md'), findsOneWidget);
-    expect(find.text('28KB'), findsOneWidget);
+    expect(find.text('MD'), findsOneWidget,
+        reason: '文件 tile 顶部应有扩展名徽标');
+    expect(find.text('28KB'), findsNothing,
+        reason: 'tile 形态不显文件大小（向参考图看齐）');
     expect(find.byType(Image), findsNothing,
         reason: '文件附件不渲染图片缩略图');
     await tester.tap(find.byIcon(AppIcons.close));

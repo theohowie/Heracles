@@ -48,8 +48,10 @@ void main() {
 
       expect(tester.takeException(), isNull,
           reason: '输入行在 ${width.toInt()}dp 下不应有溢出/布局异常');
-      // 两枚胶囊都在：模型名（截断显示）与思考档位（完整）
-      expect(find.text('思考 · 最高'), findsOneWidget);
+      // 模型胶囊在（单枚，卡内底行）：Text 的 data 是全名，
+      // 视觉截断不影响 finder —— 以此证明胶囊真渲染了
+      expect(
+          find.text('deepseek-v4.1-flash-pro-very-long-name'), findsOneWidget);
     });
   }
 }

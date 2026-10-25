@@ -31,6 +31,9 @@ class InputBar extends StatefulWidget {
     required this.onSend,
     this.onPickAttachment,
     this.onRemoveAttachment,
+    this.workspaceLabel,
+    this.onWorkspaceTap,
+    this.onGithubTap,
     this.attachments = const [],
     this.enabled = true,
     this.busy = false,
@@ -62,6 +65,16 @@ class InputBar extends StatefulWidget {
 
   /// 已选附件
   final List<HAttachment> attachments;
+
+  /// 底部信息条显示的工作区名（2026-10-26 TRAE 式输入区）；null 显示「工作区」
+  final String? workspaceLabel;
+
+  /// 点信息条的工作区项（外层打开抽屉换区）
+  final VoidCallback? onWorkspaceTap;
+
+  /// 点信息条的「连接 Github」—— 功能未接入，先占位前端
+  /// （用户 2026-10-26 定：先把前端做好，后续不做再撤）
+  final VoidCallback? onGithubTap;
 
   final bool enabled;
 
@@ -224,58 +237,24 @@ class _InputBarState extends State<InputBar> {
                 canPin: i > 0,
               ),
 
-            // ---- 附件 chip 行 ----
-            if (widget.attachments.isNotEmpty)
-              _AttachmentRow(
-                attachments: widget.attachments,
-                h: h,
-                onRemove: widget.onRemoveAttachment,
-              ),
-
-            // ---- ★ 悬浮大容器输入框（2026-10-12，仿 llama.cpp Web UI）----
+            // ---- ★ 输入大卡（2026-10-26，用户按 TRAE 参考图定版）----
             //
-            //   ╭──────────────────────────────────╮
-            //   │ 描述你要做什么…                    │
-            //   │ (+)  🛡  [模型 ▾]          (↑)   │
-            //   ╰──────────────────────────────────╯
-            // 悬浮感三要素（用户："悬浮悬浮悬浮"）：
-            //   · 四周留边距（离屏幕左右下各有一段距离）
-            //   · 容器自带投影（浮在页面背景之上）
-            //   · 无顶部焊线（旧版的 Border(top) 已去掉）
-            // ---- 模型 / 思考胶囊行（2026-10-25 用户指定：移到输入框上方）----
-            // 原先挤在输入卡底行，长模型名被截得只剩几个字母（真机截图
-            // 「dee…」）；独立成行后宽度充裕，底行只留 ＋ / 盾牌 / 发送。
-            Padding(
-              padding: const EdgeInsets.fromLTRB(
-                  HSpace.md + 2, HSpace.sm, HSpace.md + 2, 0),
-              child: _ModelSelector(
-                label: widget.providerLabel,
-                reasoningLevel: widget.reasoningLevel,
-                h: h,
-                onTap: widget.onModelTap,
-                onReasoningLevelChanged: widget.onReasoningLevelChanged,
-                providers: widget.providers,
-                activeProviderId: widget.activeProviderId,
-                onProviderSelected: widget.onProviderSelected,
-                onOpenModelCatalog: widget.onOpenModelCatalog,
-              ),
-            ),
-
+            // 一张圆角大卡自上而下：附件 tile 区（有附件时）→ 文本区 →
+            // 底行（＋ / 权限 / 模型胶囊 / 发送）；卡下沿贴一条信息条
+            // （工作区 · 连接 Github · 选择分支）。不要麦克风（用户明说）。
+            // 模型胶囊回到卡内底行、只一枚只显模型名（思考等级在模型
+            // 抽屉里调）——2026-10-25「移到卡上方」的方案被本版覆盖：
+            // 参考图的字号更小、底行更宽，长名不再被截成「dee…」。
             Padding(
               padding: const EdgeInsets.fromLTRB(
                 HSpace.md, HSpace.sm + 2, HSpace.md, HSpace.md,
               ),
               child: Container(
-                // ★ 不设 maxHeight —— 多行文本由 Flexible+内部滚动约束，
-                //   设上限反而会 BOTTOM OVERFLOWED（实测 144px 黄条：
-                //   maxLines:null 的 TextField 无限长，ConstrainedBox
-                //   只约束不裁剪）
                 decoration: BoxDecoration(
-                  color: h.surface,
-                  borderRadius: BorderRadius.circular(HRadius.xl),
+                  color: h.surfaceAlt,
+                  borderRadius: BorderRadius.circular(26),
                   border: Border.all(color: h.border),
                   boxShadow: [
-                    // 悬浮投影 —— 与模型胶囊同款，让容器从背景上浮起
                     BoxShadow(
                       color:
                           Colors.black.withValues(alpha: h.dark ? 0.30 : 0.08),
@@ -284,28 +263,30 @@ class _InputBarState extends State<InputBar> {
                     ),
                   ],
                 ),
+                clipBehavior: Clip.antiAlias,
                 child: Column(
                   mainAxisSize: MainAxisSize.min,
                   children: [
-                    // ---- 文本区（容器上半部）----
-                    // ★ ConstrainedBox maxHeight 130（2026-10-12 修溢出）：
-                    //   maxLines:null 的 TextField 会随内容无限长 ——
-                    //   长文本直接撑破容器（实测 BOTTOM OVERFLOWED 144px）。
-                    //   限高后多行**内部滚动**，容器高度封顶。
+                    // ---- 附件 tile 区（卡内顶部，图二形态）----
+                    if (widget.attachments.isNotEmpty)
+                      _AttachmentRow(
+                        attachments: widget.attachments,
+                        h: h,
+                        onRemove: widget.onRemoveAttachment,
+                      ),
+                    // ---- 文本区 ----
+                    // ★ ConstrainedBox maxHeight 130：maxLines:null 的
+                    //   TextField 会随内容无限长 —— 限高后多行内部滚动，
+                    //   容器高度封顶（不设上限会 BOTTOM OVERFLOWED）。
                     ConstrainedBox(
                       constraints: const BoxConstraints(maxHeight: 130),
-                      // ★ borderless：外层容器已有胶囊圆角+边框（iOS Messages 输入条），
-                      //   文本区不再套第二层装饰。Material 的 border:InputBorder.none /
-                      //   isDense 在这里没有对应参数 —— 内边距由 padding 承担。
                       child: CupertinoTextField.borderless(
                         controller: _controller,
                         focusNode: _focus,
                         enabled: widget.enabled,
                         maxLines: null,
                         minLines: 1,
-                        // ★ 保持 send（2026-10-12 回归修复）：改成 newline 会让
-                        //   键盘回车不再发送 —— 真机习惯与全部测试都基于
-                        //   「回车=发送」。容器形态变了，交互语义不能变。
+                        // ★ 回车 = 发送（真机习惯与全部测试的既有语义）
                         textInputAction: TextInputAction.send,
                         onSubmitted: (_) => _send(),
                         style: TextStyle(
@@ -313,73 +294,54 @@ class _InputBarState extends State<InputBar> {
                           height: 1.45,
                           color: h.text,
                         ),
-                        // 空态占位（2026-10-12，用户指定）——
-                        // 与 llama.cpp Web UI 的 "Type a message..." 同位。
-                        // ★ 有排队时的占位（2026-10-13 参考图）：
-                        //   此时输入新内容 + 点发送 = 再排一条（追加队尾）；
-                        //   想插队用排队条上的 ↑（打断当前）。
-                        //   ⚠️ 措辞按用户反馈修正（"发送消息时引导不是截断"）：
-                        //   原文案"继续输入排队"没说清"发送 = 排队"。
-                        // 2026-10-25：空态文案改原型 01 的「给 Heracles
-                        // 发消息…」（2026-10-12 的长文案被原型定稿覆盖）；
-                        // 排队态保留功能说明（说清发送 = 排队）。
                         placeholder: widget.queuedTexts.isEmpty
                             ? '给 Heracles 发消息…'
                             : '发送将排在队尾；↑ 可插队立即发送',
                         placeholderStyle:
                             TextStyle(color: h.textFaint, fontSize: 15),
-                        // 容器已有圆角与边框 —— 文本区只留内边距
                         padding: const EdgeInsets.fromLTRB(
                           HSpace.lg, HSpace.md, HSpace.lg, HSpace.sm,
                         ),
                       ),
-                    ), // ConstrainedBox
-                    // ---- 底部一行（2026-10-12，按用户参考图重排）----
+                    ),
+                    // ---- 底行：＋ / 权限 / 模型胶囊 / 发送 ----
                     //
-                    //  (＋)      🛡  [模型 ▾]        (↑ 最右)
-                    //   ↑圆       ↑图标  ↑阴影胶囊     ↑贴容器右缘
-                    //
-                    // · + 与发送键是**圆形**（参考图明确）
-                    // · 发送键无内容时**置灰不可点**（ChoiceChip 同款）
-                    // · 发送键在**容器最右**、垂直居中于底行
-                    // · 模型框紧贴发送键左侧（中间不留大空隙 —— 参考图
-                    //   里两者是一组，靠右放置）
+                    // ★ 发送键语义与图标一致（2026-10-13 定）：
+                    //   空闲 → 发送；忙 + 无内容 → 停止；忙 + 有内容 →
+                    //   发送/排队（用户原话「有字时暂停按钮变发送」）。
                     Padding(
-                      padding: const EdgeInsets.fromLTRB(
-                        HSpace.sm + 2, 0, HSpace.sm + 4, HSpace.sm + 2,
-                      ),
+                      padding: const EdgeInsets.fromLTRB(10, 0, 10, 10),
                       child: Row(
                         children: [
-                          // ---- ＋（圆形）----
                           _CircleButton(
                             icon: AppIcons.add,
                             h: h,
                             onTap:
                                 widget.enabled ? widget.onPickAttachment : null,
                           ),
-                          const SizedBox(width: HSpace.md),
-
-                          // ---- 权限（只显示图标，点击弹选择框）----
+                          const SizedBox(width: 8),
                           _PermissionIconButton(
                             permission: widget.permission,
                             h: h,
                             enabled: widget.enabled,
                             onPicked: widget.onPermissionChanged,
                           ),
-                          // 模型 / 思考胶囊已移到输入框上方独立成行
-                          // （2026-10-25 用户指定），底行只留发送。
-                          const Spacer(),
-
-                          // ---- 发送/停止（圆形，容器最右）----
-                          //
-                          // ★ 点击行为**与图标一致**（2026-10-13，两次迭代）：
-                          //   · 空闲 → 发送
-                          //   · 忙 + **无内容** → 停止（当前会话）—— 用户要停
-                          //   · 忙 + **有内容** → 发送/排队 —— 用户在排下一条
-                          //     （用户原话："输入框里有字的时候，
-                          //       暂停按钮变成发送按钮"）
-                          //
-                          // 视觉与行为必须同步：图标是发送，点下去就是发送。
+                          const SizedBox(width: 10),
+                          Flexible(
+                            child: _ModelSelector(
+                              label: widget.providerLabel,
+                              reasoningLevel: widget.reasoningLevel,
+                              h: h,
+                              onTap: widget.onModelTap,
+                              onReasoningLevelChanged:
+                                  widget.onReasoningLevelChanged,
+                              providers: widget.providers,
+                              activeProviderId: widget.activeProviderId,
+                              onProviderSelected: widget.onProviderSelected,
+                              onOpenModelCatalog: widget.onOpenModelCatalog,
+                            ),
+                          ),
+                          const SizedBox(width: 10),
                           _SendButton(
                             enabled: (_hasText ||
                                     widget.attachments.isNotEmpty) &&
@@ -397,6 +359,13 @@ class _InputBarState extends State<InputBar> {
                           ),
                         ],
                       ),
+                    ),
+                    // ---- 信息条（卡下沿，图一形态）----
+                    _EnvStrip(
+                      h: h,
+                      workspaceLabel: widget.workspaceLabel,
+                      onWorkspaceTap: widget.onWorkspaceTap,
+                      onGithubTap: widget.onGithubTap,
                     ),
                   ],
                 ),
@@ -417,6 +386,97 @@ class _InputBarState extends State<InputBar> {
 ///
 /// 横向滚动，多个附件不挤压输入框；参考图底部的「分析一下」快捷
 /// 建议胶囊**不做**（用户明确说不需要）。
+/// 输入大卡下沿的信息条（2026-10-26，用户按 TRAE 参考图定）：
+/// 工作区 · 连接 Github · 选择分支。
+///
+/// - 工作区：显示当前工作区名，点按由外层打开抽屉换区；
+/// - 连接 Github：功能未接入 —— 用户定「先把前端做好，后续不做再撤」，
+///   点按由外层给占位提示，不假装已连通；
+/// - 选择分支：未连 Github 前置灰不可用（与参考图一致）。
+class _EnvStrip extends StatelessWidget {
+  const _EnvStrip({
+    required this.h,
+    this.workspaceLabel,
+    this.onWorkspaceTap,
+    this.onGithubTap,
+  });
+
+  final Hue h;
+  final String? workspaceLabel;
+  final VoidCallback? onWorkspaceTap;
+  final VoidCallback? onGithubTap;
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      decoration: BoxDecoration(
+        color: h.surface,
+        border: Border(top: BorderSide(color: h.border)),
+      ),
+      padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 3),
+      child: Row(
+        children: [
+          // 三段等分（中段更宽）：工作区左对齐、Github 居中、分支右对齐。
+          // 标签都是 Flexible —— 窄屏先缩可变的工作区名，固定文案
+          // （连接 Github / 选择分支）在 360dp 以上不截断（溢出回归守着）。
+          Expanded(
+            flex: 3,
+            child: _item(CupertinoIcons.folder_fill, workspaceLabel ?? '工作区',
+                onWorkspaceTap, dim: false, align: Alignment.centerLeft),
+          ),
+          Expanded(
+            flex: 4,
+            child: _item(CupertinoIcons.link, '连接 Github', onGithubTap,
+                dim: false, align: Alignment.center),
+          ),
+          Expanded(
+            flex: 3,
+            child: _item(CupertinoIcons.arrow_branch, '选择分支', null,
+                dim: true, align: Alignment.centerRight),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _item(IconData icon, String label, VoidCallback? onTap,
+      {required bool dim, required Alignment align}) {
+    return Align(
+      alignment: align,
+      child: Material(
+        color: Colors.transparent,
+        child: InkWell(
+          onTap: dim ? null : onTap,
+          borderRadius: BorderRadius.circular(8),
+          child: Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 5, vertical: 6),
+            child: Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Icon(icon, size: 15, color: dim ? h.textFaint : h.textDim),
+                const SizedBox(width: 5),
+                Flexible(
+                  child: Text(
+                    label,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: TextStyle(
+                      fontSize: 13,
+                      color: dim ? h.textFaint : h.text,
+                    ),
+                  ),
+                ),
+                const SizedBox(width: 2),
+                Icon(AppIcons.chevronDown, size: 11, color: h.textFaint),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
 class _AttachmentRow extends StatelessWidget {
   const _AttachmentRow({
     required this.attachments,
@@ -432,7 +492,7 @@ class _AttachmentRow extends StatelessWidget {
   Widget build(BuildContext context) {
     return SingleChildScrollView(
       scrollDirection: Axis.horizontal,
-      padding: const EdgeInsets.fromLTRB(HSpace.lg, 8, HSpace.lg, 4),
+      padding: const EdgeInsets.fromLTRB(14, 12, 14, 4),
       child: Row(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
@@ -441,7 +501,7 @@ class _AttachmentRow extends StatelessWidget {
             if (attachments[i].isImage)
               _ImageThumb(a: attachments[i], h: h, onRemove: onRemove)
             else
-              _FileCard(a: attachments[i], h: h, onRemove: onRemove),
+              _FileTile(a: attachments[i], h: h, onRemove: onRemove),
           ],
         ],
       ),
@@ -463,25 +523,26 @@ class _ImageThumb extends StatelessWidget {
       clipBehavior: Clip.none,
       children: [
         ClipRRect(
-          borderRadius: BorderRadius.circular(14),
+          borderRadius: BorderRadius.circular(16),
           child: Image.file(
             File(a.path),
-            height: 88,
+            width: 92,
+            height: 92,
             fit: BoxFit.cover,
             // 未解码完先占位 88×88：否则宽度塌成 0，右上角的 × 会
             // 落到 Stack 边界外（画得出来但点不中 —— hitTest 先查边界）
             frameBuilder: (_, child, frame, _) => frame == null
                 ? Container(
-                    width: 88,
-                    height: 88,
+                    width: 92,
+                    height: 92,
                     color: h.surface,
                     alignment: Alignment.center,
                     child: Icon(AppIcons.image, size: 26, color: h.textDim),
                   )
                 : child,
             errorBuilder: (_, _, _) => Container(
-              width: 88,
-              height: 88,
+              width: 92,
+              height: 92,
               color: h.surface,
               alignment: Alignment.center,
               child: Icon(AppIcons.image, size: 26, color: h.textDim),
@@ -499,72 +560,68 @@ class _ImageThumb extends StatelessWidget {
   }
 }
 
-/// 文件附件：图标砖 + 名称 + 大小的卡片（宽度随内容，超长名省略）
-class _FileCard extends StatelessWidget {
-  const _FileCard({required this.a, required this.h, this.onRemove});
+/// 文件附件：方形 tile（2026-10-26 TRAE 图二式）——
+/// 顶部一行扩展名徽标 + 右上 ×，文件名沉到底部一行省略。
+/// 不显大小：tile 就这么大，信息密度向参考图看齐。
+class _FileTile extends StatelessWidget {
+  const _FileTile({required this.a, required this.h, this.onRemove});
 
   final HAttachment a;
   final Hue h;
   final void Function(String id)? onRemove;
 
+  String get _ext {
+    final dot = a.name.lastIndexOf('.');
+    if (dot <= 0 || dot == a.name.length - 1) return 'FILE';
+    final e = a.name.substring(dot + 1).toUpperCase();
+    return e.length > 4 ? e.substring(0, 4) : e;
+  }
+
   @override
   Widget build(BuildContext context) {
     return Stack(
-      clipBehavior: Clip.none,
       children: [
         Container(
-          // 右上让出 6px：角标整颗落在边界内才点得中（见图片那条注释）
-          margin: const EdgeInsets.only(top: 6, right: 6),
-          constraints: const BoxConstraints(maxWidth: 232),
-          padding: const EdgeInsets.fromLTRB(10, 10, 14, 10),
+          width: 92,
+          height: 96,
+          padding: const EdgeInsets.all(10),
           decoration: BoxDecoration(
             color: h.surface,
-            borderRadius: BorderRadius.circular(14),
+            borderRadius: BorderRadius.circular(16),
             border: Border.all(color: h.border),
           ),
-          child: Row(
-            mainAxisSize: MainAxisSize.min,
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
             children: [
               Container(
-                width: 40,
-                height: 40,
+                padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
                 decoration: BoxDecoration(
-                  color: h.surfaceAlt,
-                  borderRadius: BorderRadius.circular(10),
+                  border: Border.all(color: h.border),
+                  borderRadius: BorderRadius.circular(HRadius.pill),
                 ),
-                child: Icon(AppIcons.file, size: 21, color: h.text),
+                child: Text(
+                  _ext,
+                  style: TextStyle(
+                    fontSize: 10.5,
+                    fontWeight: FontWeight.w700,
+                    color: h.textDim,
+                  ),
+                ),
               ),
-              const SizedBox(width: 10),
-              Flexible(
-                child: Column(
-                  mainAxisSize: MainAxisSize.min,
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Text(
-                      a.name,
-                      maxLines: 1,
-                      overflow: TextOverflow.ellipsis,
-                      style: TextStyle(
-                        fontSize: 13.5,
-                        fontWeight: FontWeight.w500,
-                        color: h.text,
-                      ),
-                    ),
-                    const SizedBox(height: 2),
-                    Text(
-                      a.sizeLabel,
-                      style: TextStyle(fontSize: 12, color: h.textFaint),
-                    ),
-                  ],
-                ),
+              const Spacer(),
+              Text(
+                a.name,
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: TextStyle(fontSize: 12.5, color: h.text),
               ),
             ],
           ),
         ),
         if (onRemove != null)
           Positioned(
-            top: 0,
-            right: 0,
+            top: 4,
+            right: 4,
             child: _RemoveBadge(h: h, onTap: () => onRemove!(a.id)),
           ),
       ],
@@ -821,80 +878,43 @@ class _ModelSelector extends StatelessWidget {
     //   之前 GestureDetector(opaque)+Container(带 boxShadow) 在真机上
     //   tap 无响应（连 onTapDown 都没到 —— 有透明遮挡/竞技场差异），
     //   widget 测试却通过。改用与**对照组（盾牌）完全相同**的结构。
-    // 胶囊外形（两枚共用）：浅底 + 边框 + 轻投影"托"起来
+    // 胶囊外形（2026-10-26 TRAE 式）：浅灰实心、无边框无投影 ——
+    // 卡面是 surfaceAlt，胶囊用 surface 正好沉一档。
     BoxDecoration pillDeco() => BoxDecoration(
-          color: h.surfaceAlt,
+          color: h.surface,
           borderRadius: BorderRadius.circular(HRadius.pill),
-          border: Border.all(color: h.border),
-          boxShadow: [
-            BoxShadow(
-              color: Colors.black.withValues(alpha: h.dark ? 0.30 : 0.08),
-              blurRadius: 6,
-              offset: const Offset(0, 2),
-            ),
-          ],
         );
-    // 思考档位的紧凑中文（原型 01 写法「思考 · 高」）
-    final thinkShort = switch (reasoningLevel) {
-      ReasoningLevel.auto => '自动',
-      ReasoningLevel.off => '关',
-      ReasoningLevel.low => '低',
-      ReasoningLevel.high => '高',
-      ReasoningLevel.max => '最高',
-    };
-    Widget pill(Widget child) => Material(
-          color: Colors.transparent,
-          child: InkWell(
-            onTap: () => _open(context),
-            borderRadius: BorderRadius.circular(HRadius.pill),
-            child: Container(
-              height: 34,
-              padding: const EdgeInsets.symmetric(horizontal: HSpace.md),
-              decoration: pillDeco(),
-              child: child,
-            ),
-          ),
-        );
-    return Row(
-      // 输入框上方独立行：左对齐（2026-10-25 随位置调整）
-      mainAxisAlignment: MainAxisAlignment.start,
-      children: [
-        // ★ 不给模型加前置图标（2026-10-12 用户明确要求）
-        // 第一枚（模型名）可收缩：宽度不足时名字走省略号，
-        // 第二枚（思考档位）保持完整 —— 档位信息不能被截断。
-        Flexible(
-          child: pill(Row(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            // ★ 名字必须躺在 Flexible 里才能真的收缩：ConstrainedBox
-            //   只是上限，Row 给非弹性子级的宽度是无界的 —— 只套上限
-            //   时文本按上限宽度排版，胶囊被分到更窄时照样溢出
-            //   （窄屏回归实测：内层 Row 仅分到 24px 仍溢出 102px）。
-            Flexible(
-              child: ConstrainedBox(
-                // 两枚胶囊并排，长模型名截断，不把发送键挤出屏幕
-                constraints: const BoxConstraints(maxWidth: 170),
-                child: Text(
-                  name,
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
-                  style: TextStyle(fontSize: 12.5, color: h.text),
+    // 单枚胶囊：模型名 + ⌄（思考等级在模型抽屉里调，胶囊上不再显）。
+    // 名字躺在 Flexible 里才能真收缩，宽度不足走省略号。
+    return Material(
+      color: Colors.transparent,
+      child: InkWell(
+        onTap: () => _open(context),
+        borderRadius: BorderRadius.circular(HRadius.pill),
+        child: Container(
+          height: 38,
+          padding: const EdgeInsets.symmetric(horizontal: 14),
+          decoration: pillDeco(),
+          child: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Flexible(
+                child: ConstrainedBox(
+                  constraints: const BoxConstraints(maxWidth: 200),
+                  child: Text(
+                    name,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: TextStyle(fontSize: 14, color: h.text),
+                  ),
                 ),
               ),
-            ),
-            const SizedBox(width: HSpace.xs),
-            Icon(AppIcons.chevronDown, size: 18, color: h.textDim),
-          ],
-          )),
-        ),
-        const SizedBox(width: HSpace.xs),
-        pill(Center(
-          child: Text(
-            '思考 · $thinkShort',
-            style: TextStyle(fontSize: 12, color: h.textDim),
+              const SizedBox(width: 4),
+              Icon(AppIcons.chevronDown, size: 16, color: h.textDim),
+            ],
           ),
-        )),
-      ],
+        ),
+      ),
     );
   }
 }

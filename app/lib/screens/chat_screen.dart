@@ -4335,6 +4335,17 @@ class _ChatScreenState extends State<ChatScreen> {
             attachments: _attachments,
             onPickAttachment: _pickAttachment,
             onRemoveAttachment: _removeAttachment,
+            // 信息条（2026-10-26 TRAE 式输入区）：工作区项开抽屉换区；
+            // Github 未接入，先占位提示（用户定：前端先做好）
+            workspaceLabel: _activeWorkspace?.name,
+            onWorkspaceTap: () => _scaffoldKey.currentState?.openDrawer(),
+            onGithubTap: () => unawaited(showBwConfirmSheet(
+                  context,
+                  title: '连接 Github',
+                  message: '这个功能还没接入，界面先占位，后续版本再打通。',
+                  confirmLabel: '知道了',
+                  cancelLabel: null,
+                )),
             // ★ 输入框上方那一行开关（2026-10-12，S4）
             //
             // 权限改的是**设置**（会持久化），不等同于"这一次运行"的参数 ——
@@ -5258,18 +5269,16 @@ class _ChatScreenState extends State<ChatScreen> {
         onAction: _pickWorkspace,
       );
     }
-    return _Hint(
+    // 默认空态（2026-10-26，用户按 TRAE 首页定版）：左上顶格大字
+    // 问候 + 一列建议胶囊，点胶囊把文案填进输入框（不自动发送）。
+    return _WelcomeState(
       h: h,
-      // 2026-10-25：空态不放装饰图标（用户指着 sparkles 说「怎么还有
-      // emoji」——零 emoji 规矩同样管图标装饰），只留问候语本身。
-      icon: null,
-      // 空态文案（2026-10-12，用户指定）：
-      // 「你好，今天想做些什么？」—— 与 llama.cpp Web UI 的
-      // "Hello there / Type a message..." 空态同一形态，中文语境
-      title: '你好，今天想做些什么？',
-      body: _activeSession == null
-          ? ''
-          : '这是会话「${_activeSession!.title}」。\n继续发消息即可。',
+      onSuggest: (text) {
+        _inputCtrl.text = text;
+        _inputCtrl.selection = TextSelection.collapsed(
+          offset: _inputCtrl.text.length,
+        );
+      },
     );
   }
 }
@@ -5651,6 +5660,97 @@ class _Hint extends StatelessWidget {  const _Hint({
               ),
             ],
           ],
+        ),
+      ),
+    );
+  }
+}
+
+/// **默认空态**（2026-10-26，用户发 TRAE 首页截图定版）：
+///
+/// 左上顶格两行大字问候，下面一列描边建议胶囊（填充式图标），
+/// 大量留白。点胶囊 = 把文案填进输入框由用户补全/发送，不自动发。
+class _WelcomeState extends StatelessWidget {
+  const _WelcomeState({required this.h, required this.onSuggest});
+
+  final Hue h;
+  final ValueChanged<String> onSuggest;
+
+  static const _suggestions = <(IconData, String)>[
+    (CupertinoIcons.folder_fill, '快速看懂这个项目'),
+    (CupertinoIcons.chevron_left_slash_chevron_right, '帮我写个脚本'),
+    (CupertinoIcons.hammer_fill, '帮我搭个小工具'),
+    (CupertinoIcons.lightbulb_fill, '碰撞一下灵感'),
+    (CupertinoIcons.doc_text_fill, '帮我整理一份文档'),
+  ];
+
+  @override
+  Widget build(BuildContext context) {
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(22, 52, 22, 0),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(
+            '今天想做些什么？\n找我，我都可以帮你！',
+            style: TextStyle(
+              fontSize: 30,
+              fontWeight: FontWeight.w700,
+              height: 1.45,
+              color: h.text,
+            ),
+          ),
+          const SizedBox(height: 34),
+          for (final (icon, label) in _suggestions) ...[
+            _SuggestChip(
+              h: h,
+              icon: icon,
+              label: label,
+              onTap: () => onSuggest(label),
+            ),
+            const SizedBox(height: 10),
+          ],
+        ],
+      ),
+    );
+  }
+}
+
+/// 空态建议胶囊：描边圆角、填充图标 + 文案，宽度随内容（TRAE 式）。
+class _SuggestChip extends StatelessWidget {
+  const _SuggestChip({
+    required this.h,
+    required this.icon,
+    required this.label,
+    required this.onTap,
+  });
+
+  final Hue h;
+  final IconData icon;
+  final String label;
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    return Material(
+      color: Colors.transparent,
+      child: InkWell(
+        onTap: onTap,
+        borderRadius: BorderRadius.circular(HRadius.pill),
+        child: Container(
+          padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+          decoration: BoxDecoration(
+            border: Border.all(color: h.border),
+            borderRadius: BorderRadius.circular(HRadius.pill),
+          ),
+          child: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Icon(icon, size: 17, color: h.textDim),
+              const SizedBox(width: 8),
+              Text(label, style: TextStyle(fontSize: 15, color: h.text)),
+            ],
+          ),
         ),
       ),
     );
