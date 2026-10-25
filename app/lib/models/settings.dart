@@ -242,6 +242,7 @@ class ModelCapability {
     this.maxOutputTokens,
     this.supportsTools,
     this.supportsReasoning,
+    this.reasoningLevelsEffective = false,
   });
 
   /// 上下文长度（token）—— 服务端权威值。`0` = 服务端未上报。
@@ -253,6 +254,11 @@ class ModelCapability {
   final bool? supportsTools;
   final bool? supportsReasoning;
 
+  /// 思考档位是否真生效（创建时按 provider 协议自动填，见
+  /// [ProviderProtocol.reasoningLevelsEffective]）。旧数据没有
+  /// 这个键 ⇒ 读回默认 false（宁可少显示，不假装有区别）。
+  final bool reasoningLevelsEffective;
+
   bool get hasContext => contextWindow > 0;
 
   /// 紧凑序列化（见类注释说明）。
@@ -261,6 +267,7 @@ class ModelCapability {
         if (maxOutputTokens != null) 'maxOut': maxOutputTokens,
         if (supportsTools != null) 'tools': supportsTools,
         if (supportsReasoning != null) 'reason': supportsReasoning,
+        if (reasoningLevelsEffective) 'rLv': true,
       };
 
   factory ModelCapability.fromJson(Map<String, dynamic> j) => ModelCapability(
@@ -268,6 +275,7 @@ class ModelCapability {
         maxOutputTokens: (j['maxOut'] as num?)?.toInt(),
         supportsTools: j['tools'] as bool?,
         supportsReasoning: j['reason'] as bool?,
+        reasoningLevelsEffective: j['rLv'] as bool? ?? false,
       );
 }
 
@@ -311,6 +319,13 @@ enum ProviderProtocol {
 
   const ProviderProtocol(this.label);
   final String label;
+
+  /// 该协议下思考**档位**是否真生效（后端如实标注，2026-10-25）：
+  /// 只有 OpenAI Chat 轨把 `reasoning_effort` 真正下发并生效；
+  /// Anthropic / Responses 轨的 client 不读这个通道 —— 那两轨只有
+  /// 开/关两态，前端据此只显示两态，不假装五档有区别。
+  bool get reasoningLevelsEffective =>
+      this == ProviderProtocol.openaiChat;
 
   static ProviderProtocol parse(String? s) => ProviderProtocol.values.firstWhere(
         (v) => v.name == s,

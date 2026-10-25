@@ -2513,6 +2513,7 @@ class _ChatScreenState extends State<ChatScreen> {
               maxOutputTokens: e.value.maxOutputTokens,
               supportsTools: e.value.supportsTools,
               supportsReasoning: e.value.supportsReasoning,
+              reasoningLevelsEffective: p.protocol.reasoningLevelsEffective,
             ),
       };
       await widget.settings.updateProvider(

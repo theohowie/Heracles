@@ -763,6 +763,18 @@ class _ModelSelector extends StatelessWidget {
   /// 比"贴着小控件弹小菜单"更常见的交互（与参考图二的信息一致）。
   Future<void> _open(BuildContext context) async {
     final h2 = h;
+    // ★ 思考档位是否真生效（后端如实标注，2026-10-25）：Anthropic /
+    //   Responses 轨不读 reasoning_effort ⇒ 只给开/关两态，不假装五档。
+    //   数据优先吃能力快照（rLv），没有快照时按 provider 协议推导。
+    var levelsEffective = true;
+    final activeProvider =
+        providers.where((p) => p.id == activeProviderId).firstOrNull;
+    if (activeProvider != null) {
+      levelsEffective =
+          activeProvider.modelCapabilities[activeProvider.model]
+                  ?.reasoningLevelsEffective ??
+              activeProvider.protocol.reasoningLevelsEffective;
+    }
     await showModalBottomSheet<void>(
       context: context,
       backgroundColor: h2.surfaceAlt,
@@ -867,7 +879,12 @@ class _ModelSelector extends StatelessWidget {
                       const SizedBox(width: HSpace.md),
                       const Text('推理等级', style: TextStyle(fontSize: 15)),
                       const Spacer(),
-                      Text(reasoningLevel.label,
+                      Text(
+                          levelsEffective
+                              ? reasoningLevel.label
+                              : (reasoningLevel == ReasoningLevel.off
+                                  ? '关'
+                                  : '开'),
                           style: TextStyle(
                               fontSize: 13, color: h2.textDim)),
                     ],
@@ -877,33 +894,63 @@ class _ModelSelector extends StatelessWidget {
                     spacing: HSpace.sm,
                     runSpacing: HSpace.sm,
                     children: [
-                      for (final v in ReasoningLevel.values)
+                      if (levelsEffective)
+                        for (final v in ReasoningLevel.values)
+                          _PillOption(
+                            label: v.label,
+                            selected: v == reasoningLevel,
+                            h: h2,
+                            onTap: () {
+                              Navigator.of(sheetCtx).pop();
+                              // ★ 选同一个档位不回调 —— 不产生无意义的写盘
+                              //（与旧锚点菜单同语义，测试「同档不回调」钉它）
+                              if (v != reasoningLevel) {
+                                onReasoningLevelChanged?.call(v);
+                              }
+                            },
+                          )
+                      else ...[
                         _PillOption(
-                          label: v.label,
-                          selected: v == reasoningLevel,
+                          label: '关',
+                          selected: reasoningLevel == ReasoningLevel.off,
                           h: h2,
                           onTap: () {
                             Navigator.of(sheetCtx).pop();
-                            // ★ 选同一个档位不回调 —— 不产生无意义的写盘
-                            //（与旧锚点菜单同语义，测试「同档不回调」钉它）
-                            if (v != reasoningLevel) {
-                              onReasoningLevelChanged?.call(v);
+                            if (reasoningLevel != ReasoningLevel.off) {
+                              onReasoningLevelChanged
+                                  ?.call(ReasoningLevel.off);
                             }
                           },
                         ),
+                        _PillOption(
+                          label: '开',
+                          selected: reasoningLevel != ReasoningLevel.off,
+                          h: h2,
+                          onTap: () {
+                            Navigator.of(sheetCtx).pop();
+                            if (reasoningLevel == ReasoningLevel.off) {
+                              onReasoningLevelChanged
+                                  ?.call(ReasoningLevel.auto);
+                            }
+                          },
+                        ),
+                      ],
                     ],
                   ),
                   // ★ 当前档位的说明（与旧锚点菜单的 detail 同源 ——
                   //   本地三档相同/云端各异的如实说明，信息不能丢）
                   const SizedBox(height: HSpace.sm),
                   Text(
-                    _detailFor(reasoningLevel),
+                    levelsEffective
+                        ? _detailFor(reasoningLevel)
+                        : '当前协议不区分思考档位（低 / 高 / 最大不生效），只有开和关。',
                     style: TextStyle(
                         fontSize: 12, height: 1.4, color: h2.textDim),
                   ),
-                  // ★ 本地两态提示已移除（2026-10-12 用户要求）：
-                  //   用户不再用本地模型 —— 云端与电脑后端都真实支持分档，
-                  //   那句"只有开/关"反而成了噪音。
+                  // ★ 两态提示的适用范围（2026-10-25）：本地两态提示
+                  //   2026-10-12 已移除；现在出现"只有开/关"是因为
+                  //   Anthropic / Responses 协议轨不读 reasoning_effort
+                  //   （见 levelsEffective），与本地后端无关。
                 ],
               ),
             ),

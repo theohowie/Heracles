@@ -742,10 +742,12 @@ class _GlobalMemoryEntryState extends State<_GlobalMemoryEntry> {
   }
 }
 
-/// **全局记忆二级页**（2026-10-23）—— 全文查看 + 清空。
+/// **全局记忆二级页**（2026-10-25 改版）—— 结构化条目卡片。
 ///
-/// 记忆存在 App 全局（不在工作区），每轮系统提示都会把它带回去；
-/// 这一页只管两件事：**看得见**、**能清掉**。
+/// 记忆存在 App 全局（不在工作区），每轮系统提示都会把它带回去。
+/// 后端 N7 落地后记忆按条目组织（kind/source/createdAt），本页按
+/// kind 分组逐条展示，可增 / 改 / 删单条，也可整表清空。
+/// 旧格式（legacy）条目是纯文本行自动迁移来的，元信息行标「旧格式」。
 class GlobalMemoryPage extends StatefulWidget {
   const GlobalMemoryPage({super.key});
 
@@ -753,11 +755,33 @@ class GlobalMemoryPage extends StatefulWidget {
   State<GlobalMemoryPage> createState() => _GlobalMemoryPageState();
 }
 
+/// kind 词表（后端定，前端只展示）：分组顺序与中文名。
+const _memoryKindOrder = ['preference', 'background', 'habit', 'other'];
+const _memoryKindLabels = {
+  'preference': '长期偏好',
+  'background': '项目背景',
+  'habit': '使用习惯',
+  'other': '其他',
+};
+
+String _memorySourceLabel(String source) => switch (source) {
+      'user' => '手动添加',
+      'agent' => '模型记的',
+      'legacy' => '旧格式',
+      _ => source,
+    };
+
+String _memoryDate(int ms) {
+  final d = DateTime.fromMillisecondsSinceEpoch(ms);
+  return '${d.month}月${d.day}日';
+}
+
 class _GlobalMemoryPageState extends State<GlobalMemoryPage> {
   final _memory = const GlobalMemory();
 
   /// null = 读取中（转圈）
-  MemoryReadResult? _result;
+  List<MemoryEntry>? _entries;
+  ({int usedBytes, int maxBytes})? _capacity;
 
   /// 清空进行中 —— 右上角动作锁住并转圈，避免连点二次触发
   bool _clearing = false;
@@ -769,9 +793,13 @@ class _GlobalMemoryPageState extends State<GlobalMemoryPage> {
   }
 
   Future<void> _load() async {
-    final result = await _memory.readResult();
+    final entries = await _memory.listEntries();
+    final cap = await _memory.capacity();
     if (!mounted) return;
-    setState(() => _result = result);
+    setState(() {
+      _entries = entries;
+      _capacity = cap;
+    });
   }
 
   /// 清空**不可逆** —— 先弹 iOS 确认框，破坏性动作用红色（iOS 的规矩）。
@@ -803,34 +831,60 @@ class _GlobalMemoryPageState extends State<GlobalMemoryPage> {
     showIosToast(context, '已清空');
   }
 
-  /// 「12 条 · 3.4 KB / 256 KB」—— 规模与上限一行说清（接近上限就提醒）。
-  String _sizeLine(MemoryReadResult r) {
-    final cap = _fmtBytes(GlobalMemory.maxBytes);
-    if (r.isEmpty) return '暂无记忆 · 上限 $cap';
-    final line = '${_entryCount(r.text)} 条 · ${_fmtBytes(r.bytes)} / $cap';
-    return r.nearlyFull ? '$line · 接近上限，建议清空' : line;
+  Future<void> _confirmDelete(MemoryEntry e) async {
+    await showIosDialog(
+      context,
+      title: '删除这条记忆？',
+      message: e.text.length > 80 ? '${e.text.substring(0, 80)}…' : e.text,
+      actions: [
+        const IosAction('取消'),
+        IosAction('删除', isDestructiveAction: true, onTap: () async {
+          final r = await _memory.deleteEntry(e.id);
+          if (!mounted) return;
+          if (!r.ok) {
+            showIosToast(context, r.error ?? '删除失败');
+            return;
+          }
+          await _load();
+        }),
+      ],
+    );
   }
 
-  TextStyle _mono(Hue h, Color color, {double size = 12}) => TextStyle(
-        fontSize: size,
-        fontFamily: kMonoFontFamily,
-        fontFamilyFallback: kMonoFallback,
-        color: color,
-      );
+  Future<void> _openEditor({MemoryEntry? entry}) async {
+    final saved = await showModalBottomSheet<bool>(
+      context: context,
+      isScrollControlled: true,
+      backgroundColor: Colors.transparent,
+      builder: (_) => _MemoryEditorSheet(memory: _memory, entry: entry),
+    );
+    if (saved == true) {
+      await _load();
+      if (!mounted) return;
+      showIosToast(context, entry == null ? '已添加' : '已保存');
+    }
+  }
 
   @override
   Widget build(BuildContext context) {
     final h = Hue.of(context);
-    final r = _result;
-    // 读不出来时连"有没有东西可清"都不知道 —— 那时只给「重试」
-    final canClear = r != null && r.error == null && !r.isEmpty;
+    final entries = _entries;
+    final cap = _capacity;
+    final nearlyFull =
+        cap != null && cap.usedBytes >= cap.maxBytes * 0.9;
     return Scaffold(
       appBar: AppBar(
         title: const Text('全局记忆'),
         leading: _iosBackLeading(context),
         actions: [
+          CupertinoButton(
+            onPressed: () => _openEditor(),
+            minimumSize: const Size(0, 44),
+            padding: const EdgeInsets.symmetric(horizontal: HSpace.sm),
+            child: Icon(AppIcons.add, size: 22, color: h.text),
+          ),
           // 没有记忆就没有可清的东西 —— 动作干脆不出现（iOS 的做法）
-          if (canClear)
+          if (entries != null && entries.isNotEmpty)
             CupertinoButton(
               onPressed: _clearing ? null : _confirmClear,
               minimumSize: const Size(0, 44),
@@ -844,95 +898,358 @@ class _GlobalMemoryPageState extends State<GlobalMemoryPage> {
           const SizedBox(width: HSpace.sm),
         ],
       ),
-      body: r == null
+      body: entries == null
           ? Center(child: CupertinoActivityIndicator(color: h.accent))
           : ListView(
               padding: const EdgeInsets.all(HSpace.lg),
               children: [
-                // ---- 读不出来 ≠ 没有记忆：这两种情况必须说不同的话 ----
-                if (r.error != null) ...[
+                // ---- 规模与上限（条数 + 容量条）----
+                if (cap != null) ...[
+                  Text(
+                    entries.isEmpty
+                        ? '暂无记忆 · 上限 ${_fmtBytes(cap.maxBytes)}'
+                        : '${entries.length} 条 · '
+                            '${_fmtBytes(cap.usedBytes)} / '
+                            '${_fmtBytes(cap.maxBytes)}'
+                            '${nearlyFull ? ' · 接近上限，建议清理' : ''}',
+                    style: TextStyle(
+                      fontSize: 12.5,
+                      color: nearlyFull
+                          ? HColors.warnOn(h.dark)
+                          : h.textDim,
+                    ),
+                  ),
+                  const SizedBox(height: 8),
+                  ClipRRect(
+                    borderRadius: BorderRadius.circular(2),
+                    child: LinearProgressIndicator(
+                      value: cap.maxBytes > 0
+                          ? (cap.usedBytes / cap.maxBytes)
+                              .clamp(0.0, 1.0)
+                          : 0,
+                      minHeight: 4,
+                      backgroundColor: h.border,
+                      valueColor: AlwaysStoppedAnimation<Color>(
+                        nearlyFull ? HColors.warnOn(h.dark) : h.text,
+                      ),
+                    ),
+                  ),
+                  const SizedBox(height: HSpace.md),
+                ],
+                if (entries.isEmpty)
                   Container(
                     width: double.infinity,
                     padding: const EdgeInsets.all(HSpace.md),
                     decoration: BoxDecoration(
-                      color: HColors.errorOn(h.dark).withValues(alpha: 0.08),
+                      color: h.surfaceAlt,
                       borderRadius: BorderRadius.circular(HRadius.md),
-                      border: Border.all(
-                        color: HColors.errorOn(h.dark).withValues(alpha: 0.3),
-                      ),
+                      border: Border.all(color: h.border),
                     ),
                     child: Text(
-                      '读不出记忆：${r.error}',
+                      '还没有任何记忆。和 Heracles 聊天时它会把值得记住的事'
+                      '写在这里（跨会话生效），你也可以点右上角 + 手动添加。',
+                      textAlign: TextAlign.center,
                       style: TextStyle(
                         fontSize: 12.5,
-                        height: 1.5,
-                        color: HColors.errorOn(h.dark),
+                        height: 1.6,
+                        color: h.textFaint,
+                      ),
+                    ),
+                  )
+                else
+                  for (final kind in _memoryKindOrder)
+                    if (entries.any((e) => e.kind == kind)) ...[
+                      Padding(
+                        padding: const EdgeInsets.only(
+                            top: HSpace.sm, bottom: HSpace.sm),
+                        child: Text(
+                          _memoryKindLabels[kind] ?? kind,
+                          style: TextStyle(
+                            fontSize: 12,
+                            fontWeight: FontWeight.w600,
+                            color: h.textFaint,
+                          ),
+                        ),
+                      ),
+                      for (final e in entries.where((e) => e.kind == kind))
+                        _MemoryCard(
+                          entry: e,
+                          h: h,
+                          onEdit: () => _openEditor(entry: e),
+                          onDelete: () => _confirmDelete(e),
+                        ),
+                    ],
+                // 未知 kind（词表外）兜底一组，不吞条目
+                if (entries.any(
+                    (e) => !_memoryKindOrder.contains(e.kind))) ...[
+                  Padding(
+                    padding: const EdgeInsets.only(
+                        top: HSpace.sm, bottom: HSpace.sm),
+                    child: Text(
+                      '未分类',
+                      style: TextStyle(
+                        fontSize: 12,
+                        fontWeight: FontWeight.w600,
+                        color: h.textFaint,
                       ),
                     ),
                   ),
-                  const SizedBox(height: HSpace.md),
-                  IosButton(
-                    label: '重试',
-                    filled: false,
-                    color: h.accent,
-                    dense: true,
-                    onPressed: _load,
-                  ),
-                ] else ...[
-                  // ---- 规模与上限 ----
-                  Text(
-                    _sizeLine(r),
-                    style: _mono(
-                        h, r.nearlyFull ? HColors.warnOn(h.dark) : h.textDim),
-                  ),
-                  const SizedBox(height: HSpace.sm),
-                  // ---- 全文 / 空态 ----
-                  if (r.isEmpty)
-                    Container(
-                      width: double.infinity,
-                      padding: const EdgeInsets.all(HSpace.md),
-                      decoration: BoxDecoration(
-                        color: h.surfaceAlt,
-                        borderRadius: BorderRadius.circular(HRadius.md),
-                        border: Border.all(color: h.border),
-                      ),
-                      child: Text(
-                        '还没有任何记忆。和 Heracles 聊天时它会把值得记住的事'
-                        '写在这里（跨会话生效）。',
-                        textAlign: TextAlign.center,
-                        style: TextStyle(
-                          fontSize: 12.5,
-                          height: 1.6,
-                          color: h.textFaint,
-                        ),
-                      ),
-                    )
-                  else
-                    Container(
-                      width: double.infinity,
-                      padding: const EdgeInsets.all(HSpace.md),
-                      decoration: BoxDecoration(
-                        color: h.surfaceAlt,
-                        borderRadius: BorderRadius.circular(HRadius.md),
-                        border: Border.all(color: h.border),
-                      ),
-                      child: SelectableText(
-                        r.text,
-                        style: TextStyle(
-                          fontSize: 12,
-                          height: 1.5,
-                          fontFamily: kMonoFontFamily,
-                          fontFamilyFallback: kMonoFallback,
-                          color: h.text,
-                        ),
-                      ),
+                  for (final e in entries
+                      .where((e) => !_memoryKindOrder.contains(e.kind)))
+                    _MemoryCard(
+                      entry: e,
+                      h: h,
+                      onEdit: () => _openEditor(entry: e),
+                      onDelete: () => _confirmDelete(e),
                     ),
-                  const SizedBox(height: HSpace.md),
-                  // 滚到底时再报一次规模，不用翻回顶部
-                  Text(_sizeLine(r), style: _mono(h, h.textFaint)),
                 ],
               ],
             ),
+    );
+  }
+}
+
+/// 一条记忆的卡片：正文 + 来源/日期元信息 + 编辑/删除。
+class _MemoryCard extends StatelessWidget {
+  const _MemoryCard({
+    required this.entry,
+    required this.h,
+    required this.onEdit,
+    required this.onDelete,
+  });
+
+  final MemoryEntry entry;
+  final Hue h;
+  final VoidCallback onEdit;
+  final VoidCallback onDelete;
+
+  @override
+  Widget build(BuildContext context) {
+    final meta = <String>[
+      _memorySourceLabel(entry.source),
+      if (entry.createdAt > 0) _memoryDate(entry.createdAt),
+      if (entry.expiresAt != null) '到期 ${_memoryDate(entry.expiresAt!)}',
+    ];
+    return Container(
+      width: double.infinity,
+      margin: const EdgeInsets.only(bottom: HSpace.sm),
+      padding: const EdgeInsets.fromLTRB(
+          HSpace.md, HSpace.md, HSpace.sm, HSpace.sm),
+      decoration: BoxDecoration(
+        color: h.surface,
+        borderRadius: BorderRadius.circular(HRadius.md),
+        border: Border.all(color: h.border),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(
+            entry.text,
+            style: TextStyle(fontSize: 14.5, height: 1.55, color: h.text),
+          ),
+          const SizedBox(height: 6),
+          Row(
+            children: [
+              Expanded(
+                child: Text(
+                  meta.join(' · '),
+                  style: TextStyle(fontSize: 12, color: h.textFaint),
+                ),
+              ),
+              CupertinoButton(
+                onPressed: onEdit,
+                minimumSize: const Size(0, 32),
+                padding: const EdgeInsets.all(6),
+                child: Icon(AppIcons.edit, size: 17, color: h.textDim),
+              ),
+              CupertinoButton(
+                onPressed: onDelete,
+                minimumSize: const Size(0, 32),
+                padding: const EdgeInsets.all(6),
+                child: Icon(AppIcons.trash,
+                    size: 17, color: HColors.errorOn(h.dark)),
+              ),
+            ],
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+/// 记忆编辑抽屉：新增（可选 kind）/ 编辑正文。
+///
+/// 写入失败（疑似密钥拒收 / 超限）把后端给的人话原因直接显示在
+/// 输入框下方，不吞错误。
+class _MemoryEditorSheet extends StatefulWidget {
+  const _MemoryEditorSheet({required this.memory, this.entry});
+
+  final GlobalMemory memory;
+  final MemoryEntry? entry;
+
+  @override
+  State<_MemoryEditorSheet> createState() => _MemoryEditorSheetState();
+}
+
+class _MemoryEditorSheetState extends State<_MemoryEditorSheet> {
+  late final TextEditingController _ctrl =
+      TextEditingController(text: widget.entry?.text ?? '');
+  String _kind = 'other';
+  String? _error;
+  bool _saving = false;
+
+  bool get _isEdit => widget.entry != null;
+
+  Future<void> _save() async {
+    final text = _ctrl.text.trim();
+    if (text.isEmpty) {
+      setState(() => _error = '内容为空');
+      return;
+    }
+    setState(() {
+      _saving = true;
+      _error = null;
+    });
+    final r = _isEdit
+        ? await widget.memory.updateEntry(widget.entry!.id, text)
+        : await widget.memory.addEntry(text, kind: _kind, source: 'user');
+    if (!mounted) return;
+    if (!r.ok) {
+      setState(() {
+        _saving = false;
+        _error = r.error ?? '保存失败';
+      });
+      return;
+    }
+    Navigator.of(context).pop(true);
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final h = Hue.of(context);
+    return Padding(
+      padding:
+          EdgeInsets.only(bottom: MediaQuery.viewInsetsOf(context).bottom),
+      child: Container(
+        decoration: BoxDecoration(
+          color: h.surface,
+          borderRadius:
+              const BorderRadius.vertical(top: Radius.circular(20)),
+        ),
+        padding: const EdgeInsets.fromLTRB(
+            HSpace.lg, HSpace.md, HSpace.lg, HSpace.lg),
+        child: SafeArea(
+          top: false,
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Center(
+                child: Container(
+                  width: 36,
+                  height: 4,
+                  decoration: BoxDecoration(
+                    color: h.border,
+                    borderRadius: BorderRadius.circular(2),
+                  ),
+                ),
+              ),
+              const SizedBox(height: HSpace.md),
+              Text(
+                _isEdit ? '编辑记忆' : '添加记忆',
+                style: TextStyle(
+                  fontSize: 16,
+                  fontWeight: FontWeight.w600,
+                  color: h.text,
+                ),
+              ),
+              const SizedBox(height: HSpace.md),
+              CupertinoTextField(
+                controller: _ctrl,
+                autofocus: true,
+                maxLines: 5,
+                minLines: 3,
+                placeholder: '写下要长期记住的事…',
+                style: TextStyle(fontSize: 15, color: h.text),
+                placeholderStyle:
+                    TextStyle(fontSize: 15, color: h.textFaint),
+                decoration: BoxDecoration(
+                  color: h.surfaceAlt,
+                  borderRadius: BorderRadius.circular(HRadius.md),
+                  border: Border.all(color: h.border),
+                ),
+                padding: const EdgeInsets.all(HSpace.md),
+              ),
+              if (!_isEdit) ...[
+                const SizedBox(height: HSpace.md),
+                Wrap(
+                  spacing: 8,
+                  children: [
+                    for (final kind in _memoryKindOrder)
+                      GestureDetector(
+                        onTap: () => setState(() => _kind = kind),
+                        child: Container(
+                          padding: const EdgeInsets.symmetric(
+                              horizontal: 12, vertical: 7),
+                          decoration: BoxDecoration(
+                            color: _kind == kind ? h.text : h.surfaceAlt,
+                            borderRadius: BorderRadius.circular(999),
+                            border: Border.all(color: h.border),
+                          ),
+                          child: Text(
+                            _memoryKindLabels[kind] ?? kind,
+                            style: TextStyle(
+                              fontSize: 13,
+                              color: _kind == kind
+                                  ? (h.dark
+                                      ? const Color(0xFF0A0A0B)
+                                      : Colors.white)
+                                  : h.textDim,
+                            ),
+                          ),
+                        ),
+                      ),
+                  ],
+                ),
+              ],
+              if (_error != null) ...[
+                const SizedBox(height: HSpace.sm),
+                Text(
+                  _error!,
+                  style: TextStyle(
+                      fontSize: 13, color: HColors.errorOn(h.dark)),
+                ),
+              ],
+              const SizedBox(height: HSpace.md),
+              SizedBox(
+                width: double.infinity,
+                child: CupertinoButton(
+                  onPressed: _saving ? null : _save,
+                  color: h.text,
+                  padding: const EdgeInsets.symmetric(vertical: 13),
+                  borderRadius: BorderRadius.circular(HRadius.md),
+                  child: _saving
+                      ? CupertinoActivityIndicator(
+                          radius: 9,
+                          color: h.dark
+                              ? const Color(0xFF0A0A0B)
+                              : Colors.white)
+                      : Text(
+                          '保存',
+                          style: TextStyle(
+                            fontSize: 15,
+                            fontWeight: FontWeight.w600,
+                            color: h.dark
+                                ? const Color(0xFF0A0A0B)
+                                : Colors.white,
+                          ),
+                        ),
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
     );
   }
 }
@@ -1474,6 +1791,8 @@ class _ProviderEditPageState extends State<ProviderEditPage> {
                 maxOutputTokens: e.value.maxOutputTokens,
                 supportsTools: e.value.supportsTools,
                 supportsReasoning: e.value.supportsReasoning,
+                reasoningLevelsEffective:
+                    _protocol.reasoningLevelsEffective,
               ),
           };
         });
