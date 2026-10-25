@@ -611,7 +611,12 @@ class _ToolCallCardState extends State<ToolCallCard> {
     // · **展开态**：才给一点底色把人车入库，看得清"这块属于这次调用"
     //
     // 热区仍 ≥ [kMinTapTarget]（docs/25 §7 第 3 条）—— 用户点的是**整行**。
-    final diffStat = isFileWritingTool(call.tool) ? _stat(call) : null;
+    // ★ 失败的调用不显示 diff 统计：失败 = 什么都没改成，按参数估算出的
+    //   +/- 是假数字（实测-14 §4 瑕疵 1：edit 失败的卡显示 +2/+1/−1）。
+    final diffStat =
+        isFileWritingTool(call.tool) && call.status != ToolStatus.failure
+            ? _stat(call)
+            : null;
 
     return Container(
       margin: const EdgeInsets.only(bottom: HSpace.xs),
@@ -863,6 +868,8 @@ class _ToolCallCardState extends State<ToolCallCard> {
   }
 
   Widget _diffSection(Hue h, HToolCall call) {
+    // 失败 ⇒ 整个 diff 区块不渲染（连参数原文也不当 diff 展示）
+    if (call.status == ToolStatus.failure) return const SizedBox.shrink();
     final stat = _stat(call);
     final text = _diffText(call);
     final files = changedFilesOf(call.args);
