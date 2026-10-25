@@ -290,39 +290,39 @@ class _DevicePermissionPageState extends State<DevicePermissionPage> {
                   padding: const EdgeInsets.symmetric(
                       horizontal: HSpace.md, vertical: 11),
                   child: Row(
-                    // ★ 2026-10-25 真机修复（第二版；第一版 flex 3:5 有副作用）。
+                    // ★ 2026-10-25 真机修复（**第三版／定稿**，前两版都被真机推翻）。
                     //
-                    // 原始缺陷：`Row(Expanded(Text(标签)), Text(状态))` —— 状态文字
-                    // **不定宽**，先把宽度吃掉，`Expanded` 只剩近 0 宽 ⇒ Flutter
-                    // 逐字换行 ⇒ 「所有文件访问」标签**竖排**（真机该行 47px→~400px；
-                    // 取证 `staging/n8/N8-真机冒烟结果-2026-10-25.md`）。
+                    // 【原始缺陷】`Row(Expanded(Text(标签)), Text(状态))`：状态文字
+                    // **不定宽**先吃掉宽度，`Expanded` 只剩近 0 宽 ⇒ Flutter 逐字换行
+                    // ⇒ 「所有文件访问」标签**竖排**（真机该行 47px→~400px）。
                     //
-                    // 第一版修法给标签 flex 3、状态 Flexible(flex 5)，真机复验虽然
-                    // 竖排消失，但留下两个观感副作用（复验报告 §5）：
-                    //   ① 标签只有 3/8 宽 ⇒ 10 字的「文件访问（授权目录）」被折成 2 行
-                    //      （该行 131px→202px）；
-                    //   ② 状态用 `Flexible`（宽松）⇒ 单行状态的盒子只有固有宽，
-                    //      `textAlign` 在单行上不可见 ⇒ 短状态**不贴右边缘**。
+                    // 【第一版】标签 flex 3 / 状态 Flexible flex 5 ⇒ 竖排消失，但真机复验出：
+                    //   ① 10 字的「文件访问（授权目录）」被折成 **2 行**（该行 131px→202px）；
+                    //   ② 状态宽松 ⇒ 单行状态的盒子只取固有宽，`textAlign` 在单行上不可见
+                    //      ⇒ 短状态**不贴右边缘**（x 右缘 1000→572）。
                     //
-                    // 第二版（现在这版）三件事一起满足：
-                    //   · 标签 `Flexible`（宽松，flex 1）+ `maxLines:1 / softWrap:false`
-                    //     ⇒ **永不换行**（够宽就全显示，不够才省略号），绝不会竖排；
-                    //   · 状态 `Expanded`（**紧约束**，flex 1）+ `textAlign:right`
-                    //     ⇒ 单行也贴住右边缘，长文案在自己列内换行（右对齐）；
-                    //   · `spaceBetween` ⇒ 标签不足其份额时，余量落到两列之间，
-                    //     状态仍贴右边缘。
+                    // 【第二版】标签 Flexible + maxLines:1/softWrap:false/省略号 ⇒
+                    //   ①②收回，但真机复验又出**新的用户可见缺陷**：省略号把标签
+                    //   **吃掉两个字**（「文件访问（授权目…」）。
+                    //
+                    // 【空间真相（真机实测，MiSans 度量 ≈1.3em/字）】行内容宽 ~350dp；
+                    //   标签 10 字 ≈182dp；状态 18 字 ≈304dp。两者**不可能**同排且都完整
+                    //   ⇒ 必须有一方让步。让状态换行是唯一**不丢信息**的选择。
+                    //
+                    // 【第三版（本版）】标签**取自身宽度**（非 flex，永不换行/不省略）+
+                    //   状态 `Expanded`（紧约束，吃剩余宽度、**贴右**、必要时在自己列内换行）：
+                    //   · 标签 182dp 完整显示（六项都是固定短语，不会撑破行）；
+                    //   · 状态拿到 ~160dp ⇒ 长状态换 **2 行**（不是 3 行）、右对齐；
+                    //   · 行高回到 ~191px，与第二版相同，但**没有截断**。
+                    //   取证：`staging/n8/`（三段前后对照 + 截图）。
                     crossAxisAlignment: CrossAxisAlignment.start,
-                    mainAxisAlignment: MainAxisAlignment.spaceBetween,
                     children: [
-                      Flexible(
-                        child: Text(
-                          order[i].$2,
-                          maxLines: 1,
-                          softWrap: false,
-                          overflow: TextOverflow.ellipsis,
-                          style:
-                              TextStyle(fontSize: 14, color: h.text),
-                        ),
+                      Text(
+                        order[i].$2,
+                        maxLines: 1,
+                        softWrap: false,
+                        overflow: TextOverflow.ellipsis,
+                        style: TextStyle(fontSize: 14, color: h.text),
                       ),
                       const SizedBox(width: HSpace.sm),
                       Expanded(

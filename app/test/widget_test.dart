@@ -341,14 +341,11 @@ void main() {
     expect(size.width, greaterThan(60),
         reason: '标签宽度不能被长状态文字挤到 0（<60dp 就会逐字换行）');
 
-    // ★ 2026-10-25 真机复验追加的两条（第一版修法 flex 3:5 的副作用）：
+    // ★ 2026-10-25 真机复验追加（第一版 flex 3:5 的两个副作用）：
     //   ① 标签只给 3/8 宽 ⇒ 10 字那行「文件访问（授权目录）」被折成 **2 行**
     //      （真机实测该行 131px → 202px）；
     //   ② 状态用 `Flexible`（宽松）⇒ 单行短状态的盒子只有固有宽，`textAlign`
-    //      在单行上看不出效果 ⇒ 状态**不贴右边缘**（真机实测 x∈[440,572]，
-    //      修复前是贴右的 [868,975]）。
-    //   所以：六项标签**逐个**都得是一行（<25dp 才是真一行），且**短状态**
-    //   必须贴住行的右边缘。
+    //      在单行上看不出效果 ⇒ 状态**不贴右边缘**（真机右缘 1000 → 572）。
     for (final l in const [
       'Shizuku',
       '文件访问（授权目录）',
@@ -361,6 +358,24 @@ void main() {
       expect(f, findsOneWidget, reason: '六项里必须有「$l」这一行');
       expect(tester.getSize(f).height, lessThan(25),
           reason: '「$l」必须是一行 —— 折成两行说明标签列被压得太窄');
+    }
+
+    // ★★ 2026-10-25 真机**第二版**复验追加（最隐蔽的一条，放在几何断言之前）：
+    //   **标签不得被省略号截断**。省略号是**绘制期**行为 —— `find.text` 仍命中、
+    //   盒子宽仍等于约束宽、高度仍是一行 ⇒ 上面那些断言**全都抓不到**它
+    //   （真机实测：`maxLines:1 + ellipsis` 把「文件访问（授权目录）」吃成
+    //   「文件访问（授权目…」，像素签名为末尾 3 个 5~6px 的小 run）。
+    //   这里用 `TextPainter` 量**完整文案需要多宽**，再与**标签盒子宽**比：
+    //   盒子窄于文案需求 ⇒ 真机上必然截断（与字体族、设备无关）。
+    for (final l in const ['文件访问（授权目录）', '所有文件访问']) {
+      final box = tester.getSize(find.text(l)).width;
+      final tp = TextPainter(
+        text: TextSpan(text: l, style: const TextStyle(fontSize: 14)),
+        textDirection: TextDirection.ltr,
+      )..layout();
+      expect(tp.width, lessThanOrEqualTo(box + 0.5),
+          reason: '「$l」完整文案需要 ${tp.width}dp，标签盒子只有 $box dp '
+              '⇒ 真机上会被省略号吃掉（第二版就是这个缺陷）');
     }
 
     // 短状态（「已授权」）必须贴住行的右边缘：状态盒子应当是**紧约束**
