@@ -19,7 +19,7 @@
 ///    `showBwConfirmSheet` / `showBwTextInputSheet`）；居中弹窗已退役。
 /// 4. **消息条**：`SnackBar` ⇒ [showIosToast]（顶部胶囊，2 秒自动消失 ——
 ///    iOS 没有底部黑条）。
-/// 5. **表单件**：`FilledButton` ⇒ [IosButton.filled]；`Switch` ⇒ `CupertinoSwitch`；
+/// 5. **表单件**：`FilledButton` ⇒ [IosButton.filled]；`Switch` ⇒ `ElasticSwitch`（弹性开关，`elastic_switch.dart`）；
 ///    `CircularProgressIndicator` ⇒ `CupertinoActivityIndicator`；
 ///    `TextField` ⇒ `CupertinoTextField`；`Slider` ⇒ `CupertinoSlider`；
 ///    `PopupMenuButton` ⇒ `showCupertinoMenu`；`ListTile` ⇒ `CupertinoListTile`。

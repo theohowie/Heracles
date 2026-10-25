@@ -364,7 +364,7 @@ class WorkspaceDrawer extends StatelessWidget {
               Text('还没有工作区',
                   style: TextStyle(
                       fontSize: 14,
-                      fontWeight: FontWeight.w600,
+                      fontWeight: FontWeight.w500,
                       color: h.text)),
               const SizedBox(height: HSpace.sm),
               Text(
@@ -433,8 +433,7 @@ class WorkspaceDrawer extends StatelessWidget {
                   'Heracles',
                   style: TextStyle(
                     fontSize: 16.5,
-                    fontWeight: FontWeight.w700,
-                    letterSpacing: -0.3,
+                    fontWeight: FontWeight.w600,
                     color: h.text,
                   ),
                 ),
@@ -598,7 +597,7 @@ class WorkspaceDrawer extends StatelessWidget {
           text,
           style: TextStyle(
             fontSize: 11.5,
-            fontWeight: FontWeight.w600,
+            fontWeight: FontWeight.w500,
             color: h.textFaint,
             letterSpacing: 0.5,
           ),
@@ -627,7 +626,7 @@ class WorkspaceDrawer extends StatelessWidget {
                   label,
                   style: TextStyle(
                     fontSize: 14,
-                    fontWeight: selected ? FontWeight.w600 : FontWeight.w400,
+                    fontWeight: selected ? FontWeight.w500 : FontWeight.w400,
                     color: selected ? h.text : h.textDim,
                   ),
                 ),
@@ -645,6 +644,12 @@ class WorkspaceDrawer extends StatelessWidget {
 ///
 /// 用**文件级函数**而不是 widget 方法 —— 因为它需要 workspace 上下文
 /// 才能把回调传给上层，做成 widget 会多一层无意义的 prop 传递。
+/// 会话的底部菜单（2026-10-25 改统一抽屉样式：抓手 + 填充图标行，
+/// 与审批 / 确认抽屉同一套视觉。旧版 CupertinoListTile + 描边图标
+/// 与新抽屉语言不一致，用户真机指出后退役）。
+///
+/// 用**文件级函数**而不是 widget 方法 —— 因为它需要 workspace 上下文
+/// 才能把回调传给上层，做成 widget 会多一层无意义的 prop 传递。
 void _sessionMenu(
   BuildContext context,
   Hue h,
@@ -659,60 +664,111 @@ void _sessionMenu(
     context: context,
     backgroundColor: h.surfaceAlt,
     shape: const RoundedRectangleBorder(
-      borderRadius: BorderRadius.vertical(top: Radius.circular(HRadius.lg)),
+      borderRadius: BorderRadius.vertical(top: Radius.circular(24)),
     ),
     builder: (ctx) => SafeArea(
-      child: CupertinoTheme(
-        data: CupertinoThemeData(
-          brightness: h.dark ? Brightness.dark : Brightness.light,
-          primaryColor: h.accent,
-        ),
+      child: Padding(
+        padding: const EdgeInsets.fromLTRB(10, 10, 10, 12),
         child: Column(
           mainAxisSize: MainAxisSize.min,
           children: [
-            CupertinoListTile(
-              leading: Icon(
-                s.starred ? AppIcons.star : CupertinoIcons.star,
-                color: s.starred ? HColors.warnOn(h.dark) : h.textDim,
-              ),
-              title: Text(s.starred ? '取消收藏' : '收藏',
-                  style: TextStyle(color: h.text)),
+            _bwSheetHandle(h),
+            const SizedBox(height: 8),
+            _bwMenuRow(
+              h,
+              icon: AppIcons.star,
+              label: s.starred ? '取消收藏' : '收藏',
+              iconColor: s.starred ? HColors.warnOn(h.dark) : null,
               onTap: () {
                 Navigator.of(ctx).pop();
                 onStar(w.id, s.id);
               },
             ),
-            CupertinoListTile(
-              leading: Icon(AppIcons.edit, color: h.textDim),
-              title: Text('重命名', style: TextStyle(color: h.text)),
+            _bwMenuRow(
+              h,
+              icon: CupertinoIcons.square_pencil_fill,
+              label: '重命名',
               onTap: () {
                 Navigator.of(ctx).pop();
                 onRename(w.id, s.id);
               },
             ),
-            CupertinoListTile(
-              leading: Icon(CupertinoIcons.archivebox, color: h.textDim),
-              title: Text(s.archived ? '取消归档' : '归档',
-                  style: TextStyle(color: h.text)),
-              subtitle: Text('归档后默认隐藏',
-                  style: TextStyle(fontSize: 11, color: h.textFaint)),
+            _bwMenuRow(
+              h,
+              icon: CupertinoIcons.archivebox_fill,
+              label: s.archived ? '取消归档' : '归档',
+              subtitle: '归档后默认隐藏',
               onTap: () {
                 Navigator.of(ctx).pop();
                 onArchive(w.id, s.id);
               },
             ),
-            CupertinoListTile(
-              leading: Icon(AppIcons.trash, color: HColors.errorOn(h.dark)),
-              title: Text('删除',
-                  style: TextStyle(color: HColors.errorOn(h.dark))),
+            _bwMenuRow(
+              h,
+              icon: CupertinoIcons.trash_fill,
+              label: '删除',
+              danger: true,
               onTap: () {
                 Navigator.of(ctx).pop();
                 onDelete(w.id, s.id);
               },
             ),
-            const SizedBox(height: HSpace.sm),
           ],
         ),
+      ),
+    ),
+  );
+}
+
+/// 抽屉抓手（与 bw 系列抽屉一致的样式）
+Widget _bwSheetHandle(Hue h) => Center(
+      child: Container(
+        width: 36,
+        height: 4,
+        decoration: BoxDecoration(
+          color: h.border,
+          borderRadius: BorderRadius.circular(999),
+        ),
+      ),
+    );
+
+/// 统一抽屉菜单行：填充图标 + 标题（+ 可选副标题）；
+/// [danger] = 图标与文字一起语义红（删除类）。
+Widget _bwMenuRow(
+  Hue h, {
+  required IconData icon,
+  required String label,
+  String? subtitle,
+  Color? iconColor,
+  bool danger = false,
+  required VoidCallback onTap,
+}) {
+  final err = HColors.errorOn(h.dark);
+  return InkWell(
+    onTap: onTap,
+    borderRadius: BorderRadius.circular(12),
+    child: Padding(
+      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 11),
+      child: Row(
+        children: [
+          Icon(icon,
+              size: 20, color: danger ? err : (iconColor ?? h.textDim)),
+          const SizedBox(width: 12),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Text(label,
+                    style:
+                        TextStyle(fontSize: 15, color: danger ? err : h.text)),
+                if (subtitle != null)
+                  Text(subtitle,
+                      style: TextStyle(fontSize: 11.5, color: h.textFaint)),
+              ],
+            ),
+          ),
+        ],
       ),
     ),
   );
@@ -750,7 +806,7 @@ class _SectionHeader extends StatelessWidget {
             '工作区',
             style: TextStyle(
               fontSize: 12,
-              fontWeight: FontWeight.w600,
+              fontWeight: FontWeight.w500,
               color: h.textFaint,
               letterSpacing: 0.6,
             ),
@@ -953,7 +1009,7 @@ class _WorkspaceGroup extends StatelessWidget {
                         overflow: TextOverflow.ellipsis,
                         style: TextStyle(
                             fontSize: 15,
-                            fontWeight: FontWeight.w600,
+                            fontWeight: FontWeight.w500,
                             color: h.text),
                       ),
                       // 常规副标题（已授权文件夹 / 路径尾）按原型去掉；
@@ -1011,19 +1067,13 @@ class _WorkspaceGroup extends StatelessWidget {
               ),
             )
           else
-            // 会话挂在工作区下：左侧连续竖线 + 缩进（原型 04）
+            // 会话挂在工作区下：缩进列表 —— 每条会话前一根独立
+            // 短竖，不再连成一条整线（2026-10-25 晚用户改）
             Padding(
-              padding: const EdgeInsets.only(left: 21, right: HSpace.sm),
-              child: Container(
-                decoration: BoxDecoration(
-                  border: Border(
-                    left: BorderSide(color: h.border, width: 1.5),
-                  ),
-                ),
-                padding: const EdgeInsets.only(left: HSpace.md),
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.stretch,
-                  children: [
+              padding: const EdgeInsets.only(left: 33, right: HSpace.sm),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: [
                     for (final ss in workspace.sessions)
                       _SessionRow(
                         session: ss,
@@ -1040,8 +1090,7 @@ class _WorkspaceGroup extends StatelessWidget {
                           (wid, sid) => onDelete(sid),
                         ),
                       ),
-                  ],
-                ),
+                ],
               ),
             ),
       ],
@@ -1054,47 +1103,56 @@ class _WorkspaceGroup extends StatelessWidget {
       context: context,
       backgroundColor: h.surfaceAlt,
       shape: const RoundedRectangleBorder(
-        borderRadius: BorderRadius.vertical(top: Radius.circular(HRadius.lg)),
+        borderRadius: BorderRadius.vertical(top: Radius.circular(24)),
       ),
       builder: (ctx) => SafeArea(
-        child: CupertinoTheme(
-          data: CupertinoThemeData(
-            brightness: h.dark ? Brightness.dark : Brightness.light,
-            primaryColor: h.accent,
-          ),
+        child: Padding(
+          padding: const EdgeInsets.fromLTRB(10, 10, 10, 12),
           child: Column(
             mainAxisSize: MainAxisSize.min,
             children: [
-              CupertinoListTile(
-                leading: Icon(CupertinoIcons.folder_open, color: h.textDim),
-                title: Text(
-                  workspace.path,
-                  maxLines: 2,
-                  overflow: TextOverflow.ellipsis,
-                  style: TextStyle(fontSize: 12, color: h.textDim),
+              _bwSheetHandle(h),
+              const SizedBox(height: 8),
+              // 路径（只读信息行，不可点）
+              Padding(
+                padding:
+                    const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+                child: Row(
+                  children: [
+                    Icon(CupertinoIcons.folder_fill,
+                        size: 20, color: h.textDim),
+                    const SizedBox(width: 12),
+                    Expanded(
+                      child: Text(
+                        workspace.path,
+                        maxLines: 2,
+                        overflow: TextOverflow.ellipsis,
+                        style: TextStyle(fontSize: 12, color: h.textDim),
+                      ),
+                    ),
+                  ],
                 ),
               ),
-              CupertinoListTile(
-                leading: Icon(AppIcons.add, color: h.accent),
-                title: Text('新建会话', style: TextStyle(color: h.text)),
+              _bwMenuRow(
+                h,
+                icon: AppIcons.add,
+                label: '新建会话',
                 onTap: () {
                   Navigator.of(ctx).pop();
                   onNewSession();
                 },
               ),
-              CupertinoListTile(
-                leading: Icon(CupertinoIcons.minus_circle,
-                    color: HColors.errorOn(h.dark)),
-                title: Text('从列表移除',
-                    style: TextStyle(color: HColors.errorOn(h.dark))),
-                subtitle: Text('不会删除文件夹本身',
-                    style: TextStyle(fontSize: 11, color: h.textFaint)),
+              _bwMenuRow(
+                h,
+                icon: CupertinoIcons.minus_circle_fill,
+                label: '从列表移除',
+                subtitle: '不会删除文件夹本身',
+                danger: true,
                 onTap: () {
                   Navigator.of(ctx).pop();
                   onRemove();
                 },
               ),
-              const SizedBox(height: HSpace.sm),
             ],
           ),
         ),
@@ -1126,66 +1184,74 @@ class _SessionRow extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final active = session.active;
-    // 第二行小字：[工作区名 ·] 时间 [· 当前]（原型 04 的两行式）
-    final second = [
+    // 右侧小字（与标题同行）：[归属工作区 ·] 时间 [· 当前]。
+    // 原来放第二行把行高撑得太高（2026-10-25 晚用户改到右侧）。
+    final right = [
       ?subtitle,
       if (session.relativeTime.isNotEmpty) session.relativeTime,
       if (active) '当前',
     ].join(' · ');
-    return Material(
-      // 当前会话 = 整块浅灰高亮（原型 04）
-      color: active ? h.surface : Colors.transparent,
-      borderRadius: BorderRadius.circular(12),
-      child: InkWell(
-        onTap: onTap,
-        onLongPress: onMenu,
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 2),
+      child: Material(
+        // 当前会话 = 整块浅灰高亮（原型 04）
+        color: active ? h.surface : Colors.transparent,
         borderRadius: BorderRadius.circular(12),
-        child: Padding(
-          padding: const EdgeInsets.symmetric(
-              horizontal: HSpace.md, vertical: 9),
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              Row(
-                children: [
-                  if (session.starred)
-                    Padding(
-                      padding: const EdgeInsets.only(right: 4),
-                      child: Icon(AppIcons.star,
-                          size: 11, color: HColors.warnOn(h.dark)),
-                    ),
-                  if (session.archived)
-                    Padding(
-                      padding: const EdgeInsets.only(right: 4),
-                      child: Icon(CupertinoIcons.archivebox,
-                          size: 13, color: h.textFaint),
-                    ),
-                  Expanded(
-                    child: Text(
-                      session.title,
-                      maxLines: 1,
-                      overflow: TextOverflow.ellipsis,
-                      style: TextStyle(
-                        fontSize: 14,
-                        fontWeight:
-                            active ? FontWeight.w600 : FontWeight.w500,
-                        color: h.text,
-                      ),
+        child: InkWell(
+          onTap: onTap,
+          onLongPress: onMenu,
+          borderRadius: BorderRadius.circular(12),
+          child: Padding(
+            padding: const EdgeInsets.symmetric(
+                horizontal: HSpace.md, vertical: 10),
+            child: Row(
+              children: [
+                // 每条会话前一根独立短竖：当前 = 深色，其余 = 浅灰，
+                // 段与段之间断开，不连成整线。
+                Container(
+                  width: 3,
+                  height: 18,
+                  decoration: BoxDecoration(
+                    color: active ? h.text : h.border,
+                    borderRadius: BorderRadius.circular(1.5),
+                  ),
+                ),
+                const SizedBox(width: 10),
+                if (session.starred)
+                  Padding(
+                    padding: const EdgeInsets.only(right: 4),
+                    child: Icon(AppIcons.star,
+                        size: 11, color: HColors.warnOn(h.dark)),
+                  ),
+                if (session.archived)
+                  Padding(
+                    padding: const EdgeInsets.only(right: 4),
+                    child: Icon(CupertinoIcons.archivebox,
+                        size: 13, color: h.textFaint),
+                  ),
+                Expanded(
+                  child: Text(
+                    session.title,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: TextStyle(
+                      fontSize: 14,
+                      fontWeight:
+                          active ? FontWeight.w500 : FontWeight.w400,
+                      color: h.text,
                     ),
                   ),
-                ],
-              ),
-              if (second.isNotEmpty) ...[
-                const SizedBox(height: 2),
-                Text(
-                  second,
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
-                  style: TextStyle(fontSize: 11.5, color: h.textFaint),
                 ),
+                if (right.isNotEmpty) ...[
+                  const SizedBox(width: 8),
+                  Text(
+                    right,
+                    maxLines: 1,
+                    style: TextStyle(fontSize: 11.5, color: h.textFaint),
+                  ),
+                ],
               ],
-            ],
+            ),
           ),
         ),
       ),

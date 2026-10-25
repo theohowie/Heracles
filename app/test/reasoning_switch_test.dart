@@ -8,6 +8,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 
 import 'package:heracles/models/settings.dart';
 import 'package:heracles/services/agent_bridge.dart';
+import 'package:heracles/screens/settings_screen.dart';
 import 'package:heracles/services/settings_controller.dart';
 import 'package:heracles/theme/app_theme.dart';
 import 'package:heracles/widgets/input_bar.dart';
@@ -65,8 +66,6 @@ void main() {
     String? label,
     List<ModelProviderConfig> providers = const [],
     ValueChanged<String>? onProviderSelected,
-    int maxTurns = 0,
-    ValueChanged<int>? onMaxTurnsChanged,
   }) =>
       InputBar(
         onSend: (_) {},
@@ -76,8 +75,6 @@ void main() {
         providerLabel: label,
         providers: providers,
         onProviderSelected: onProviderSelected,
-        maxTurns: maxTurns,
-        onMaxTurnsChanged: onMaxTurnsChanged,
       );
 
   // ==================================================================
@@ -527,32 +524,40 @@ void main() {
           reason: '写盘也必须是 0 —— 否则写进去的脏值下次读回又被悄悄改掉');
     });
 
-    testWidgets('★★ 弹层里五档一个不少，默认选中「自动」', (tester) async {
-      await tester.pumpWidget(wrap(barWith(
-        level: ReasoningLevel.auto,
-        label: 'm',
-        maxTurns: 0,
-      )));
-      await tester.pump();
-      await openSheet(tester);
+    // ★★★ 最大轮次 UI 于 2026-10-25 迁出模型抽屉（用户明确定：
+    // 「不要在这个模型抽屉里改」）—— 唯一入口 = 通用设置页分段选择。
+    // 以下用例在通用设置页验证同一批语义（五档 / 人话 / 点选 / 同档）。
+
+    /// 造一个带指定 maxTurns 的 controller 并打开通用设置页，
+    /// 滚动到最大轮次卡片可见。
+    Future<SettingsController> openGeneral(
+      WidgetTester tester, {
+      int maxTurns = 0,
+    }) async {
+      SharedPreferences.setMockInitialValues({'maxTurns': maxTurns});
+      final c = await SettingsController.load();
+      await tester.pumpWidget(wrap(GeneralSettingsPage(controller: c)));
+      await tester.pumpAndSettle();
+      await tester.scrollUntilVisible(find.text('最大轮次'), 120);
+      await tester.pumpAndSettle();
+      return c;
+    }
+
+    testWidgets('★★ 通用设置里五档一个不少，默认选中「自动」', (tester) async {
+      final c = await openGeneral(tester);
 
       expect(find.text('最大轮次'), findsOneWidget,
-          reason: '最大轮次区块必须出现在模型/推理弹层里');
+          reason: '最大轮次区块必须出现在通用设置页');
       for (final label in ['自动', '8', '16', '40', '80']) {
         expect(find.text(label), findsWidgets,
             reason: '档位 $label 必须在（0 显示成"自动"，不是"0"）');
       }
+      expect(c.value.maxTurns, 0, reason: '默认 = 自动（0）');
     });
 
     testWidgets('★★ 必须有**人话提示**：自动跟随后端 + 更久 + 更贵',
         (tester) async {
-      await tester.pumpWidget(wrap(barWith(
-        level: ReasoningLevel.auto,
-        label: 'm',
-        maxTurns: 0,
-      )));
-      await tester.pump();
-      await openSheet(tester);
+      await openGeneral(tester);
 
       // 三个事实缺一不可：自动到底是多少 / 更久 / 更贵
       // ★ 2026-10-19：本地后端已删除 ⇒ 提示里只保留"云端 40"（不再有"本地 8"）
@@ -564,7 +569,7 @@ void main() {
           reason: '云端按轮计费 ⇒ 必须提示花钱更多，不能只让用户看到"更多轮次"');
     });
 
-    /// 点某个轮次**选项胶囊**（现实现是自绘 _PillOption，不是 ChoiceChip）。
+    /// 点某个轮次**分段选项**（现实现是通用设置页的 _SegControl）。
     ///
     /// ⚠️ **不能**直接 `find.text('40')`：当前档位非自动时，行尾也会显示
     /// "40"（`_maxTurnsLabel`），于是同一个文本有两个 widget →
@@ -582,51 +587,41 @@ void main() {
       await tester.pumpAndSettle();
     }
 
-    testWidgets('★★ 点「40」→ 回调 40，且行尾显示 40', (tester) async {
-      final picked = <int>[];
-      await tester.pumpWidget(wrap(barWith(
-        level: ReasoningLevel.auto,
-        label: 'm',
-        maxTurns: 0,
-        onMaxTurnsChanged: picked.add,
-      )));
-      await tester.pump();
-      await openSheet(tester);
+    testWidgets('★★ 点「40」→ 设置变 40 并持久化', (tester) async {
+      final c = await openGeneral(tester);
 
       await tapChip(tester, '40');
 
-      expect(picked, [40], reason: '点选即回调该档位的数值');
+      expect(c.value.maxTurns, 40, reason: '点选即生效');
+      final c2 = await SettingsController.load();
+      expect(c2.value.maxTurns, 40, reason: '必须写盘 —— 重启后还在');
     });
 
     testWidgets('★ 选同一档位不触发回调（不产生无意义的写盘）',
         (tester) async {
+      final c = await openGeneral(tester, maxTurns: 40);
       var calls = 0;
-      await tester.pumpWidget(wrap(barWith(
-        level: ReasoningLevel.auto,
-        label: 'm',
-        maxTurns: 40,
-        onMaxTurnsChanged: (_) => calls++,
-      )));
-      await tester.pump();
-      await openSheet(tester);
+      c.addListener(() => calls++);
 
       await tapChip(tester, '40');
 
       expect(calls, 0, reason: '选了同一档不该回调 —— 与推理等级同语义');
+      expect(c.value.maxTurns, 40);
     });
 
-    testWidgets('★ 非自动档位时行尾显示具体数字（不是"自动"）',
+    testWidgets('★ 模型抽屉里不再有最大轮次（2026-10-25 用户定）',
         (tester) async {
       await tester.pumpWidget(wrap(barWith(
         level: ReasoningLevel.auto,
         label: 'm',
-        maxTurns: 16,
       )));
       await tester.pump();
       await openSheet(tester);
 
-      // 行尾 "16" + 档位芯片 "16" = 至少两处
-      expect(find.text('16'), findsWidgets);
+      expect(find.text('思考等级'), findsOneWidget,
+          reason: '思考等级仍在模型抽屉里');
+      expect(find.text('最大轮次'), findsNothing,
+          reason: '最大轮次已迁到通用设置，抽屉里不许再出现');
     });
 
     // ----------------------------------------------------------------

@@ -1134,7 +1134,10 @@ class _ToolCallCardState extends State<ToolCallCard> {
 ///
 /// ## 字号：各级一律由 [fontSize] 派生（2026-10-23）
 ///
-/// 用户报「总结字体还是小」⇒ 最终回答基准 15 → **16**。但只改基准不够：
+/// 2026-10-23 曾按「总结字体还是小」把最终回答基准抬到 16，与步骤正文的
+/// 15 分成两层；**2026-10-25 晚用户纠正：字号必须统一**（同一段对话里
+/// 一会儿大一会儿小是硬伤，层级靠字重/颜色，不靠字号）⇒ 基准统一 **15**，
+/// 与 HTxt.body、步骤正文汇报、用户消息完全一致。但只改基准不够：
 /// 标题原来写死 15.5/16.5/17.5，基准调到 16 之后 `###`（15.5）反而**比正文小**。
 /// 现在各级相对 [fontSize] 计算：
 ///
@@ -1160,7 +1163,7 @@ class MarkdownLite extends StatelessWidget {
   const MarkdownLite({
     super.key,
     required this.text,
-    this.fontSize = 16,
+    this.fontSize = 15,
     this.color,
   });
 
@@ -1168,8 +1171,7 @@ class MarkdownLite extends StatelessWidget {
 
   /// 正文基准字号 —— 标题/列表/引用/代码/表格的字号都由它派生（见类注释）。
   ///
-  /// · 最终回答：16（用户要求"总结字体还是小"）
-  /// · 步骤正文汇报：15（用户要求正文汇报保持 15）
+  /// · 最终回答与步骤正文汇报：统一 15（2026-10-25 晚用户定字号统一）
   final double fontSize;
 
   /// 正文墨色；`null` = 跟随主题（[Hue.text]）。错误态正文传错误色。

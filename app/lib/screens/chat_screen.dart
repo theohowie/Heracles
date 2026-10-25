@@ -356,6 +356,46 @@ class _ChatScreenState extends State<ChatScreen> {
   /// 当前会话的累计用量（没有则零元）。
   SessionUsage get _usage => _usageBySession[_activeSessionId ?? ''] ?? SessionUsage.empty;
 
+  /// 顶栏右列双指标（2026-10-25 晚用户定的两层 topbar）：
+  /// 上行上下文占用率、下行缓存命中率，各带一个同色小圆环；
+  /// 点整列打开用量抽屉（同旧圆环）。未知/未上报显示「—」灰字，
+  /// 不画假数（命中率口径与用量抽屉一致：SessionUsage.hitRate）。
+  Widget _topMetrics(Hue h) {
+    final cu = _contextUsage;
+    final cRatio = cu.limit > 0 ? cu.used / cu.limit : null;
+    final hit = _usage.hitRate;
+    return GestureDetector(
+      onTap: _openUsageSidebar,
+      behavior: HitTestBehavior.opaque,
+      child: Container(
+        width: 108,
+        padding: const EdgeInsets.only(right: 14),
+        child: Column(
+          mainAxisAlignment: MainAxisAlignment.center,
+          crossAxisAlignment: CrossAxisAlignment.end,
+          children: [
+            TopMetricLine(
+              label: '上下文',
+              valueText:
+                  cRatio == null ? '—' : '${(cRatio * 100).round()}%',
+              ratio: cRatio,
+              color: cRatio == null
+                  ? h.textFaint
+                  : usageStatusColor(h, cRatio),
+            ),
+            const SizedBox(height: 6),
+            TopMetricLine(
+              label: '命中',
+              valueText: hit == null ? '—' : '${(hit * 100).round()}%',
+              ratio: hit,
+              color: hit == null ? h.textFaint : hitStatusColor(h, hit),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
   /// 当前实时订阅归属的运行。`null` = 没有正在收事件的运行。
   _RunOrigin? _liveOrigin;
 
@@ -4058,76 +4098,70 @@ class _ChatScreenState extends State<ChatScreen> {
         // 有光晕的主题：顶栏也透明，光斑从屏幕顶部透出来（同图一）
         backgroundColor: h.glowColors.isEmpty ? null : Colors.transparent,
         titleSpacing: 0,
-        // ★ 顶栏左侧 = 真实 App 图标（原型 01，2026-10-25 回位）：
-        //   点它开抽屉。不再用汉堡线条图标（用户禁用线条式图标，
-        //   且品牌图标本身就是导航锚点，抽屉头部同款）。
-        leading: CupertinoButton(
-          padding: const EdgeInsets.all(8),
-          onPressed: () => _scaffoldKey.currentState?.openDrawer(),
-          child: ClipRRect(
-            borderRadius: BorderRadius.circular(8),
-            child: Image.asset(
-              'assets/branding/app_icon_source.png',
-              width: 27,
-              height: 27,
-              fit: BoxFit.cover,
+        // ★ 两层 topbar（2026-10-25 晚用户定）：左侧 App 图标独占
+        //   两层高度；中间上层会话标题、下层灵动岛（居中）；右列
+        //   上层上下文占用率、下层缓存命中率（状态色档位见
+        //   bw_topbar）。左右槽位同宽 108，中间列才真居中。
+        toolbarHeight: 76,
+        leadingWidth: 108,
+        leading: Align(
+          alignment: Alignment.centerLeft,
+          child: Padding(
+            padding: const EdgeInsets.only(left: 14),
+            child: GestureDetector(
+              onTap: () => _scaffoldKey.currentState?.openDrawer(),
+              behavior: HitTestBehavior.opaque,
+              child: ClipRRect(
+                borderRadius: BorderRadius.circular(10),
+                child: Image.asset(
+                  'assets/branding/app_icon_source.png',
+                  width: 37,
+                  height: 37,
+                  fit: BoxFit.cover,
+                ),
+              ),
             ),
           ),
         ),
-        title: Row(
+        title: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.center,
           children: [
-            // ★ 灵动岛胶囊回顶栏（原型 01，2026-10-25 回位）：
-            //   收起态是顶栏里的小胶囊（在标题左侧）；点它展开，
-            //   面板从顶栏下方正中垂下（body Stack 的悬浮层渲染，
-            //   AppBar 固定高度装不下展开态）。展开时胶囊让位给
-            //   面板自己的标题行，避免同屏两颗胶囊。
-            if (_planSteps != null && _planSteps!.isNotEmpty && _planCollapsed) ...[
-              Flexible(
-                child: DynamicIsland(
-                  steps: _planSteps!,
-                  doneCount: _planDone,
-                  activeIndex: _planActive,
-                  collapsed: true,
-                  onToggle: () => setState(() => _planCollapsed = false),
-                  reachedGoal: _planReachedGoal,
-                  closedReason: _planClosedReason,
-                  cancelledIndices: _planCancelled,
-                  onAdjust: _prefillPlanAdjust,
-                ),
-              ),
-              const SizedBox(width: HSpace.sm),
-            ],
-            // ★ 标题只有工作区名（2026-10-12，用户要求）：
-            //   「你标题上面的这个本地模型名称还放着那干嘛？」——
-            //   BackendBadge（[本地|qwen3.5-4b] 绿胶囊）移除。
-            //   模型信息在输入框的模型选择框里已经有了，标题不重复。
-            Flexible(
-              child: Text(
-                _activeSession?.title ?? _workspaceName,
-                maxLines: 1,
-                overflow: TextOverflow.ellipsis,
-                style: TextStyle(
-                  fontSize: 15,
-                  fontWeight: FontWeight.w600,
-                  color: h.text,
-                ),
+            // ★ 标题只有会话名（无会话时回退工作区名）：模型信息在
+            //   输入框的模型选择框里已有，标题不重复（2026-10-12）。
+            Text(
+              _activeSession?.title ?? _workspaceName,
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              textAlign: TextAlign.center,
+              style: TextStyle(
+                fontSize: 15,
+                fontWeight: FontWeight.w600,
+                color: h.text,
               ),
             ),
+            // 灵动岛收起胶囊：标题下层居中。点它展开，面板从顶栏
+            // 下方正中垂下（body Stack 悬浮层渲染）；展开时胶囊
+            // 让位给面板自己的标题行，避免同屏两颗胶囊。
+            if (_planSteps != null &&
+                _planSteps!.isNotEmpty &&
+                _planCollapsed) ...[
+              const SizedBox(height: 4),
+              DynamicIsland(
+                steps: _planSteps!,
+                doneCount: _planDone,
+                activeIndex: _planActive,
+                collapsed: true,
+                onToggle: () => setState(() => _planCollapsed = false),
+                reachedGoal: _planReachedGoal,
+                closedReason: _planClosedReason,
+                cancelledIndices: _planCancelled,
+                onAdjust: _prefillPlanAdjust,
+              ),
+            ],
           ],
         ),
-        actions: [
-          // ★ 上下文圆环（2026-10-24 黑白改版）：替代原来的 UsageIndicator 文字，
-          //   环的弧长 = 已用 / 上限，点按打开用量半抽屉。
-          ContextRing(
-            usedTokens: _contextUsage.used,
-            limitTokens: _contextUsage.limit,
-            onTap: _openUsageSidebar,
-          ),
-          // ★ 顶栏右侧只留圆环（原型 01 第三轮拍板：「右上图标去掉
-          //   只留圆环」）—— 刷新按钮 2026-10-25 按原型移除，
-          //   _reload 仍由抽屉打开等内部路径调用，不受影响。
-          const SizedBox(width: HSpace.xs),
-        ],
+        actions: [_topMetrics(h)],
       ),
       body: Column(
         children: [
@@ -4311,12 +4345,8 @@ class _ChatScreenState extends State<ChatScreen> {
             reasoningLevel: widget.settings.value.reasoningLevel,
             onReasoningLevelChanged: (v) =>
                 unawaited(widget.settings.setReasoningLevel(v)),
-            // ★ 最大轮次（2026-10-18，docs/27 P0-1 / ADR-033）——
-            //   与推理等级同属"单次运行的成本参数"，接法保持一致：
-            //   改的是**设置**（持久化），不是"仅这一次运行"的临时参数。
-            maxTurns: widget.settings.value.maxTurns,
-            onMaxTurnsChanged: (v) =>
-                unawaited(widget.settings.setMaxTurns(v)),
+            // 最大轮次只在通用设置页调整（2026-10-25 用户定），
+            // 输入区不再透传；setMaxTurns 的调用点在设置页。
             // 本地只有开/关两态那条提示已随本地后端删除（ADR-035 S4）——
             // 不再传 `isLocalBackend`（InputBar 里该参数已移除）。
             // 模型选择框（2026-10-12）：显示当前 provider 的短名，
@@ -4642,10 +4672,22 @@ class _ChatScreenState extends State<ChatScreen> {
     var page = 0;
     final total = questions.length;
 
-    final result = await showCupertinoDialog<Map<String, List<String>>?>(
+    // ★ 2026-10-25 晚：居中弹窗改上拉抽屉（用户定：所有弹层统一抽屉式，
+    //   高度随问题内容自适应）。语义与弹窗时代一条不变：
+    //   · 点外面 / 下拉关闭 = null ⇒ 空答案（全部未回答，绝不编造）
+    //   · 「跳过」= 回传**已答部分**（collect）；单选点选项自动跳题；
+    //     「其他…」自填留空 = 该题未作答；controller 跨翻页保留输入。
+    //   高度：内容区 Flexible + 滚动 —— 选项少时抽屉贴合内容，
+    //   选项多时抽屉长到上限、内部滚动，按钮行始终钉底。
+    final result = await showModalBottomSheet<Map<String, List<String>>>(
       context: context,
-      barrierDismissible: true,
-      builder: (dlgCtx) {
+      backgroundColor: h.surfaceAlt,
+      isScrollControlled: true,
+      isDismissible: true,
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(24)),
+      ),
+      builder: (sheetCtx) {
         return StatefulBuilder(
           builder: (ctx, setDlgState) {
             final q = questions[page];
@@ -4694,116 +4736,187 @@ class _ChatScreenState extends State<ChatScreen> {
               });
             }
 
-            return CupertinoAlertDialog(
-              title: Row(
-                children: [
-                  Icon(CupertinoIcons.question_circle, size: 20, color: h.accent),
-                  const SizedBox(width: HSpace.sm),
-                  const Expanded(
-                    child: Text('模型需要你的回答',
-                        style: TextStyle(fontSize: 16)),
-                  ),
-                  // 进度：多题时必须让用户知道还有几题
-                  if (total > 1)
-                    Text('${page + 1}/$total',
-                        style: TextStyle(fontSize: 12, color: h.textFaint)),
-                ],
-              ),
-              content: ConstrainedBox(
-                constraints: BoxConstraints(
-                  maxHeight: MediaQuery.sizeOf(context).height * 0.55,
+            return SafeArea(
+              child: Padding(
+                // 键盘弹起时抽屉整体上移（自填框 autofocus 会拉键盘）
+                padding: EdgeInsets.fromLTRB(
+                  20,
+                  10,
+                  20,
+                  16 + MediaQuery.viewInsetsOf(ctx).bottom,
                 ),
-                child: SingleChildScrollView(
-                  child: Column(
-                    mainAxisSize: MainAxisSize.min,
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      Text(title,
-                          style: TextStyle(
-                              fontSize: 14, height: 1.5, color: h.text)),
-                      const SizedBox(height: HSpace.xs),
-                      Text(
-                        multi ? '可多选（也可选「其他」自己填）' : '单选（也可选「其他」自己填）',
-                        style: TextStyle(fontSize: 11, color: h.textFaint),
-                      ),
-                      const SizedBox(height: HSpace.md),
-                      // ★ 选项：编号 + label + description，整块可点
-                      for (var i = 0; i < options.length; i++)
-                        _askOptionTile(
-                          h: h,
-                          index: i + 1,
-                          label: (options[i] as Map)['label'] as String? ?? '',
-                          description:
-                              (options[i] as Map)['description'] as String? ?? '',
-                          selected: sel.contains(
-                              (options[i] as Map)['label'] as String? ?? ''),
-                          multi: multi,
-                          onTap: () => toggle(
-                              (options[i] as Map)['label'] as String? ?? ''),
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Center(
+                      child: Container(
+                        width: 36,
+                        height: 4,
+                        decoration: BoxDecoration(
+                          color: h.border,
+                          borderRadius: BorderRadius.circular(999),
                         ),
-                      // ★ 2026-10-23：每题末尾固定一个「其他…」——
-                      //   用户原话「或者选其他，然后自己填」。
-                      _askOptionTile(
-                        h: h,
-                        index: options.length + 1,
-                        label: '其他…',
-                        description: '自己填写',
-                        selected: customOn.contains(id),
-                        multi: multi,
-                        onTap: toggleCustom,
                       ),
-                      // 选中「其他…」才展开自填框；**留空 = 该题未作答**
-                      // （不编答案，collect() 里会跳过空串）
-                      if (customOn.contains(id))
-                        Padding(
-                          padding: const EdgeInsets.only(bottom: HSpace.sm),
-                          child: CupertinoTextField(
-                            // controller 跨"上一题/下一题"保留用户输入
-                            controller: customCtl.putIfAbsent(
-                                id, () => TextEditingController()),
-                            autofocus: true,
-                            placeholder: '在这里填写你的回答…',
-                            minLines: 1,
-                            maxLines: 3,
-                            padding: const EdgeInsets.all(HSpace.sm + 2),
-                            style: TextStyle(
-                                fontSize: 13.5, height: 1.4, color: h.text),
-                            decoration: BoxDecoration(
-                              color: h.surfaceAlt,
-                              borderRadius: BorderRadius.circular(HRadius.sm),
-                              border: Border.all(
-                                  color: h.accent.withValues(alpha: 0.5)),
+                    ),
+                    const SizedBox(height: 14),
+                    Row(
+                      children: [
+                        Icon(CupertinoIcons.question_circle_fill,
+                            size: 20, color: h.text),
+                        const SizedBox(width: HSpace.sm),
+                        const Expanded(
+                          child: Text('模型需要你的回答',
+                              style: TextStyle(
+                                  fontSize: 16, fontWeight: FontWeight.w700)),
+                        ),
+                        // 进度：多题时必须让用户知道还有几题
+                        if (total > 1)
+                          Text('${page + 1}/$total',
+                              style:
+                                  TextStyle(fontSize: 12, color: h.textFaint)),
+                      ],
+                    ),
+                    const SizedBox(height: 12),
+                    // 题目 + 选项：随内容长高，超限内部滚动
+                    Flexible(
+                      child: SingleChildScrollView(
+                        child: Column(
+                          mainAxisSize: MainAxisSize.min,
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Text(title,
+                                style: TextStyle(
+                                    fontSize: 15, height: 1.5, color: h.text)),
+                            const SizedBox(height: HSpace.xs),
+                            Text(
+                              multi
+                                  ? '可多选（也可选「其他」自己填）'
+                                  : '单选（也可选「其他」自己填）',
+                              style: TextStyle(
+                                  fontSize: 11.5, color: h.textFaint),
                             ),
-                          ),
+                            const SizedBox(height: HSpace.md),
+                            // ★ 选项：编号 + label + description，整块可点
+                            for (var i = 0; i < options.length; i++)
+                              _askOptionTile(
+                                h: h,
+                                index: i + 1,
+                                label: (options[i] as Map)['label'] as String? ??
+                                    '',
+                                description: (options[i]
+                                        as Map)['description'] as String? ??
+                                    '',
+                                selected: sel.contains(
+                                    (options[i] as Map)['label'] as String? ??
+                                        ''),
+                                multi: multi,
+                                onTap: () => toggle(
+                                    (options[i] as Map)['label'] as String? ??
+                                        ''),
+                              ),
+                            // ★ 每题末尾固定一个「其他…」
+                            _askOptionTile(
+                              h: h,
+                              index: options.length + 1,
+                              label: '其他…',
+                              description: '自己填写',
+                              selected: customOn.contains(id),
+                              multi: multi,
+                              onTap: toggleCustom,
+                            ),
+                            // 选中「其他…」才展开自填框；**留空 = 该题未作答**
+                            if (customOn.contains(id))
+                              Padding(
+                                padding:
+                                    const EdgeInsets.only(bottom: HSpace.sm),
+                                child: CupertinoTextField(
+                                  // controller 跨"上一题/下一题"保留用户输入
+                                  controller: customCtl.putIfAbsent(
+                                      id, () => TextEditingController()),
+                                  autofocus: true,
+                                  placeholder: '在这里填写你的回答…',
+                                  minLines: 1,
+                                  maxLines: 3,
+                                  padding:
+                                      const EdgeInsets.all(HSpace.sm + 2),
+                                  style: TextStyle(
+                                      fontSize: 13.5,
+                                      height: 1.4,
+                                      color: h.text),
+                                  decoration: BoxDecoration(
+                                    color: h.surfaceAlt,
+                                    borderRadius:
+                                        BorderRadius.circular(HRadius.md),
+                                    border: Border.all(color: h.border),
+                                  ),
+                                ),
+                              ),
+                          ],
                         ),
-                    ],
-                  ),
+                      ),
+                    ),
+                    const SizedBox(height: 12),
+                    // 底部按钮行：跳过在左；翻页 / 提交在右（提交 = 黑钮）
+                    Row(
+                      children: [
+                        CupertinoButton(
+                          padding: const EdgeInsets.symmetric(
+                              horizontal: 18, vertical: 10),
+                          color: h.surface,
+                          borderRadius: BorderRadius.circular(12),
+                          // 跳过 = 已答的仍然回传（别浪费用户已做的选择）
+                          onPressed: () =>
+                              Navigator.of(sheetCtx).pop(collect()),
+                          child: Text('跳过',
+                              style: TextStyle(fontSize: 14.5, color: h.text)),
+                        ),
+                        const Spacer(),
+                        if (page > 0) ...[
+                          CupertinoButton(
+                            padding: const EdgeInsets.symmetric(
+                                horizontal: 18, vertical: 10),
+                            color: h.surface,
+                            borderRadius: BorderRadius.circular(12),
+                            onPressed: () => setDlgState(() => page--),
+                            child: Text('上一题',
+                                style:
+                                    TextStyle(fontSize: 14.5, color: h.text)),
+                          ),
+                          const SizedBox(width: 8),
+                        ],
+                        if (!isLast)
+                          CupertinoButton(
+                            padding: const EdgeInsets.symmetric(
+                                horizontal: 18, vertical: 10),
+                            color: h.text,
+                            borderRadius: BorderRadius.circular(12),
+                            onPressed: () => setDlgState(() => page++),
+                            child: Text('下一题',
+                                style: TextStyle(
+                                    fontSize: 14.5,
+                                    fontWeight: FontWeight.w600,
+                                    color: h.bg)),
+                          ),
+                        if (isLast)
+                          CupertinoButton(
+                            padding: const EdgeInsets.symmetric(
+                                horizontal: 18, vertical: 10),
+                            color: h.text,
+                            borderRadius: BorderRadius.circular(12),
+                            onPressed: () =>
+                                Navigator.of(sheetCtx).pop(collect()),
+                            child: Text('提交',
+                                style: TextStyle(
+                                    fontSize: 14.5,
+                                    fontWeight: FontWeight.w600,
+                                    color: h.bg)),
+                          ),
+                      ],
+                    ),
+                  ],
                 ),
               ),
-              actions: [
-                // 上一题 / 下一题（用户明确要求）
-                if (page > 0)
-                  CupertinoDialogAction(
-                    onPressed: () => setDlgState(() => page--),
-                    child: const Text('上一题'),
-                  ),
-                if (!isLast)
-                  CupertinoDialogAction(
-                    onPressed: () => setDlgState(() => page++),
-                    child: const Text('下一题'),
-                  ),
-                CupertinoDialogAction(
-                  // 跳过 = 已答的仍然回传（别浪费用户已做的选择）
-                  onPressed: () => Navigator.of(dlgCtx).pop(collect()),
-                  child: const Text('跳过'),
-                ),
-                if (isLast)
-                  CupertinoDialogAction(
-                    isDefaultAction: true,
-                    onPressed: () => Navigator.of(dlgCtx).pop(collect()),
-                    child: const Text('提交'),
-                  ),
-              ],
             );
           },
         );
@@ -4852,13 +4965,13 @@ class _ChatScreenState extends State<ChatScreen> {
         type: MaterialType.transparency,
         child: InkWell(
           onTap: onTap,
-          borderRadius: BorderRadius.circular(HRadius.sm),
+          borderRadius: BorderRadius.circular(HRadius.md),
           child: Container(
             padding: const EdgeInsets.symmetric(
-                horizontal: HSpace.sm, vertical: HSpace.sm),
+                horizontal: HSpace.md, vertical: 10),
             decoration: BoxDecoration(
               color: selected ? h.accent.withValues(alpha: 0.12) : h.surface,
-              borderRadius: BorderRadius.circular(HRadius.sm),
+              borderRadius: BorderRadius.circular(HRadius.md),
               border: Border.all(
                 color: selected ? h.accent : h.border,
                 width: selected ? 1.5 : 1,
@@ -5136,7 +5249,7 @@ class _ChatScreenState extends State<ChatScreen> {
     if (_workspaces.isEmpty) {
       return _Hint(
         h: h,
-        icon: AppIcons.folder,
+        icon: CupertinoIcons.folder_fill,
         title: '先选一个工作区',
         body: '工作区 = 你要让智能体操作的\n那个项目文件夹。\n\n'
             '点左上角菜单 → ⊕ 选择工作区。\n'
@@ -5147,13 +5260,15 @@ class _ChatScreenState extends State<ChatScreen> {
     }
     return _Hint(
       h: h,
-      icon: CupertinoIcons.sparkles,
+      // 2026-10-25：空态不放装饰图标（用户指着 sparkles 说「怎么还有
+      // emoji」——零 emoji 规矩同样管图标装饰），只留问候语本身。
+      icon: null,
       // 空态文案（2026-10-12，用户指定）：
       // 「你好，今天想做些什么？」—— 与 llama.cpp Web UI 的
       // "Hello there / Type a message..." 空态同一形态，中文语境
       title: '你好，今天想做些什么？',
       body: _activeSession == null
-          ? '发送消息或点击 + 上传文件或图片'
+          ? ''
           : '这是会话「${_activeSession!.title}」。\n继续发消息即可。',
     );
   }
@@ -5487,7 +5602,9 @@ class _Hint extends StatelessWidget {  const _Hint({
   });
 
   final Hue h;
-  final IconData icon;
+
+  /// null = 不画图标（空态问候语，2026-10-25）
+  final IconData? icon;
   final String title;
   final String body;
   final String? actionLabel;
@@ -5501,8 +5618,10 @@ class _Hint extends StatelessWidget {  const _Hint({
         child: Column(
           mainAxisSize: MainAxisSize.min,
           children: [
-            Icon(icon, size: 36, color: h.textFaint),
-            const SizedBox(height: HSpace.lg),
+            if (icon != null) ...[
+              Icon(icon!, size: 36, color: h.textFaint),
+              const SizedBox(height: HSpace.lg),
+            ],
             Text(
               title,
               textAlign: TextAlign.center,
@@ -5514,12 +5633,15 @@ class _Hint extends StatelessWidget {  const _Hint({
                 color: h.text,
               ),
             ),
-            const SizedBox(height: HSpace.md),
-            Text(
-              body,
-              textAlign: TextAlign.center,
-              style: TextStyle(fontSize: 12.5, height: 1.7, color: h.textFaint),
-            ),
+            if (body.isNotEmpty) ...[
+              const SizedBox(height: HSpace.md),
+              Text(
+                body,
+                textAlign: TextAlign.center,
+                style:
+                    TextStyle(fontSize: 12.5, height: 1.7, color: h.textFaint),
+              ),
+            ],
             if (actionLabel != null) ...[
               const SizedBox(height: HSpace.xl),
               IosButton(

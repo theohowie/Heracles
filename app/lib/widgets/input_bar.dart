@@ -49,8 +49,6 @@ class InputBar extends StatefulWidget {
     this.onQueuedPin,
     this.reasoningLevel = ReasoningLevel.auto,
     this.onReasoningLevelChanged,
-    this.maxTurns = 0,
-    this.onMaxTurnsChanged,
   });
 
   final void Function(String text) onSend;
@@ -94,13 +92,8 @@ class InputBar extends StatefulWidget {
   /// 用户改了推理等级
   final ValueChanged<ReasoningLevel>? onReasoningLevelChanged;
 
-  /// **单次任务最大轮次**（2026-10-18，`docs/27` P0-1 / ADR-033）。
-  ///
-  /// `0` = 自动跟随当前后端（本地 8 / 云端 40）。
-  final int maxTurns;
-
-  /// 用户改了最大轮次 —— null 表示这一块只读展示（测试/预览时用）。
-  final ValueChanged<int>? onMaxTurnsChanged;
+  // 最大轮次不在输入区改（2026-10-25 用户定）：唯一入口在
+  // 通用设置页，输入区不再透传 maxTurns。
 
   // ---- 模型选择框（2026-10-12，仿 llama.cpp Web UI）----
 
@@ -247,6 +240,25 @@ class _InputBarState extends State<InputBar> {
             //   · 四周留边距（离屏幕左右下各有一段距离）
             //   · 容器自带投影（浮在页面背景之上）
             //   · 无顶部焊线（旧版的 Border(top) 已去掉）
+            // ---- 模型 / 思考胶囊行（2026-10-25 用户指定：移到输入框上方）----
+            // 原先挤在输入卡底行，长模型名被截得只剩几个字母（真机截图
+            // 「dee…」）；独立成行后宽度充裕，底行只留 ＋ / 盾牌 / 发送。
+            Padding(
+              padding: const EdgeInsets.fromLTRB(
+                  HSpace.md + 2, HSpace.sm, HSpace.md + 2, 0),
+              child: _ModelSelector(
+                label: widget.providerLabel,
+                reasoningLevel: widget.reasoningLevel,
+                h: h,
+                onTap: widget.onModelTap,
+                onReasoningLevelChanged: widget.onReasoningLevelChanged,
+                providers: widget.providers,
+                activeProviderId: widget.activeProviderId,
+                onProviderSelected: widget.onProviderSelected,
+                onOpenModelCatalog: widget.onOpenModelCatalog,
+              ),
+            ),
+
             Padding(
               padding: const EdgeInsets.fromLTRB(
                 HSpace.md, HSpace.sm + 2, HSpace.md, HSpace.md,
@@ -352,32 +364,9 @@ class _InputBarState extends State<InputBar> {
                             enabled: widget.enabled,
                             onPicked: widget.onPermissionChanged,
                           ),
-                          // ---- 模型选择框（双胶囊，紧贴发送键）----
-                          // ★ Expanded 独占剩余宽度是溢出防线（2026-10-25
-                          //   真机实测 RIGHT OVERFLOWED 8px）：不能再用
-                          //   Spacer + Flexible 对半分 —— 胶囊区只拿到一半
-                          //   空间照样溢出（窄屏回归测试实测 33px）。
-                          //   _ModelSelector 内部右对齐 + 首枚胶囊可收缩。
-                          Expanded(
-                            child: _ModelSelector(
-                            label: widget.providerLabel,
-                            reasoningLevel: widget.reasoningLevel,
-                            h: h,
-                            onTap: widget.onModelTap,
-                            onReasoningLevelChanged:
-                                widget.onReasoningLevelChanged,
-                            // ★ 最大轮次（2026-10-18，ADR-033）——
-                            //   与推理等级同一弹层，避免又多一个入口
-                            maxTurns: widget.maxTurns,
-                            onMaxTurnsChanged: widget.onMaxTurnsChanged,
-                            providers: widget.providers,
-                            activeProviderId: widget.activeProviderId,
-                            onProviderSelected: widget.onProviderSelected,
-                            // ★ 两层菜单：点中转站 → 进它的模型目录
-                            onOpenModelCatalog: widget.onOpenModelCatalog,
-                            ),
-                          ),
-                          const SizedBox(width: HSpace.sm),
+                          // 模型 / 思考胶囊已移到输入框上方独立成行
+                          // （2026-10-25 用户指定），底行只留发送。
+                          const Spacer(),
 
                           // ---- 发送/停止（圆形，容器最右）----
                           //
@@ -463,7 +452,7 @@ class _AttachmentRow extends StatelessWidget {  const _AttachmentRow({
                     a.name,
                     maxLines: 1,
                     overflow: TextOverflow.ellipsis,
-                    style: TextStyle(fontSize: 12, color: h.textDim),
+                    style: TextStyle(fontSize: 11.5, color: h.textDim),
                   ),
                 ),
                 const SizedBox(width: 4),
@@ -662,8 +651,6 @@ class _ModelSelector extends StatelessWidget {
     required this.activeProviderId,
     required this.onProviderSelected,
     this.onOpenModelCatalog,
-    this.maxTurns = 0,
-    this.onMaxTurnsChanged,
   });
 
   final String? label;
@@ -674,11 +661,6 @@ class _ModelSelector extends StatelessWidget {
   /// 用户在弹出列表里改了推理等级
   final ValueChanged<ReasoningLevel>? onReasoningLevelChanged;
 
-  /// **单次任务最大轮次**（2026-10-18，ADR-033）。`0` = 自动跟随当前后端。
-  final int maxTurns;
-
-  /// 用户在弹出列表里改了最大轮次
-  final ValueChanged<int>? onMaxTurnsChanged;
 
   /// 全部 provider（弹层里列出；已配置的才可选中）
   final List<ModelProviderConfig> providers;
@@ -705,11 +687,9 @@ class _ModelSelector extends StatelessWidget {
       providers: providers,
       activeProviderId: activeProviderId,
       reasoningLevel: reasoningLevel,
-      maxTurns: maxTurns,
       onProviderSelected: onProviderSelected,
       onOpenModelCatalog: onOpenModelCatalog,
       onReasoningLevelChanged: onReasoningLevelChanged,
-      onMaxTurnsChanged: onMaxTurnsChanged,
     );
   }
 
@@ -748,7 +728,7 @@ class _ModelSelector extends StatelessWidget {
             onTap: () => _open(context),
             borderRadius: BorderRadius.circular(HRadius.pill),
             child: Container(
-              height: 38,
+              height: 34,
               padding: const EdgeInsets.symmetric(horizontal: HSpace.md),
               decoration: pillDeco(),
               child: child,
@@ -756,8 +736,8 @@ class _ModelSelector extends StatelessWidget {
           ),
         );
     return Row(
-      // 占满 Expanded 给的宽度并右对齐（胶囊组贴发送键一侧）
-      mainAxisAlignment: MainAxisAlignment.end,
+      // 输入框上方独立行：左对齐（2026-10-25 随位置调整）
+      mainAxisAlignment: MainAxisAlignment.start,
       children: [
         // ★ 不给模型加前置图标（2026-10-12 用户明确要求）
         // 第一枚（模型名）可收缩：宽度不足时名字走省略号，
@@ -773,12 +753,12 @@ class _ModelSelector extends StatelessWidget {
             Flexible(
               child: ConstrainedBox(
                 // 两枚胶囊并排，长模型名截断，不把发送键挤出屏幕
-                constraints: const BoxConstraints(maxWidth: 104),
+                constraints: const BoxConstraints(maxWidth: 170),
                 child: Text(
                   name,
                   maxLines: 1,
                   overflow: TextOverflow.ellipsis,
-                  style: TextStyle(fontSize: 13, color: h.text),
+                  style: TextStyle(fontSize: 12.5, color: h.text),
                 ),
               ),
             ),

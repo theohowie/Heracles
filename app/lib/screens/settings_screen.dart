@@ -10,6 +10,7 @@ import '../services/global_memory.dart';
 import '../services/settings_controller.dart';
 import '../theme/app_theme.dart';
 import '../theme/cupertino_kit.dart';
+import '../theme/elastic_switch.dart';
 import '../widgets/bw_approval.dart';
 
 /// 设置主页 —— 分类列表（对应参考图的侧栏结构）。
@@ -28,49 +29,53 @@ class SettingsScreen extends StatelessWidget {
       body: ValueListenableBuilder<AppSettings>(
         valueListenable: controller,
         builder: (context, s, _) {
-          final h = Hue.of(context);
           return ListView(
-          padding: const EdgeInsets.symmetric(vertical: HSpace.sm),
-          children: [
-            // ★ 原型 05（2026-10-25 按原型重排）：小字分组标题 +
-            //   左对齐平直行，无图标瓷砖、无副标题。「通用设置」是
-            //   可点的分组标题（原型同款 seclink），行右侧只给值/徽标。
-            _SectionLinkLabel(
-              '通用设置',
-              onTap: () => _push(context, GeneralSettingsPage(controller: controller)),
-            ),
-            _GlobalMemoryEntry(
-              onOpen: () => _push(context, const GlobalMemoryPage()),
-            ),
-            Divider(height: 1, indent: HSpace.lg, endIndent: HSpace.lg, color: h.border),
-            _DevicePermissionEntry(
-              onOpen: () => _push(context, const DevicePermissionPage()),
-            ),
-            Divider(height: 1, indent: HSpace.lg, endIndent: HSpace.lg, color: h.border),
-            _HomeRow(
-              title: '模型',
-              // 与聊天页同源同字段（2026-10-15 修 BUG-5 的口径保留）：
-              // effectiveProvider + 「服务商 · 模型名」
-              value: s.effectiveProvider == null
-                  ? '未选择'
-                  : (s.effectiveProvider!.model.isEmpty
-                      ? s.effectiveProvider!.name
-                      : '${s.effectiveProvider!.name} · ${s.effectiveProvider!.model}'),
-              onTap: () => _push(context, ModelSettingsPage(controller: controller)),
-            ),
-            const _SectionLabel('应用'),
-            _HomeRow(
-              title: '外观',
-              value: s.appearance.label,
-              onTap: () => _push(context, AppearanceSettingsPage(controller: controller)),
-            ),
-            Divider(height: 1, indent: HSpace.lg, endIndent: HSpace.lg, color: h.border),
-            _HomeRow(
-              title: '关于 Heracles',
-              value: 'Dart 内核',
-              onTap: () => _push(context, const AboutPage()),
-            ),
-          ],
+            padding: const EdgeInsets.only(bottom: HSpace.xl),
+            children: [
+              // ★ 设置主页卡片式（2026-10-25 用户参照账户页截图指定）：
+              //   小字分组标签在上，每个设置项一张圆角卡片包裹（标题 +
+              //   副行状态值 + 右箭头）。「通用设置」不再做小字链接，
+              //   与其他项同为卡片；状态值放副行、整行省略 —— 旧平直行
+              //   把值放右侧，长模型名把标题挤成竖排（真机实测翻车）。
+              const _SectionLabel('通用'),
+              _HomeCard(
+                title: '通用设置',
+                subtitle: '界面字号 · 工作步骤 · 繁忙发送 · 最大轮次',
+                onTap: () => _push(
+                    context, GeneralSettingsPage(controller: controller)),
+              ),
+              const _SectionLabel('智能体'),
+              _GlobalMemoryEntry(
+                onOpen: () => _push(context, const GlobalMemoryPage()),
+              ),
+              _DevicePermissionEntry(
+                onOpen: () => _push(context, const DevicePermissionPage()),
+              ),
+              _HomeCard(
+                title: '模型',
+                // 与聊天页同源同字段（2026-10-15 修 BUG-5 的口径保留）：
+                // effectiveProvider + 「服务商 · 模型名」
+                subtitle: s.effectiveProvider == null
+                    ? '未选择'
+                    : (s.effectiveProvider!.model.isEmpty
+                        ? s.effectiveProvider!.name
+                        : '${s.effectiveProvider!.name} · ${s.effectiveProvider!.model}'),
+                onTap: () => _push(
+                    context, ModelSettingsPage(controller: controller)),
+              ),
+              const _SectionLabel('应用'),
+              _HomeCard(
+                title: '外观',
+                subtitle: s.appearance.label,
+                onTap: () => _push(
+                    context, AppearanceSettingsPage(controller: controller)),
+              ),
+              _HomeCard(
+                title: '关于 Heracles',
+                subtitle: 'Dart 内核',
+                onTap: () => _push(context, const AboutPage()),
+              ),
+            ],
           );
         },
       ),
@@ -155,10 +160,10 @@ class _DevicePermissionEntryState extends State<_DevicePermissionEntry> {
 
   @override
   Widget build(BuildContext context) {
-    return _HomeRow(
+    return _HomeCard(
       title: '设备权限',
-      // 徽标在行右值位（原型 05）—— 不进二级页也知道几项没开
-      value: _badge,
+      // 状态作卡片副行 —— 不进二级页也知道几项没开
+      subtitle: _badge,
       onTap: () async {
         widget.onOpen();
         // 从二级页返回后刷新状态（用户可能刚执行了授权命令）
@@ -189,8 +194,9 @@ class _DevicePermissionPageState extends State<DevicePermissionPage> {
   /// Shizuku 一键授权进行中（按钮转圈）
   bool _shizukuBusy = false;
 
-  /// Shizuku 授权结果（✅/❌ + 可读信息）
+  /// Shizuku 授权结果文案 + 成败（成败单独存，不靠文案前缀判断）
   String? _shizukuMsg;
+  bool _shizukuOk = false;
   bool _loading = true;
 
   /// 执行路由诊断（ping / granted / sui）——
@@ -230,102 +236,137 @@ class _DevicePermissionPageState extends State<DevicePermissionPage> {
     });
   }
 
-  /// 权限总览（N8）：六项统一状态，只读渲染。
+  /// 权限总览卡（2026-10-25 晚按概念图 07 重做）：一张卡六行，
+  /// 每行 名称 + 说明 + 右侧状态胶囊 —— 已授权 = 黑色实心胶囊，
+  /// 其余 = 灰胶囊（Shizuku 未授权时胶囊可点 =「去开启」一键授权），
+  /// 不再用彩色文字堆一张表。
   ///
   /// 两个渲染口径（后端对接清单 §6，必须照做）：
   /// · `allFiles` 的 denied 是**正常态**（按设计不申请所有文件访问，
-  ///   文件走 SAF 授权目录）—— 中性说明，绝不红色/警告色；
+  ///   文件走 SAF 授权目录）—— 胶囊写「未开启 · 按设计」，中性；
   /// · `shizuku` 的 unknown = Shizuku **没启动**（探测不了），与
   ///   denied（启动了没授权）是两回事，文案分开。
   Widget _permOverview(Hue h) {
-    const order = [
-      ('shizuku', 'Shizuku'),
-      ('files', '文件访问（授权目录）'),
-      ('allFiles', '所有文件访问'),
-      ('notifications', '通知'),
-      ('accessibility', '无障碍'),
-      ('overlay', '悬浮窗'),
+    const rows = [
+      ('shizuku', 'Shizuku', '执行系统级命令与设备操作'),
+      ('files', '文件访问', '读写已授权的工作区文件夹'),
+      ('allFiles', '所有文件访问', '按设计不申请，文件经授权目录访问'),
+      ('notifications', '通知', '任务完成与审批请求提醒'),
+      ('accessibility', '无障碍服务', '读取界面元素、辅助点击操作'),
+      ('overlay', '悬浮窗', '在其他应用上方显示运行状态'),
     ];
 
-    (String, Color) statusOf(String key) {
+    Widget pill(String key) {
       final v = _perms[key] ?? 'unknown';
-      if (key == 'allFiles') {
-        return switch (v) {
-          'granted' => ('已开启', HColors.successOn(h.dark)),
-          'denied' => ('未开启（按设计）', h.textDim),
-          _ => ('未知', h.textFaint),
-        };
-      }
-      if (key == 'shizuku' && v == 'unknown') {
-        return ('未启动', h.textDim);
-      }
-      return switch (v) {
-        'granted' => ('已授权', HColors.successOn(h.dark)),
-        'denied' => ('未授权', HColors.warnOn(h.dark)),
-        _ => ('未知', h.textFaint),
+      // (文案, 是否实心, 是否可点去开启)
+      final (label, filled, action) = switch ((key, v)) {
+        ('allFiles', 'denied') => ('未开启 · 按设计', false, false),
+        ('shizuku', 'unknown') => ('未启动', false, false),
+        (_, 'granted') =>
+          (key == 'notifications' ? '已开启' : '已授权', true, false),
+        ('shizuku', 'denied') => ('去开启', false, true),
+        (_, 'denied') => ('未授权', false, false),
+        _ => ('未知', false, false),
       };
+      final chip = Container(
+        padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 7),
+        decoration: BoxDecoration(
+          color: filled ? h.text : h.surface,
+          borderRadius: BorderRadius.circular(999),
+        ),
+        child: action && _shizukuBusy
+            ? CupertinoActivityIndicator(radius: 8, color: h.text)
+            : Text(
+                label,
+                style: TextStyle(
+                  fontSize: 13,
+                  fontWeight: FontWeight.w600,
+                  color: filled ? h.bg : h.text,
+                ),
+              ),
+      );
+      if (!action) return chip;
+      return GestureDetector(
+        onTap: _shizukuBusy ? null : () => _runShizuku(force: false),
+        behavior: HitTestBehavior.opaque,
+        child: chip,
+      );
     }
 
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        Text(
-          '权限总览',
-          style: TextStyle(
-            fontSize: 12,
-            fontWeight: FontWeight.w600,
-            color: h.textFaint,
-          ),
-        ),
-        const SizedBox(height: HSpace.sm),
-        Container(
-          width: double.infinity,
-          decoration: BoxDecoration(
-            color: h.surface,
-            borderRadius: BorderRadius.circular(HRadius.md),
-            border: Border.all(color: h.border),
-          ),
-          child: Column(
-            children: [
-              for (var i = 0; i < order.length; i++) ...[
-                if (i > 0)
-                  Divider(height: 1, indent: HSpace.md, color: h.border),
-                Padding(
-                  padding: const EdgeInsets.symmetric(
-                      horizontal: HSpace.md, vertical: 11),
-                  child: Row(
-                    children: [
-                      Expanded(
-                        child: Text(
-                          order[i].$2,
-                          style:
-                              TextStyle(fontSize: 14, color: h.text),
-                        ),
-                      ),
-                      Flexible(
-                        child: Text(
-                          statusOf(order[i].$1).$1,
-                          textAlign: TextAlign.right,
-                          style: TextStyle(
-                              fontSize: 13, color: statusOf(order[i].$1).$2),
-                        ),
-                      ),
-                    ],
+    return Container(
+      width: double.infinity,
+      decoration: BoxDecoration(
+        color: h.surfaceAlt,
+        borderRadius: BorderRadius.circular(HRadius.xl),
+      ),
+      padding: const EdgeInsets.symmetric(vertical: 6),
+      child: Column(
+        children: [
+          for (var i = 0; i < rows.length; i++) ...[
+            if (i > 0)
+              Divider(height: 1, indent: 18, endIndent: 18, color: h.border),
+            Padding(
+              padding:
+                  const EdgeInsets.symmetric(horizontal: 18, vertical: 13),
+              child: Row(
+                children: [
+                  Expanded(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text(rows[i].$2,
+                            style: TextStyle(fontSize: 15, color: h.text)),
+                        const SizedBox(height: 2),
+                        Text(rows[i].$3,
+                            style: TextStyle(
+                                fontSize: 12.5, color: h.textFaint)),
+                      ],
+                    ),
                   ),
-                ),
-              ],
-            ],
-          ),
-        ),
-        if ((_perms['allFiles'] ?? '') == 'denied') ...[
-          const SizedBox(height: HSpace.sm),
-          Text(
-            '所有文件访问按设计不申请，文件经授权目录访问。',
-            style: TextStyle(fontSize: 12, height: 1.5, color: h.textFaint),
-          ),
+                  const SizedBox(width: 12),
+                  pill(rows[i].$1),
+                ],
+              ),
+            ),
+          ],
         ],
-        const SizedBox(height: HSpace.lg),
-      ],
+      ),
+    );
+  }
+
+  /// Shizuku 授权动作（胶囊「去开启」/ 一键授权 / 重新申请共用）：
+  /// force=false 走 shizukuGrant（未授权时的一键授权）；force=true
+  /// 走 shizukuForceRequest（已授权时强制再弹一次，让 Shizuku 的
+  /// 「已授权应用」列表收录本 App —— 2026-10-16 实测问题）。
+  Future<void> _runShizuku({required bool force}) async {
+    setState(() => _shizukuBusy = true);
+    final r = force
+        ? await AgentBridge().shizukuForceRequest()
+        : await AgentBridge().shizukuGrant();
+    if (!mounted) return;
+    setState(() {
+      _shizukuOk = r.success;
+      _shizukuMsg = r.message;
+    });
+    await _refresh();
+    if (!mounted) return;
+    setState(() => _shizukuBusy = false);
+  }
+
+  /// 授权结果一行（成功绿 / 失败红，纯文字无装饰符号）
+  Widget _shizukuMsgLine(Hue h) {
+    if (_shizukuMsg == null) return const SizedBox.shrink();
+    return Padding(
+      padding: const EdgeInsets.only(top: HSpace.sm),
+      child: Text(
+        _shizukuMsg!,
+        style: TextStyle(
+          fontSize: 12.5,
+          height: 1.45,
+          color:
+              _shizukuOk ? HColors.successOn(h.dark) : HColors.errorOn(h.dark),
+        ),
+      ),
     );
   }
 
@@ -333,72 +374,40 @@ class _DevicePermissionPageState extends State<DevicePermissionPage> {
   Widget build(BuildContext context) {
     final h = Hue.of(context);
     return Scaffold(
-      appBar: AppBar(title: const Text('设备权限'), leading: _iosBackLeading(context)),
+      appBar: AppBar(
+          title: const Text('设备权限'), leading: _iosBackLeading(context)),
       body: _loading
-          ? Center(
-              child: CupertinoActivityIndicator(color: h.accent))
+          ? Center(child: CupertinoActivityIndicator(color: h.accent))
           : ListView(
               padding: const EdgeInsets.all(HSpace.lg),
               children: [
-                // ---- 状态卡 ----
-                Container(
-                  padding: const EdgeInsets.all(HSpace.lg),
-                  decoration: BoxDecoration(
-                    color: h.surface,
-                    borderRadius: BorderRadius.circular(HRadius.lg),
-                    border: Border.all(
-                      color: _granted == true
-                          ? HColors.successOn(h.dark)
-                          : HColors.warnOn(h.dark),
-                      width: 1.5,
-                    ),
-                  ),
-                  child: Row(
-                    children: [
-                      Icon(
-                        _granted == true
-                            ? CupertinoIcons.checkmark_circle_fill
-                            : AppIcons.warning,
-                        size: 29,
-                        color: _granted == true
-                            ? HColors.successOn(h.dark)
-                            : HColors.warnOn(h.dark),
-                      ),
-                      const SizedBox(width: HSpace.md),
-                      Expanded(
-                        child: Column(
-                          crossAxisAlignment: CrossAxisAlignment.start,
-                          children: [
-                            Text(
-                              _granted == true ? '已授权' : '未授权',
-                              style: TextStyle(
-                                fontSize: 16,
-                                fontWeight: FontWeight.w600,
-                                color: h.text,
-                              ),
-                            ),
-                            const SizedBox(height: 2),
-                            Text(
-                              _granted == true
-                                  ? '无障碍自愈可用'
-                                  : '无障碍自愈不可用',
-                              style: TextStyle(
-                                  fontSize: 12, color: h.textDim),
-                            ),
-                          ],
-                        ),
-                      ),
-                    ],
-                  ),
-                ),
-                const SizedBox(height: HSpace.lg),
-                // ---- 权限总览（N8 统一查询，六项只读）----
+                // ---- 权限总览卡（概念图 07 形态）----
                 if (_perms.isNotEmpty) _permOverview(h),
-                // ---- 引导 ----
+                // ---- 卡下说明：自愈状态 + 概念图 07 页脚 ----
+                const SizedBox(height: HSpace.md),
+                Text(
+                  [
+                    if (_granted != null)
+                      '无障碍自愈${_granted == true ? '可用' : '不可用'}',
+                    '权限只在你主动开启后生效；关闭任意一项，对应工具会立即不可用并说明原因。',
+                  ].join(' · '),
+                  style: TextStyle(
+                      fontSize: 12, height: 1.55, color: h.textFaint),
+                ),
+                // ---- 未授权：授权引导（方式说明 + 一键授权）----
                 if (_granted == false && _guidance.isNotEmpty) ...[
+                  const SizedBox(height: HSpace.lg),
+                  Text(
+                    '授权引导',
+                    style: TextStyle(
+                        fontSize: 13,
+                        fontWeight: FontWeight.w600,
+                        color: h.text),
+                  ),
+                  const SizedBox(height: HSpace.xs),
                   Text(
                     '三种授权方式任选其一：',
-                    style: TextStyle(fontSize: 13, color: h.textDim),
+                    style: TextStyle(fontSize: 12.5, color: h.textDim),
                   ),
                   const SizedBox(height: HSpace.sm),
                   Container(
@@ -421,48 +430,19 @@ class _DevicePermissionPageState extends State<DevicePermissionPage> {
                     ),
                   ),
                   const SizedBox(height: HSpace.md),
-                  // ★ 一键 Shizuku 授权（2026-10-16 用户反馈完善）——
-                  //
-                  // 用户实测：「我在 shizuku 上面都找不到本 app 来授权」——
-                  // 因为 App 没集成 Shizuku SDK。现在集成了：点这个按钮 →
-                  // Shizuku 弹授权框 → 同意后自动执行 pm grant。
-                  //
-                  // 结果在按钮下方显示（成功/失败 + 服务器返回的可读信息）。
                   SizedBox(
                     width: double.infinity,
                     child: IosButton(
                       label: '通过 Shizuku 一键授权',
                       color: h.accent,
-                      // ★ 忙态转圈（2026-10-22 补）：iOS 按钮忙态 = 文字换转圈
                       busy: _shizukuBusy,
                       onPressed: _shizukuBusy
                           ? null
-                          : () async {
-                              setState(() => _shizukuBusy = true);
-                              final r = await AgentBridge().shizukuGrant();
-                              if (!mounted) return;
-                              setState(() => _shizukuMsg =
-                                  '${r.success ? "✅" : "❌"} ${r.message}');
-                              await _refresh();
-                              if (!mounted) return;
-                              setState(() => _shizukuBusy = false);
-                            },
+                          : () => _runShizuku(force: false),
                     ),
                   ),
-                  if (_shizukuMsg != null) ...[
-                    const SizedBox(height: HSpace.xs),
-                    Text(
-                      _shizukuMsg!,
-                      style: TextStyle(
-                        fontSize: 12,
-                        height: 1.4,
-                        color: _shizukuMsg!.startsWith('✅')
-                            ? HColors.successOn(h.dark)
-                            : HColors.errorOn(h.dark),
-                      ),
-                    ),
-                  ],
-                  const SizedBox(height: HSpace.md),
+                  _shizukuMsgLine(h),
+                  const SizedBox(height: HSpace.sm),
                   SizedBox(
                     width: double.infinity,
                     child: IosButton(
@@ -472,135 +452,98 @@ class _DevicePermissionPageState extends State<DevicePermissionPage> {
                       onPressed: _refresh,
                     ),
                   ),
-                  const SizedBox(height: HSpace.md),
                 ] else if (_granted == true) ...[
+                  const SizedBox(height: HSpace.md),
                   Text(
                     '一切正常 —— 无障碍被系统关闭时会自动恢复，无需干预。',
-                    style: TextStyle(fontSize: 13, color: h.textDim),
+                    style: TextStyle(
+                        fontSize: 12.5, height: 1.5, color: h.textDim),
                   ),
-                  const SizedBox(height: HSpace.md),
-                  // ★ 强制重新申请（2026-10-16）——
-                  //   用户问「Shizuku 那边怎么还是已授权 0 个应用？」：
-                  //   诊断证明 Shizuku **服务端已授权本 App**，但它的 UI 列表空
-                  //   —— 因为本 App 的授权是遗留记录（2026-10-12 装过），
-                  //   **没走过 Shizuku 的申请弹窗**，而列表只收录"走过流程"的应用。
-                  //
-                  //   这个按钮无条件触发一次 Shizuku 弹窗 → 同意后它的
-                  //   「已授权应用」里就会收录本 App。
-                  SizedBox(
-                    width: double.infinity,
-                    child: IosButton(
-                      label: '重新向 Shizuku 申请授权（收录本 App）',
-                      filled: false,
-                      color: h.accent,
-                      dense: true,
-                      busy: _shizukuBusy,
+                  // 强制重新申请（2026-10-16）：Shizuku 服务端已授权但
+                  // 它的 UI 列表不收录「遗留授权」—— 以小字按钮保留入口，
+                  // 不再占一整行大按钮。
+                  Align(
+                    alignment: Alignment.centerLeft,
+                    child: CupertinoButton(
                       onPressed: _shizukuBusy
                           ? null
-                          : () async {
-                              setState(() => _shizukuBusy = true);
-                              final r = await AgentBridge()
-                                  .shizukuForceRequest();
-                              if (!mounted) return;
-                              setState(() => _shizukuMsg =
-                                  '${r.success ? "✅" : "❌"} ${r.message}');
-                              await _refresh();
-                              if (!mounted) return;
-                              setState(() => _shizukuBusy = false);
-                            },
-                    ),
-                  ),
-                  if (_shizukuMsg != null) ...[
-                    const SizedBox(height: HSpace.xs),
-                    Text(
-                      _shizukuMsg!,
-                      style: TextStyle(
-                        fontSize: 12,
-                        height: 1.4,
-                        color: _shizukuMsg!.startsWith('✅')
-                            ? HColors.successOn(h.dark)
-                            : HColors.errorOn(h.dark),
+                          : () => _runShizuku(force: true),
+                      minimumSize: const Size(0, 36),
+                      padding: EdgeInsets.zero,
+                      child: Text(
+                        '重新向 Shizuku 申请授权（收录本 App）',
+                        style: TextStyle(fontSize: 13, color: h.textDim),
                       ),
                     ),
-                  ],
-                ],
-                // ---- ★ 执行路由诊断（2026-10-16）----
-                //
-                // 用户问「Shizuku 那边怎么还是已授权 0 个应用？」——
-                // 本机同时装了 Stellar（Sui 系管理器），而 Shizuku-API
-                // **内置 Sui 支持**：Sui 可用时 API 调用走 Sui，Shizuku
-                // 的授权列表自然是 0（因为根本没经它）。
-                //
-                // 这里如实显示实际路由，让用户看到真相而不是猜。
-                if (_diag.isNotEmpty) ...[
-                  const SizedBox(height: HSpace.lg),
-                  Text(
-                    '执行路由诊断',
-                    style: TextStyle(
-                        fontSize: 13,
-                        fontWeight: FontWeight.w600,
-                        color: h.text),
                   ),
-                  const SizedBox(height: HSpace.xs),
-                  Container(
-                    width: double.infinity,
-                    padding: const EdgeInsets.all(HSpace.md),
-                    decoration: BoxDecoration(
-                      color: h.surfaceAlt,
-                      borderRadius: BorderRadius.circular(HRadius.md),
-                      border: Border.all(color: h.border),
-                    ),
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        // ★ 统一结论：实际走的是谁（Stellar 优先 → Shizuku）
-                        Row(
-                          children: [
-                            Text('当前执行路由：',
-                                style: TextStyle(fontSize: 12.5, color: h.textDim)),
-                            Text(
-                              (_diag['route'] as String?) ?? '无',
-                              style: TextStyle(
-                                fontSize: 13,
-                                fontWeight: FontWeight.w700,
-                                color: (_diag['route'] as String?) == '无'
-                                    ? HColors.errorOn(h.dark)
-                                    : HColors.successOn(h.dark),
+                  _shizukuMsgLine(h),
+                ],
+                // ---- 诊断与自检（默认收起：调试信息不是正文）----
+                const SizedBox(height: HSpace.lg),
+                GestureDetector(
+                  onTap: () => setState(() => _diagExpanded = !_diagExpanded),
+                  behavior: HitTestBehavior.opaque,
+                  child: Row(
+                    children: [
+                      Text(
+                        '诊断与自检',
+                        style: TextStyle(
+                            fontSize: 13,
+                            fontWeight: FontWeight.w600,
+                            color: h.text),
+                      ),
+                      const Spacer(),
+                      Text(
+                        _diagExpanded ? '收起' : '详情',
+                        style: TextStyle(fontSize: 12.5, color: h.textDim),
+                      ),
+                      Icon(
+                        _diagExpanded
+                            ? AppIcons.chevronUp
+                            : AppIcons.chevronDown,
+                        size: 15,
+                        color: h.textDim,
+                      ),
+                    ],
+                  ),
+                ),
+                if (_diagExpanded) ...[
+                  // 执行路由诊断：本机同时装 Stellar（Sui 系）时
+                  // Shizuku-API 内置 Sui 支持会改走 Sui，它的授权
+                  // 列表自然是 0 —— 如实显示实际路由，不让用户猜。
+                  if (_diag.isNotEmpty) ...[
+                    const SizedBox(height: HSpace.sm),
+                    Container(
+                      width: double.infinity,
+                      padding: const EdgeInsets.all(HSpace.md),
+                      decoration: BoxDecoration(
+                        color: h.surfaceAlt,
+                        borderRadius: BorderRadius.circular(HRadius.lg),
+                        border: Border.all(color: h.border),
+                      ),
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Row(
+                            children: [
+                              Text('当前执行路由：',
+                                  style: TextStyle(
+                                      fontSize: 12.5, color: h.textDim)),
+                              Text(
+                                (_diag['route'] as String?) ?? '无',
+                                style: TextStyle(
+                                  fontSize: 13,
+                                  fontWeight: FontWeight.w700,
+                                  color: (_diag['route'] as String?) == '无'
+                                      ? HColors.errorOn(h.dark)
+                                      : HColors.successOn(h.dark),
+                                ),
                               ),
-                            ),
-                            const Spacer(),
-                            // ★ 逐项清单默认收起（2026-10-25 用户：
-                            //   「这个字太多了」）—— 结论留在外面，
-                            //   明细点开才看，是调试信息不是正文。
-                            GestureDetector(
-                              onTap: () => setState(
-                                  () => _diagExpanded = !_diagExpanded),
-                              behavior: HitTestBehavior.opaque,
-                              child: Row(
-                                mainAxisSize: MainAxisSize.min,
-                                children: [
-                                  Text(
-                                    _diagExpanded ? '收起' : '详情',
-                                    style: TextStyle(
-                                        fontSize: 12.5, color: h.textDim),
-                                  ),
-                                  Icon(
-                                    _diagExpanded
-                                        ? AppIcons.chevronUp
-                                        : AppIcons.chevronDown,
-                                    size: 15,
-                                    color: h.textDim,
-                                  ),
-                                ],
-                              ),
-                            ),
-                          ],
-                        ),
-                        if (_diagExpanded) ...[
+                            ],
+                          ),
                           const SizedBox(height: HSpace.xs),
                           Divider(height: 1, color: h.border),
                           const SizedBox(height: HSpace.xs),
-                          // ---- Stellar（能力更强，优先）----
                           _diagRow(h, 'Stellar 已安装', _diag['stellarInstalled']),
                           _diagRow(h, 'Stellar 服务在运行', _diag['stellarRunning']),
                           _diagRow(h, 'Stellar 已授权本 App', _diag['stellarGranted']),
@@ -612,89 +555,86 @@ class _DevicePermissionPageState extends State<DevicePermissionPage> {
                                   : 'Stellar 模式：ADB / Shell（uid=${_diag['stellarUid']}）',
                             ),
                           const SizedBox(height: HSpace.xs),
-                          // ---- Shizuku ----
                           _diagRow(h, 'Shizuku 已安装', _diag['shizukuInstalled']),
                           _diagRow(h, 'Shizuku binder 连通', _diag['shizukuPing']),
                           _diagRow(h, 'Shizuku 已授权本 App', _diag['shizukuGranted']),
                           _diagRow(h, 'Shizuku 版本过旧(pre-v11)', _diag['shizukuPreV11']),
+                          const SizedBox(height: HSpace.sm),
+                          Text(_diagConclusion(),
+                              style: TextStyle(
+                                  fontSize: 12, height: 1.5, color: h.textDim)),
                         ],
-                        const SizedBox(height: HSpace.sm),
-                        Text(_diagConclusion(), style: TextStyle(
-                            fontSize: 12, height: 1.5, color: h.textDim)),
-                      ],
-                    ),
-                  ),
-                ],
-                // ---- ★ 编码层自检（2026-10-17）----
-                //
-                // 为什么放在「设备权限」页：自检能不能跑通**直接取决于上面那个执行路由**
-                // （App 自己没有 shell 身份，aapt2/javac/d8 全靠它跑）。
-                // 而 `DeviceShellRunner` / `AgentBuildService` / `SystemHealthSource`
-                // 此前只有「编译过、APK 装得上」—— 这里给它们一个**能真跑的答案**。
-                const SizedBox(height: HSpace.lg),
-                Text(
-                  '编码层自检',
-                  style: TextStyle(
-                      fontSize: 13,
-                      fontWeight: FontWeight.w600,
-                      color: h.text),
-                ),
-                const SizedBox(height: HSpace.xs),
-                Text(
-                  '在手机上真跑一遍：起前台服务 → 读温度/电量 → 定位工具链 → '
-                  '建 Hello World → 构建 → 拆包核对。',
-                  style: TextStyle(fontSize: 12, height: 1.5, color: h.textDim),
-                ),
-                const SizedBox(height: HSpace.sm),
-                SizedBox(
-                  width: double.infinity,
-                  child: IosButton(
-                    label: '跑一遍编码层自检',
-                    color: h.accent,
-                    busy: _selfCheckBusy,
-                    onPressed: _selfCheckBusy
-                        ? null
-                        : () async {
-                            setState(() {
-                              _selfCheckBusy = true;
-                              _selfCheckMsg = null;
-                            });
-                            final r = await AgentBridge().encodeSelfCheck();
-                            if (!mounted) return;
-                            setState(() {
-                              _selfCheckMsg = r;
-                              _selfCheckBusy = false;
-                            });
-                          },
-                  ),
-                ),
-                if (_selfCheckBusy)
-                  Padding(
-                    padding: const EdgeInsets.only(top: HSpace.xs),
-                    child: Text('构建要 1–3 分钟，期间请不要切走应用…',
-                        style: TextStyle(fontSize: 12, color: h.textDim)),
-                  ),
-                if (_selfCheckMsg != null) ...[
-                  const SizedBox(height: HSpace.sm),
-                  Container(
-                    width: double.infinity,
-                    padding: const EdgeInsets.all(HSpace.md),
-                    decoration: BoxDecoration(
-                      color: h.surfaceAlt,
-                      borderRadius: BorderRadius.circular(HRadius.md),
-                      border: Border.all(color: h.border),
-                    ),
-                    child: SelectableText(
-                      _selfCheckMsg!,
-                      style: TextStyle(
-                        fontSize: 11.5,
-                        height: 1.5,
-                        fontFamily: kMonoFontFamily,
-                        fontFamilyFallback: kMonoFallback,
-                        color: h.text,
                       ),
                     ),
+                  ],
+                  // 编码层自检：能不能跑通直接取决于上面的执行路由
+                  //（App 自己没有 shell 身份，工具链全靠它跑）。
+                  const SizedBox(height: HSpace.lg),
+                  Text(
+                    '编码层自检',
+                    style: TextStyle(
+                        fontSize: 13,
+                        fontWeight: FontWeight.w600,
+                        color: h.text),
                   ),
+                  const SizedBox(height: HSpace.xs),
+                  Text(
+                    '在手机上真跑一遍：起前台服务 → 读温度/电量 → 定位工具链 → '
+                    '建 Hello World → 构建 → 拆包核对。',
+                    style:
+                        TextStyle(fontSize: 12, height: 1.5, color: h.textDim),
+                  ),
+                  const SizedBox(height: HSpace.sm),
+                  SizedBox(
+                    width: double.infinity,
+                    child: IosButton(
+                      label: '跑一遍编码层自检',
+                      color: h.accent,
+                      busy: _selfCheckBusy,
+                      onPressed: _selfCheckBusy
+                          ? null
+                          : () async {
+                              setState(() {
+                                _selfCheckBusy = true;
+                                _selfCheckMsg = null;
+                              });
+                              final r = await AgentBridge().encodeSelfCheck();
+                              if (!mounted) return;
+                              setState(() {
+                                _selfCheckMsg = r;
+                                _selfCheckBusy = false;
+                              });
+                            },
+                    ),
+                  ),
+                  if (_selfCheckBusy)
+                    Padding(
+                      padding: const EdgeInsets.only(top: HSpace.xs),
+                      child: Text('构建要 1–3 分钟，期间请不要切走应用…',
+                          style: TextStyle(fontSize: 12, color: h.textDim)),
+                    ),
+                  if (_selfCheckMsg != null) ...[
+                    const SizedBox(height: HSpace.sm),
+                    Container(
+                      width: double.infinity,
+                      padding: const EdgeInsets.all(HSpace.md),
+                      decoration: BoxDecoration(
+                        color: h.surfaceAlt,
+                        borderRadius: BorderRadius.circular(HRadius.md),
+                        border: Border.all(color: h.border),
+                      ),
+                      child: SelectableText(
+                        _selfCheckMsg!,
+                        style: TextStyle(
+                          fontSize: 11.5,
+                          height: 1.5,
+                          fontFamily: kMonoFontFamily,
+                          fontFamilyFallback: kMonoFallback,
+                          color: h.text,
+                        ),
+                      ),
+                    ),
+                  ],
                 ],
               ],
             ),
@@ -814,10 +754,10 @@ class _GlobalMemoryEntryState extends State<_GlobalMemoryEntry> {
 
   @override
   Widget build(BuildContext context) {
-    return _HomeRow(
+    return _HomeCard(
       title: '全局记忆',
-      // 规模徽标在行右值位（原型 05）—— 不进二级页也知道记了多少
-      value: _badge ?? '…',
+      // 规模作卡片副行 —— 不进二级页也知道记了多少
+      subtitle: _badge ?? '…',
       onTap: () async {
         await widget.onOpen();
         // 从二级页返回后再读一次（用户可能刚点了清空）—— 这次是真等 pop
@@ -859,6 +799,21 @@ String _memorySourceLabel(String source) => switch (source) {
 String _memoryDate(int ms) {
   final d = DateTime.fromMillisecondsSinceEpoch(ms);
   return '${d.month}月${d.day}日';
+}
+
+/// 卡片头行的短标签（概念图 03 的标签形态：偏好 / 背景 / 习惯 / 其他）
+const _memoryKindShort = {
+  'preference': '偏好',
+  'background': '背景',
+  'habit': '习惯',
+  'other': '其他',
+};
+
+String _memoryDateTime(int ms) {
+  final d = DateTime.fromMillisecondsSinceEpoch(ms);
+  final hh = d.hour.toString().padLeft(2, '0');
+  final mm = d.minute.toString().padLeft(2, '0');
+  return '${d.month}月${d.day}日 $hh:$mm';
 }
 
 class _GlobalMemoryPageState extends State<GlobalMemoryPage> {
@@ -971,11 +926,21 @@ class _GlobalMemoryPageState extends State<GlobalMemoryPage> {
               onPressed: _clearing ? null : _confirmClear,
               minimumSize: const Size(0, 44),
               padding: const EdgeInsets.symmetric(horizontal: HSpace.sm),
-              foregroundColor: HColors.errorOn(h.dark),
-              child: _clearing
-                  ? CupertinoActivityIndicator(
-                      radius: 8, color: HColors.errorOn(h.dark))
-                  : const Text('清空', style: TextStyle(fontSize: 15)),
+              child: Container(
+                padding:
+                    const EdgeInsets.symmetric(horizontal: 13, vertical: 6),
+                decoration: BoxDecoration(
+                  color: h.surface,
+                  borderRadius: BorderRadius.circular(999),
+                ),
+                child: _clearing
+                    ? CupertinoActivityIndicator(
+                        radius: 8, color: HColors.errorOn(h.dark))
+                    : Text('清空',
+                        style: TextStyle(
+                            fontSize: 13.5,
+                            color: HColors.errorOn(h.dark))),
+              ),
             ),
           const SizedBox(width: HSpace.sm),
         ],
@@ -985,105 +950,127 @@ class _GlobalMemoryPageState extends State<GlobalMemoryPage> {
           : ListView(
               padding: const EdgeInsets.all(HSpace.lg),
               children: [
-                // ---- 规模与上限（条数 + 容量条）----
+                // ---- 容量头卡（2026-10-25 晚按概念图 03）：大数字 +
+                //   容量条 + 已用/上限，一张卡说清规模 ----
                 if (cap != null) ...[
-                  Text(
-                    entries.isEmpty
-                        ? '暂无记忆 · 上限 ${_fmtBytes(cap.maxBytes)}'
-                        : '${entries.length} 条 · '
-                            '${_fmtBytes(cap.usedBytes)} / '
-                            '${_fmtBytes(cap.maxBytes)}'
-                            '${nearlyFull ? ' · 接近上限，建议清理' : ''}',
-                    style: TextStyle(
-                      fontSize: 12.5,
-                      color: nearlyFull
-                          ? HColors.warnOn(h.dark)
-                          : h.textDim,
-                    ),
-                  ),
-                  const SizedBox(height: 8),
-                  ClipRRect(
-                    borderRadius: BorderRadius.circular(2),
-                    child: LinearProgressIndicator(
-                      value: cap.maxBytes > 0
-                          ? (cap.usedBytes / cap.maxBytes)
-                              .clamp(0.0, 1.0)
-                          : 0,
-                      minHeight: 4,
-                      backgroundColor: h.border,
-                      valueColor: AlwaysStoppedAnimation<Color>(
-                        nearlyFull ? HColors.warnOn(h.dark) : h.text,
-                      ),
-                    ),
-                  ),
-                  const SizedBox(height: HSpace.md),
-                ],
-                if (entries.isEmpty)
                   Container(
                     width: double.infinity,
-                    padding: const EdgeInsets.all(HSpace.md),
+                    padding: const EdgeInsets.fromLTRB(18, 16, 18, 14),
                     decoration: BoxDecoration(
                       color: h.surfaceAlt,
-                      borderRadius: BorderRadius.circular(HRadius.md),
-                      border: Border.all(color: h.border),
+                      borderRadius: BorderRadius.circular(HRadius.xl),
                     ),
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Row(
+                          crossAxisAlignment: CrossAxisAlignment.baseline,
+                          textBaseline: TextBaseline.alphabetic,
+                          children: [
+                            Text(
+                              '${entries.length}',
+                              style: TextStyle(
+                                fontSize: 26,
+                                fontWeight: FontWeight.w700,
+                                color: h.text,
+                              ),
+                            ),
+                            const SizedBox(width: 6),
+                            Text(
+                              '条记忆',
+                              style:
+                                  TextStyle(fontSize: 14, color: h.textDim),
+                            ),
+                            const Spacer(),
+                            Text(
+                              nearlyFull ? '接近上限，建议清理' : '会注入每次对话',
+                              style: TextStyle(
+                                fontSize: 12.5,
+                                color: nearlyFull
+                                    ? HColors.warnOn(h.dark)
+                                    : h.textFaint,
+                              ),
+                            ),
+                          ],
+                        ),
+                        const SizedBox(height: 12),
+                        ClipRRect(
+                          borderRadius: BorderRadius.circular(3),
+                          child: LinearProgressIndicator(
+                            value: cap.maxBytes > 0
+                                ? (cap.usedBytes / cap.maxBytes)
+                                    .clamp(0.0, 1.0)
+                                : 0,
+                            minHeight: 6,
+                            backgroundColor: h.border,
+                            valueColor: AlwaysStoppedAnimation<Color>(
+                              nearlyFull
+                                  ? HColors.warnOn(h.dark)
+                                  : h.text,
+                            ),
+                          ),
+                        ),
+                        const SizedBox(height: 8),
+                        Row(
+                          children: [
+                            Text(
+                              '已用 ${_fmtBytes(cap.usedBytes)}',
+                              style: TextStyle(
+                                  fontSize: 12, color: h.textFaint),
+                            ),
+                            const Spacer(),
+                            Text(
+                              '上限 ${_fmtBytes(cap.maxBytes)}',
+                              style: TextStyle(
+                                  fontSize: 12, color: h.textFaint),
+                            ),
+                          ],
+                        ),
+                      ],
+                    ),
+                  ),
+                  const SizedBox(height: HSpace.lg),
+                ],
+                if (entries.isEmpty)
+                  Padding(
+                    padding: const EdgeInsets.symmetric(vertical: 36),
                     child: Text(
-                      '还没有任何记忆。和 Heracles 聊天时它会把值得记住的事'
-                      '写在这里（跨会话生效），你也可以点右上角 + 手动添加。',
+                      '还没有任何记忆。\n和 Heracles 聊天时它会把值得记住的事'
+                      '写在这里（跨会话生效），也可以点右上角 + 手动添加。',
                       textAlign: TextAlign.center,
                       style: TextStyle(
-                        fontSize: 12.5,
-                        height: 1.6,
+                        fontSize: 13,
+                        height: 1.7,
                         color: h.textFaint,
                       ),
                     ),
                   )
-                else
-                  for (final kind in _memoryKindOrder)
-                    if (entries.any((e) => e.kind == kind)) ...[
-                      Padding(
-                        padding: const EdgeInsets.only(
-                            top: HSpace.sm, bottom: HSpace.sm),
-                        child: Text(
-                          _memoryKindLabels[kind] ?? kind,
-                          style: TextStyle(
-                            fontSize: 12,
-                            fontWeight: FontWeight.w600,
-                            color: h.textFaint,
-                          ),
-                        ),
-                      ),
-                      for (final e in entries.where((e) => e.kind == kind))
-                        _MemoryCard(
-                          entry: e,
-                          h: h,
-                          onEdit: () => _openEditor(entry: e),
-                          onDelete: () => _confirmDelete(e),
-                        ),
-                    ],
-                // 未知 kind（词表外）兜底一组，不吞条目
-                if (entries.any(
-                    (e) => !_memoryKindOrder.contains(e.kind))) ...[
+                else ...[
                   Padding(
-                    padding: const EdgeInsets.only(
-                        top: HSpace.sm, bottom: HSpace.sm),
+                    padding: const EdgeInsets.only(bottom: HSpace.sm),
                     child: Text(
-                      '未分类',
+                      '全部记忆',
                       style: TextStyle(
-                        fontSize: 12,
+                        fontSize: 13,
                         fontWeight: FontWeight.w600,
-                        color: h.textFaint,
+                        color: h.textDim,
                       ),
                     ),
                   ),
-                  for (final e in entries
-                      .where((e) => !_memoryKindOrder.contains(e.kind)))
+                  for (final e in entries)
                     _MemoryCard(
                       entry: e,
                       h: h,
                       onEdit: () => _openEditor(entry: e),
                       onDelete: () => _confirmDelete(e),
                     ),
+                  const SizedBox(height: HSpace.sm),
+                  Center(
+                    child: Text(
+                      '记忆由对话自动提炼，也可以手动添加',
+                      style: TextStyle(fontSize: 12, color: h.textFaint),
+                    ),
+                  ),
                 ],
               ],
             ),
@@ -1107,56 +1094,82 @@ class _MemoryCard extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    // 卡底元信息：来源（手动添加 / 模型记的 / 旧格式）+ 到期标注
     final meta = <String>[
       _memorySourceLabel(entry.source),
-      if (entry.createdAt > 0) _memoryDate(entry.createdAt),
       if (entry.expiresAt != null) '到期 ${_memoryDate(entry.expiresAt!)}',
     ];
     return Container(
       width: double.infinity,
       margin: const EdgeInsets.only(bottom: HSpace.sm),
-      padding: const EdgeInsets.fromLTRB(
-          HSpace.md, HSpace.md, HSpace.sm, HSpace.sm),
+      padding: const EdgeInsets.fromLTRB(16, 12, 12, 14),
       decoration: BoxDecoration(
-        color: h.surface,
-        borderRadius: BorderRadius.circular(HRadius.md),
-        border: Border.all(color: h.border),
+        color: h.surfaceAlt,
+        borderRadius: BorderRadius.circular(HRadius.xl),
       ),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
+          // 头行（概念图 03）：类别标签 + 日期 …… 编辑 / 删除小方钮
+          Row(
+            children: [
+              Container(
+                padding:
+                    const EdgeInsets.symmetric(horizontal: 9, vertical: 3),
+                decoration: BoxDecoration(
+                  color: h.surface,
+                  borderRadius: BorderRadius.circular(999),
+                ),
+                child: Text(
+                  _memoryKindShort[entry.kind] ?? entry.kind,
+                  style: TextStyle(
+                    fontSize: 11,
+                    fontWeight: FontWeight.w600,
+                    color: h.textDim,
+                  ),
+                ),
+              ),
+              const SizedBox(width: 8),
+              if (entry.createdAt > 0)
+                Text(
+                  _memoryDateTime(entry.createdAt),
+                  style: TextStyle(fontSize: 12, color: h.textFaint),
+                ),
+              const Spacer(),
+              _iconBtn(AppIcons.edit, onEdit),
+              const SizedBox(width: 6),
+              _iconBtn(AppIcons.trash, onDelete),
+            ],
+          ),
+          const SizedBox(height: 9),
           Text(
             entry.text,
             style: TextStyle(fontSize: 14.5, height: 1.55, color: h.text),
           ),
           const SizedBox(height: 6),
-          Row(
-            children: [
-              Expanded(
-                child: Text(
-                  meta.join(' · '),
-                  style: TextStyle(fontSize: 12, color: h.textFaint),
-                ),
-              ),
-              CupertinoButton(
-                onPressed: onEdit,
-                minimumSize: const Size(0, 32),
-                padding: const EdgeInsets.all(6),
-                child: Icon(AppIcons.edit, size: 17, color: h.textDim),
-              ),
-              CupertinoButton(
-                onPressed: onDelete,
-                minimumSize: const Size(0, 32),
-                padding: const EdgeInsets.all(6),
-                child: Icon(AppIcons.trash,
-                    size: 17, color: HColors.errorOn(h.dark)),
-              ),
-            ],
+          Text(
+            meta.join(' · '),
+            style: TextStyle(fontSize: 11.5, color: h.textFaint),
           ),
         ],
       ),
     );
   }
+
+  /// 头行小方钮：浅底圆角 + 填充图标（危险色留给确认抽屉承担）
+  Widget _iconBtn(IconData icon, VoidCallback onTap) => GestureDetector(
+        onTap: onTap,
+        behavior: HitTestBehavior.opaque,
+        child: Container(
+          width: 30,
+          height: 30,
+          decoration: BoxDecoration(
+            color: h.surface,
+            borderRadius: BorderRadius.circular(9),
+          ),
+          child: Icon(icon, size: 15, color: h.textDim),
+        ),
+      );
 }
 
 /// 记忆编辑抽屉：新增（可选 kind）/ 编辑正文。
@@ -1378,96 +1391,130 @@ class GeneralSettingsPage extends StatelessWidget {
         builder: (context, s, _) {
           final h = Hue.of(context);
           return ListView(
-          padding: const EdgeInsets.symmetric(vertical: HSpace.sm),
+          padding: const EdgeInsets.only(bottom: HSpace.xl),
           children: [
-            // ★ 原型 06（2026-10-25 按原型重排）：平直行 + 滑杆
-            //   调节器，无分节瓷砖。顺序与原型一致：语言 / 字号 /
-            //   工作步骤 / 繁忙时发送 / 最大轮次 / 流式输出。
-            //   原本页的「外观」分段移到外观页（入口归位）；
-            //   「权限」组（默认权限 + 始终允许）原型未画，保留在
-            //   页尾 —— 它是安全设置，没有第二个入口，不能删。
-            _PickerRow<AppLanguage>(
-              label: '界面语言',
-              value: s.language,
-              options: AppLanguage.values,
-              labelOf: (v) => v.label,
-              onChanged: controller.setLanguage,
+            // ★ 卡片式（2026-10-25 晚，用户批准概念图 heracles-ui-general）：
+            //   每项一张卡、卡内只有一套控件。字号是连续量用滑杆；
+            //   其余离散档位用分段胶囊；流式只报状态；权限卡内含中性
+            //   警示行。旧版「值胶囊 + 滑杆」双控件与步进器全部退役。
+            //   页尾权限组（默认权限 + 始终允许）是安全设置、没有第二
+            //   个入口，随卡片化保留。
+            const _SectionLabel('显示'),
+            _SettingsCard(
+              title: '界面语言',
+              subtitle: '界面与回复使用的语言',
+              child: _SegControl<AppLanguage>(
+                value: s.language,
+                options: AppLanguage.values,
+                labelOf: (v) => v.label,
+                onChanged: controller.setLanguage,
+              ),
             ),
-            Divider(),
-            // ---- 字号：三档滑杆（小 / 标准 / 大）----
-            _SteppedRow<double>(
-              label: '字号大小',
-              hint: '全局字阶按比例缩放',
-              value: _nearestFontStop(s.fontSize),
-              options: const [13.0, 15.0, 18.0],
-              labelOf: _fontStopLabel,
-              onChanged: controller.setFontSize,
-            ),
-            Divider(),
-            // ---- 工作步骤展示（真实四档 stepped 滑杆）----
-            _SteppedRow<StepDetail>(
-              label: '工作步骤展示',
-              hint: '选择希望看到多少工具调用细节',
-              value: s.stepDetail,
-              options: StepDetail.values,
-              labelOf: (v) => v.label,
-              onChanged: controller.setStepDetail,
-            ),
-            _SteppedRow<BusySendBehavior>(
-              label: '繁忙时发送',
-              hint: '任务执行中发消息如何处理',
-              value: s.busySend,
-              options: BusySendBehavior.values,
-              labelOf: (v) => v == BusySendBehavior.queue ? '排队' : '插队',
-              onChanged: controller.setBusySend,
-            ),
-            Divider(),
-            // ---- 最大轮次：步进器（原型 06 的 − 值 ＋）----
-            _MaxTurnsRow(
-              value: s.maxTurns,
-              onChanged: controller.setMaxTurns,
-            ),
-            // ---- 流式输出：默认开启、不设关闭开关（用户拍板）----
-            //   原型画了开关，但用户明确不要这个开关 —— 行只报状态。
-            Padding(
-              padding: const EdgeInsets.fromLTRB(
-                  HSpace.lg, HSpace.sm, HSpace.lg, HSpace.sm),
-              child: Row(
+            _SettingsCard(
+              title: '字号大小',
+              subtitle: '全局字阶按比例缩放，拖动实时预览',
+              trailing: Text(
+                '${_fontStopLabel(s.fontSize)} · ${s.fontSize.round()}',
+                style: TextStyle(fontSize: 14, color: h.textDim),
+              ),
+              child: Column(
                 children: [
-                  Expanded(
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
+                  CupertinoSlider(
+                    value: s.fontSize,
+                    min: 12,
+                    max: 20,
+                    activeColor: h.text,
+                    onChanged: controller.setFontSize,
+                  ),
+                  Padding(
+                    padding: const EdgeInsets.symmetric(horizontal: 2),
+                    child: Row(
+                      mainAxisAlignment: MainAxisAlignment.spaceBetween,
                       children: [
-                        Text('流式输出',
-                            style: TextStyle(fontSize: 14, color: h.text)),
-                        const SizedBox(height: 2),
-                        Text('逐字显示模型回复',
+                        Text('小',
                             style: TextStyle(
-                                fontSize: 11.5, color: h.textFaint)),
+                                fontSize: 12, color: h.textFaint)),
+                        Text('大',
+                            style: TextStyle(
+                                fontSize: 12, color: h.textFaint)),
                       ],
                     ),
                   ),
-                  Text('开启',
-                      style: TextStyle(fontSize: 13, color: h.textDim)),
                 ],
               ),
             ),
-            Divider(),
-            // ---- 权限（原型未画，保留：新会话默认 + 始终允许）----
-            const _SectionLabel('权限'),
-            _PickerRow<PermissionMode>(
-              label: '新会话的默认权限',
-              hint: '决定工具执行前是否需要你确认',
-              value: s.permission,
-              options: PermissionMode.values,
-              labelOf: (v) => v.label,
-              descOf: (v) => v.description,
-              onChanged: controller.setPermission,
-            ),
-            if (s.permission.requiresElevation)
-              const _WarningNote(
-                '「完全访问」需要 Shizuku 或 root 才能真正生效。',
+            const _SectionLabel('行为'),
+            _SettingsCard(
+              title: '工作步骤展示',
+              subtitle: '选择希望看到多少工具调用细节',
+              child: _SegControl<StepDetail>(
+                value: s.stepDetail,
+                options: StepDetail.values,
+                labelOf: (v) => v.label,
+                onChanged: controller.setStepDetail,
               ),
+            ),
+            _SettingsCard(
+              title: '繁忙时发送',
+              subtitle: '任务执行中发消息如何处理',
+              child: _SegControl<BusySendBehavior>(
+                value: s.busySend,
+                options: BusySendBehavior.values,
+                labelOf: (v) => v == BusySendBehavior.queue ? '排队' : '插队',
+                onChanged: controller.setBusySend,
+              ),
+            ),
+            _SettingsCard(
+              title: '最大轮次',
+              subtitle: '单次任务最多执行的工具轮次',
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  _SegControl<int>(
+                    value: s.maxTurns,
+                    options: kMaxTurnsOptions,
+                    labelOf: (v) => v == 0 ? '自动' : '$v',
+                    onChanged: controller.setMaxTurns,
+                  ),
+                  const SizedBox(height: 10),
+                  Text(
+                    '自动 = 云端 40 轮（默认）。轮次越多，单次任务能做的步骤'
+                    '越多，但可能跑更久；云端按轮计费，花费也更多。',
+                    style: TextStyle(
+                        fontSize: 12, height: 1.5, color: h.textFaint),
+                  ),
+                ],
+              ),
+            ),
+            // ---- 流式输出：默认开启、不设关闭开关（用户拍板）----
+            _SettingsCard(
+              title: '流式输出',
+              subtitle: '逐字显示模型回复',
+              trailing: Text('始终开启',
+                  style: TextStyle(fontSize: 14, color: h.textDim)),
+            ),
+            const _SectionLabel('权限'),
+            _SettingsCard(
+              title: '新会话的默认权限',
+              subtitle: '决定工具执行前是否需要你确认',
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: [
+                  _SegControl<PermissionMode>(
+                    value: s.permission,
+                    options: PermissionMode.values,
+                    labelOf: (v) => v.label,
+                    onChanged: controller.setPermission,
+                  ),
+                  if (s.permission.requiresElevation) ...[
+                    const SizedBox(height: 13),
+                    const _CardWarnNote(
+                      '「完全访问」需要 Shizuku 或 root 才能真正生效。',
+                    ),
+                  ],
+                ],
+              ),
+            ),
             const _AlwaysAllowedRow(),
           ],
           );
@@ -2510,21 +2557,14 @@ class AppearanceSettingsPage extends StatelessWidget {
         builder: (context, s, _) => ListView(
           padding: const EdgeInsets.symmetric(vertical: HSpace.sm),
           children: [
-            // ★ 原型 08（2026-10-25 按原型重排）：深浅三段在最前
-            //   （此前埋在通用设置页，入口归位到外观页）。
+            // ★ 深浅（2026-10-25 晚按概念图 08 定稿）：三张预览卡 ——
+            //   卡内是界面骨架缩略图（浅 / 深 / 一半一半），比图标钮
+            //   一眼更明白；选中 = 深色描边。
             const _SectionLabel('深浅'),
-            _SegmentedRow<AppAppearance>(
+            _AppearancePreviewRow(
               value: s.appearance,
-              options: AppAppearance.values,
-              labelOf: (v) => v.label,
-              iconOf: (v) => switch (v) {
-                AppAppearance.light => CupertinoIcons.sun_max_fill,
-                AppAppearance.dark => CupertinoIcons.moon_fill,
-                AppAppearance.system => CupertinoIcons.brightness,
-              },
               onChanged: controller.setAppearance,
             ),
-            Divider(),
             // ★ 主题选择（2026-10-24，用户拍板）：代替已移除的强调色选择。
             //   只换颜色与背景，不换布局；默认黑白。
             const _SectionLabel('主题'),
@@ -2535,27 +2575,52 @@ class AppearanceSettingsPage extends StatelessWidget {
                 dark: Hue.of(context).dark,
                 onTap: () => controller.setThemeStyle(t),
               ),
-            Divider(),
             const _SectionLabel('显示'),
-            _HomeRow(
-              title: '界面字号',
-              value: _fontStopLabel(_nearestFontStop(s.fontSize)),
-              onTap: () => Navigator.of(context).push(
-                CupertinoPageRoute(
-                  builder: (_) => GeneralSettingsPage(controller: controller),
+            // 显示 + 效果合并一张卡（概念图 08 形态）：三行共用
+            // _CardRow、同一左缩进顶格对齐。图标风格是既定设计语言
+            // （黑白填充），只报状态不做假开关。
+            Padding(
+              padding: const EdgeInsets.symmetric(horizontal: HSpace.lg),
+              child: Container(
+                decoration: BoxDecoration(
+                  color: Hue.of(context).surfaceAlt,
+                  borderRadius: BorderRadius.circular(HRadius.xl),
+                ),
+                padding: const EdgeInsets.symmetric(vertical: 4),
+                child: Column(
+                  children: [
+                    _CardRow(
+                      title: '界面字号',
+                      value: _fontStopLabel(_nearestFontStop(s.fontSize)),
+                      onTap: () => Navigator.of(context).push(
+                        CupertinoPageRoute(
+                          builder: (_) =>
+                              GeneralSettingsPage(controller: controller),
+                        ),
+                      ),
+                    ),
+                    Divider(
+                        height: 1,
+                        indent: 18,
+                        endIndent: 18,
+                        color: Hue.of(context).border),
+                    const _CardRow(title: '图标风格', value: '填充 · 黑白'),
+                    Divider(
+                        height: 1,
+                        indent: 18,
+                        endIndent: 18,
+                        color: Hue.of(context).border),
+                    _CardRow(
+                      title: '玻璃效果',
+                      subtitle: '面板使用半透明毛玻璃质感',
+                      trailing: ElasticSwitch(
+                        value: s.glassEffect,
+                        onChanged: controller.setGlassEffect,
+                      ),
+                    ),
+                  ],
                 ),
               ),
-            ),
-            Divider(height: 1, indent: HSpace.lg, endIndent: HSpace.lg),
-            // 图标风格是既定设计语言（黑白填充），只报状态不做假开关
-            const _HomeRow(title: '图标风格', value: '填充 · 黑白'),
-            Divider(),
-            const _SectionLabel('效果'),
-            _SwitchRow(
-              label: '玻璃效果',
-              hint: '面板使用半透明毛玻璃质感',
-              value: s.glassEffect,
-              onChanged: controller.setGlassEffect,
             ),
           ],
         ),
@@ -2696,11 +2761,22 @@ class AboutPage extends StatelessWidget {
 
 /// 设置主页的平直行（原型 05）：标题左对齐、无图标无副标题，
 /// 右侧是值/徽标 + 淡箭头。[onTap] 为 null = 纯信息行（无箭头）。
-class _HomeRow extends StatelessWidget {
-  const _HomeRow({required this.title, this.value, this.onTap});
+/// 卡内行（外观页显示卡用，2026-10-25 晚）：标题 + 可选副行 + 右侧
+/// 值 / 自定义尾部 / 箭头，左缩进与卡片内边距一致（18）。同一张卡
+/// 里的行全部走它 —— 左缘顶格对齐，不再各行各的缩进。
+class _CardRow extends StatelessWidget {
+  const _CardRow({
+    required this.title,
+    this.subtitle,
+    this.value,
+    this.trailing,
+    this.onTap,
+  });
 
   final String title;
+  final String? subtitle;
   final String? value;
+  final Widget? trailing;
   final VoidCallback? onTap;
 
   @override
@@ -2710,25 +2786,33 @@ class _HomeRow extends StatelessWidget {
       onTap: onTap,
       behavior: HitTestBehavior.opaque,
       child: Padding(
-        padding: const EdgeInsets.symmetric(
-            horizontal: HSpace.lg, vertical: 13),
+        padding: const EdgeInsets.symmetric(horizontal: 18, vertical: 13),
         child: Row(
           children: [
             Expanded(
-              child: Text(
-                title,
-                style: TextStyle(fontSize: 15, color: h.text),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Text(title,
+                      style: TextStyle(fontSize: 15, color: h.text)),
+                  if (subtitle != null) ...[
+                    const SizedBox(height: 2),
+                    Text(subtitle!,
+                        style:
+                            TextStyle(fontSize: 12.5, color: h.textFaint)),
+                  ],
+                ],
               ),
             ),
-            if (value != null) ...[
-              Text(
-                value!,
-                style: TextStyle(fontSize: 13, color: h.textFaint),
-              ),
-              const SizedBox(width: HSpace.xs),
-            ],
-            if (onTap != null)
+            if (value != null)
+              Text(value!,
+                  style: TextStyle(fontSize: 13.5, color: h.textDim)),
+            ?trailing,
+            if (onTap != null) ...[
+              const SizedBox(width: 6),
               Icon(AppIcons.chevronRight, size: 15, color: h.textFaint),
+            ],
           ],
         ),
       ),
@@ -2736,12 +2820,46 @@ class _HomeRow extends StatelessWidget {
   }
 }
 
-/// 可点的分组标题（原型 05 的 seclink）：小字标题本身就是入口，
-/// 右侧带淡箭头 —— 通用设置用它进二级页。
-class _SectionLinkLabel extends StatelessWidget {
-  const _SectionLinkLabel(this.text, {required this.onTap});
+/// 深浅三选预览卡组（概念图 08 定稿形态）：每张卡内是界面骨架
+/// 缩略图 + 下方标签，选中 = 深色描边 + 标签粗体。
+class _AppearancePreviewRow extends StatelessWidget {
+  const _AppearancePreviewRow({required this.value, required this.onChanged});
 
-  final String text;
+  final AppAppearance value;
+  final void Function(AppAppearance) onChanged;
+
+  @override
+  Widget build(BuildContext context) {
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(HSpace.lg, 0, HSpace.lg, HSpace.xs),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          for (var i = 0; i < AppAppearance.values.length; i++) ...[
+            if (i > 0) const SizedBox(width: 10),
+            Expanded(
+              child: _AppearanceOption(
+                option: AppAppearance.values[i],
+                selected: AppAppearance.values[i] == value,
+                onTap: () => onChanged(AppAppearance.values[i]),
+              ),
+            ),
+          ],
+        ],
+      ),
+    );
+  }
+}
+
+class _AppearanceOption extends StatelessWidget {
+  const _AppearanceOption({
+    required this.option,
+    required this.selected,
+    required this.onTap,
+  });
+
+  final AppAppearance option;
+  final bool selected;
   final VoidCallback onTap;
 
   @override
@@ -2750,23 +2868,316 @@ class _SectionLinkLabel extends StatelessWidget {
     return GestureDetector(
       onTap: onTap,
       behavior: HitTestBehavior.opaque,
-      child: Padding(
-        padding: const EdgeInsets.fromLTRB(
-            HSpace.lg, HSpace.lg, HSpace.lg, HSpace.sm),
-        child: Row(
+      child: Container(
+        padding: const EdgeInsets.all(10),
+        decoration: BoxDecoration(
+          color: h.surfaceAlt,
+          borderRadius: BorderRadius.circular(HRadius.xl),
+          border: Border.all(
+            color: selected ? h.text : h.border,
+            width: selected ? 2 : 1,
+          ),
+        ),
+        child: Column(
           children: [
-            Text(
-              text,
-              style: TextStyle(
-                fontSize: 12,
-                fontWeight: FontWeight.w600,
-                color: h.textFaint,
-                letterSpacing: 0.6,
+            ClipRRect(
+              borderRadius: BorderRadius.circular(12),
+              child: SizedBox(
+                height: 62,
+                width: double.infinity,
+                child: _previewBox(option),
               ),
             ),
-            const SizedBox(width: HSpace.xs),
-            Icon(AppIcons.chevronRight, size: 13, color: h.textFaint),
+            const SizedBox(height: 9),
+            Text(
+              option.label,
+              style: TextStyle(
+                fontSize: 13.5,
+                fontWeight: selected ? FontWeight.w600 : FontWeight.w400,
+                color: h.text,
+              ),
+            ),
           ],
+        ),
+      ),
+    );
+  }
+
+  /// 界面骨架缩略：两条文本线 + 一块主按钮，颜色随深浅选项；
+  /// 「跟随系统」= 左右各半 + 中性骨架。
+  Widget _previewBox(AppAppearance v) {
+    Widget skeleton(Color bar, Color pill) => Padding(
+          padding: const EdgeInsets.all(8),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Container(
+                width: 34,
+                height: 6,
+                decoration: BoxDecoration(
+                    color: bar, borderRadius: BorderRadius.circular(3)),
+              ),
+              const SizedBox(height: 5),
+              Container(
+                width: 48,
+                height: 6,
+                decoration: BoxDecoration(
+                    color: bar, borderRadius: BorderRadius.circular(3)),
+              ),
+              const Spacer(),
+              Container(
+                height: 15,
+                decoration: BoxDecoration(
+                    color: pill, borderRadius: BorderRadius.circular(7.5)),
+              ),
+            ],
+          ),
+        );
+    return switch (v) {
+      AppAppearance.light => Container(
+          color: const Color(0xFFF5F5F4),
+          child: skeleton(const Color(0xFFD8D8D5), const Color(0xFF161616)),
+        ),
+      AppAppearance.dark => Container(
+          color: const Color(0xFF161616),
+          child: skeleton(const Color(0xFF4A4A4A), const Color(0xFFF5F5F4)),
+        ),
+      AppAppearance.system => Stack(
+          children: [
+            const Row(
+              children: [
+                Expanded(child: ColoredBox(color: Color(0xFFF5F5F4))),
+                Expanded(child: ColoredBox(color: Color(0xFF161616))),
+              ],
+            ),
+            skeleton(const Color(0xFFB9B9B6), const Color(0xFF8C8C8C)),
+          ],
+        ),
+    };
+  }
+}
+
+/// 设置子页的卡片容器（2026-10-25 晚，通用设置改版起）：标题 + 副行
+/// 说明 + 可选右上状态 + 卡内控件。与主页 [_HomeCard] 同语言（圆角
+/// 20、surfaceAlt 底），区别是主页卡是导航行、这里是内容容器。
+class _SettingsCard extends StatelessWidget {
+  const _SettingsCard({
+    required this.title,
+    this.subtitle,
+    this.trailing,
+    this.child,
+  });
+
+  final String title;
+  final String? subtitle;
+  final Widget? trailing;
+  final Widget? child;
+
+  @override
+  Widget build(BuildContext context) {
+    final h = Hue.of(context);
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(HSpace.lg, 0, HSpace.lg, 10),
+      child: Container(
+        decoration: BoxDecoration(
+          color: h.surfaceAlt,
+          borderRadius: BorderRadius.circular(HRadius.xl),
+        ),
+        padding: const EdgeInsets.symmetric(horizontal: 18, vertical: 15),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            Row(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(title,
+                          style: TextStyle(
+                              fontSize: 16,
+                              fontWeight: FontWeight.w500,
+                              color: h.text)),
+                      if (subtitle != null) ...[
+                        const SizedBox(height: 3),
+                        Text(subtitle!,
+                            style:
+                                TextStyle(fontSize: 13, color: h.textFaint)),
+                      ],
+                    ],
+                  ),
+                ),
+                if (trailing != null) ...[
+                  const SizedBox(width: HSpace.sm),
+                  Padding(
+                    padding: const EdgeInsets.only(top: 2),
+                    child: trailing!,
+                  ),
+                ],
+              ],
+            ),
+            if (child != null) ...[
+              const SizedBox(height: 13),
+              child!,
+            ],
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+/// 分段胶囊（离散档位专用，2026-10-25 晚）：一排等分选项，
+/// 选中 = 主色底 + 反色粗字。连续量（字号）不要用它，用滑杆。
+class _SegControl<T> extends StatelessWidget {
+  const _SegControl({
+    required this.value,
+    required this.options,
+    required this.labelOf,
+    required this.onChanged,
+  });
+
+  final T value;
+  final List<T> options;
+  final String Function(T) labelOf;
+  final void Function(T) onChanged;
+
+  @override
+  Widget build(BuildContext context) {
+    final h = Hue.of(context);
+    return Container(
+      decoration: BoxDecoration(
+        color: h.surface,
+        borderRadius: BorderRadius.circular(12),
+      ),
+      padding: const EdgeInsets.all(3),
+      child: Row(
+        children: [
+          for (final o in options)
+            Expanded(
+              child: GestureDetector(
+                // 选同一档不回调 —— 不产生无意义的写盘（与模型抽屉同语义）
+        onTap: () {
+          if (o != value) onChanged(o);
+        },
+                behavior: HitTestBehavior.opaque,
+                child: Container(
+                  padding: const EdgeInsets.symmetric(vertical: 7),
+                  decoration: o == value
+                      ? BoxDecoration(
+                          color: h.text,
+                          borderRadius: BorderRadius.circular(9),
+                        )
+                      : null,
+                  child: Text(
+                    labelOf(o),
+                    textAlign: TextAlign.center,
+                    style: TextStyle(
+                      fontSize: 13.5,
+                      fontWeight:
+                          o == value ? FontWeight.w600 : FontWeight.w400,
+                      color: o == value ? h.bg : h.textDim,
+                    ),
+                  ),
+                ),
+              ),
+            ),
+        ],
+      ),
+    );
+  }
+}
+
+/// 卡内警示行（中性款）：灰底 + 橙盾图标 + 正文。取代旧版整块橙色
+/// 警告框 —— 黑白语言里只留图标一点橙，其余中性。
+class _CardWarnNote extends StatelessWidget {
+  const _CardWarnNote(this.text);
+
+  final String text;
+
+  @override
+  Widget build(BuildContext context) {
+    final h = Hue.of(context);
+    return Container(
+      decoration: BoxDecoration(
+        color: h.surface,
+        borderRadius: BorderRadius.circular(12),
+      ),
+      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 11),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Icon(CupertinoIcons.exclamationmark_shield_fill,
+              size: 16, color: HColors.warnOn(h.dark)),
+          const SizedBox(width: 9),
+          Expanded(
+            child: Text(text,
+                style: TextStyle(
+                    fontSize: 12.5, height: 1.55, color: h.textDim)),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+/// 设置主页的卡片项（2026-10-25 用户参照账户页截图指定）：圆角卡片
+/// 包裹，标题在上、状态值作副行（整行省略）、右侧箭头。与子页里
+/// 继续使用的平直行 [_HomeRow] 分工：主页用卡片，子页用行。
+class _HomeCard extends StatelessWidget {
+  const _HomeCard({required this.title, this.subtitle, this.onTap});
+
+  final String title;
+  final String? subtitle;
+  final VoidCallback? onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    final h = Hue.of(context);
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(HSpace.lg, 0, HSpace.lg, 10),
+      child: GestureDetector(
+        onTap: onTap,
+        behavior: HitTestBehavior.opaque,
+        child: Container(
+          decoration: BoxDecoration(
+            color: h.surfaceAlt,
+            borderRadius: BorderRadius.circular(HRadius.xl),
+          ),
+          padding: const EdgeInsets.symmetric(horizontal: 18, vertical: 15),
+          child: Row(
+            children: [
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Text(
+                      title,
+                      style: TextStyle(
+                          fontSize: 16,
+                          fontWeight: FontWeight.w500,
+                          color: h.text),
+                    ),
+                    if (subtitle != null) ...[
+                      const SizedBox(height: 3),
+                      Text(
+                        subtitle!,
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: TextStyle(fontSize: 13, color: h.textFaint),
+                      ),
+                    ],
+                  ],
+                ),
+              ),
+              if (onTap != null) ...[
+                const SizedBox(width: HSpace.sm),
+                Icon(AppIcons.chevronRight, size: 16, color: h.textFaint),
+              ],
+            ],
+          ),
         ),
       ),
     );
@@ -2781,98 +3192,6 @@ double _nearestFontStop(double v) {
 
 String _fontStopLabel(double v) =>
     v <= 13.0 ? '小' : (v >= 18.0 ? '大' : '标准');
-
-/// 最大轮次步进器（原型 06：− 值 ＋），在可选档位间循环。
-class _MaxTurnsRow extends StatelessWidget {
-  const _MaxTurnsRow({required this.value, required this.onChanged});
-
-  final int value;
-  final void Function(int) onChanged;
-
-  @override
-  Widget build(BuildContext context) {
-    final h = Hue.of(context);
-    final idx = kMaxTurnsOptions.indexOf(value);
-    final cur = idx < 0 ? 0 : idx;
-    void step(int delta) {
-      final n = (cur + delta) % kMaxTurnsOptions.length;
-      onChanged(kMaxTurnsOptions[n < 0 ? n + kMaxTurnsOptions.length : n]);
-    }
-
-    return Padding(
-      padding: const EdgeInsets.fromLTRB(
-          HSpace.lg, HSpace.sm, HSpace.lg, HSpace.sm),
-      child: Row(
-        children: [
-          Expanded(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Text('最大轮次',
-                    style: TextStyle(fontSize: 14, color: h.text)),
-                const SizedBox(height: 2),
-                Text('单次任务最多执行的工具轮次',
-                    style:
-                        TextStyle(fontSize: 11.5, color: h.textFaint)),
-              ],
-            ),
-          ),
-          _StepButton(
-            h: h,
-            icon: CupertinoIcons.minus,
-            onTap: () => step(-1),
-          ),
-          Container(
-            constraints: const BoxConstraints(minWidth: 56),
-            margin: const EdgeInsets.symmetric(horizontal: HSpace.sm),
-            padding: const EdgeInsets.symmetric(
-                horizontal: HSpace.md, vertical: HSpace.xs + 2),
-            decoration: BoxDecoration(
-              color: h.surface,
-              borderRadius: BorderRadius.circular(HRadius.md),
-              border: Border.all(color: h.border),
-            ),
-            child: Text(
-              value == 0 ? '自动' : '$value',
-              textAlign: TextAlign.center,
-              style: TextStyle(fontSize: 13, color: h.text),
-            ),
-          ),
-          _StepButton(
-            h: h,
-            icon: CupertinoIcons.plus,
-            onTap: () => step(1),
-          ),
-        ],
-      ),
-    );
-  }
-}
-
-class _StepButton extends StatelessWidget {
-  const _StepButton({required this.h, required this.icon, required this.onTap});
-
-  final Hue h;
-  final IconData icon;
-  final VoidCallback onTap;
-
-  @override
-  Widget build(BuildContext context) {
-    return GestureDetector(
-      onTap: onTap,
-      behavior: HitTestBehavior.opaque,
-      child: Container(
-        width: 30,
-        height: 30,
-        decoration: BoxDecoration(
-          border: Border.all(color: h.border),
-          borderRadius: BorderRadius.circular(999),
-        ),
-        child: Icon(icon, size: 14, color: h.text),
-      ),
-    );
-  }
-}
 
 class _SectionLabel extends StatelessWidget {
   const _SectionLabel(this.text);
@@ -2890,356 +3209,6 @@ class _SectionLabel extends StatelessWidget {
             fontWeight: FontWeight.w600,
             color: h.textFaint,
             letterSpacing: 0.6,
-          ),
-        ),
-      );
-  }
-}
-
-/// 下拉选择行（权限 / 工作步骤 / 繁忙行为都用它）
-class _PickerRow<T> extends StatelessWidget {
-  const _PickerRow({
-    required this.label,
-    required this.value,
-    required this.options,
-    required this.labelOf,
-    required this.onChanged,
-    this.hint,
-    this.descOf,
-  });
-
-  final String label;
-  final String? hint;
-  final T value;
-  final List<T> options;
-  final String Function(T) labelOf;
-  final String Function(T)? descOf;
-  final void Function(T) onChanged;
-
-  @override
-  Widget build(BuildContext context) {
-    final h = Hue.of(context);
-    return Padding(
-      padding: const EdgeInsets.fromLTRB(HSpace.lg, HSpace.sm, HSpace.lg, HSpace.sm),
-      child: Row(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Expanded(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Text(
-                  label,
-                  style: TextStyle(fontSize: 14, color: h.text),
-                ),
-                if (hint != null) ...[
-                  const SizedBox(height: 2),
-                  Text(
-                    hint!,
-                    style: TextStyle(fontSize: 11.5, color: h.textFaint),
-                  ),
-                ],
-              ],
-            ),
-          ),
-          const SizedBox(width: HSpace.md),
-          CupertinoButton(
-            padding: EdgeInsets.zero,
-            minimumSize: const Size(0, 34),
-            onPressed: () => _pick(context),
-            child: Container(
-              padding: const EdgeInsets.symmetric(
-                  horizontal: HSpace.md, vertical: HSpace.sm),
-              decoration: BoxDecoration(
-                color: h.surface,
-                borderRadius: BorderRadius.circular(HRadius.md),
-                border: Border.all(color: h.border),
-              ),
-              child: Row(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  Text(labelOf(value),
-                      style: TextStyle(fontSize: 13, color: h.text)),
-                  const SizedBox(width: HSpace.xs),
-                  Icon(AppIcons.chevronDown,
-                      size: 17, color: h.textFaint),
-                ],
-              ),
-            ),
-          ),
-        ],
-      ),
-    );
-  }
-
-  /// iOS 动作面板（替换 Material 的 `PopupMenuButton`）—— 选中逻辑逐条不变。
-  Future<void> _pick(BuildContext context) async {
-    final h = Hue.of(context);
-    final picked = await showCupertinoModalPopup<T>(
-      context: context,
-      builder: (sheetCtx) => CupertinoActionSheet(
-        title: Text(label),
-        actions: [
-          for (final o in options)
-            CupertinoActionSheetAction(
-              isDefaultAction: o == value,
-              onPressed: () => Navigator.of(sheetCtx).pop(o),
-              child: _optionOf(o, h),
-            ),
-        ],
-      ),
-    );
-    if (picked != null) onChanged(picked);
-  }
-
-  /// 选项内容：名称（+ 可选说明），对应旧的 `PopupMenuItem`。
-  Widget _optionOf(T o, Hue h) {
-    final desc = descOf?.call(o);
-    if (desc == null || desc.isEmpty) return Text(labelOf(o));
-    return Column(
-      mainAxisSize: MainAxisSize.min,
-      children: [
-        Text(labelOf(o)),
-        const SizedBox(height: 2),
-        Text(
-          desc,
-          style: TextStyle(fontSize: 11, color: h.textFaint, height: 1.3),
-        ),
-      ],
-    );
-  }
-}
-
-/// 三段式选择（外观）
-class _SegmentedRow<T> extends StatelessWidget {
-  const _SegmentedRow({
-    required this.value,
-    required this.options,
-    required this.labelOf,
-    required this.iconOf,
-    required this.onChanged,
-  });
-
-  final T value;
-  final List<T> options;
-  final String Function(T) labelOf;
-  final IconData Function(T) iconOf;
-  final void Function(T) onChanged;
-
-  @override
-  Widget build(BuildContext context) {
-    final h = Hue.of(context);
-    return Padding(
-      padding: const EdgeInsets.symmetric(horizontal: HSpace.lg),
-      child: Row(
-        children: options.map((o) {
-          final selected = o == value;
-          return Expanded(
-            child: Padding(
-              padding: const EdgeInsets.only(right: HSpace.sm),
-              child: GestureDetector(
-                onTap: () => onChanged(o),
-                child: Container(
-                  height: 72,
-                  decoration: BoxDecoration(
-                    color: selected
-                        ? h.accent.withValues(alpha: 0.10)
-                        : h.surface,
-                    borderRadius: BorderRadius.circular(HRadius.md),
-                    border: Border.all(
-                      color: selected ? h.accent : h.border,
-                      width: selected ? 1.5 : 1,
-                    ),
-                  ),
-                  child: Column(
-                    mainAxisAlignment: MainAxisAlignment.center,
-                    children: [
-                      Icon(iconOf(o),
-                          size: 21,
-                          color: selected ? h.accent : h.textDim),
-                      const SizedBox(height: HSpace.xs + 2),
-                      Text(
-                        labelOf(o),
-                        style: TextStyle(
-                          fontSize: 12,
-                          fontWeight: selected ? FontWeight.w600 : FontWeight.w400,
-                          color: selected ? h.accent : h.textDim,
-                        ),
-                      ),
-                    ],
-                  ),
-                ),
-              ),
-            ),
-          );
-        }).toList(),
-      ),
-    );
-  }
-}
-
-/// 开关行
-/// 分档滑杆（2026-10-24 黑白改版）：把枚举选项排成滑杆的刻度，
-/// 拖到哪一档就是哪一档。与 _SliderRow 同款外观（标签 + 当前值徽标 + 滑杆）。
-class _SteppedRow<T> extends StatelessWidget {
-  const _SteppedRow({
-    required this.label,
-    required this.value,
-    required this.options,
-    required this.labelOf,
-    required this.onChanged,
-    this.hint,
-  });
-
-  final String label;
-  final String? hint;
-  final T value;
-  final List<T> options;
-  final String Function(T) labelOf;
-  final void Function(T) onChanged;
-
-  @override
-  Widget build(BuildContext context) {
-    final h = Hue.of(context);
-    final index = options.indexOf(value).clamp(0, options.length - 1);
-    return Padding(
-      padding: const EdgeInsets.fromLTRB(
-          HSpace.lg, HSpace.sm, HSpace.lg, HSpace.sm),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Row(
-            children: [
-              Expanded(
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Text(label,
-                        style: TextStyle(fontSize: 14, color: h.text)),
-                    if (hint != null) ...[
-                      const SizedBox(height: 2),
-                      Text(hint!,
-                          style: TextStyle(
-                              fontSize: 11.5, color: h.textFaint)),
-                    ],
-                  ],
-                ),
-              ),
-              Container(
-                padding: const EdgeInsets.symmetric(
-                    horizontal: HSpace.md, vertical: HSpace.xs + 2),
-                decoration: BoxDecoration(
-                  color: h.surface,
-                  borderRadius: BorderRadius.circular(HRadius.md),
-                  border: Border.all(color: h.border),
-                ),
-                child: Text(
-                  labelOf(value),
-                  style: TextStyle(fontSize: 13, color: h.text),
-                ),
-              ),
-            ],
-          ),
-          CupertinoSlider(
-            value: index.toDouble(),
-            min: 0,
-            max: (options.length - 1).toDouble(),
-            divisions: options.length - 1,
-            activeColor: h.accent,
-            onChanged: (v) => onChanged(options[v.round()]),
-          ),
-          // 刻度标签：首尾对齐，中间均分
-          Row(
-            mainAxisAlignment: MainAxisAlignment.spaceBetween,
-            children: [
-              for (final o in options)
-                Text(
-                  labelOf(o),
-                  style: TextStyle(
-                    fontSize: 11,
-                    color: o == value ? h.text : h.textFaint,
-                    fontWeight:
-                        o == value ? FontWeight.w600 : FontWeight.w400,
-                  ),
-                ),
-            ],
-          ),
-        ],
-      ),
-    );
-  }
-}
-
-class _SwitchRow extends StatelessWidget {
-  const _SwitchRow({
-    required this.label,
-    required this.value,
-    required this.onChanged,
-    this.hint,
-  });
-
-  final String label;
-  final String? hint;
-  final bool value;
-  final void Function(bool) onChanged;
-
-  @override
-  Widget build(BuildContext context) {
-    final h = Hue.of(context);
-    return Padding(
-      padding: const EdgeInsets.fromLTRB(HSpace.lg, HSpace.sm, HSpace.lg, HSpace.sm),
-      child: Row(
-        children: [
-          Expanded(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Text(label,
-                    style: TextStyle(fontSize: 14, color: h.text)),
-                if (hint != null) ...[
-                  const SizedBox(height: 3),
-                  Text(hint!,
-                      style: TextStyle(
-                          fontSize: 11.5, color: h.textFaint, height: 1.35)),
-                ],
-              ],
-            ),
-          ),
-          const SizedBox(width: HSpace.md),
-          CupertinoSwitch(
-            value: value,
-            onChanged: onChanged,
-            activeTrackColor: h.accent,
-            // 关闭态轨道跟随应用配色（Cupertino 的系统灰按平台亮度解析）
-            inactiveTrackColor: h.border,
-            thumbColor: CupertinoColors.white,
-          ),
-        ],
-      ),
-    );
-  }
-}
-
-class _WarningNote extends StatelessWidget {
-  const _WarningNote(this.text);
-  final String text;
-
-  @override
-  Widget build(BuildContext context) {
-    final h = Hue.of(context);
-    return Padding(
-        padding: const EdgeInsets.fromLTRB(HSpace.lg, 0, HSpace.lg, HSpace.sm),
-        child: Container(
-          padding: const EdgeInsets.all(HSpace.md),
-          decoration: BoxDecoration(
-            color: HColors.warnOn(h.dark).withValues(alpha: 0.08),
-            borderRadius: BorderRadius.circular(HRadius.md),
-            border: Border.all(color: HColors.warnOn(h.dark).withValues(alpha: 0.3)),
-          ),
-          child: Text(
-            text,
-            style: TextStyle(
-                fontSize: 11.5, color: HColors.warnOn(h.dark), height: 1.5),
           ),
         ),
       );
@@ -3284,22 +3253,15 @@ class _AlwaysAllowedRowState extends State<_AlwaysAllowedRow> {
     final tools = _tools;
     // 加载中不显示（一闪而过的"无"比不显示更让人困惑）
     if (tools == null) return const SizedBox.shrink();
-    return Padding(
-      padding: const EdgeInsets.fromLTRB(HSpace.lg, 0, HSpace.lg, HSpace.sm),
+    return _SettingsCard(
+      title: '已始终允许的工具',
+      subtitle: '审批时选过「始终允许」的工具',
       child: Row(
         children: [
           Expanded(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Text('已始终允许的工具',
-                    style: TextStyle(fontSize: 13, color: h.text)),
-                const SizedBox(height: 2),
-                Text(
-                  tools.isEmpty ? '无' : tools.join('、'),
-                  style: TextStyle(fontSize: 11.5, color: h.textDim),
-                ),
-              ],
+            child: Text(
+              tools.isEmpty ? '无' : tools.join('、'),
+              style: TextStyle(fontSize: 13.5, color: h.textDim),
             ),
           ),
           if (tools.isNotEmpty)

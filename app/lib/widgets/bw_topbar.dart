@@ -3,6 +3,7 @@ import 'dart:math' as math;
 import 'package:flutter/material.dart';
 
 import '../theme/app_theme.dart';
+import '../theme/cupertino_kit.dart';
 
 /// 黑白界面的顶部组件：灵动岛、上下文圆环、纯文字工具行。
 ///
@@ -341,27 +342,33 @@ class ContextRing extends StatelessWidget {
 }
 
 class _RingPainter extends CustomPainter {
-  const _RingPainter({required this.ratio, required this.track, required this.arc});
+  const _RingPainter({
+    required this.ratio,
+    required this.track,
+    required this.arc,
+    this.strokeWidth = 3,
+  });
 
   final double? ratio;
   final Color track;
   final Color arc;
+  final double strokeWidth;
 
   @override
   void paint(Canvas canvas, Size size) {
     final center = Offset(size.width / 2, size.height / 2);
-    final radius = size.width / 2 - 1.5;
+    final radius = size.width / 2 - strokeWidth / 2;
     final trackPaint = Paint()
       ..color = track
       ..style = PaintingStyle.stroke
-      ..strokeWidth = 3;
+      ..strokeWidth = strokeWidth;
     canvas.drawCircle(center, radius, trackPaint);
     final r = ratio;
     if (r != null && r > 0) {
       final arcPaint = Paint()
         ..color = arc
         ..style = PaintingStyle.stroke
-        ..strokeWidth = 3
+        ..strokeWidth = strokeWidth
         ..strokeCap = StrokeCap.round;
       canvas.drawArc(
         Rect.fromCircle(center: center, radius: radius),
@@ -375,7 +382,72 @@ class _RingPainter extends CustomPainter {
 
   @override
   bool shouldRepaint(_RingPainter old) =>
-      old.ratio != ratio || old.track != track || old.arc != arc;
+      old.ratio != ratio ||
+      old.track != track ||
+      old.arc != arc ||
+      old.strokeWidth != strokeWidth;
+}
+
+/// 顶栏指标的状态色（2026-10-25 晚用户定档位）：
+///
+/// - **上下文占用率**：≤50% 绿、50–80% 黄、>80% 红（越满越危险）；
+/// - **缓存命中率**：反过来 —— <60% 红、60–80% 黄、>80% 绿（越高越好）。
+Color usageStatusColor(Hue h, double ratio) {
+  if (ratio > 0.80) return HColors.errorOn(h.dark);
+  if (ratio > 0.50) return HColors.warnOn(h.dark);
+  return HColors.successOn(h.dark);
+}
+
+/// 缓存命中率状态色（档位与上下文相反，见 [usageStatusColor]）。
+Color hitStatusColor(Hue h, double rate) {
+  if (rate > 0.80) return HColors.successOn(h.dark);
+  if (rate >= 0.60) return HColors.warnOn(h.dark);
+  return HColors.errorOn(h.dark);
+}
+
+/// 顶栏右列的一行指标：小圆环 + 「标签 百分比」，圆环与文字同色
+/// （状态色由调用方按 [usageStatusColor] / [hitStatusColor] 算好）。
+/// ratio 为 null（上限未知 / 未上报）时只画浅灰环、文字由调用方给「—」。
+class TopMetricLine extends StatelessWidget {
+  const TopMetricLine({
+    super.key,
+    required this.label,
+    required this.valueText,
+    required this.ratio,
+    required this.color,
+  });
+
+  final String label;
+  final String valueText;
+  final double? ratio;
+  final Color color;
+
+  @override
+  Widget build(BuildContext context) {
+    return Row(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        CustomPaint(
+          size: const Size(15, 15),
+          painter: _RingPainter(
+            ratio: ratio,
+            track: color.withValues(alpha: 0.22),
+            arc: color,
+            strokeWidth: 2.5,
+          ),
+        ),
+        const SizedBox(width: 5),
+        Text(
+          '$label $valueText',
+          style: TextStyle(
+            fontSize: 11.5,
+            fontWeight: FontWeight.w600,
+            color: color,
+          ),
+        ),
+      ],
+    );
+  }
 }
 
 /// 纯文字工具行（无容器包裹），自带展开/收起状态。
@@ -434,7 +506,7 @@ class _PlainToolLineState extends State<PlainToolLine> {
                   turns: _expanded ? 0.5 : 0,
                   duration: const Duration(milliseconds: 200),
                   child: Icon(
-                    Icons.keyboard_arrow_down,
+                    AppIcons.chevronDown,
                     size: 15,
                     color: h.textFaint,
                   ),
