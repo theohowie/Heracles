@@ -203,6 +203,10 @@ class _DevicePermissionPageState extends State<DevicePermissionPage> {
   /// 自检报告（逐行：前台服务/shell 路由/工具链/工作区/构建/产物核对）
   String? _selfCheckMsg;
 
+  /// N8 统一权限总览（六项 → granted/denied/unknown）；空 = 通道无数据，
+  /// 整段不渲染，不画假状态。
+  Map<String, String> _perms = const {};
+
   @override
   void initState() {
     super.initState();
@@ -211,13 +215,104 @@ class _DevicePermissionPageState extends State<DevicePermissionPage> {
 
   Future<void> _refresh() async {
     final st = await AgentBridge().devicePermission();
+    final perms = await AgentBridge().devicePermissions();
     if (!mounted) return;
     setState(() {
       _granted = st.writeSecureSettings;
       _guidance = st.guidance;
       _diag = st.shizuku;
+      _perms = perms;
       _loading = false;
     });
+  }
+
+  /// 权限总览（N8）：六项统一状态，只读渲染。
+  ///
+  /// 两个渲染口径（后端对接清单 §6，必须照做）：
+  /// · `allFiles` 的 denied 是**正常态**（按设计不申请所有文件访问，
+  ///   文件走 SAF 授权目录）—— 中性说明，绝不红色/警告色；
+  /// · `shizuku` 的 unknown = Shizuku **没启动**（探测不了），与
+  ///   denied（启动了没授权）是两回事，文案分开。
+  Widget _permOverview(Hue h) {
+    const order = [
+      ('shizuku', 'Shizuku'),
+      ('files', '文件访问（授权目录）'),
+      ('allFiles', '所有文件访问'),
+      ('notifications', '通知'),
+      ('accessibility', '无障碍'),
+      ('overlay', '悬浮窗'),
+    ];
+
+    (String, Color) statusOf(String key) {
+      final v = _perms[key] ?? 'unknown';
+      if (key == 'allFiles') {
+        return switch (v) {
+          'granted' => ('已开启', HColors.successOn(h.dark)),
+          'denied' => ('未开启（按设计，文件经授权目录访问）', h.textDim),
+          _ => ('未知', h.textFaint),
+        };
+      }
+      if (key == 'shizuku' && v == 'unknown') {
+        return ('未启动', h.textDim);
+      }
+      return switch (v) {
+        'granted' => ('已授权', HColors.successOn(h.dark)),
+        'denied' => ('未授权', HColors.warnOn(h.dark)),
+        _ => ('未知', h.textFaint),
+      };
+    }
+
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Text(
+          '权限总览',
+          style: TextStyle(
+            fontSize: 12,
+            fontWeight: FontWeight.w600,
+            color: h.textFaint,
+          ),
+        ),
+        const SizedBox(height: HSpace.sm),
+        Container(
+          width: double.infinity,
+          decoration: BoxDecoration(
+            color: h.surface,
+            borderRadius: BorderRadius.circular(HRadius.md),
+            border: Border.all(color: h.border),
+          ),
+          child: Column(
+            children: [
+              for (var i = 0; i < order.length; i++) ...[
+                if (i > 0)
+                  Divider(height: 1, indent: HSpace.md, color: h.border),
+                Padding(
+                  padding: const EdgeInsets.symmetric(
+                      horizontal: HSpace.md, vertical: 11),
+                  child: Row(
+                    children: [
+                      Expanded(
+                        child: Text(
+                          order[i].$2,
+                          style:
+                              TextStyle(fontSize: 14, color: h.text),
+                        ),
+                      ),
+                      Text(
+                        statusOf(order[i].$1).$1,
+                        style: TextStyle(
+                            fontSize: 13, color: statusOf(order[i].$1).$2),
+                      ),
+                    ],
+                  ),
+                ),
+              ],
+            ],
+          ),
+        ),
+        const SizedBox(height: HSpace.lg),
+      ],
+    );
   }
 
   @override
@@ -283,6 +378,8 @@ class _DevicePermissionPageState extends State<DevicePermissionPage> {
                   ),
                 ),
                 const SizedBox(height: HSpace.lg),
+                // ---- 权限总览（N8 统一查询，六项只读）----
+                if (_perms.isNotEmpty) _permOverview(h),
                 // ---- 引导 ----
                 if (_granted == false && _guidance.isNotEmpty) ...[
                   Text(
