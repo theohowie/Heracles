@@ -7,7 +7,6 @@ import 'package:shared_preferences/shared_preferences.dart';
 import 'package:heracles/screens/chat_screen.dart';
 import 'package:heracles/services/settings_controller.dart';
 import 'package:heracles/theme/app_theme.dart';
-import 'package:heracles/theme/cupertino_kit.dart' show AppIcons;
 
 import 'support/secure_storage_mock.dart';
 
@@ -173,6 +172,23 @@ void main() {
     }
   }
 
+  /// **打开抽屉**：原型 01（`1f52b1d`，2026-10-25）之后顶栏左侧不再有 ☰ 线条图标，
+  /// 换成**品牌图标**（真实 App 图标，点它开抽屉）。按 **asset 名**定位，
+  /// 免得 finder 随 UI 改版再失效。
+  Future<void> openDrawer(WidgetTester tester) async {
+    final opener = find.byWidgetPredicate(
+      (w) =>
+          w is Image &&
+          w.image is AssetImage &&
+          (w.image as AssetImage).assetName.contains('app_icon_source'),
+      description: '顶栏左侧品牌图标（打开抽屉）',
+    );
+    expect(opener, findsOneWidget,
+        reason: '顶栏左侧必须有品牌图标（点它开抽屉）—— 找不到说明顶栏又改了');
+    await tester.tap(opener);
+    await settle(tester);
+  }
+
   /// ★ 用**手机大小**的测试面（390×844）—— 默认的 800×600 会让
   /// `WorkspaceDrawer` 的空态 `Column`（`workspace_drawer.dart:298`）
   /// `RenderFlex overflowed`，把按钮挤出可视区、`tap()` 点不到。
@@ -203,7 +219,7 @@ void main() {
 
   /// 驱动用户真正走的路径：开抽屉 → 点 ⊕ → 点「默认工作区」。
   Future<void> pickAppWorkspace(WidgetTester tester) async {
-    await tester.tap(find.byIcon(AppIcons.menu)); // AppBar 的 ☰（Cupertino 化后）
+    await openDrawer(tester);
     await settle(tester);
 
     await tester.tap(drawerAddButton()); // ⊕

@@ -217,11 +217,27 @@ void main() {
     }
   }
 
+  /// **打开抽屉**：原型 01（`1f52b1d`，2026-10-25）之后顶栏左侧**不再有 ☰ 线条图标**，
+/// 换成**品牌图标**（真实 App 图标，点它开抽屉 —— 用户禁用线条式图标）。
+/// 所以按 **asset 名**定位，而不是按图标字形（否则 finder 会随 UI 改版失效）。
+  Finder drawerOpener() => find.byWidgetPredicate(
+        (w) =>
+            w is Image &&
+            w.image is AssetImage &&
+            (w.image as AssetImage).assetName.contains('app_icon_source'),
+        description: '顶栏左侧品牌图标（打开抽屉）',
+      );
+
+  Future<void> openDrawer(WidgetTester tester) async {
+    expect(drawerOpener(), findsOneWidget,
+        reason: '顶栏左侧必须有品牌图标（点它开抽屉）—— 找不到说明顶栏又改了');
+    await tester.tap(drawerOpener());
+    await settle(tester);
+  }
+
   /// 切到会话 B：开抽屉 → 点它
   Future<void> switchToSessionB(WidgetTester tester) async {
-    // 打开抽屉（AppBar 的 ☰）
-    await tester.tap(find.byIcon(AppIcons.menu));
-    await settle(tester);
+    await openDrawer(tester);
 
     expect(find.text('会话 B'), findsOneWidget,
         reason: '抽屉里应当能看到会话 B —— 否则切会话这步没做到');
@@ -444,7 +460,7 @@ void main() {
     await settle(tester);
 
     // 开抽屉 → 点「新会话」
-    await tester.tap(find.byIcon(AppIcons.menu));
+    await openDrawer(tester);
     await settle(tester);
     expect(find.text('新会话'), findsOneWidget);
     await tester.tap(find.text('新会话'));
@@ -558,7 +574,7 @@ void main() {
     await settle(tester);
 
     // ---- 开抽屉 → 工作区 ⋯ 菜单 → 从列表移除 ----
-    await tester.tap(find.byIcon(AppIcons.menu));
+    await openDrawer(tester);
     await settle(tester);
 
     expect(find.text('proj'), findsWidgets, reason: '工作区应当出现在抽屉里');

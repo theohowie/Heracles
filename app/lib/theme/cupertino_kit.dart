@@ -345,12 +345,19 @@ class IosButton extends StatelessWidget {
                     leading!,
                     const SizedBox(width: 6),
                   ],
-                  Text(
-                    label,
-                    style: TextStyle(
-                      fontSize: dense ? 13 : 15,
-                      fontWeight: FontWeight.w600,
-                      color: filled ? CupertinoColors.white : (color ?? scheme),
+                  // ★ 长文案必须可缩：裸 Text 在 MainAxisSize.min 的
+                  //   Row 里按固有宽度测量，超宽直接溢出报错（真机
+                  //   实测「重新向 Shizuku 申请授权…」溢出 1.3px）。
+                  Flexible(
+                    child: Text(
+                      label,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: TextStyle(
+                        fontSize: dense ? 13 : 15,
+                        fontWeight: FontWeight.w600,
+                        color: filled ? CupertinoColors.white : (color ?? scheme),
+                      ),
                     ),
                   ),
                 ],

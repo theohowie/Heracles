@@ -4,13 +4,15 @@ import 'package:flutter/material.dart';
 import '../models/settings.dart';
 import '../theme/app_theme.dart';
 
-/// 审批相关弹层（2026-10-24 黑白改版）。
+/// 审批相关弹层（2026-10-24 黑白改版；2026-10-25 按原型 10/11 重做）。
 ///
-/// 两件套：
-/// - 完全访问二次确认：与权限选择抽屉同款底部上拉抽屉，勾选
-///   「我已知晓」后「确认选择」才可用；取消/返回 = 不改（沿用旧弹窗的安全语义）。
-/// - 运行时审批请求：三按钮（拒绝 / 允许一次 / 始终允许），等后端 N1
-///   的 `approval_required` 事件落地后再接线 —— 目前只提供 UI，不挂假触发器。
+/// 三件套：
+/// - 审批模式抽屉（原型 10）：三档自定义行，输入框权限按钮打开；
+/// - 完全访问二次确认（原型 10 下半）：叠在模式抽屉之上的同款上拉
+///   抽屉，勾选「我已知晓以上风险」后「确认选择」才可用；取消/返回
+///   = 不改（沿用旧弹窗的安全语义）；
+/// - 运行时审批请求（原型 11）：拒绝 / 允许一次 / 始终允许 + 停止任务，
+///   接后端 N1 的 `approval_required` 事件。
 
 /// 完全访问二次确认抽屉。返回 true = 用户勾选并确认。
 Future<bool> showFullAccessConfirmSheet(BuildContext context) async {
@@ -67,18 +69,34 @@ class _FullAccessConfirmSheetState extends State<_FullAccessConfirmSheet> {
             ),
             const SizedBox(height: 16),
             const Text(
-              '确认切换到「完全访问」？',
+              '开启完全访问？',
               style: TextStyle(fontSize: 17, fontWeight: FontWeight.w700),
             ),
-            const SizedBox(height: 12),
+            const SizedBox(height: 2),
             Text(
-              '选这个档位后，agent 的操作不再逐条询问你：\n\n'
-              '· 它修改文件、执行命令都不会再确认\n'
-              '· 出错或越界时没有拦截点\n'
-              '· 这个选择会持续到你自己改回来\n\n'
-              '${PermissionMode.fullAccess.description}',
-              style: TextStyle(fontSize: 14.5, height: 1.6, color: h.textDim),
+              '这是最后一道确认',
+              style: TextStyle(fontSize: 12.5, color: h.textFaint),
             ),
+            const SizedBox(height: 14),
+            const Text(
+              '开启后，智能体可以：',
+              style: TextStyle(fontSize: 14.5),
+            ),
+            const SizedBox(height: 6),
+            for (final line in [
+              '· 直接删除、移动任意文件',
+              '· 执行任意命令',
+              '· 修改工作区之外的路径',
+              '· 以上操作都不再询问，且不可撤销',
+            ])
+              Padding(
+                padding: const EdgeInsets.only(top: 3),
+                child: Text(
+                  line,
+                  style:
+                      TextStyle(fontSize: 14.5, height: 1.5, color: h.textDim),
+                ),
+              ),
             const SizedBox(height: 16),
             // 勾选行：44 高可点区域，方框 + 对勾
             GestureDetector(
@@ -148,8 +166,184 @@ class _FullAccessConfirmSheetState extends State<_FullAccessConfirmSheet> {
                 ),
               ],
             ),
+            const SizedBox(height: 10),
+            Text(
+              '开启后，输入框旁的权限按钮会标示为完全访问，随时可以改回。',
+              style: TextStyle(fontSize: 12, height: 1.5, color: h.textFaint),
+            ),
           ],
           ),
+        ),
+      ),
+    );
+  }
+}
+
+/// 审批模式三档的图标（与 input_bar 的 PermissionModeIcon 同一套
+/// Cupertino 盾族；那边是 extension，这边抽屉独立成文件，用函数）。
+IconData permissionModeIcon(PermissionMode mode) => switch (mode) {
+      PermissionMode.manual => CupertinoIcons.checkmark_shield,
+      PermissionMode.workspaceAuto => CupertinoIcons.lock_shield,
+      PermissionMode.fullAccess => CupertinoIcons.exclamationmark_shield,
+    };
+
+/// 审批模式抽屉（原型 10，2026-10-25 按用户「严格按原型图」重做）。
+///
+/// 结构：抓手 + 标题「审批模式」+ 副标题「危险操作执行前如何确认」
+/// + 三档自定义行（图标 + 名称 + 原型文案说明，当前档高亮带对勾）。
+/// 点前两档即选即关；点「完全访问」不关本抽屉，直接在其上叠出
+/// 二次确认抽屉（原型：「同高度新抽屉覆盖原抽屉」），确认后两层
+/// 一起关、取消只关确认层回到三档列表。
+///
+/// 文案用原型稿，不用 PermissionMode.description（那是设置页
+/// 通用说明，语气与信息点都不同）。
+Future<void> showApprovalModeSheet(
+  BuildContext context, {
+  required PermissionMode current,
+  required ValueChanged<PermissionMode> onPicked,
+}) async {
+  final h = Hue.of(context);
+  const descriptions = {
+    PermissionMode.manual: '删除、执行命令、修改工作区外的文件，每次都先问你。',
+    PermissionMode.workspaceAuto: '已授权工作区内的改动自动执行，区外操作仍然询问。',
+    PermissionMode.fullAccess: '所有操作直接执行，不再询问。',
+  };
+  final picked = await showModalBottomSheet<PermissionMode>(
+    context: context,
+    backgroundColor: h.surfaceAlt,
+    shape: const RoundedRectangleBorder(
+      borderRadius: BorderRadius.vertical(top: Radius.circular(24)),
+    ),
+    builder: (sheetCtx) => SafeArea(
+      child: Padding(
+        padding: const EdgeInsets.fromLTRB(20, 10, 20, 18),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Center(
+              child: Container(
+                width: 36,
+                height: 4,
+                decoration: BoxDecoration(
+                  color: h.border,
+                  borderRadius: BorderRadius.circular(999),
+                ),
+              ),
+            ),
+            const SizedBox(height: 14),
+            Text(
+              '审批模式',
+              style: TextStyle(
+                fontSize: 17,
+                fontWeight: FontWeight.w700,
+                color: h.text,
+              ),
+            ),
+            const SizedBox(height: 2),
+            Text(
+              '危险操作执行前如何确认',
+              style: TextStyle(fontSize: 12, color: h.textFaint),
+            ),
+            const SizedBox(height: 12),
+            for (final mode in PermissionMode.values) ...[
+              _ApprovalModeRow(
+                h: h,
+                mode: mode,
+                description: descriptions[mode]!,
+                selected: mode == current,
+                onTap: () async {
+                  if (mode != PermissionMode.fullAccess) {
+                    Navigator.of(sheetCtx).pop(mode);
+                    return;
+                  }
+                  // 完全访问：确认抽屉叠在本抽屉之上（不先关），
+                  // 确认 → 两层一起关并回传档位；取消 → 回到本列表。
+                  final confirmed =
+                      await showFullAccessConfirmSheet(sheetCtx);
+                  if (confirmed && sheetCtx.mounted) {
+                    Navigator.of(sheetCtx).pop(PermissionMode.fullAccess);
+                  }
+                },
+              ),
+              const SizedBox(height: 8),
+            ],
+          ],
+        ),
+      ),
+    ),
+  );
+  if (picked != null && picked != current) {
+    onPicked(picked);
+  }
+}
+
+class _ApprovalModeRow extends StatelessWidget {
+  const _ApprovalModeRow({
+    required this.h,
+    required this.mode,
+    required this.description,
+    required this.selected,
+    required this.onTap,
+  });
+
+  final Hue h;
+  final PermissionMode mode;
+  final String description;
+  final bool selected;
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    final warn = mode == PermissionMode.fullAccess;
+    return GestureDetector(
+      onTap: onTap,
+      behavior: HitTestBehavior.opaque,
+      child: Container(
+        padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
+        decoration: BoxDecoration(
+          color: selected ? h.surface : Colors.transparent,
+          border: Border.all(color: h.border),
+          borderRadius: BorderRadius.circular(14),
+        ),
+        child: Row(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Icon(
+              permissionModeIcon(mode),
+              size: 23,
+              color: warn ? HColors.warnOn(h.dark) : h.textDim,
+            ),
+            const SizedBox(width: 12),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    mode.label,
+                    style: TextStyle(
+                      fontSize: 15,
+                      fontWeight: selected ? FontWeight.w600 : FontWeight.w400,
+                      color: h.text,
+                    ),
+                  ),
+                  const SizedBox(height: 2),
+                  Text(
+                    description,
+                    style: TextStyle(
+                      fontSize: 12.5,
+                      height: 1.45,
+                      color: h.textFaint,
+                    ),
+                  ),
+                ],
+              ),
+            ),
+            if (selected) ...[
+              const SizedBox(width: 8),
+              Icon(CupertinoIcons.checkmark, size: 18, color: h.text),
+            ],
+          ],
         ),
       ),
     );

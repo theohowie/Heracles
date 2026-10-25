@@ -6,6 +6,7 @@ import '../models/settings.dart';
 import '../theme/app_theme.dart';
 import '../theme/cupertino_kit.dart';
 import 'bw_approval.dart';
+import 'bw_model_sheet.dart';
 
 /// 底部输入区 —— 固定，始终可见。
 ///
@@ -600,81 +601,15 @@ class _PermissionIconButton extends StatelessWidget {
   final ValueChanged<PermissionMode>? onPicked;
 
   Future<void> _open(BuildContext context) async {
-    // ★ 底部弹层（2026-10-12）：与模型框同款交互。
-    //   锚点菜单在键盘模式下会弹到屏幕中部（与模型框同一个 bug），
-    //   底部弹层不依赖锚点定位 —— 键盘模式也不错位。
-    final h = Hue.of(context);
-    final picked = await showModalBottomSheet<PermissionMode>(
-      context: context,
-      backgroundColor: h.surfaceAlt,
-      shape: const RoundedRectangleBorder(
-        borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
-      ),
-      builder: (sheetCtx) => SafeArea(
-        child: CupertinoTheme(
-          data: CupertinoThemeData(
-            brightness: h.dark ? Brightness.dark : Brightness.light,
-            primaryColor: h.accent,
-          ),
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              const SizedBox(height: HSpace.sm),
-              for (final v in PermissionMode.values)
-                CupertinoListTile(
-                  // 三档三枚图标（用户给的三张参考小图）——
-                  // 完全访问用警示色，与其余两档区分
-                  leading: Icon(v.icon,
-                      size: 23,
-                      color: v.requiresElevation
-                          ? HColors.warnOn(h.dark)
-                          : h.textDim),
-                  title: Text(v.label,
-                      style: TextStyle(
-                          fontSize: 15,
-                          fontWeight: v == permission
-                              ? FontWeight.w600
-                              : FontWeight.w400,
-                          color: v == permission ? h.accent : h.text)),
-                  subtitle: Text(v.description,
-                      style:
-                          TextStyle(fontSize: 12, color: h.textFaint)),
-                  trailing: v == permission
-                      ? Icon(AppIcons.check,
-                          size: 19, color: h.accent)
-                      : null,
-                  onTap: () => Navigator.of(sheetCtx).pop(v),
-                ),
-              const SizedBox(height: HSpace.sm),
-            ],
-          ),
-        ),
-      ),
+    // ★ 审批模式抽屉（原型 10，2026-10-25 重做）：三档自定义行 +
+    //   点「完全访问」在同一位置叠出二次确认抽屉（不先关再开）。
+    //   实现在 bw_approval.dart 的 showApprovalModeSheet —— 安全
+    //   语义不变：确认前不回调、取消 = 什么都不改。
+    await showApprovalModeSheet(
+      context,
+      current: permission,
+      onPicked: (m) => onPicked?.call(m),
     );
-    if (picked == null || picked == permission) return;
-
-    // ★★ 切「完全访问」必须二次确认（2026-10-12，用户要求）
-    //
-    // 这段逻辑原来在旧版 `_pickPermission` 里 —— 输入框改版时我一度把它
-    // 随旧类一起删掉了（**安全护栏的回归**，测试抓回来的）。现在它属于
-    // 这个图标按钮：**换到 fullAccess 就必须停下来确认，不管入口长什么样**。
-    if (picked == PermissionMode.fullAccess) {
-      // ★★ 切「完全访问」必须二次确认（2026-10-12，用户要求；
-      //   2026-10-24 黑白改版：居中弹窗改为同款上拉抽屉 + 勾选门禁）。
-      //
-      // 安全语义一字不变：必须显式选择，点遮罩/下滑都不算确认；
-      // 只有勾选「我已知晓」并点「确认选择」才算确认，取消/返回 = 不改。
-      // （本组件无 mounted 可查；confirm sheet 自带 isDismissible:false，
-      //   context 只用来挂载，与旧弹窗的 ignore 理由相同。）
-      final confirmed = await showFullAccessConfirmSheet(
-        // ignore: use_build_context_synchronously
-        context,
-      );
-      // 取消 = 什么都不改
-      if (!confirmed) return;
-    }
-
-    onPicked?.call(picked);
   }
 
   @override
@@ -702,13 +637,8 @@ class _PermissionIconButton extends StatelessWidget {
   }
 }
 
-/// **模型选择框** —— 参考图：带阴影边框的胶囊，
-/// 「◆ 模型名 (4B) ▾」，点击弹出模型/推理等级列表。
-///
-/// ⚠️ 注意：fullAccess 的**二次风险确认**（`_pickPermission` 里那道）
-/// 在这个图标按钮里**没有** —— 因为这里只弹选择框，确认逻辑应在
-/// `onPicked` 的上层做（chat_screen 接到回调后判断目标档位再确认）。
-/// 本轮先保持"选择即生效"，二次确认的迁移作为遗留记在 WORKLOG。
+/// **模型选择框** —— 带阴影边框的胶囊（模型名 + 思考档位），
+/// 点击打开模型与思考半抽屉（原型 09，见 bw_model_sheet.dart）。
 class _ModelSelector extends StatelessWidget {
   const _ModelSelector({
     required this.label,
@@ -752,305 +682,24 @@ class _ModelSelector extends StatelessWidget {
   /// 弹层里点配了目录的 provider 时触发
   final ValueChanged<String>? onOpenModelCatalog;
 
-  /// 点击模型框 → 底部弹层（**图二**内容：模型行 + 推理等级行）。
-  ///
-  /// ## 为什么从「贴锚点的 showMenu」改成 `showModalBottomSheet`
-  ///
-  /// 真机实测（2026-10-12）：锚点菜单在键盘模式下**弹到屏幕中部**
-  /// （定位错位），且换 GestureDetector / anchorKey / 对照结构三轮后
-  /// **连 onTapDown 都收不到**（有透明的手势竞争者盖在胶囊区域）。
-  /// 底部弹层不依赖锚点定位 —— 没有那两类问题，且在手机上是
-  /// 比"贴着小控件弹小菜单"更常见的交互（与参考图二的信息一致）。
+  /// 点击模型框 → 模型与思考半抽屉（原型 09，实现在
+  /// bw_model_sheet.dart 的 showModelSheet）。旧版弹层是服务商
+  /// Cupertino 列表 + 内嵌分段，与原型不是同一套版式，2026-10-25
+  /// 按用户「严格按原型图」整体迁出重做；选择语义（点选即生效、
+  /// 同档不回调、目录两层、未配置不渲染）一条不变。
   Future<void> _open(BuildContext context) async {
-    final h2 = h;
-    // ★ 思考档位是否真生效（后端如实标注，2026-10-25）：Anthropic /
-    //   Responses 轨不读 reasoning_effort ⇒ 只给开/关两态，不假装五档。
-    //   数据优先吃能力快照（rLv），没有快照时按 provider 协议推导。
-    var levelsEffective = true;
-    final activeProvider =
-        providers.where((p) => p.id == activeProviderId).firstOrNull;
-    if (activeProvider != null) {
-      levelsEffective =
-          activeProvider.modelCapabilities[activeProvider.model]
-                  ?.reasoningLevelsEffective ??
-              activeProvider.protocol.reasoningLevelsEffective;
-    }
-    await showModalBottomSheet<void>(
-      context: context,
-      backgroundColor: h2.surfaceAlt,
-      shape: const RoundedRectangleBorder(
-        borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
-      ),
-      builder: (sheetCtx) => SafeArea(
-        // ★ 可滚动（2026-10-14 修溢出）：provider 多 + 推理等级五档
-        //   + 说明文字，总高超屏就是 BOTTOM OVERFLOWED（用户截图：
-        //   BY 59 PIXELS）。整个弹层放进单子项滚动的 Column。
-        child: SingleChildScrollView(
-          child: CupertinoTheme(
-            // 弹层里的 Cupertino 控件按 App 深浅色解析（默认跟系统，会错）
-            data: CupertinoThemeData(
-              brightness: h2.dark ? Brightness.dark : Brightness.light,
-              primaryColor: h2.accent,
-            ),
-            child: Column(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              const SizedBox(height: HSpace.sm),
-              // ---- ★ 后端列表（2026-10-12）：点选即切换 ----
-              //
-              // ★ 2026-10-14 改（用户反馈）：
-              //   「上面只显示配置好的模型，没配置好的不显示」——
-              //   未配置的 provider **直接不渲染**（不是置灰 ——
-              //   置灰还是会把"去设置页填 Key"这种噪音混进选择列表）。
-              //
-              //   「选择基元律动来当模型用是可以点进去选择模型的」——
-              //   配了**模型目录**的 provider 点进去是**二级页**：
-              //   选它目录里的具体模型。
-              for (final p in providers)
-                if (p.isConfigured || AppSettings.isLocalConfig(p))
-                  CupertinoListTile(
-                    title: Text(p.name, style: const TextStyle(fontSize: 15)),
-                    subtitle: Text(
-                      // 显示当前用的模型（或目录数量）
-                      (p.id == activeProviderId && p.model.isNotEmpty)
-                          ? p.model
-                          : (p.modelCatalog.isNotEmpty
-                              ? '模型目录 · ${p.modelCatalog.length} 个'
-                              : p.model),
-                      style: TextStyle(fontSize: 12, color: h2.textFaint),
-                    ),
-                    // ★ 尾部图标：对勾与箭头**不是二选一**（2026-10-15 修 BUG-6）
-                    //
-                    // ## 修的是什么（真机实测）
-                    //
-                    // 用户实测：`tokenrhythm` **没有显示 `›` 箭头**，
-                    // 但点它确实能进入二级菜单（25 个模型）——
-                    // 用户不知道这个能点进去。
-                    //
-                    // ## 根因（逻辑错误）
-                    //
-                    // 旧代码把"选中态"与"可进入"做成了三元互斥：
-                    //     trailing: (p.id == activeProviderId)
-                    //         ? Icon(对勾)          ← 选中的只显示对勾
-                    //         : (有目录 ? Icon(箭头) : null)
-                    // 而**当前选中的 provider 恰恰是最需要提示"能点进去"的那个**
-                    // （用户刚用它聊过，最可能想换它下面的模型）。
-                    //
-                    // ## 修法：两个语义都表达
-                    //
-                    // 对勾 = "当前选中"，箭头 = "可进入选模型" —— 同时显示。
-                    trailing: Row(
-                      mainAxisSize: MainAxisSize.min,
-                      children: [
-                        if (p.id == activeProviderId)
-                          Icon(AppIcons.check, size: 19, color: h2.accent),
-                        if (p.modelCatalog.isNotEmpty) ...[
-                          if (p.id == activeProviderId)
-                            const SizedBox(width: HSpace.xs),
-                          Icon(AppIcons.chevronRight,
-                              size: 19, color: h2.textFaint),
-                        ],
-                      ],
-                    ),
-                    onTap: () {
-                      Navigator.of(sheetCtx).pop();
-                      // ★ 配了模型目录的 provider → **进目录选模型**
-                      //   （用户原话：「选择基元律动来当模型用是可以
-                      //   点进去选择模型的」）—— 选中即切 provider + 换模型
-                      if (p.modelCatalog.isNotEmpty) {
-                        onOpenModelCatalog?.call(p.id);
-                      } else {
-                        onProviderSelected?.call(p.id);
-                      }
-                    },
-                  ),
-              const Divider(height: 1),
-            // ---- 推理等级：就地展开五档 ----
-            Padding(
-              padding: const EdgeInsets.symmetric(
-                  horizontal: HSpace.md, vertical: HSpace.sm),
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Row(
-                    children: [
-                      Icon(AppIcons.think,
-                          size: 21, color: h2.textDim),
-                      const SizedBox(width: HSpace.md),
-                      const Text('推理等级', style: TextStyle(fontSize: 15)),
-                      const Spacer(),
-                      Text(
-                          levelsEffective
-                              ? reasoningLevel.label
-                              : (reasoningLevel == ReasoningLevel.off
-                                  ? '关'
-                                  : '开'),
-                          style: TextStyle(
-                              fontSize: 13, color: h2.textDim)),
-                    ],
-                  ),
-                  const SizedBox(height: HSpace.sm),
-                  Wrap(
-                    spacing: HSpace.sm,
-                    runSpacing: HSpace.sm,
-                    children: [
-                      if (levelsEffective)
-                        for (final v in ReasoningLevel.values)
-                          _PillOption(
-                            label: v.label,
-                            selected: v == reasoningLevel,
-                            h: h2,
-                            onTap: () {
-                              Navigator.of(sheetCtx).pop();
-                              // ★ 选同一个档位不回调 —— 不产生无意义的写盘
-                              //（与旧锚点菜单同语义，测试「同档不回调」钉它）
-                              if (v != reasoningLevel) {
-                                onReasoningLevelChanged?.call(v);
-                              }
-                            },
-                          )
-                      else ...[
-                        _PillOption(
-                          label: '关',
-                          selected: reasoningLevel == ReasoningLevel.off,
-                          h: h2,
-                          onTap: () {
-                            Navigator.of(sheetCtx).pop();
-                            if (reasoningLevel != ReasoningLevel.off) {
-                              onReasoningLevelChanged
-                                  ?.call(ReasoningLevel.off);
-                            }
-                          },
-                        ),
-                        _PillOption(
-                          label: '开',
-                          selected: reasoningLevel != ReasoningLevel.off,
-                          h: h2,
-                          onTap: () {
-                            Navigator.of(sheetCtx).pop();
-                            if (reasoningLevel == ReasoningLevel.off) {
-                              onReasoningLevelChanged
-                                  ?.call(ReasoningLevel.auto);
-                            }
-                          },
-                        ),
-                      ],
-                    ],
-                  ),
-                  // ★ 当前档位的说明（与旧锚点菜单的 detail 同源 ——
-                  //   本地三档相同/云端各异的如实说明，信息不能丢）
-                  const SizedBox(height: HSpace.sm),
-                  Text(
-                    levelsEffective
-                        ? _detailFor(reasoningLevel)
-                        : '当前协议不区分思考档位（低 / 高 / 最大不生效），只有开和关。',
-                    style: TextStyle(
-                        fontSize: 12, height: 1.4, color: h2.textDim),
-                  ),
-                  // ★ 两态提示的适用范围（2026-10-25）：本地两态提示
-                  //   2026-10-12 已移除；现在出现"只有开/关"是因为
-                  //   Anthropic / Responses 协议轨不读 reasoning_effort
-                  //   （见 levelsEffective），与本地后端无关。
-                ],
-              ),
-            ),
-            const Divider(height: 1),
-            // ---- ★ 最大轮次（2026-10-18，docs/27 P0-1 / ADR-033）----
-            //
-            // ## 修的是什么
-            //
-            // 最大轮次此前**硬编码 8**，真机上**云端模型也只在 8 轮内跑** ——
-            // 一个要十几步的构建/重构任务会被无理由截断，用户看到的是
-            // "模型干到一半就不动了"，而且**没有任何提示**（这不是模型的错）。
-            //
-            // ## 为什么放在这个弹层里
-            //
-            // 它和推理等级是同一类东西：**单次运行的成本参数**。
-            // 再开一个入口只会让"模型设置"散成好几处。
-            //
-            // ## 为什么必须写人话提示
-            //
-            // "8 轮"对用户不是自明的量：轮次 = 工具调用次数 = 请求次数
-            // = 云端花的钱 + 用户等的时间。只给数字等于让用户猜。
-            Padding(
-              padding: const EdgeInsets.symmetric(
-                  horizontal: HSpace.md, vertical: HSpace.sm),
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Row(
-                    children: [
-                      Icon(CupertinoIcons.repeat,
-                          size: 21, color: h2.textDim),
-                      const SizedBox(width: HSpace.md),
-                      const Text('最大轮次', style: TextStyle(fontSize: 15)),
-                      const Spacer(),
-                      Text(_maxTurnsLabel,
-                          style: TextStyle(fontSize: 13, color: h2.textDim)),
-                    ],
-                  ),
-                  const SizedBox(height: HSpace.sm),
-                  Wrap(
-                    spacing: HSpace.sm,
-                    runSpacing: HSpace.sm,
-                    children: [
-                      for (final v in kMaxTurnsOptions)
-                        _PillOption(
-                          label: v == 0 ? '自动' : '$v',
-                          selected: v == maxTurns,
-                          h: h2,
-                          onTap: () {
-                            Navigator.of(sheetCtx).pop();
-                            // ★ 选同一档不回调 —— 与上面推理等级同语义
-                            //   （不产生无意义的写盘）
-                            if (v != maxTurns) {
-                              onMaxTurnsChanged?.call(v);
-                            }
-                          },
-                        ),
-                    ],
-                  ),
-                  const SizedBox(height: HSpace.sm),
-                  // ★ 人话说明（**三个事实都要说**，别只丢一个数字）：
-                  //   · 自动 = 本地跟 8、云端跟 40（默认，不用管）
-                  //   · 加大轮次 = 单次任务可能跑更久
-                  //   · 加大轮次 = 云端花费更多
-                  Text(
-                    '自动 = 云端 40 轮（默认）。\n'
-                    '轮次越多，单次任务能做的步骤越多，但可能跑更久；'
-                    '云端按轮计费，花费也更多。',
-                    style: TextStyle(
-                        fontSize: 12, height: 1.4, color: h2.textDim),
-                  ),
-                ],
-              ),
-            ),
-            const SizedBox(height: HSpace.md),
-          ],
-        ),
-          ), // CupertinoTheme（弹层内 Cupertino 控件的深浅色）
-      ),
-      ),
+    await showModelSheet(
+      context,
+      providers: providers,
+      activeProviderId: activeProviderId,
+      reasoningLevel: reasoningLevel,
+      maxTurns: maxTurns,
+      onProviderSelected: onProviderSelected,
+      onOpenModelCatalog: onOpenModelCatalog,
+      onReasoningLevelChanged: onReasoningLevelChanged,
+      onMaxTurnsChanged: onMaxTurnsChanged,
     );
   }
-
-  /// 当前最大轮次的**行尾显示**（`0` 要显示成"自动"，不是"0"）。
-  ///
-  /// 「0 轮」在界面上是**错的**（那等于什么都不能做）——
-  /// `0` 的语义是"我不指定，由后端决定"，所以必须写"自动"。
-  String get _maxTurnsLabel => maxTurns == 0 ? '自动' : '$maxTurns';
-
-  /// 档位说明。
-  ///
-  /// ★ 2026-10-18（ADR-035 S4）：原先"本地后端下 Low/High/Max **说明必须
-  /// 完全相同**"那条分支随本地后端**整体删除** —— 本地 `llama-server`
-  /// 静默忽略 `reasoning_effort`（`docs/25` §10.3），而**云端真的支持分档**，
-  /// 所以现在直接给 `ReasoningLevel.description`（各档不同、都是真话）。
-  ///
-  /// ⚠️ 那段历史不该失传：给本地三档编出"更深/更浅"的差异曾是**假信息**。
-  /// 今天的云端不存在这个问题，但**新的后端**接进来时仍要重新问一遍
-  /// "它真的支持分档吗"，而不是照抄描述。
-  String _detailFor(ReasoningLevel v) => v.description;
 
   @override
   Widget build(BuildContext context) {
@@ -1099,56 +748,16 @@ class _ModelSelector extends StatelessWidget {
                   ),
                 ),
                 const SizedBox(width: HSpace.xs),
+                // ★ 思考强度直接写在 chip 上（原型 01）：不用打开
+                //   抽屉就知道当前档位。
+                Text(
+                  '· ${reasoningLevel.label}',
+                  style: TextStyle(fontSize: 11.5, color: h.textDim),
+                ),
+                const SizedBox(width: HSpace.xs),
                 Icon(AppIcons.chevronDown, size: 18, color: h.textDim),
               ],
             ),
-          ),
-        ),
-      ),
-    );
-  }
-}
-
-/// **iOS 风格单选胶囊**（2026-10-22 Cupertino 化，替换 Material `ChoiceChip`）。
-///
-/// 选中 = 主色实心，未选 = 描边 —— iOS 没有"底色加深+对勾"的 chip，
-/// 用胶囊填充是最接近的视觉语言。排布（Wrap）与语义（点选、
-/// 同档不回调）和旧 ChoiceChip 完全一致。
-class _PillOption extends StatelessWidget {
-  const _PillOption({
-    required this.label,
-    required this.selected,
-    required this.h,
-    required this.onTap,
-  });
-
-  final String label;
-  final bool selected;
-  final Hue h;
-  final VoidCallback onTap;
-
-  @override
-  Widget build(BuildContext context) {
-    return GestureDetector(
-      onTap: onTap,
-      child: Container(
-        padding:
-            const EdgeInsets.symmetric(horizontal: HSpace.md, vertical: 7),
-        decoration: BoxDecoration(
-          color: selected ? h.accent : h.surface,
-          borderRadius: BorderRadius.circular(HRadius.pill),
-          border: Border.all(color: selected ? h.accent : h.border),
-        ),
-        child: Text(
-          label,
-          style: TextStyle(
-            fontSize: 13,
-            fontWeight: selected ? FontWeight.w600 : FontWeight.w400,
-            color: selected
-                ? (h.dark
-                    ? const Color(0xFF1A0E08)
-                    : const Color(0xFFFFFFFF))
-                : h.textDim,
           ),
         ),
       ),

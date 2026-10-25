@@ -4092,19 +4092,49 @@ class _ChatScreenState extends State<ChatScreen> {
         // 有光晕的主题：顶栏也透明，光斑从屏幕顶部透出来（同图一）
         backgroundColor: h.glowColors.isEmpty ? null : Colors.transparent,
         titleSpacing: 0,
+        // ★ 顶栏左侧 = 真实 App 图标（原型 01，2026-10-25 回位）：
+        //   点它开抽屉。不再用汉堡线条图标（用户禁用线条式图标，
+        //   且品牌图标本身就是导航锚点，抽屉头部同款）。
         leading: CupertinoButton(
           padding: const EdgeInsets.all(8),
           onPressed: () => _scaffoldKey.currentState?.openDrawer(),
-          child: Icon(AppIcons.menu, size: 23, color: h.text),
+          child: ClipRRect(
+            borderRadius: BorderRadius.circular(8),
+            child: Image.asset(
+              'assets/branding/app_icon_source.png',
+              width: 27,
+              height: 27,
+              fit: BoxFit.cover,
+            ),
+          ),
         ),
         title: Row(
           children: [
+            // ★ 灵动岛胶囊回顶栏（原型 01，2026-10-25 回位）：
+            //   收起态是顶栏里的小胶囊（在标题左侧）；点它展开，
+            //   面板从顶栏下方正中垂下（body Stack 的悬浮层渲染，
+            //   AppBar 固定高度装不下展开态）。展开时胶囊让位给
+            //   面板自己的标题行，避免同屏两颗胶囊。
+            if (_planSteps != null && _planSteps!.isNotEmpty && _planCollapsed) ...[
+              Flexible(
+                child: DynamicIsland(
+                  steps: _planSteps!,
+                  doneCount: _planDone,
+                  activeIndex: _planActive,
+                  collapsed: true,
+                  onToggle: () => setState(() => _planCollapsed = false),
+                  reachedGoal: _planReachedGoal,
+                  closedReason: _planClosedReason,
+                  cancelledIndices: _planCancelled,
+                  onAdjust: _prefillPlanAdjust,
+                ),
+              ),
+              const SizedBox(width: HSpace.sm),
+            ],
             // ★ 标题只有工作区名（2026-10-12，用户要求）：
             //   「你标题上面的这个本地模型名称还放着那干嘛？」——
             //   BackendBadge（[本地|qwen3.5-4b] 绿胶囊）移除。
             //   模型信息在输入框的模型选择框里已经有了，标题不重复。
-            // ★ 灵动岛不在顶栏（2026-10-25 移位）：展开态在固定高度的
-            //   AppBar 里会溢出，改为浮在消息列表顶部正中（见 body 的 Stack）。
             Flexible(
               child: Text(
                 _activeSession?.title ?? _workspaceName,
@@ -4127,14 +4157,9 @@ class _ChatScreenState extends State<ChatScreen> {
             limitTokens: _contextUsage.limit,
             onTap: _openUsageSidebar,
           ),
-          Tooltip(
-            message: '刷新',
-            child: CupertinoButton(
-              padding: const EdgeInsets.all(8),
-              onPressed: _busy ? null : _reload,
-              child: Icon(AppIcons.refresh, size: 21, color: h.textDim),
-            ),
-          ),
+          // ★ 顶栏右侧只留圆环（原型 01 第三轮拍板：「右上图标去掉
+          //   只留圆环」）—— 刷新按钮 2026-10-25 按原型移除，
+          //   _reload 仍由抽屉打开等内部路径调用，不受影响。
           const SizedBox(width: HSpace.xs),
         ],
       ),
@@ -4233,12 +4258,12 @@ class _ChatScreenState extends State<ChatScreen> {
                       hasNewContent: _hasNewContent,
                     ),
                   ),
-                // ---- 灵动岛（2026-10-25 从顶栏移入）----
-                //   浮在消息列表顶部正中：收起是小胶囊（当前步骤 + 进度），
-                //   点开是完整清单面板，盖在消息之上、不挤占布局高度
-                //   （顶栏固定高度放不下展开态）。数据吃 plan_updated
-                //   完整帧（见事件处理）。
-                if (_planSteps != null && _planSteps!.isNotEmpty)
+                // ---- 灵动岛展开面板（原型 01）----
+                //   收起胶囊在顶栏里（见 AppBar）；点开后本悬浮层在
+                //   顶栏下方正中垂下面板（完整清单 + 调整入口），
+                //   盖在消息之上、不挤占布局高度。再点面板标题行
+                //   收回，胶囊回到顶栏。
+                if (_planSteps != null && _planSteps!.isNotEmpty && !_planCollapsed)
                   Positioned(
                     top: 6,
                     left: 0,
@@ -4248,7 +4273,7 @@ class _ChatScreenState extends State<ChatScreen> {
                         steps: _planSteps!,
                         doneCount: _planDone,
                         activeIndex: _planActive,
-                        collapsed: _planCollapsed,
+                        collapsed: false,
                         onToggle: () => setState(
                             () => _planCollapsed = !_planCollapsed),
                         reachedGoal: _planReachedGoal,
