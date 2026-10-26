@@ -178,7 +178,14 @@ class _StretchSegmentedState extends State<StretchSegmented>
             onHorizontalDragUpdate: (d) => _dragUpdate(d.localPosition.dx),
             onHorizontalDragEnd: (_) => _dragEnd(),
             onHorizontalDragCancel: _dragEnd,
-            child: Stack(
+            // ★ 边界硬裁剪（2026-10-26 用户令「滑块到了边界就不能
+            // 超出去」）：同心圆角只是算术保证，真机上旧实现照样
+            // 鼓出过。轨道内层套 ClipRRect（半径 = 轨 14 − 内衬 4
+            // = 10，与滑块角重合）——滑块在飞行/凸起/拖拽任何一帧
+            // 画出内界，都会被裁掉，这是结构保证，不靠半径算对。
+            child: ClipRRect(
+              borderRadius: BorderRadius.circular(10),
+              child: Stack(
               children: [
                 Positioned(
                   left: leftSegs * _segW,
@@ -224,6 +231,7 @@ class _StretchSegmentedState extends State<StretchSegmented>
                   ],
                 ),
               ],
+              ),
             ),
           );
         },
