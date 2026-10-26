@@ -61,14 +61,13 @@ const STEPS = [
 
 const GALLERY = [
   { src: '/Heracles/shots/empty.webp', title: '空态' },
-  { src: '/Heracles/shots/chat.webp', title: '会话与 diff' },
+  { src: '/Heracles/shots/chat.webp', title: '会话与工具调用' },
+  { src: '/Heracles/shots/generating.webp', title: '生成中' },
   { src: '/Heracles/shots/modelsheet.webp', title: '模型与思考' },
   { src: '/Heracles/shots/perms.webp', title: '设备权限' },
-  { src: '/Heracles/shots/settings.webp', title: '设置·通用' },
   { src: '/Heracles/shots/home.webp', title: '设置首页' },
-  { src: '/Heracles/shots/model.webp', title: '设置·模型' },
   { src: '/Heracles/shots/appearance.webp', title: '设置·外观' },
-  { src: '/Heracles/shots/memory.webp', title: '全局记忆' },
+  { src: '/Heracles/shots/about.webp', title: '关于' },
 ]
 
 const WORKS = ['会话与守卫（在途结果不串台）', '审批门禁（允许 / 需确认 / 拒绝）', '取消、排队发送、上下文压缩',
@@ -189,6 +188,24 @@ function How() {
           </div>
         </div>
       </div>
+    </section>
+  )
+}
+
+
+function Demo() {
+  return (
+    <section className="section" id="demo">
+      <Reveal>
+        <h2 className="section-title">30 秒看它怎么工作</h2>
+        <p className="section-sub">真机录屏：发一条消息，它调用工具、给出结果。没有加速剪辑。</p>
+      </Reveal>
+      <Reveal>
+        <div className="demo">
+          <video src="/Heracles/video/heracles-30s.mp4" poster="/Heracles/shots/chat.webp"
+            controls muted loop playsInline preload="metadata" />
+        </div>
+      </Reveal>
     </section>
   )
 }
@@ -335,6 +352,7 @@ export default function Landing() {
       <Nav />
       <main>
         <Hero />
+        <Demo />
         <How />
         <Features />
         <Shots />
