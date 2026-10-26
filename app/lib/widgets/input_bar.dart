@@ -339,9 +339,9 @@ class _InputBarState extends State<InputBar>
                         color: h.dark
                             ? h.surface
                             : Color.alphaBlend(
-                                // 灰度按 TRAE 特写实测：托盘 231 vs
-                                // 页面 245，约压 6.5% 黑（v3 的 12% 太重）
-                                Colors.black.withValues(alpha: 0.065),
+                                // 灰度：TRAE 特写实测约压 6%，但真机上
+                                // 用户评「不明显」—— 加深到压 12% 黑
+                                Colors.black.withValues(alpha: 0.12),
                                 h.surface),
                         borderRadius: BorderRadius.circular(24),
                         boxShadow: [
@@ -426,7 +426,8 @@ class _InputBarState extends State<InputBar>
                     //   发送/排队（用户原话「有字时暂停按钮变发送」）。
                     Padding(
                       padding: const EdgeInsets.fromLTRB(10, 0, 10, 10),
-                      child: Row(
+                      child: LayoutBuilder(
+                        builder: (context, cons) => Row(
                         children: [
                           _CircleButton(
                             icon: AppIcons.add,
@@ -434,9 +435,11 @@ class _InputBarState extends State<InputBar>
                             onTap:
                                 widget.enabled ? widget.onPickAttachment : null,
                           ),
-                          const SizedBox(width: 8),
+                          const SizedBox(width: 4),
                           Flexible(
                             child: _ModelSelector(
+                              // 胶囊总宽不超过底行一半（用户令）
+                              maxTextWidth: cons.maxWidth * 0.5 - 24,
                               label: widget.providerLabel,
                               reasoningLevel: widget.reasoningLevel,
                               h: h,
@@ -473,6 +476,7 @@ _PermissionIconButton(
                                 : _send,
                           ),
                         ],
+                        ),
                       ),
                     ),
                             ],
@@ -829,10 +833,10 @@ class _SendButton extends StatelessWidget {
       enabled: active,
       child: AnimatedContainer(
       duration: const Duration(milliseconds: 150),
-      // 图二的发送圆与 ＋/麦克风同量级（约 40）；46 在小底行里
+      // 图二的发送圆与 ＋/麦克风同量级；46 在小底行里
       // 明显抢眼（用户实报「怎么还这么大」）
-      width: 40,
-      height: 40,
+      width: 38,
+      height: 38,
       // ★ 圆形 + 恒黑底白箭头（2026-10-26 对图二定）：不再随可用态
       // 变灰 —— 图二的发送键永远是主色实心圆。深色下 h.text 是白，
       // 即白底黑箭头（反色），同样恒定。
@@ -890,7 +894,7 @@ class _CircleButton extends StatelessWidget {
       width: 38,
       height: 38,
       child: Material(
-        color: h.surface,
+        color: h.surfaceAlt,
         shape: const CircleBorder(
           side: BorderSide(color: Colors.transparent),
         ),
@@ -980,7 +984,12 @@ class _ModelSelector extends StatelessWidget {
     required this.activeProviderId,
     required this.onProviderSelected,
     this.onOpenModelCatalog,
+    this.maxTextWidth = 200,
   });
+
+  /// 模型名最大宽度（由底行按「不超过输入框一半」传入，2026-10-26
+  /// 用户令：胶囊自适应长度、超长走省略号）
+  final double maxTextWidth;
 
   final String? label;
   final ReasoningLevel reasoningLevel;
@@ -1033,7 +1042,7 @@ class _ModelSelector extends StatelessWidget {
     // 胶囊外形（2026-10-26 TRAE 式）：浅灰实心、无边框无投影 ——
     // 卡面是 surfaceAlt，胶囊用 surface 正好沉一档。
     BoxDecoration pillDeco() => BoxDecoration(
-          color: h.surface,
+          color: h.surfaceAlt,
           borderRadius: BorderRadius.circular(HRadius.pill),
         );
     // 单枚胶囊：模型名 + ⌄（思考等级在模型抽屉里调，胶囊上不再显）。
@@ -1047,14 +1056,14 @@ class _ModelSelector extends StatelessWidget {
         borderRadius: BorderRadius.circular(HRadius.pill),
         child: Container(
           height: 38,
-          padding: const EdgeInsets.symmetric(horizontal: 14),
+          padding: const EdgeInsets.symmetric(horizontal: 12),
           decoration: pillDeco(),
           child: Row(
             mainAxisSize: MainAxisSize.min,
             children: [
               Flexible(
                 child: ConstrainedBox(
-                  constraints: const BoxConstraints(maxWidth: 200),
+                  constraints: BoxConstraints(maxWidth: maxTextWidth),
                   child: Text(
                     name,
                     maxLines: 1,
@@ -1063,8 +1072,8 @@ class _ModelSelector extends StatelessWidget {
                   ),
                 ),
               ),
-              const SizedBox(width: 4),
-              Icon(AppIcons.chevronDown, size: 16, color: h.textDim),
+              // （⌄ 已去掉 —— 2026-10-26 用户令：胶囊就纯粹包裹住
+              // 模型名，像 TRAE 那样，不带下拉箭头）
             ],
           ),
         ),
