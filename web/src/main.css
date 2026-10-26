@@ -137,27 +137,6 @@ img { max-width: 100%; display: block; }
 .card h3 { margin: 0 0 8px; font-size: 17.5px; }
 .card p { margin: 0; color: var(--fg-dim); font-size: 14.8px; }
 
-/* ---------- 界面画廊 ---------- */
-.gallery { display: grid; grid-template-columns: repeat(3, 1fr); gap: 16px; }
-.gallery-item {
-  padding: 12px; border-radius: 18px; border: 1px solid var(--line); background: #fff;
-  cursor: zoom-in; box-shadow: var(--shadow-card); text-align: center; font: inherit;
-  transition: transform .22s, box-shadow .28s;
-}
-.gallery-item:hover { transform: translateY(-3px); box-shadow: var(--shadow-lift); }
-.gallery-item img { border-radius: 12px; width: 100%; }
-.gallery-item span { display: block; margin-top: 10px; font-size: 13.5px; color: var(--fg-dim); }
-
-.lightbox {
-  position: fixed; inset: 0; z-index: 100; background: rgba(255, 255, 255, .92);
-  backdrop-filter: blur(14px); display: flex; align-items: center; justify-content: center; padding: 40px;
-  cursor: zoom-out;
-}
-.lightbox img {
-  max-height: 88vh; width: auto; border-radius: 22px; border: 1px solid var(--line-strong);
-  box-shadow: 0 40px 90px rgba(0, 0, 0, .18);
-}
-
 /* ---------- 状态 ---------- */
 .status-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
 .status-card {
@@ -246,3 +225,43 @@ img { max-width: 100%; display: block; }
   border-bottom: 1px solid var(--line-strong); padding-bottom: 1px;
 }
 .hero-video-more:hover { color: var(--fg); }
+
+/* ---------- 界面轮播 ---------- */
+.carousel { position: relative; overflow: hidden; padding: 8px 0 4px; cursor: grab; }
+.carousel:active { cursor: grabbing; }
+.carousel-track { display: flex; align-items: center; will-change: transform; }
+.slide {
+  flex: 0 0 auto; padding: 0; border: 0; background: transparent; cursor: pointer;
+  transform-origin: center center;
+}
+.slide-tilt {
+  border-radius: 22px; overflow: hidden; background: #fff;
+  border: 1px solid var(--line); box-shadow: 0 10px 26px rgba(0,0,0,.08);
+  transition: box-shadow .3s ease, transform .2s ease;
+}
+.slide.on .slide-tilt { box-shadow: 0 28px 64px rgba(0,0,0,.18); }
+.slide img { width: 100%; display: block; pointer-events: none; -webkit-user-drag: none; }
+
+.nav-arrow {
+  position: absolute; top: 50%; transform: translateY(-50%); z-index: 5;
+  width: 44px; height: 44px; border-radius: 50%; cursor: pointer;
+  display: flex; align-items: center; justify-content: center;
+  font-size: 22px; line-height: 1; color: var(--fg);
+  background: rgba(255,255,255,.9); border: 1px solid var(--line-strong);
+  box-shadow: 0 6px 18px rgba(0,0,0,.10); backdrop-filter: blur(8px);
+  transition: transform .18s ease, background .18s;
+}
+.nav-arrow:hover { background: #fff; transform: translateY(-50%) scale(1.06); }
+.nav-arrow.prev { left: 8px; }
+.nav-arrow.next { right: 8px; }
+
+.carousel-caption { text-align: center; margin-top: 22px; min-height: 46px; }
+.carousel-caption strong { display: block; font-size: 17px; letter-spacing: -.2px; }
+.carousel-caption span { color: var(--fg-dim); font-size: 14.5px; }
+
+.dots { display: flex; justify-content: center; gap: 8px; margin-top: 14px; }
+.dot {
+  width: 7px; height: 7px; border-radius: 50%; border: 0; cursor: pointer; padding: 0;
+  background: rgba(0,0,0,.16); transition: all .22s ease;
+}
+.dot.on { width: 22px; border-radius: 4px; background: var(--accent); }

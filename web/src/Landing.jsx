@@ -1,5 +1,5 @@
-import { useState } from 'react'
-import { motion, AnimatePresence, useReducedMotion } from 'framer-motion'
+import { useEffect, useRef, useState } from 'react'
+import { motion, AnimatePresence, useReducedMotion, useMotionValue, useTransform } from 'framer-motion'
 
 const APK = 'https://github.com/theohowie/Heracles/releases/download/v0.2.2/Heracles-v0.2.2.apk'
 const RELEASES = 'https://github.com/theohowie/Heracles/releases'
@@ -60,14 +60,14 @@ const STEPS = [
 ]
 
 const GALLERY = [
-  { src: '/Heracles/shots/empty-v2.webp', title: '空态' },
-  { src: '/Heracles/shots/chat-v2.webp', title: '会话与工具调用' },
-  { src: '/Heracles/shots/generating-v2.webp', title: '生成中' },
-  { src: '/Heracles/shots/modelsheet-v2.webp', title: '模型与思考' },
-  { src: '/Heracles/shots/perms-v2.webp', title: '设备权限' },
-  { src: '/Heracles/shots/home-v2.webp', title: '设置首页' },
-  { src: '/Heracles/shots/appearance-v2.webp', title: '设置·外观' },
-  { src: '/Heracles/shots/about-v2.webp', title: '关于' },
+  { src: '/Heracles/shots/empty-v2.webp', title: '空态', desc: '开口就是任务：一句话起步，五个建议胶囊' },
+  { src: '/Heracles/shots/chat-v2.webp', title: '会话与工具调用', desc: '工具卡可展开，改哪几行、跑什么命令都留痕' },
+  { src: '/Heracles/shots/generating-v2.webp', title: '生成中', desc: '彩虹光圈 + 停止键，随时打断长任务' },
+  { src: '/Heracles/shots/modelsheet-v2.webp', title: '模型与思考', desc: '多家 provider、思考档位、最大轮次一处切换' },
+  { src: '/Heracles/shots/perms-v2.webp', title: '设备权限', desc: '六项状态与执行路由，一页看清' },
+  { src: '/Heracles/shots/home-v2.webp', title: '设置首页', desc: '通用 / 记忆 / 权限 / 模型 / 外观' },
+  { src: '/Heracles/shots/appearance-v2.webp', title: '外观', desc: '深浅与主题、玻璃效果实时预览' },
+  { src: '/Heracles/shots/about-v2.webp', title: '关于', desc: '版本、许可与开源信息' },
 ]
 
 const WORKS = ['会话与守卫（在途结果不串台）', '审批门禁（允许 / 需确认 / 拒绝）', '取消、排队发送、上下文压缩',
@@ -220,27 +220,128 @@ function Features() {
 }
 
 function Shots() {
+  const shots = GALLERY
+  const count = shots.length
+  const [index, setIndex] = useState(0)
   const [open, setOpen] = useState(null)
+  const [paused, setPaused] = useState(false)
+  const [cw, setCw] = useState(1180)
+  const wrapRef = useRef(null)
+  const reduce = useReducedMotion()
+
+  // 容器宽度（决定居中偏移）
+  useEffect(() => {
+    const el = wrapRef.current
+    if (!el) return undefined
+    const ro = new ResizeObserver(([e]) => setCw(e.contentRect.width))
+    ro.observe(el)
+    setCw(el.getBoundingClientRect().width)
+    return () => ro.disconnect()
+  }, [])
+
+  // 自动轮播（悬停/灯箱时暂停）
+  useEffect(() => {
+    if (paused || open || reduce) return undefined
+    const t = setInterval(() => setIndex((i) => (i + 1) % count), 4200)
+    return () => clearInterval(t)
+  }, [paused, open, reduce, count])
+
+  const step = (d) => setIndex((i) => (i + d + count) % count)
+
+  // 鼠标 3D 倾斜
+  const mx = useMotionValue(0)
+  const my = useMotionValue(0)
+  const rotY = useTransform(mx, [-0.5, 0.5], [9, -9])
+  const rotX = useTransform(my, [-0.5, 0.5], [-7, 7])
+  const onMove = (e) => {
+    const r = e.currentTarget.getBoundingClientRect()
+    mx.set((e.clientX - r.left) / r.width - 0.5)
+    my.set((e.clientY - r.top) / r.height - 0.5)
+  }
+  const onLeave = () => { mx.set(0); my.set(0) }
+
+  const CARD = cw < 700 ? 232 : 300
+  const GAP = cw < 700 ? 14 : 24
+  const offset = (cw - CARD) / 2 - index * (CARD + GAP)
+  const cur = shots[index]
+
   return (
     <section className="section" id="shots">
       <Reveal>
         <h2 className="section-title">界面</h2>
-        <p className="section-sub">真机实拍，已裁掉系统状态栏与手势条。点任意一张放大。</p>
+        <p className="section-sub">真机实拍（已裁掉系统状态栏）。拖动、点箭头或圆点切换，点图看大图。</p>
       </Reveal>
-      <div className="gallery">
-        {GALLERY.map((s) => (
-          <button className="gallery-item" key={s.src} onClick={() => setOpen(s)}>
-            <img src={s.src} alt={s.title} loading="lazy" />
-            <span>{s.title}</span>
-          </button>
+
+      <div className="carousel" ref={wrapRef}
+        onMouseEnter={() => setPaused(true)} onMouseLeave={() => { setPaused(false); onLeave() }}>
+        <motion.div className="carousel-track drag" style={{ x: offset }}
+          animate={{ x: offset }}
+          transition={{ type: 'spring', stiffness: 120, damping: 20, mass: 0.9 }}
+          drag="x"
+          dragConstraints={{ left: 0, right: 0 }}
+          dragElastic={0.12}
+          onDragEnd={(e, info) => {
+            if (info.offset.x < -60 || info.velocity.x < -400) step(1)
+            else if (info.offset.x > 60 || info.velocity.x > 400) step(-1)
+          }}>
+          {shots.map((s, i) => {
+            const active = i === index
+            return (
+              <motion.button
+                key={s.src}
+                className={`slide${active ? ' on' : ''}`}
+                style={{ width: CARD, marginRight: GAP }}
+                onClick={() => (active ? setOpen(s) : setIndex(i))}
+                animate={{
+                  scale: active ? 1 : 0.86,
+                  opacity: active ? 1 : 0.5,
+                  filter: active ? 'blur(0px)' : 'blur(1.5px)',
+                }}
+                transition={{ type: 'spring', stiffness: 160, damping: 22 }}
+              >
+                {active && !reduce ? (
+                  <motion.div className="slide-tilt" onMouseMove={onMove}
+                    style={{ rotateY: rotY, rotateX: rotX, transformPerspective: 900 }}>
+                    <img src={s.src} alt={s.title} />
+                  </motion.div>
+                ) : (
+                  <div className="slide-tilt"><img src={s.src} alt={s.title} /></div>
+                )}
+              </motion.button>
+            )
+          })}
+        </motion.div>
+
+        <button className="nav-arrow prev" onClick={() => step(-1)} aria-label="上一张">‹</button>
+        <button className="nav-arrow next" onClick={() => step(1)} aria-label="下一张">›</button>
+      </div>
+
+      <div className="carousel-caption">
+        <AnimatePresence mode="wait">
+          <motion.div key={cur.title}
+            initial={reduce ? false : { opacity: 0, y: 8 }}
+            animate={{ opacity: 1, y: 0 }}
+            exit={reduce ? undefined : { opacity: 0, y: -8 }}
+            transition={{ duration: 0.25 }}>
+            <strong>{cur.title}</strong>
+            <span>{cur.desc}</span>
+          </motion.div>
+        </AnimatePresence>
+      </div>
+
+      <div className="dots">
+        {shots.map((s, i) => (
+          <button key={s.src} className={`dot${i === index ? ' on' : ''}`} onClick={() => setIndex(i)} aria-label={s.title} />
         ))}
       </div>
+
       <AnimatePresence>
         {open && (
           <motion.div className="lightbox" onClick={() => setOpen(null)}
             initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}>
             <motion.img src={open.src} alt={open.title}
-              initial={{ scale: 0.96 }} animate={{ scale: 1 }} exit={{ scale: 0.98 }} />
+              initial={{ scale: 0.94, y: 12 }} animate={{ scale: 1, y: 0 }} exit={{ scale: 0.96 }}
+              transition={{ type: 'spring', stiffness: 200, damping: 24 }} />
           </motion.div>
         )}
       </AnimatePresence>
