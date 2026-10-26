@@ -446,17 +446,7 @@ class _StreamStepViewState extends State<StreamStepView> {
               )
             else
               const Spacer(),
-            // 展开箭头在行尾（与工具行同位），无可展开内容时不画
-            if (expandable)
-              AnimatedRotation(
-                turns: _expanded ? 0.5 : 0,
-                duration: const Duration(milliseconds: 200),
-                child: Icon(
-                  AppIcons.chevronDown,
-                  size: 15,
-                  color: h.textFaint,
-                ),
-              ),
+            // （行尾展开箭头已退役 —— 2026-10-26 用户令，行仍可点开）
           ],
         ),
       ),
@@ -653,14 +643,6 @@ class _ToolSubEntryState extends State<_ToolSubEntry> {
                       ),
                     ),
                   ],
-                  const SizedBox(width: HSpace.sm),
-                  Icon(
-                    _expanded
-                        ? AppIcons.chevronUp
-                        : AppIcons.chevronDown,
-                    size: 16,
-                    color: h.textFaint,
-                  ),
                 ],
               ),
             ),

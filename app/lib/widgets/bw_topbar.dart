@@ -3,7 +3,7 @@ import 'dart:math' as math;
 import 'package:flutter/material.dart';
 
 import '../theme/app_theme.dart';
-import '../theme/cupertino_kit.dart';
+
 
 /// 黑白界面的顶部组件：灵动岛、上下文圆环、纯文字工具行。
 ///
@@ -508,16 +508,7 @@ class _PlainToolLineState extends State<PlainToolLine> {
                   ),
                 ),
               ),
-              if (detailLines.isNotEmpty)
-                AnimatedRotation(
-                  turns: _expanded ? 0.5 : 0,
-                  duration: const Duration(milliseconds: 200),
-                  child: Icon(
-                    AppIcons.chevronDown,
-                    size: 15,
-                    color: h.textFaint,
-                  ),
-                ),
+              // （行尾展开箭头已退役 —— 2026-10-26 用户令）
             ],
           ),
           AnimatedSize(
