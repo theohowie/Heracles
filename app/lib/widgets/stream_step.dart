@@ -7,9 +7,10 @@ import '../models/message.dart';
 import '../models/settings.dart';
 import '../theme/app_theme.dart';
 import '../theme/cupertino_kit.dart';
-// ★ 共享件全部来自 `tool_call_card.dart`（**单向依赖**）：
+// ★ 共享件来自 `tool_call_card.dart`（**单向依赖**）：
 //   · `MarkdownLite` —— 正文汇报复用最终回答那套渲染（用户：「正文汇报不渲染 md」）
-//   · `kStepRow*`    —— 「分析请求」行与工具行共用的左侧几何（两行必须对齐）
+//   · `kStepRowVPad` —— 步骤行与工具行共用的纵向内边距（左侧几何已于
+//     2026-10-25 晚改为与 PlainToolLine 同槽：图标 15 + 间距 8）
 //   ⚠️ 依赖方向只能是 stream_step → tool_call_card。`message_row.dart` 反过来
 //      import 本文件（渲染 StreamStepView），所以本文件**绝不能** import
 //      `message_row.dart`，否则成环。
@@ -19,11 +20,6 @@ import 'tool_call_card.dart'
         changedFilesOf,
         estimatedDiffStatOf,
         kFileWritingTools,
-        kStepRowArrowGap,
-        kStepRowArrowSize,
-        kStepRowHPad,
-        kStepRowStatusGap,
-        kStepRowStatusSize,
         kStepRowVPad;
 
 /// **逐字生成中的一个步骤** —— 思考与正文分开渲染。
@@ -91,9 +87,6 @@ class _StreamStepViewState extends State<StreamStepView> {
   Widget build(BuildContext context) {
     final h = Hue.of(context);
     final step = widget.step;
-    final accent = step.isError
-        ? HColors.errorOn(h.dark)
-        : (step.finished ? h.textFaint : HColors.infoOn(h.dark));
 
     // ★ 收起状态（2026-10-13）：只有标题行 + 一行流式预览。
     //   用户原话：「收起状态下，流式输出也不是没有」——
@@ -103,6 +96,9 @@ class _StreamStepViewState extends State<StreamStepView> {
     final streaming = !step.finished;
     final toolStreaming = StreamStepView.isStreamingToolCallStatic(step.text);
     final finishedToolCall = _isFinishedToolCall(step);
+    // 标题行尾部箭头的显隐：有可展开内容（思考 / 工具子条目）才画
+    final expandable =
+        step.reasoning.isNotEmpty || toolStreaming || finishedToolCall;
 
     // ★★ 2026-10-23 用户报：「分析请求还没跑完呢，正文汇报就出来了」★★
     //
@@ -184,7 +180,7 @@ class _StreamStepViewState extends State<StreamStepView> {
           if (_showHeader)
             InkWell(
               onTap: () => setState(() => _userExpanded = !_expanded),
-              child: _header(h, accent, preview, previewVisible),
+              child: _header(h, preview, previewVisible, expandable),
             ),
 
           // ---- 思考：仅展开时显示（收起时只留标题行里的单行预览）----
@@ -358,84 +354,83 @@ class _StreamStepViewState extends State<StreamStepView> {
     return '…${t.substring(t.length - max)}';
   }
 
-  /// 标题行：状态点 + 文案 + （进行中的单行预览）+ 展开箭头
+  /// 标题行：前置图标 + 文案 + （进行中的单行预览）+ 行尾展开箭头
   ///
-  /// ## 与工具行**逐像素对齐**（2026-10-23，用户报「分析请求没和其他工具调用
-  /// 对齐」）
+  /// ## 与工具行对齐（2026-10-25 晚用户定版）
   ///
-  /// 两行的左边距、箭头尺寸、箭头后间距、状态图标槽位、图标后间距、标题文字
-  /// 起点，**全部取自 `tool_call_card.dart` 的 `kStepRow*` 常量**（工具行也读
-  /// 同一组）。改前这里是"箭头贴着左边缘 + `HSpace.sm` 图标间距"，工具行是
-  /// "`HSpace.sm` 水平内边距 + 6px 图标间距" ⇒ 箭头差 8px、文字差 14px。
-  ///
-  /// 状态图标槽位**固定宽 14**：运行中是 12 的转圈，也居中放进去 —— 否则
-  /// 「正在分析」与「分析完成」两种状态之间标题文字会左右跳。
+  /// 用户对着真机截图定：步骤行（分析 / 思考）要和工具行（执行了命令 /
+  /// 向你提了问）**一个样** —— 前面是图标、不要左侧的 `>`、不要 ✓、
+  /// 字号也要一样。此前本行是"`>` + 状态槽（✓/转圈）+ 12 号小字"，
+  /// 工具行是"图标 + 13.5 号字"，摆在一起两套语言。现在：
+  /// · 图标槽 15 + 间距 8 ⇒ 标签起点 23，与 `PlainToolLine` 逐像素一致
+  /// · 标签 13.5 w600（同工具行摘要），颜色保持 textDim（它是状态叙述）
+  /// · 展开箭头移到行尾（同工具行），无可展开内容不画
   ///
   /// ## 没有耗时了（2026-10-23 用户原话：「这个 xxxms 给我删了」）
   ///
-  /// 原来的 `917ms` 属于**诊断信息**，在"每一轮都有标题行"之后变成每行必挂的
-  /// 噪音。删掉显示的同时把只服务它的代码一起删了（不留给下一个人的死代码）；
-  /// `HStepStream.durationMs` 字段本身保留 —— 落盘/其它界面仍在使用，本组件不碰。
+  /// 原来的 `917ms` 属于**诊断信息**，删掉显示的同时把只服务它的代码
+  /// 一起删了；`HStepStream.durationMs` 字段本身保留（落盘/其它界面在用）。
   Widget _header(
     Hue h,
-    Color accent,
     String preview,
     bool previewVisible,
+    bool expandable,
   ) {
     final step = widget.step;
+    // 纯正文轮（无思考通道）用文件图标，其余（分析 / 思考）用灯泡 ——
+    // 与 _label 的「本轮输出」兜底判据一致
+    final isOutput = step.reasoning.isEmpty && step.title == '本轮输出';
     return ConstrainedBox(
       // 热区与工具行同高（≥ kMinTapTarget，`docs/25` §7）：
-      // 一整行都可点，展开/收起不用瞄准那个小箭头。
+      // 一整行都可点，展开/收起不用瞄准小箭头。
       constraints: const BoxConstraints(minHeight: kMinTapTarget),
       child: Padding(
-        padding: const EdgeInsets.symmetric(
-          horizontal: kStepRowHPad,
-          vertical: kStepRowVPad,
-        ),
+        padding: const EdgeInsets.symmetric(vertical: kStepRowVPad),
         child: Row(
           children: [
-            // ★ 左侧折叠箭头 —— 与 `ToolCallCard` 同 x、同 size（用户要求"对齐"）
-            Icon(
-              _expanded ? AppIcons.chevronDown : AppIcons.chevronRight,
-              size: kStepRowArrowSize,
-              color: h.textFaint,
-            ),
-            const SizedBox(width: kStepRowArrowGap),
+            // ★ 前置图标槽（2026-10-25 晚用户定）：不要左侧的 > 、不要 ✓ ——
+            //   像工具行（PlainToolLine）一样，前面是一个图标且对齐：
+            //   图标 15 + 间距 8 ⇒ 标签起点同为 23。
+            //   进行中 = 转圈；出错 = 错误图标；其余 = 按类填充图标。
             SizedBox(
-              width: kStepRowStatusSize,
-              height: kStepRowStatusSize,
+              width: 15,
+              height: 15,
               child: step.finished
                   ? Icon(
-                      step.isError ? AppIcons.error : AppIcons.check,
-                      size: kStepRowStatusSize,
-                      color: accent,
+                      step.isError
+                          ? AppIcons.error
+                          : (isOutput
+                              ? AppIcons.file
+                              : CupertinoIcons.lightbulb_fill),
+                      size: 15,
+                      color: step.isError
+                          ? HColors.errorOn(h.dark)
+                          : h.text,
                     )
                   : Center(
                       child: CupertinoActivityIndicator(
                         radius: 6,
-                        color: accent,
+                        color: h.text,
                       ),
                     ),
             ),
-            const SizedBox(width: kStepRowStatusGap),
+            const SizedBox(width: 8),
             Flexible(
               child: Text(
-                // ★ 2026-10-23：文案见 `_label`（第 1 轮「分析」/ 之后「思考」）
+                // ★ 文案见 `_label`（第 1 轮「分析」/ 之后「思考」）
+                // 字号与工具行摘要统一 13.5 w600（2026-10-25 晚用户定：
+                // 步骤行与工具行同为一行式条目，不许两种字号）
                 _label(step),
                 overflow: TextOverflow.ellipsis,
                 style: TextStyle(
-                  fontSize: 12,
+                  fontSize: 13.5,
                   fontWeight: FontWeight.w600,
                   color: h.textDim,
-                  letterSpacing: 0.2,
                 ),
               ),
             ),
             const SizedBox(width: HSpace.sm),
             // ---- ★ 单行预览（**只在进行中**；DeepSeek harness 风格）----
-            //   `思考 · The user is clarifying something...` —— 标签后面直接跟一行灰字。
-            //   之前是**右对齐 + 斜体**，读起来像"状态栏"；DSH 那张图是
-            //   **紧跟在标签后面**，所以改成左对齐、常规字重、仅灰色弱化。
             if (previewVisible)
               Expanded(
                 child: Text(
@@ -451,6 +446,17 @@ class _StreamStepViewState extends State<StreamStepView> {
               )
             else
               const Spacer(),
+            // 展开箭头在行尾（与工具行同位），无可展开内容时不画
+            if (expandable)
+              AnimatedRotation(
+                turns: _expanded ? 0.5 : 0,
+                duration: const Duration(milliseconds: 200),
+                child: Icon(
+                  AppIcons.chevronDown,
+                  size: 15,
+                  color: h.textFaint,
+                ),
+              ),
           ],
         ),
       ),
@@ -463,7 +469,8 @@ class _StreamStepViewState extends State<StreamStepView> {
   /// 逐字过程中把它们渲染成格式会让文字**跳来跳去**。
   Widget _reasoning(Hue h) {
     return Padding(
-      padding: const EdgeInsets.only(left: HSpace.md),
+      // 缩进到标题行标签起点（23），与工具行明细同一左线
+      padding: const EdgeInsets.only(left: 23),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
@@ -509,9 +516,9 @@ class _StreamStepViewState extends State<StreamStepView> {
   ///
   /// ## 字号
   ///
-  /// 基准 **15**（正文汇报保持不变）；最终回答是 16（用户「总结字体还是小」），
-  /// 工具行 12 —— 三层层级一眼可辨。`MarkdownLite` 内部的标题/列表/代码/表格
-  /// 字号都从基准派生，所以这里不用逐个再调。
+  /// 基准 **15** —— 与最终回答**同一个数**（2026-10-25 晚用户定：
+  /// 全对话正文字号统一，步骤正文与最终回答不许一大一小）。
+  /// `MarkdownLite` 内部的标题/列表/代码/表格字号都从基准派生。
   Widget _body(Hue h) {
     return MarkdownLite(
       // 协议转义（字面量 `\n` / 制表符）先还原，再交给 Markdown 渲染
@@ -580,12 +587,13 @@ class _ToolSubEntryState extends State<_ToolSubEntry> {
     final meta = _meta();
     final change = _fileChange();
     return Padding(
-      padding: const EdgeInsets.only(left: HSpace.md),
+      // 外 7 + 边框 2 + 内 14 ⇒ 文字起点 23，与标题行标签 / 工具行明细同线
+      padding: const EdgeInsets.only(left: 7),
       child: Container(
         decoration: BoxDecoration(
           border: Border(left: BorderSide(color: h.border, width: 2)),
         ),
-        padding: const EdgeInsets.only(left: HSpace.md),
+        padding: const EdgeInsets.only(left: 14),
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [

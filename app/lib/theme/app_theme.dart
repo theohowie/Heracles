@@ -282,8 +282,10 @@ class HSpace {
 class HRadius {
   HRadius._();
   static const sm = 6.0;
-  static const md = 10.0;
-  static const lg = 14.0;
+  // 2026-10-25 晚圆角统一（用户对概念图 08 拍板）：基准整体上调到
+  // 图一的尺度 —— md 10→14、lg 14→20，大卡片一律 xl(24)。
+  static const md = 14.0;
+  static const lg = 20.0;
   /// 大容器圆角（2026-10-12）—— 输入框改为「大容器」形态
   /// （仿 llama.cpp Web UI：+/发送键内嵌容器内部，容器占满宽度）。
   /// 14(lg) 在占满宽度的容器上显得太「方」，参考图是明显的胶囊感。

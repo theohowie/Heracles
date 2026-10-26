@@ -179,18 +179,10 @@ class _FullAccessConfirmSheetState extends State<_FullAccessConfirmSheet> {
   }
 }
 
-/// 审批模式三档的图标（与 input_bar 的 PermissionModeIcon 同一套
-/// Cupertino 盾族；那边是 extension，这边抽屉独立成文件，用函数）。
-IconData permissionModeIcon(PermissionMode mode) => switch (mode) {
-      PermissionMode.manual => CupertinoIcons.checkmark_shield,
-      PermissionMode.workspaceAuto => CupertinoIcons.lock_shield,
-      PermissionMode.fullAccess => CupertinoIcons.exclamationmark_shield,
-    };
-
 /// 审批模式抽屉（原型 10，2026-10-25 按用户「严格按原型图」重做）。
 ///
 /// 结构：抓手 + 标题「审批模式」+ 副标题「危险操作执行前如何确认」
-/// + 三档自定义行（图标 + 名称 + 原型文案说明，当前档高亮带对勾）。
+/// + 三档单选行（圆圈 + 名称 + 原型文案说明，选中深描边 + 实心点）。
 /// 点前两档即选即关；点「完全访问」不关本抽屉，直接在其上叠出
 /// 二次确认抽屉（原型：「同高度新抽屉覆盖原抽屉」），确认后两层
 /// 一起关、取消只关确认层回到三档列表。
@@ -211,16 +203,23 @@ Future<void> showApprovalModeSheet(
   final picked = await showModalBottomSheet<PermissionMode>(
     context: context,
     backgroundColor: h.surfaceAlt,
+    isScrollControlled: true,
     shape: const RoundedRectangleBorder(
       borderRadius: BorderRadius.vertical(top: Radius.circular(24)),
     ),
     builder: (sheetCtx) => SafeArea(
-      child: Padding(
-        padding: const EdgeInsets.fromLTRB(20, 10, 20, 18),
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
+      child: ConstrainedBox(
+        // 矮屏上三档卡片放不下时内部滚动，不溢出（单选卡改高后
+        // 600 高的测试面溢出过 16px —— 小屏真机同理）
+        constraints: BoxConstraints(
+          maxHeight: MediaQuery.sizeOf(sheetCtx).height * 0.88,
+        ),
+        child: Padding(
+          padding: const EdgeInsets.fromLTRB(20, 10, 20, 18),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
             Center(
               child: Container(
                 width: 36,
@@ -246,6 +245,12 @@ Future<void> showApprovalModeSheet(
               style: TextStyle(fontSize: 12, color: h.textFaint),
             ),
             const SizedBox(height: 12),
+            Flexible(
+              child: SingleChildScrollView(
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
             for (final mode in PermissionMode.values) ...[
               _ApprovalModeRow(
                 h: h,
@@ -268,7 +273,12 @@ Future<void> showApprovalModeSheet(
               ),
               const SizedBox(height: 8),
             ],
-          ],
+                  ],
+                ),
+              ),
+            ),
+            ],
+          ),
         ),
       ),
     ),
@@ -278,6 +288,9 @@ Future<void> showApprovalModeSheet(
   }
 }
 
+/// 审批档位行（概念图 10 定式）：单选圆圈 + 标题 + 说明的描边卡片，
+/// 选中 = 深描边 + 圆圈实心点。不用图标、不用右上对勾（用户对着
+/// 真机图一与概念图二拍板改成图二样式）。
 class _ApprovalModeRow extends StatelessWidget {
   const _ApprovalModeRow({
     required this.h,
@@ -295,24 +308,46 @@ class _ApprovalModeRow extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final warn = mode == PermissionMode.fullAccess;
     return GestureDetector(
       onTap: onTap,
       behavior: HitTestBehavior.opaque,
       child: Container(
-        padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
+        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
         decoration: BoxDecoration(
-          color: selected ? h.surface : Colors.transparent,
-          border: Border.all(color: h.border),
-          borderRadius: BorderRadius.circular(14),
+          color: selected ? h.bg : Colors.transparent,
+          border: Border.all(
+            color: selected ? h.text : h.border,
+            width: 2,
+          ),
+          borderRadius: BorderRadius.circular(18),
         ),
         child: Row(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            Icon(
-              permissionModeIcon(mode),
-              size: 23,
-              color: warn ? HColors.warnOn(h.dark) : h.textDim,
+            // 单选圆圈：选中 = 深环 + 实心点
+            Container(
+              width: 22,
+              height: 22,
+              margin: const EdgeInsets.only(top: 1),
+              decoration: BoxDecoration(
+                shape: BoxShape.circle,
+                border: Border.all(
+                  color: selected ? h.text : h.border,
+                  width: 2,
+                ),
+              ),
+              child: selected
+                  ? Center(
+                      child: Container(
+                        width: 11,
+                        height: 11,
+                        decoration: BoxDecoration(
+                          shape: BoxShape.circle,
+                          color: h.text,
+                        ),
+                      ),
+                    )
+                  : null,
             ),
             const SizedBox(width: 12),
             Expanded(
@@ -323,26 +358,22 @@ class _ApprovalModeRow extends StatelessWidget {
                     mode.label,
                     style: TextStyle(
                       fontSize: 15,
-                      fontWeight: selected ? FontWeight.w600 : FontWeight.w400,
+                      fontWeight: FontWeight.w600,
                       color: h.text,
                     ),
                   ),
-                  const SizedBox(height: 2),
+                  const SizedBox(height: 3),
                   Text(
                     description,
                     style: TextStyle(
-                      fontSize: 12.5,
-                      height: 1.45,
+                      fontSize: 13,
+                      height: 1.55,
                       color: h.textFaint,
                     ),
                   ),
                 ],
               ),
             ),
-            if (selected) ...[
-              const SizedBox(width: 8),
-              Icon(CupertinoIcons.checkmark, size: 18, color: h.text),
-            ],
           ],
         ),
       ),
@@ -373,136 +404,187 @@ Future<ApprovalDecision?> showApprovalRequestSheet(
   bool allowStop = false,
 }) {
   final h = Hue.of(context);
+  final hasArgs = argsPreview.trim().isNotEmpty && argsPreview != '（无参数）';
   return showModalBottomSheet<ApprovalDecision>(
     context: context,
     backgroundColor: h.surfaceAlt,
     isDismissible: false,
     enableDrag: false,
+    isScrollControlled: true,
     shape: const RoundedRectangleBorder(
-      borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
+      borderRadius: BorderRadius.vertical(top: Radius.circular(24)),
     ),
     builder: (sheetCtx) => SafeArea(
-      child: Padding(
-        padding: const EdgeInsets.fromLTRB(20, 10, 20, 16),
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Center(
-              child: Container(
-                width: 36,
-                height: 4,
-                decoration: BoxDecoration(
-                  color: h.border,
-                  borderRadius: BorderRadius.circular(999),
-                ),
-              ),
-            ),
-            const SizedBox(height: 16),
-            const Text(
-              '需要你的批准',
-              style: TextStyle(fontSize: 17, fontWeight: FontWeight.w700),
-            ),
-            const SizedBox(height: 12),
-            Text(
-              tool,
-              style: const TextStyle(
-                  fontSize: 15, fontWeight: FontWeight.w600),
-            ),
-            const SizedBox(height: 6),
-            // 参数全文不截断（审批的意义是看清再签字）；过长时内部滚动
-            ConstrainedBox(
-              constraints: BoxConstraints(
-                maxHeight: MediaQuery.sizeOf(sheetCtx).height * 0.35,
-              ),
-              child: SingleChildScrollView(
-                child: Text(
-                  argsPreview,
-                  style: TextStyle(
-                      fontSize: 13.5, height: 1.6, color: h.textDim),
-                ),
-              ),
-            ),
-            if (risk != null) ...[
-              const SizedBox(height: 8),
-              Text(
-                risk,
-                style: TextStyle(
-                    fontSize: 13.5, color: HColors.warnOn(h.dark)),
-              ),
-            ],
-            if (note != null && note.isNotEmpty) ...[
-              const SizedBox(height: 8),
-              Text(
-                note,
-                style: TextStyle(fontSize: 13, height: 1.5, color: h.textDim),
-              ),
-            ],
-            const SizedBox(height: 8),
-            Text(
-              workspaceInside ? '在工作区内操作' : '超出工作区范围',
-              style: TextStyle(fontSize: 12, color: h.textFaint),
-            ),
-            const SizedBox(height: 16),
-            Row(
-              children: [
-                Expanded(
-                  child: CupertinoButton(
-                    padding: const EdgeInsets.symmetric(vertical: 12),
-                    onPressed: () => Navigator.of(sheetCtx)
-                        .pop(ApprovalDecision.deny),
-                    child: Text('拒绝',
-                        style: TextStyle(fontSize: 15, color: h.textDim)),
+      child: ConstrainedBox(
+        // 高度随内容自适应但有上限；中间区可滚、按钮区钉底 ——
+        // 长参数 + 长风险说明也不会再把按钮顶出屏幕（真机溢出 62px 的教训）
+        constraints: BoxConstraints(
+          maxHeight: MediaQuery.sizeOf(sheetCtx).height * 0.88,
+        ),
+        child: Padding(
+          padding: const EdgeInsets.fromLTRB(20, 10, 20, 16),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Center(
+                child: Container(
+                  width: 36,
+                  height: 4,
+                  decoration: BoxDecoration(
+                    color: h.border,
+                    borderRadius: BorderRadius.circular(999),
                   ),
                 ),
-                const SizedBox(width: 8),
-                Expanded(
-                  child: CupertinoButton(
-                    padding: const EdgeInsets.symmetric(vertical: 12),
-                    color: h.text,
-                    onPressed: () => Navigator.of(sheetCtx)
-                        .pop(ApprovalDecision.once),
-                    child: Text(
-                      '允许一次',
-                      style: TextStyle(
-                        fontSize: 15,
-                        fontWeight: FontWeight.w600,
-                        color: h.dark
-                            ? const Color(0xFF0A0A0B)
-                            : Colors.white,
+              ),
+              const SizedBox(height: 16),
+              Row(
+                children: [
+                  Icon(CupertinoIcons.exclamationmark_shield_fill,
+                      size: 21, color: h.text),
+                  const SizedBox(width: 8),
+                  const Text(
+                    '需要你的批准',
+                    style: TextStyle(fontSize: 17, fontWeight: FontWeight.w700),
+                  ),
+                ],
+              ),
+              const SizedBox(height: 12),
+              Text(
+                tool,
+                style: const TextStyle(
+                    fontSize: 15, fontWeight: FontWeight.w600),
+              ),
+              Flexible(
+                child: SingleChildScrollView(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      // 风险说明 = 解释段（概念图 11 的那句话）：中性色，
+                      // 不再整段橙字
+                      if (risk != null) ...[
+                        const SizedBox(height: 8),
+                        Text(
+                          risk,
+                          style: TextStyle(
+                              fontSize: 13.5, height: 1.55, color: h.textDim),
+                        ),
+                      ],
+                      // note（后端 message）正文里嵌着参数全文 —— 黑块已给
+                      // 全文时不再重复渲染（真机上出现过参数印两遍）；
+                      // 没有参数时它就是唯一的说明，照常显示。
+                      if (note != null && note.isNotEmpty && !hasArgs) ...[
+                        const SizedBox(height: 8),
+                        Text(
+                          note,
+                          style: TextStyle(
+                              fontSize: 13, height: 1.5, color: h.textDim),
+                        ),
+                      ],
+                      if (hasArgs) ...[
+                        const SizedBox(height: 12),
+                        // 参数黑块（概念图 11）：等宽字、全文不截断，
+                        // 过长时块内滚动
+                        Container(
+                          width: double.infinity,
+                          padding: const EdgeInsets.all(14),
+                          decoration: BoxDecoration(
+                            color: h.text,
+                            borderRadius: BorderRadius.circular(14),
+                          ),
+                          child: ConstrainedBox(
+                            constraints:
+                                const BoxConstraints(maxHeight: 190),
+                            child: SingleChildScrollView(
+                              child: Text(
+                                argsPreview,
+                                style: TextStyle(
+                                  fontSize: 13,
+                                  height: 1.55,
+                                  fontFamily: kMonoFontFamily,
+                                  fontFamilyFallback: kMonoFallback,
+                                  color: h.bg,
+                                ),
+                              ),
+                            ),
+                          ),
+                        ),
+                      ],
+                      const SizedBox(height: 10),
+                      Text(
+                        workspaceInside ? '在工作区内操作' : '超出工作区范围',
+                        style: TextStyle(fontSize: 12, color: h.textFaint),
                       ),
+                    ],
+                  ),
+                ),
+              ),
+              const SizedBox(height: 16),
+              // 概念图 11 的按钮式样：拒绝 / 允许一次 = 灰钮，
+              // 始终允许 = 黑钮（把「长期授权」做成最重的那一个）
+              Row(
+                children: [
+                  Expanded(
+                    child: _approvalButton(
+                        sheetCtx, h, '拒绝', ApprovalDecision.deny,
+                        filled: false),
+                  ),
+                  const SizedBox(width: 8),
+                  Expanded(
+                    child: _approvalButton(
+                        sheetCtx, h, '允许一次', ApprovalDecision.once,
+                        filled: false),
+                  ),
+                  const SizedBox(width: 8),
+                  Expanded(
+                    child: _approvalButton(
+                        sheetCtx, h, '始终允许', ApprovalDecision.always,
+                        filled: true),
+                  ),
+                ],
+              ),
+              if (allowStop) ...[
+                const SizedBox(height: 4),
+                Center(
+                  child: CupertinoButton(
+                    padding: const EdgeInsets.symmetric(vertical: 8),
+                    onPressed: () => Navigator.of(sheetCtx)
+                        .pop(ApprovalDecision.stop),
+                    child: Text(
+                      '停止任务',
+                      style: TextStyle(
+                          fontSize: 14, color: HColors.errorOn(h.dark)),
                     ),
                   ),
                 ),
-                const SizedBox(width: 8),
-                Expanded(
-                  child: CupertinoButton(
-                    padding: const EdgeInsets.symmetric(vertical: 12),
-                    onPressed: () => Navigator.of(sheetCtx)
-                        .pop(ApprovalDecision.always),
-                    child: Text('始终允许',
-                        style: TextStyle(fontSize: 15, color: h.text)),
-                  ),
-                ),
               ],
-            ),
-            if (allowStop) ...[
-              const SizedBox(height: 4),
-              Center(
-                child: CupertinoButton(
-                  padding: const EdgeInsets.symmetric(vertical: 8),
-                  onPressed: () => Navigator.of(sheetCtx)
-                      .pop(ApprovalDecision.stop),
-                  child: Text(
-                    '停止任务',
-                    style: TextStyle(
-                        fontSize: 14, color: HColors.errorOn(h.dark)),
-                  ),
-                ),
-              ),
             ],
-          ],
+          ),
         ),
+      ),
+    ),
+  );
+}
+
+/// 审批抽屉的按钮（灰 / 黑两式，圆角 14 与参数黑块呼应）
+Widget _approvalButton(
+  BuildContext ctx,
+  Hue h,
+  String label,
+  ApprovalDecision decision, {
+  required bool filled,
+}) {
+  return CupertinoButton(
+    padding: const EdgeInsets.symmetric(vertical: 12),
+    color: filled ? h.text : h.surface,
+    borderRadius: BorderRadius.circular(14),
+    onPressed: () => Navigator.of(ctx).pop(decision),
+    child: Text(
+      label,
+      style: TextStyle(
+        fontSize: 15,
+        fontWeight: filled ? FontWeight.w600 : FontWeight.w400,
+        color: filled ? h.bg : h.text,
       ),
     ),
   );
