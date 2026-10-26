@@ -146,6 +146,7 @@ img { max-width: 100%; display: block; }
 .marquee-static .marquee-track { animation: none; }
 @keyframes marquee { to { transform: translateX(-50%); } }
 .shot { margin: 0; width: 250px; flex: 0 0 auto; }
+.shot.wide { width: 380px; align-self: center; }
 .shot img {
   width: 100%; border-radius: 20px;
   border: 1px solid var(--line);

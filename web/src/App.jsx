@@ -9,10 +9,15 @@ const SHA = 'F9F1E087AEF64D5333E27CDDC8813E51A2F9C4B0886B8A60CA0DAAD85D327DBC'
 const SHOTS = [
   { src: '/Heracles/shots/empty.webp', title: '空态', desc: '想做什么，直接说' },
   { src: '/Heracles/shots/chat.webp', title: '会话', desc: '改文件带 diff，工具调用可展开' },
+  { src: '/Heracles/shots/modelsheet.webp', title: '模型与思考', desc: '一个抽屉切换模型 / 档位 / 轮次' },
+  { src: '/Heracles/shots/perms.webp', title: '设备权限', desc: '六项总览 + 执行路由诊断' },
   { src: '/Heracles/shots/settings.webp', title: '设置·通用', desc: '工作步骤 / 忙时发送 / 最大轮次' },
+  { src: '/Heracles/shots/home.webp', title: '设置首页', desc: '通用 / 记忆 / 权限 / 模型 / 外观' },
   { src: '/Heracles/shots/model.webp', title: '设置·模型', desc: '多家提供商，默认一目了然' },
   { src: '/Heracles/shots/appearance.webp', title: '设置·外观', desc: '深浅 / 四套主题 / 玻璃效果' },
-  { src: '/Heracles/shots/input.webp', title: '输入区', desc: '模型与思考档位胶囊' },
+  { src: '/Heracles/shots/memory.webp', title: '全局记忆', desc: '偏好与项目约定' },
+  { src: '/Heracles/shots/input.webp', title: '输入区', desc: '模型与思考档位胶囊', wide: true },
+  { src: '/Heracles/shots/wsmenu.webp', title: '工作区长按', desc: '新建会话 / 从列表移除', wide: true },
 ]
 
 const FEATURES = [
@@ -157,7 +162,7 @@ function Shots() {
       <div className={`marquee ${reduce ? 'marquee-static' : ''}`}>
         <div className="marquee-track">
           {row.map((s, i) => (
-            <figure className="shot" key={i}>
+            <figure className={`shot${s.wide ? ' wide' : ''}`} key={i}>
               <img src={s.src} alt={s.title} loading="lazy" />
               <figcaption>
                 <strong>{s.title}</strong>
