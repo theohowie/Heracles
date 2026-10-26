@@ -323,21 +323,31 @@ class _InputBarState extends State<InputBar>
                     left: 0,
                     right: 0,
                     bottom: 0,
-                    // 信息条高 44 + 与白卡重叠 14
-                    height: 58,
+                    // 信息条高 44 + 与白卡重叠 12
+                    height: 56,
                     child: DecoratedBox(
                       decoration: BoxDecoration(
                         color: h.dark
                             ? h.surface
                             : Color.alphaBlend(
-                                Colors.black.withValues(alpha: 0.07),
+                                Colors.black.withValues(alpha: 0.055),
                                 h.surface),
-                        borderRadius: BorderRadius.circular(28),
+                        // ★ 6 圆角要「读得出」：台阶角必须在重叠带内
+                        // 走完弧线 —— 上圆角 14（小、完整露在台阶上），
+                        // 下圆角 28；旧版全 28 时弧线大半被白卡盖住，
+                        // 台阶看起来是直角（用户实报）。阴影同步放软，
+                        // 让托盘颜色退后、不抢轮廓。
+                        borderRadius: const BorderRadius.only(
+                          topLeft: Radius.circular(14),
+                          topRight: Radius.circular(14),
+                          bottomLeft: Radius.circular(28),
+                          bottomRight: Radius.circular(28),
+                        ),
                         boxShadow: [
                           BoxShadow(
                             color: Colors.black
-                                .withValues(alpha: h.dark ? 0.30 : 0.10),
-                            blurRadius: 12,
+                                .withValues(alpha: h.dark ? 0.30 : 0.07),
+                            blurRadius: 14,
                             offset: const Offset(0, 4),
                           ),
                         ],
@@ -351,7 +361,9 @@ class _InputBarState extends State<InputBar>
                         padding: const EdgeInsets.symmetric(horizontal: 5),
                         child: Container(
                           decoration: BoxDecoration(
-                            color: h.surfaceAlt,
+                            // 图二的卡是纯白（浅色 surfaceAlt=#F0F0F0 显灰）；
+                            // 深色沿用 surfaceAlt（比底色亮一档即是它的白）
+                            color: h.dark ? h.surfaceAlt : Colors.white,
                             borderRadius: BorderRadius.circular(24),
                             border: Border.all(color: h.border),
                             boxShadow: [
@@ -404,7 +416,11 @@ class _InputBarState extends State<InputBar>
                         ),
                       ),
                     ),
-                    // ---- 底行：＋ / 权限 / 模型胶囊 / 发送 ----
+                    // ---- 底行：＋(小) / 模型胶囊 / 权限盾 / 发送 ----
+                    //
+                    // 2026-10-26 对图二（TRAE）再对齐：＋是小圆钮带灰底；
+                    // 权限盾挪到人家麦克风的位置（发送键左边），麦克风
+                    // 不做（用户早已明说不要）；发送键恒黑底白箭头。
                     //
                     // ★ 发送键语义与图标一致（2026-10-13 定）：
                     //   空闲 → 发送；忙 + 无内容 → 停止；忙 + 有内容 →
@@ -420,13 +436,6 @@ class _InputBarState extends State<InputBar>
                                 widget.enabled ? widget.onPickAttachment : null,
                           ),
                           const SizedBox(width: 8),
-                          _PermissionIconButton(
-                            permission: widget.permission,
-                            h: h,
-                            enabled: widget.enabled,
-                            onPicked: widget.onPermissionChanged,
-                          ),
-                          const SizedBox(width: 10),
                           Flexible(
                             child: _ModelSelector(
                               label: widget.providerLabel,
@@ -442,7 +451,14 @@ class _InputBarState extends State<InputBar>
                             ),
                           ),
                           const SizedBox(width: 10),
-                          _SendButton(
+_PermissionIconButton(
+                            permission: widget.permission,
+                            h: h,
+                            enabled: widget.enabled,
+                            onPicked: widget.onPermissionChanged,
+                          ),
+                          const SizedBox(width: 8),
+                                                    _SendButton(
                             enabled: (_hasText ||
                                     widget.attachments.isNotEmpty) &&
                                 widget.enabled,
@@ -818,13 +834,13 @@ class _SendButton extends StatelessWidget {
       duration: const Duration(milliseconds: 150),
       width: 46,
       height: 46,
-      // ★ 圆形（2026-10-12，参考图：发送键是圆的）
-      // 2026-10-25：原型 01 发送键 = 实心圆 + 反色箭头。旧版 accent 底
-      // 配深棕图标，在黑白主题下糊成一团（真机截图：黑圆里一团黑）。
+      // ★ 圆形 + 恒黑底白箭头（2026-10-26 对图二定）：不再随可用态
+      // 变灰 —— 图二的发送键永远是主色实心圆。深色下 h.text 是白，
+      // 即白底黑箭头（反色），同样恒定。
       decoration: BoxDecoration(
-        color: active ? h.text : h.surface,
+        color: h.text,
         shape: BoxShape.circle,
-        border: Border.all(color: active ? h.text : h.border),
+        border: Border.all(color: h.text),
       ),
       child: Material(
         color: Colors.transparent,
@@ -843,9 +859,7 @@ class _SendButton extends StatelessWidget {
                     : CupertinoIcons.hourglass)
                 : AppIcons.send,
             size: 21,
-            color: active
-                ? (h.dark ? const Color(0xFF0A0A0B) : Colors.white)
-                : h.textFaint,
+            color: h.dark ? const Color(0xFF0A0A0B) : Colors.white,
           ),
         ),
       ),
@@ -873,8 +887,9 @@ class _CircleButton extends StatelessWidget {
       borderRadius: BorderRadius.circular(999),
       enabled: active,
       child: SizedBox(
-      width: 46,
-      height: 46,
+      // 图二的 ＋ 是小圆钮（38）带浅灰底，与白色卡面拉开层次
+      width: 38,
+      height: 38,
       child: Material(
         color: h.surface,
         shape: const CircleBorder(
@@ -885,7 +900,7 @@ class _CircleButton extends StatelessWidget {
           customBorder: const CircleBorder(),
           child: Icon(
             icon,
-            size: 23,
+            size: 19,
             color: active ? h.textDim : h.textFaint,
           ),
         ),
@@ -930,8 +945,8 @@ class _PermissionIconButton extends StatelessWidget {
       borderRadius: BorderRadius.circular(999),
       enabled: enabled,
       child: SizedBox(
-      width: 34,
-      height: 46,
+      width: 38,
+      height: 38,
       child: Material(
         color: Colors.transparent,
         child: InkWell(
