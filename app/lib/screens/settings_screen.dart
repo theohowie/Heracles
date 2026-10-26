@@ -3,6 +3,9 @@ import 'dart:io';
 
 import 'package:flutter/cupertino.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
+
+import 'package:package_info_plus/package_info_plus.dart';
 
 import '../models/settings.dart';
 import '../services/agent_bridge.dart';
@@ -2056,14 +2059,17 @@ class _ProviderEditPageState extends State<ProviderEditPage> {
           // 不是假装 —— 见 ProviderProtocol 的 doc 与 AgentBridge 分派。
           //
           // ## 顺序按参考图：API 地址 → API 协议 → API 密钥
+          // 间距与 _Field 完全一致（组间 bottom lg、标签下 sm）——
+          // 旧版这里用 top sm + xs，协议与 API Key 贴脸、与 Base URL
+          // 又过开（2026-10-26 用户报间距不齐）。
           Padding(
-            padding: const EdgeInsets.only(top: HSpace.sm),
+            padding: const EdgeInsets.only(bottom: HSpace.lg),
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
                 Text('API 协议',
                     style: TextStyle(fontSize: 12.5, color: h.textDim)),
-                const SizedBox(height: HSpace.xs),
+                const SizedBox(height: HSpace.sm),
                 Container(
                   padding: const EdgeInsets.symmetric(horizontal: HSpace.md),
                   decoration: BoxDecoration(
@@ -2076,20 +2082,15 @@ class _ProviderEditPageState extends State<ProviderEditPage> {
                         0, kMinInteractiveDimensionCupertino),
                     alignment: Alignment.centerLeft,
                     onPressed: () async {
-                      final p = await showCupertinoModalPopup<ProviderProtocol>(
-                        context: context,
-                        builder: (sheetCtx) => CupertinoActionSheet(
-                          title: const Text('API 协议'),
-                          actions: [
-                            for (final o in ProviderProtocol.values)
-                              CupertinoActionSheetAction(
-                                isDefaultAction: o == _protocol,
-                                onPressed: () =>
-                                    Navigator.of(sheetCtx).pop(o),
-                                child: Text(o.label),
-                              ),
-                          ],
-                        ),
+                      // 旧 CupertinoActionSheet 弹窗退役（2026-10-26
+                      // 用户报「还是古老 UI」）→ 与审批模式同款的
+                      // bw 单选抽屉。
+                      final p = await showBwRadioSheet<ProviderProtocol>(
+                        context,
+                        title: 'API 协议',
+                        options: ProviderProtocol.values,
+                        current: _protocol,
+                        labelOf: (o) => o.label,
                       );
                       if (p != null) setState(() => _protocol = p);
                     },
@@ -2745,40 +2746,288 @@ class _ThemeCard extends StatelessWidget {
       );
 }
 
-class AboutPage extends StatelessWidget {
+class AboutPage extends StatefulWidget {
   const AboutPage({super.key});
+
+  @override
+  State<AboutPage> createState() => _AboutPageState();
+}
+
+class _AboutPageState extends State<AboutPage> {
+  /// 真实版本号（2026-10-26 用户令：不要静态写死）——运行时从
+  /// 应用包信息读（即 pubspec 的 version），打包升版自动跟随。
+  String _version = '';
+  String _build = '';
+
+  @override
+  void initState() {
+    super.initState();
+    PackageInfo.fromPlatform().then((info) {
+      if (mounted) {
+        setState(() {
+          _version = info.version;
+          _build = info.buildNumber;
+        });
+      }
+    }).catchError((_) {});
+  }
+
+  static const _repoUrl = 'https://github.com/theohowie/Heracles';
+  static const _issuesUrl = 'https://github.com/theohowie/Heracles/issues';
+
+  void _copy(BuildContext context, String text) {
+    Clipboard.setData(ClipboardData(text: text));
+    ScaffoldMessenger.of(context).showSnackBar(
+      const SnackBar(
+        content: Text('链接已复制'),
+        duration: Duration(seconds: 1),
+      ),
+    );
+  }
 
   @override
   Widget build(BuildContext context) {
     final h = Hue.of(context);
     return Scaffold(
       appBar: AppBar(title: Text('关于'), leading: _iosBackLeading(context)),
-      body: Padding(
-        padding: const EdgeInsets.all(HSpace.xl),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Text(
-              'Heracles',
-              style: TextStyle(
-                fontSize: 26,
-                fontWeight: FontWeight.w700,
-                letterSpacing: -0.6,
-                color: h.text,
+      body: ListView(
+        padding: const EdgeInsets.fromLTRB(20, 8, 20, 28),
+        children: [
+          // ---- 头部：图标 + 名称 + 一句话 + 版本 ----
+          Row(
+            children: [
+              ClipRRect(
+                borderRadius: BorderRadius.circular(17),
+                child: Image.asset(
+                  'assets/branding/app_icon_source.png',
+                  width: 64,
+                  height: 64,
+                  fit: BoxFit.cover,
+                ),
               ),
+              const SizedBox(width: 14),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      'Heracles',
+                      style: TextStyle(
+                        fontSize: 24,
+                        fontWeight: FontWeight.w700,
+                        letterSpacing: -0.5,
+                        color: h.text,
+                      ),
+                    ),
+                    const SizedBox(height: 2),
+                    Text('手机上的开发智能体',
+                        style: TextStyle(fontSize: 13, color: h.textDim)),
+                    const SizedBox(height: 4),
+                    Text(_version.isEmpty ? '版本 —' : '版本 $_version',
+                        style: TextStyle(fontSize: 12, color: h.textFaint)),
+                  ],
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 20),
+          Text(
+            'Heracles 是一个装在手机里的开发智能体：一句话说清需求，'
+            '它就在你的手机上读文件、改代码、跑命令，把 App 构建、解包、'
+            '重打包成能直接安装的成品——从想法到装上手机，一台手机全搞定。',
+            style: TextStyle(fontSize: 15, height: 1.65, color: h.text),
+          ),
+          const SizedBox(height: 24),
+          _AboutSection(
+            title: '它能做什么',
+            children: [
+              _AboutFeature(
+                icon: CupertinoIcons.hammer_fill,
+                title: '在手机上开发',
+                body: '把项目文件夹设为工作区，它读代码、改文件、跑命令；'
+                    '改动先以 diff 呈现，你确认后才落盘。',
+              ),
+              _AboutFeature(
+                icon: CupertinoIcons.cube_box_fill,
+                title: '本机构建与改包',
+                body: '无需电脑和 Gradle，在手机上完成编译、打包、签名，'
+                    '产出可安装的 APK；也能解包、修改、重打包现有应用。',
+              ),
+              _AboutFeature(
+                icon: CupertinoIcons.list_bullet,
+                title: '任务计划看得见',
+                body: '复杂任务自动拆成步骤，进度挂在屏幕顶部的灵动岛上，'
+                    '走到哪一步、还剩什么，随时可看可调整。',
+              ),
+              _AboutFeature(
+                icon: CupertinoIcons.doc_text_fill,
+                title: '记得住你的习惯',
+                body: '偏好、背景与项目约定会被结构化记住，新会话自动带上；'
+                    '所有记忆都可查、可改、可删。',
+              ),
+              _AboutFeature(
+                icon: CupertinoIcons.link,
+                title: '接入你自己的模型',
+                body: '自带 API Key 接入云端大模型，支持 OpenAI 兼容与 '
+                    'Anthropic 两种协议，思考等级可调。',
+              ),
+            ],
+          ),
+          const SizedBox(height: 20),
+          _AboutSection(
+            title: '安全与隐私',
+            children: [
+              _AboutFeature(
+                icon: CupertinoIcons.lock_fill,
+                title: 'Key 只存在这台手机上',
+                body: '你的 API Key 只保存在本机，不经过任何中转服务器。',
+              ),
+              _AboutFeature(
+                icon: CupertinoIcons.checkmark_shield_fill,
+                title: '危险操作先经你确认',
+                body: '删除文件、执行命令等操作默认先弹窗征得同意；'
+                    '三档权限模式，放行程度由你决定。',
+              ),
+              _AboutFeature(
+                icon: CupertinoIcons.eye_fill,
+                title: '数据去向透明',
+                body: 'Heracles 没有自己的服务器，不收集你的数据；'
+                    '代码只会发送给你自己配置的模型服务商。',
+              ),
+            ],
+          ),
+          const SizedBox(height: 20),
+          _AboutSection(
+            title: '开源与反馈',
+            children: [
+              _CardRow(
+                title: 'GitHub 仓库',
+                value: 'theohowie/Heracles',
+                onTap: () => _copy(context, _repoUrl),
+              ),
+              _CardRow(
+                title: '问题反馈',
+                value: 'GitHub Issues',
+                onTap: () => _copy(context, _issuesUrl),
+              ),
+              const _CardRow(title: '开源许可证', value: '见仓库 LICENSE'),
+            ],
+          ),
+          const SizedBox(height: 20),
+          _AboutSection(
+            title: '版本信息',
+            children: [
+              _CardRow(title: '当前版本', value: _version.isEmpty ? '—' : _version),
+              if (_build.isNotEmpty)
+                _CardRow(title: '构建号', value: _build),
+              const _CardRow(title: '运行平台', value: 'Android'),
+              const _CardRow(title: '开发框架', value: 'Flutter · Dart'),
+            ],
+          ),
+          const SizedBox(height: 26),
+          Text(
+            '© 2026 Heracles 项目 · 开源软件',
+            textAlign: TextAlign.center,
+            style: TextStyle(fontSize: 12, color: h.textFaint),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+/// 关于页的分组：小标签 + 一张圆角卡（与设置页同一套语言）。
+class _AboutSection extends StatelessWidget {
+  const _AboutSection({required this.title, required this.children});
+
+  final String title;
+  final List<Widget> children;
+
+  @override
+  Widget build(BuildContext context) {
+    final h = Hue.of(context);
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Padding(
+          padding: const EdgeInsets.only(left: 4, bottom: 8),
+          child: Text(
+            title,
+            style: TextStyle(
+              fontSize: 13,
+              fontWeight: FontWeight.w600,
+              color: h.textFaint,
             ),
-            SizedBox(height: HSpace.xs),
-            Text('手机上的开发智能体',
-                style: TextStyle(fontSize: 13, color: h.textDim)),
-            SizedBox(height: HSpace.xl),
-            Text(
-              '把 Codex 做成安卓版。\n'
-              '接入你自己的云端大模型 API，Key 只存在这台手机上。',
-              style: TextStyle(
-                  fontSize: 13.5, color: h.textDim, height: 1.7),
-            ),
-          ],
+          ),
         ),
+        Container(
+          decoration: BoxDecoration(
+            color: h.surfaceAlt,
+            borderRadius: BorderRadius.circular(HRadius.xl),
+          ),
+          padding: const EdgeInsets.symmetric(vertical: 6),
+          child: Column(children: children),
+        ),
+      ],
+    );
+  }
+}
+
+/// 关于页的功能行：图标砖 + 标题 + 一句说明。
+class _AboutFeature extends StatelessWidget {
+  const _AboutFeature({
+    required this.icon,
+    required this.title,
+    required this.body,
+  });
+
+  final IconData icon;
+  final String title;
+  final String body;
+
+  @override
+  Widget build(BuildContext context) {
+    final h = Hue.of(context);
+    return Padding(
+      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 9),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Container(
+            width: 38,
+            height: 38,
+            decoration: BoxDecoration(
+              color: h.bg,
+              borderRadius: BorderRadius.circular(12),
+            ),
+            child: Icon(icon, size: 19, color: h.text),
+          ),
+          const SizedBox(width: 12),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  title,
+                  style: TextStyle(
+                    fontSize: 15,
+                    fontWeight: FontWeight.w600,
+                    color: h.text,
+                  ),
+                ),
+                const SizedBox(height: 2),
+                Text(
+                  body,
+                  style: TextStyle(
+                    fontSize: 12.5,
+                    height: 1.5,
+                    color: h.textDim,
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ],
       ),
     );
   }

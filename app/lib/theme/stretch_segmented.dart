@@ -159,10 +159,10 @@ class _StretchSegmentedState extends State<StretchSegmented>
     // 块的实际矩形：向左长时左缘要再往左让出凸起
     final leftSegs = _dir < 0 ? _pos - _bulge : _pos;
     return Container(
-      padding: const EdgeInsets.all(3),
+      padding: const EdgeInsets.all(4),
       decoration: BoxDecoration(
         color: widget.trackColor,
-        borderRadius: BorderRadius.circular(12),
+        borderRadius: BorderRadius.circular(14),
       ),
       child: LayoutBuilder(
         builder: (context, c) {
@@ -188,7 +188,7 @@ class _StretchSegmentedState extends State<StretchSegmented>
                   child: DecoratedBox(
                     decoration: BoxDecoration(
                       color: widget.blockColor,
-                      borderRadius: BorderRadius.circular(9),
+                      borderRadius: BorderRadius.circular(10),
                       boxShadow: widget.blockShadow,
                     ),
                   ),

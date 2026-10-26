@@ -911,7 +911,8 @@ class _CircleButton extends StatelessWidget {
       width: 38,
       height: 38,
       child: Material(
-        color: h.surfaceAlt,
+        // 深色卡面本身就是 surfaceAlt，钮底同色会消失 → 提亮一档
+        color: h.dark ? const Color(0xFF2C2C2E) : h.surfaceAlt,
         shape: const CircleBorder(
           side: BorderSide(color: Colors.transparent),
         ),
@@ -1059,7 +1060,8 @@ class _ModelSelector extends StatelessWidget {
     // 胶囊外形（2026-10-26 TRAE 式）：浅灰实心、无边框无投影 ——
     // 卡面是 surfaceAlt，胶囊用 surface 正好沉一档。
     BoxDecoration pillDeco() => BoxDecoration(
-          color: h.surfaceAlt,
+          // 深色卡面 = surfaceAlt，胶囊同色看不见 → 提亮一档（2C2C2E）
+          color: h.dark ? const Color(0xFF2C2C2E) : h.surfaceAlt,
           borderRadius: BorderRadius.circular(HRadius.pill),
         );
     // 单枚胶囊：模型名 + ⌄（思考等级在模型抽屉里调，胶囊上不再显）。
