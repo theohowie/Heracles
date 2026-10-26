@@ -5,7 +5,7 @@ const APK = 'https://github.com/theohowie/Heracles/releases/download/v0.2.1/Hera
 const RELEASES = 'https://github.com/theohowie/Heracles/releases'
 const REPO = 'https://github.com/theohowie/Heracles'
 const GITEE = 'https://gitee.com/theohowie/heracles'
-const SHA = 'F9F1E087AEF64D5333E27CDDC8813E51A2F9C4B0886B8A60CA0DAAD85D327DBC'
+const SHA = '9A1227BA4A6ADDABC3997A5065C4AF0FBBF67B39E5DBD55EA8C746B2275944FB'
 
 /* ---------- 内联 SVG 图标（全站不用 emoji） ---------- */
 const Icon = ({ d, size = 22 }) => (
@@ -130,7 +130,7 @@ function Hero() {
           <motion.div className="cta" initial={reduce ? false : { opacity: 0, y: 16 }} animate={{ opacity: 1, y: 0 }}
             transition={{ duration: 0.7, delay: 0.2 }}>
             <a className="btn btn-primary btn-lg" href={APK} download>
-              <Icon d={ICONS.download} size={18} /> 下载 v0.2.1（20.6 MB）
+              <Icon d={ICONS.download} size={18} /> 下载 v0.2.1（20.9 MB）
             </a>
             <a className="btn btn-ghost btn-lg" href={REPO} target="_blank" rel="noreferrer">
               查看源码 <Icon d={ICONS.arrow} size={18} />
@@ -279,7 +279,7 @@ function Download() {
       <Reveal>
         <div className="dl">
           <h2>装到手机上试用</h2>
-          <p className="dl-sub">release 构建 · 20.6 MB · 包名 com.theohowie.heracles</p>
+          <p className="dl-sub">release 构建 · 20.9 MB · 包名 com.theohowie.heracles</p>
           <a className="btn btn-primary btn-xl" href={APK} download>
             <Icon d={ICONS.download} size={20} /> 下载 APK
           </a>

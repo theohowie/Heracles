@@ -7,9 +7,9 @@
 
 模型用**你自己的 API Key**（BYOK）跑在云端，手机上不加载任何模型。
 
-> **版本 v0.2.0** · **Android 12（API 31）+ · arm64** · **GPL-3.0**
+> **版本 v0.2.1** · **Android 12（API 31）+ · arm64** · **GPL-3.0**
 >
-> 📖 图文简介与快速开始：**https://theohowie.github.io/Heracles/** ｜ ⬇️ [**下载 APK**](https://github.com/theohowie/Heracles/releases/download/v0.2.0/Heracles-v0.2.0.apk)（点即下载）
+> 📖 图文简介与快速开始：**https://theohowie.github.io/Heracles/** ｜ ⬇️ [**下载 APK**](https://github.com/theohowie/Heracles/releases/download/v0.2.1/Heracles-v0.2.1.apk)（点即下载）
 >
 > **alpha 阶段**：接口、UI、工具面都还会变。能用的与还不能用的，见 [功能与限制](#功能与限制)。
 
@@ -19,11 +19,11 @@
 
 | 方式 | 说明 |
 |---|---|
-| **直接下载** | **[`Heracles-v0.2.0.apk`](https://github.com/theohowie/Heracles/releases/download/v0.2.0/Heracles-v0.2.0.apk)** · **20.6 MB** · 点击即开始下载 |
+| **直接下载** | **[`Heracles-v0.2.1.apk`](https://github.com/theohowie/Heracles/releases/download/v0.2.1/Heracles-v0.2.1.apk)** · **20.9 MB** · 点击即开始下载 |
 | **其它版本 / 校验值** | [Releases 列表](https://github.com/theohowie/Heracles/releases) |
 | **自己构建** | 见 [从源码构建](#从源码构建) |
 
-- 校验（可选）：`sha256 = F9F1E087AEF64D5333E27CDDC8813E51A2F9C4B0886B8A60CA0DAAD85D327DBC`
+- 校验（可选）：`sha256 = 9A1227BA4A6ADDABC3997A5065C4AF0FBBF67B39E5DBD55EA8C746B2275944FB`
 - ⚠️ **只支持 arm64（arm64-v8a）机型**：Flutter 引擎 `libflutter.so` / `libapp.so` **只打包了 arm64-v8a**；
   包内另有两个插件的 `armeabi-v7a` / `x86_64` `.so`（合计约 0.2 MB），所以 `aapt2 dump badging` 会显示三个 ABI，
   但**32 位手机装上也起不来**（见 [已知问题](#已知问题)）。
