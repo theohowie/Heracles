@@ -275,13 +275,22 @@ class _InputBarState extends State<InputBar>
                 HSpace.md, HSpace.sm + 2, HSpace.md, HSpace.md,
               ),
               child: Stack(
+                // 光晕要溢出本组边界（四周等宽），不能被裁
+                clipBehavior: Clip.none,
                 children: [
-                  // ---- 生成中弥散光晕（卡背后，呼吸）----
+                  // ---- 生成中弥散光晕（卡背后，呼吸，彩虹）----
+                  //
+                  // ★ 四周等宽（2026-10-26 用户实报「四周光晕宽度
+                  // 不一样」）：旧版是贴底的径向渐变（光集中在底部、
+                  // 两侧宽度随位置变）。新版光源 = 白卡轮廓向外均匀
+                  // 扩 12 的圆角矩形（填彩虹线性渐变），再做对称高斯
+                  // 模糊 —— 模糊对四边一视同仁，晕带自然等宽。
                   Positioned(
-                    left: 0,
-                    right: 0,
-                    bottom: -8,
-                    height: 118,
+                    left: -12,
+                    right: -12,
+                    top: -12,
+                    // 白卡下沿在整组底部往上 44（信息条带）处
+                    bottom: 44 - 12,
                     child: IgnorePointer(
                       child: AnimatedOpacity(
                         opacity: _glowActive ? 1 : 0,
@@ -291,23 +300,21 @@ class _InputBarState extends State<InputBar>
                           builder: (context, _) {
                             final breathe =
                                 0.55 + 0.30 * math.sin(_glow.value * 2 * math.pi);
-                            final base = h.glowColors.isNotEmpty
-                                ? h.glowColors.first
-                                : h.text;
                             return Opacity(
                               opacity: breathe,
                               child: ImageFiltered(
                                 imageFilter: ui.ImageFilter.blur(
-                                    sigmaX: 24, sigmaY: 24),
+                                    sigmaX: 18, sigmaY: 18),
                                 child: Container(
                                   decoration: BoxDecoration(
-                                    gradient: RadialGradient(
-                                      center: const Alignment(0, 0.9),
-                                      radius: 1.1,
+                                    borderRadius: BorderRadius.circular(36),
+                                    gradient: LinearGradient(
+                                      begin: Alignment.topLeft,
+                                      end: Alignment.bottomRight,
                                       colors: [
-                                        base.withValues(
-                                            alpha: h.dark ? 0.30 : 0.20),
-                                        base.withValues(alpha: 0),
+                                        for (final c in kRainbowGlow)
+                                          c.withValues(
+                                              alpha: h.dark ? 0.50 : 0.38),
                                       ],
                                     ),
                                   ),
@@ -319,30 +326,24 @@ class _InputBarState extends State<InputBar>
                       ),
                     ),
                   ),
-                  Positioned(
-                    left: 0,
-                    right: 0,
-                    bottom: 0,
-                    // 信息条高 44 + 与白卡重叠 12
-                    height: 56,
+                  // ★ 托盘 = 与白卡**等宽**的第二层卡片，整块垫底，
+                  // 只露出卡下沿的信息条带（2026-10-26 用户看 TRAE
+                  // 特写点破：人家是两层等宽卡片错位叠放——后面那层
+                  // 往下错开，露出的部分就是托盘；我旧版让托盘左右
+                  // 各宽 5px 出台阶，用户评「太胖了」）。圆角与卡同为
+                  // 24，外轮廓就是一个完整的圆角矩形；先前数的 6 个
+                  // 圆角 = 外轮廓 4 + 白卡下沿两角的内弧 2。
+                  Positioned.fill(
                     child: DecoratedBox(
                       decoration: BoxDecoration(
                         color: h.dark
                             ? h.surface
                             : Color.alphaBlend(
-                                Colors.black.withValues(alpha: 0.12),
+                                // 灰度按 TRAE 特写实测：托盘 231 vs
+                                // 页面 245，约压 6.5% 黑（v3 的 12% 太重）
+                                Colors.black.withValues(alpha: 0.065),
                                 h.surface),
-                        // ★ 6 圆角要「读得出」：台阶角必须在重叠带内
-                        // 走完弧线 —— 上圆角 14（小、完整露在台阶上），
-                        // 下圆角 28；旧版全 28 时弧线大半被白卡盖住，
-                        // 台阶看起来是直角（用户实报）。阴影同步放软，
-                        // 让托盘颜色退后、不抢轮廓。
-                        borderRadius: const BorderRadius.only(
-                          topLeft: Radius.circular(14),
-                          topRight: Radius.circular(14),
-                          bottomLeft: Radius.circular(28),
-                          bottomRight: Radius.circular(28),
-                        ),
+                        borderRadius: BorderRadius.circular(24),
                         boxShadow: [
                           // 阴影只留一层很淡的：卡与托盘各挂一层时，
                           // 两层方形晕叠在托盘带上，用户连着两次看成
@@ -362,7 +363,7 @@ class _InputBarState extends State<InputBar>
                     mainAxisSize: MainAxisSize.min,
                     children: [
                       Padding(
-                        padding: const EdgeInsets.symmetric(horizontal: 5),
+                        padding: EdgeInsets.zero, // 与托盘等宽（见托盘注释），不再左右让位
                         child: Container(
                           decoration: BoxDecoration(
                             // 图二的卡是纯白（浅色 surfaceAlt=#F0F0F0 显灰）；
@@ -489,8 +490,8 @@ _PermissionIconButton(
                   ),
                   // ---- 生成中旋转流光描边（贴白卡轮廓）----
                   Positioned(
-                    left: 5,
-                    right: 5,
+                    left: 0,
+                    right: 0,
                     top: 0,
                     bottom: 44,
                     child: IgnorePointer(
@@ -501,9 +502,7 @@ _PermissionIconButton(
                           painter: _FlowBorderPainter(
                             progress: _glow,
                             radius: 24,
-                            colors: h.glowColors.isNotEmpty
-                                ? h.glowColors
-                                : [h.text],
+                            colors: kRainbowGlow,
                           ),
                         ),
                       ),
@@ -1207,6 +1206,21 @@ class _QueuedRow extends StatelessWidget {
 /// 动态弥散光晕边框）：一条渐变光弧沿圆角矩形边框缓慢旋转
 /// （SweepGradient + GradientRotation），黑白主题下是单色微光，
 /// 极光/活力主题下用主题的光晕色组。
+/// 生成中流光描边 + 弥散光晕共用的彩虹色带（2026-10-26 用户指定
+/// 试彩虹色：原单色/主题色「看不清」）。首尾同色，SweepGradient
+/// 整圈旋转时接缝不跳。
+const List<Color> kRainbowGlow = [
+  Color(0xFFFF3B30),
+  Color(0xFFFF9500),
+  Color(0xFFFFCC00),
+  Color(0xFF34C759),
+  Color(0xFF32ADE6),
+  Color(0xFF007AFF),
+  Color(0xFFAF52DE),
+  Color(0xFFFF2D92),
+  Color(0xFFFF3B30),
+];
+
 class _FlowBorderPainter extends CustomPainter {
   _FlowBorderPainter({
     required this.progress,

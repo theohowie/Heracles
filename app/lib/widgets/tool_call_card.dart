@@ -31,8 +31,13 @@ import '../theme/cupertino_kit.dart';
 /// 改一处两行一起变，不会再出现"各自微调后又不齐"。
 ///
 /// ⚠️ 改这组值之前先确认**两处都跟着变**：这里是唯一真相源。
-const double kStepRowArrowSize = 18.0;
-const double kStepRowArrowGap = HSpace.xs;
+// ★ 展开箭头已退役（2026-10-26 用户令：所有工具行的展开箭头都
+// 去掉、包括合并行的 > 与步骤行的 ∨，且全部行左侧对齐）。箭头槽
+// 归零后，所有引用这两个常量的对齐点（分析行占位、展开明细缩进）
+// 自动跟随左移，状态图标成一列 —— 行仍可点按展开明细，只是不画
+// 箭头。常量保留是为让那套共享几何继续成立，不要删。
+const double kStepRowArrowSize = 0.0;
+const double kStepRowArrowGap = 0.0;
 const double kStepRowStatusSize = 14.0;
 const double kStepRowStatusGap = 6.0;
 const double kStepRowHPad = HSpace.sm;
@@ -208,12 +213,6 @@ class ToolGroupRow extends StatelessWidget {
           ),
           child: Row(
             children: [
-              Icon(
-                expanded ? AppIcons.chevronDown : AppIcons.chevronRight,
-                size: kStepRowArrowSize,
-                color: h.textFaint,
-              ),
-              const SizedBox(width: kStepRowArrowGap),
               Icon(
                 AppIcons.terminal,
                 size: kStepRowStatusSize,
@@ -645,21 +644,8 @@ class _ToolCallCardState extends State<ToolCallCard> {
                 ),
                 child: Row(
                   children: [
-                    // ★ 左侧箭头（用户要的那个"能展开"的样子）
-                    //
-                    // 没有可展开内容时**仍然占位** —— 否则同一列的对齐会跳，
-                    // 一屏工具行左右参差，看着像渲染错。
-                    if (hasBody)
-                      Icon(
-                        _expanded
-                            ? AppIcons.chevronDown
-                            : AppIcons.chevronRight,
-                        size: kStepRowArrowSize,
-                        color: h.textFaint,
-                      )
-                    else
-                      const SizedBox(width: kStepRowArrowSize),
-                    const SizedBox(width: kStepRowArrowGap),
+                    // （展开箭头已退役，见 kStepRowArrowSize 注释：
+                    // 状态图标直接顶到左列，全行左对齐）
                     Icon(icon, size: kStepRowStatusSize, color: color),
                     const SizedBox(width: kStepRowStatusGap),
                     Flexible(
@@ -944,13 +930,6 @@ class _ToolCallCardState extends State<ToolCallCard> {
                   style: TextStyle(fontSize: 10.5, color: h.textFaint),
                 ),
                 const Spacer(),
-                Icon(
-                  _diffExpanded
-                      ? AppIcons.chevronUp
-                      : AppIcons.chevronDown,
-                  size: 17,
-                  color: h.textFaint,
-                ),
               ],
             ),
           ),
