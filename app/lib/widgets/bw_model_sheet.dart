@@ -150,34 +150,37 @@ Future<void> showModelSheet(
                 style: HTxt.sectionTitle.copyWith(color: h.text),
               ),
               const SizedBox(height: 10),
-              if (levelsEffective)
-                _SegBar(
-                  h: h,
-                  labels: [for (final v in ReasoningLevel.values) v.label],
-                  selected: ReasoningLevel.values.indexOf(reasoningLevel),
-                  onSelected: (i) {
-                    final v = ReasoningLevel.values[i];
-                    Navigator.of(sheetCtx).pop();
-                    if (v != reasoningLevel) {
-                      onReasoningLevelChanged?.call(v);
-                    }
-                  },
-                )
-              else
-                _SegBar(
-                  h: h,
-                  labels: const ['关', '开'],
-                  selected: reasoningLevel == ReasoningLevel.off ? 0 : 1,
-                  onSelected: (i) {
-                    Navigator.of(sheetCtx).pop();
-                    if (i == 0 && reasoningLevel != ReasoningLevel.off) {
-                      onReasoningLevelChanged?.call(ReasoningLevel.off);
-                    }
-                    if (i == 1 && reasoningLevel == ReasoningLevel.off) {
-                      onReasoningLevelChanged?.call(ReasoningLevel.auto);
-                    }
-                  },
-                ),
+              // ★ 五档恒显（2026-10-26 用户令）：不管协议支不支持，
+              // Auto/Off/Low/High/Max 五档都摆出来用同一条流体分段；
+              // 不支持分档的协议把 Low/High/Max 禁用（变淡、点不动、
+              // 拖不过去），只留 Auto 与 Off 可选 —— 旧版在不支持时
+              // 换成「关/开」两档，用户问「不支持是前端还是后端」：
+              // 是后端能力（rLv），前端如实禁用而不是藏起来。
+              // 当前值若是被禁的档（从别的服务商带过来的），选中态
+              // 按「开」处理落在 Auto 上。
+              _SegBar(
+                h: h,
+                labels: [for (final v in ReasoningLevel.values) v.label],
+                selected: levelsEffective
+                    ? ReasoningLevel.values.indexOf(reasoningLevel)
+                    : (reasoningLevel == ReasoningLevel.off
+                        ? ReasoningLevel.values.indexOf(ReasoningLevel.off)
+                        : ReasoningLevel.values.indexOf(ReasoningLevel.auto)),
+                disabled: levelsEffective
+                    ? const {}
+                    : {
+                        ReasoningLevel.values.indexOf(ReasoningLevel.low),
+                        ReasoningLevel.values.indexOf(ReasoningLevel.high),
+                        ReasoningLevel.values.indexOf(ReasoningLevel.max),
+                      },
+                onSelected: (i) {
+                  final v = ReasoningLevel.values[i];
+                  Navigator.of(sheetCtx).pop();
+                  if (v != reasoningLevel) {
+                    onReasoningLevelChanged?.call(v);
+                  }
+                },
+              ),
               const SizedBox(height: 8),
               Text(
                 levelsEffective
@@ -324,12 +327,14 @@ class _SegBar extends StatelessWidget {
     required this.labels,
     required this.selected,
     required this.onSelected,
+    this.disabled = const {},
   });
 
   final Hue h;
   final List<String> labels;
   final int selected;
   final ValueChanged<int> onSelected;
+  final Set<int> disabled;
 
   @override
   Widget build(BuildContext context) {
@@ -339,6 +344,7 @@ class _SegBar extends StatelessWidget {
       labels: labels,
       selected: selected,
       onSelected: onSelected,
+      disabled: disabled,
       trackColor: h.surface,
       blockColor: h.surfaceAlt,
       blockShadow: [
