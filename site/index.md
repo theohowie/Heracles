@@ -6,12 +6,12 @@ hero:
   text: 手机上的开发智能体
   tagline: 在 Android 手机上的真实工作区里读代码、改文件、跑命令；接上设备侧工具链后，还能直接在这台手机上把工程构建成可安装的 APK。模型走你自己的 API Key，云端推理，手机上不加载模型。
   image:
-    src: /logo.svg
+    src: /logo.png
     alt: Heracles
   actions:
     - theme: brand
-      text: 下载 v0.2.0 APK
-      link: https://github.com/theohowie/Heracles/releases
+      text: 下载 APK（20.6 MB）
+      link: https://github.com/theohowie/Heracles/releases/download/v0.2.0/Heracles-v0.2.0.apk
     - theme: alt
       text: 快速开始
       link: /guide/getting-started
@@ -53,7 +53,7 @@ Heracles 是一个**跑在 Android 手机上的 AI 编程 App**。
 
 ## 三步用起来
 
-1. **装 APK** —— 从 [下载页](https://github.com/theohowie/Heracles/releases) 拿 `Heracles-v0.2.0.apk`（arm64 手机，Android 12+）。
+1. **装 APK** —— [**直接下载 `Heracles-v0.2.0.apk`**](https://github.com/theohowie/Heracles/releases/download/v0.2.0/Heracles-v0.2.0.apk)（20.6 MB，点击即开始下载；其它版本在 [Releases](https://github.com/theohowie/Heracles/releases)）。要求：arm64 手机、Android 12+。
 2. **配模型** —— `设置 → 模型 → 添加`：选协议、填 Base URL 与 API Key、选模型名（建议用支持 function calling 的模型）。
 3. **加工作区开聊** —— 侧边栏 `⊕` 里「选择文件夹」（SAF 授权）或「默认工作区」（免授权）。
 

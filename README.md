@@ -9,7 +9,7 @@
 
 > **版本 v0.2.0** · **Android 12（API 31）+ · arm64** · **GPL-3.0**
 >
-> 📖 图文简介与快速开始：**https://theohowie.github.io/Heracles/** ｜ ⬇️ [下载 APK](https://github.com/theohowie/Heracles/releases)
+> 📖 图文简介与快速开始：**https://theohowie.github.io/Heracles/** ｜ ⬇️ [**下载 APK**](https://github.com/theohowie/Heracles/releases/download/v0.2.0/Heracles-v0.2.0.apk)（点即下载）
 >
 > **alpha 阶段**：接口、UI、工具面都还会变。能用的与还不能用的，见 [功能与限制](#功能与限制)。
 
@@ -17,10 +17,10 @@
 
 ## 下载与安装
 
-| 来源 | 说明 |
+| 方式 | 说明 |
 |---|---|
-| **GitHub Releases** | **[v0.2.0](https://github.com/theohowie/Heracles/releases)** —— 附件 `Heracles-v0.2.0.apk`（**20.6 MB**） |
-| **Gitee 发行版** | **[heracles 发行版](https://gitee.com/theohowie/heracles/releases)** —— 同一份附件 |
+| **直接下载** | **[`Heracles-v0.2.0.apk`](https://github.com/theohowie/Heracles/releases/download/v0.2.0/Heracles-v0.2.0.apk)** · **20.6 MB** · 点击即开始下载 |
+| **其它版本 / 校验值** | [Releases 列表](https://github.com/theohowie/Heracles/releases) |
 | **自己构建** | 见 [从源码构建](#从源码构建) |
 
 - 校验（可选）：`sha256 = F9F1E087AEF64D5333E27CDDC8813E51A2F9C4B0886B8A60CA0DAAD85D327DBC`
