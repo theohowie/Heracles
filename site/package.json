@@ -1,0 +1,14 @@
+{
+  "name": "heracles-site",
+  "private": true,
+  "type": "module",
+  "description": "Heracles 项目主页（VitePress）",
+  "scripts": {
+    "dev": "vitepress dev .",
+    "build": "vitepress build .",
+    "preview": "vitepress preview ."
+  },
+  "devDependencies": {
+    "vitepress": "^1.6.4"
+  }
+}
