@@ -40,6 +40,13 @@ WORKLOG.md
 AGENTS.md
 phone/
 
+# 2026-10-26 追加：契约/对接/审计文档也从仓库撤下（用户裁定：公开仓库只留
+# 可运行代码 + 运行说明 README）。文件仍在工作树里，只是不再跟踪、不再推送。
+INTERFACE.md
+接口.md
+前端对接清单.md
+agent-dev-audit.md
+
 # 2026-10-19 真机采样/分析临时目录（本地材料，不入库）
 .tmp-l1long/
 .dsh-evidence/
