@@ -38,9 +38,15 @@ import '../theme/cupertino_kit.dart';
 // 箭头。常量保留是为让那套共享几何继续成立，不要删。
 const double kStepRowArrowSize = 0.0;
 const double kStepRowArrowGap = 0.0;
-const double kStepRowStatusSize = 14.0;
-const double kStepRowStatusGap = 6.0;
-const double kStepRowHPad = HSpace.sm;
+// ★ 全行统一几何（2026-10-26 用户三报对齐）：步骤行（StreamStepView）
+// 与 PlainToolLine 早已是「图标 15 + 间距 8、标签起点 23、无横向
+// 内边距」，唯独工具行（本文件）多带一层 HPad 8 且图标 14/间距 6，
+// 合并行看着就比别的行多缩进一截 —— 三个常量对齐到步骤行口径：
+// 图标左缘全在 0、标签全在 23。引用这套常量的分析行（chat_screen）
+// 与展开明细缩进自动跟随。
+const double kStepRowStatusSize = 15.0;
+const double kStepRowStatusGap = 8.0;
+const double kStepRowHPad = 0.0;
 const double kStepRowVPad = HSpace.xs;
 
 /// **工具名 → 人话**（2026-10-13，用户要求）。

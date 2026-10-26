@@ -227,9 +227,16 @@ class _InputBarState extends State<InputBar>
     _focus.requestFocus();
   }
 
+  /// 模型胶囊里名字文本的最大宽度（build 时按屏宽赋值）：
+  /// 胶囊右缘不越输入框中线 —— 行宽 = 屏宽 − 页边 32 − 行内边距 20，
+  /// 一半再扣＋（38）+ 间距（4）+ 胶囊内边距（24）。
+  double _pillTextMax = 200;
+
   @override
   Widget build(BuildContext context) {
     final h = Hue.of(context);
+    _pillTextMax =
+        (MediaQuery.sizeOf(context).width - 32 - 20) * 0.5 - 66;
     // ★ 悬浮容器（2026-10-12，用户强调"悬浮悬浮悬浮"）：
     //   · **去掉顶部分隔线**（参考图输入框上方没有线 —— 那根线让容器
     //     看起来"焊死"在底部）
@@ -361,7 +368,16 @@ class _InputBarState extends State<InputBar>
                   ),
                   Column(
                     mainAxisSize: MainAxisSize.min,
+                    // ★ 必须 stretch：Column 默认 center 按子项固有宽
+                    // 度缩排 —— 底行内容只有 ~340 时整卡跟着缩，发送
+                    // 键到不了右缘（用户真机报「发送按钮跑哪去了」、
+                    // 胶囊封顶也算错了基数）。拉满后卡宽 = 本组宽。
+                    crossAxisAlignment: CrossAxisAlignment.stretch,
                     children: [
+                      // 全宽支柱：本组在祖先链里拿到的是松约束，
+                      // 不撑这一下，整组宽度由底行内容决定（发送键
+                      // 到不了右缘的根源）。要满宽先得有人开口要。
+                      const SizedBox(width: double.infinity, height: 0),
                       Padding(
                         padding: EdgeInsets.zero, // 与托盘等宽（见托盘注释），不再左右让位
                         child: Container(
@@ -377,6 +393,7 @@ class _InputBarState extends State<InputBar>
                           clipBehavior: Clip.antiAlias,
                           child: Column(
                             mainAxisSize: MainAxisSize.min,
+                            crossAxisAlignment: CrossAxisAlignment.stretch,
                             children: [
                     // ---- 附件 tile 区（卡内顶部，图二形态）----
                     if (widget.attachments.isNotEmpty)
@@ -426,8 +443,7 @@ class _InputBarState extends State<InputBar>
                     //   发送/排队（用户原话「有字时暂停按钮变发送」）。
                     Padding(
                       padding: const EdgeInsets.fromLTRB(10, 0, 10, 10),
-                      child: LayoutBuilder(
-                        builder: (context, cons) => Row(
+                      child: Row(
                         children: [
                           _CircleButton(
                             icon: AppIcons.add,
@@ -436,10 +452,12 @@ class _InputBarState extends State<InputBar>
                                 widget.enabled ? widget.onPickAttachment : null,
                           ),
                           const SizedBox(width: 4),
-                          Flexible(
-                            child: _ModelSelector(
-                              // 胶囊总宽不超过底行一半（用户令）
-                              maxTextWidth: cons.maxWidth * 0.5 - 24,
+                          _ModelSelector(
+                              // 胶囊右缘不越过输入框中线（用户令）：
+                              // 要算上胶囊前面的＋（38）+ 间距（4）+
+                              // 胶囊自身内边距（24），一并从一半里扣；
+                              // 宽度在 build 顶部按屏宽算好（_pillTextMax）
+                              maxTextWidth: _pillTextMax,
                               label: widget.providerLabel,
                               reasoningLevel: widget.reasoningLevel,
                               h: h,
@@ -451,7 +469,7 @@ class _InputBarState extends State<InputBar>
                               onProviderSelected: widget.onProviderSelected,
                               onOpenModelCatalog: widget.onOpenModelCatalog,
                             ),
-                          ),
+                          const Spacer(),
                           const SizedBox(width: 10),
 _PermissionIconButton(
                             permission: widget.permission,
@@ -476,7 +494,6 @@ _PermissionIconButton(
                                 : _send,
                           ),
                         ],
-                        ),
                       ),
                     ),
                             ],
