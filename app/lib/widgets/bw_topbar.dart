@@ -129,19 +129,25 @@ class _DynamicIslandState extends State<DynamicIsland>
                     ),
                   ),
                   const SizedBox(width: 7),
-                  Flexible(
-                    child: Text(
-                      _current,
-                      maxLines: 1,
-                      overflow: TextOverflow.ellipsis,
-                      style: TextStyle(
-                        fontSize: 12.5,
-                        fontWeight: FontWeight.w600,
-                        color: fg,
+                  // ★ 收起态不放步骤文字（2026-10-26 用户令「灵动岛
+                  // 要短的」+ HTML 预览拍板）：那句话最长能把胶囊撑
+                  // 到 280，收起时只留呼吸点 + 进度，胶囊约 62 宽、
+                  // 一颗短药丸；步骤文字只在展开面板的标题行里出现。
+                  if (!widget.collapsed) ...[
+                    Flexible(
+                      child: Text(
+                        _current,
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: TextStyle(
+                          fontSize: 12.5,
+                          fontWeight: FontWeight.w600,
+                          color: fg,
+                        ),
                       ),
                     ),
-                  ),
-                  const SizedBox(width: 6),
+                    const SizedBox(width: 6),
+                  ],
                   Text(
                     '${widget.doneCount}/${widget.steps.length}',
                     style: TextStyle(fontSize: 11, color: dim),
@@ -492,7 +498,16 @@ class _PlainToolLineState extends State<PlainToolLine> {
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          Row(
+          // ★ 与步骤行/工具卡同一只盒子（2026-10-26 用户报「上下
+          // 间距不一样」）：步骤标题行是 minHeight 44 + 纵向 4 的
+          // 盒子，文字在盒里垂直居中；本行原先是裸 Row（约 20 高、
+          // 无内边距），夹在 44 高的步骤行之间，行与行的间距就
+          // 一会儿紧一会儿松。套上同规格盒子后全流一个节奏。
+          ConstrainedBox(
+            constraints: const BoxConstraints(minHeight: kMinTapTarget),
+            child: Padding(
+              padding: const EdgeInsets.symmetric(vertical: HSpace.xs),
+              child: Row(
             children: [
               Icon(widget.icon, size: 15, color: h.text),
               const SizedBox(width: 8),
@@ -510,6 +525,8 @@ class _PlainToolLineState extends State<PlainToolLine> {
               ),
               // （行尾展开箭头已退役 —— 2026-10-26 用户令）
             ],
+              ),
+            ),
           ),
           AnimatedSize(
             duration: const Duration(milliseconds: 250),

@@ -4102,12 +4102,13 @@ class _ChatScreenState extends State<ChatScreen> {
         // 有光晕的主题：顶栏也透明，光斑从屏幕顶部透出来（同图一）
         backgroundColor: h.glowColors.isEmpty ? null : Colors.transparent,
         titleSpacing: 0,
-        // ★ 两层 topbar（2026-10-25 晚用户定）：左侧 App 图标独占
-        //   两层高度；中间上层会话标题、下层灵动岛（居中）；右列
-        //   上层上下文占用率、下层缓存命中率（状态色档位见
-        //   bw_topbar）。左右槽位同宽 108，中间列才真居中。
+        // ★ 两层 topbar（2026-10-25 晚用户定，2026-10-26 修订）：
+        //   左侧 App 图标；会话标题**靠左**紧挨图标（用户令：不要
+        //   居中）；灵动岛仍居中于屏幕（标题列里用 (108−63)/2 的
+        //   横向补偿实现，见 title 处）；右列上层上下文占用率、
+        //   下层缓存命中率（状态色档位见 bw_topbar）。
         toolbarHeight: 76,
-        leadingWidth: 108,
+        leadingWidth: 63,
         leading: Align(
           alignment: Alignment.centerLeft,
           child: Padding(
@@ -4129,7 +4130,7 @@ class _ChatScreenState extends State<ChatScreen> {
         ),
         title: Column(
           mainAxisSize: MainAxisSize.min,
-          crossAxisAlignment: CrossAxisAlignment.center,
+          crossAxisAlignment: CrossAxisAlignment.start,
           children: [
             // ★ 标题只有会话名（无会话时回退工作区名）：模型信息在
             //   输入框的模型选择框里已有，标题不重复（2026-10-12）。
@@ -4137,7 +4138,7 @@ class _ChatScreenState extends State<ChatScreen> {
               _activeSession?.title ?? _workspaceName,
               maxLines: 1,
               overflow: TextOverflow.ellipsis,
-              textAlign: TextAlign.center,
+              textAlign: TextAlign.start,
               style: TextStyle(
                 fontSize: 15,
                 fontWeight: FontWeight.w600,
@@ -4151,7 +4152,14 @@ class _ChatScreenState extends State<ChatScreen> {
                 _planSteps!.isNotEmpty &&
                 _planCollapsed) ...[
               const SizedBox(height: 4),
-              DynamicIsland(
+              // 标题列左起 63、右列占 108，列内居中会比屏幕中心
+              // 左偏 (108−63)/2 = 22.5 —— 横向补偿后灵动岛仍在
+              // 屏幕正中（用户令：标题靠左、灵动岛居中，两者都要）
+              Transform.translate(
+                offset: const Offset(22.5, 0),
+                child: Align(
+                  alignment: Alignment.center,
+                  child: DynamicIsland(
                 steps: _planSteps!,
                 doneCount: _planDone,
                 activeIndex: _planActive,
@@ -4161,6 +4169,8 @@ class _ChatScreenState extends State<ChatScreen> {
                 closedReason: _planClosedReason,
                 cancelledIndices: _planCancelled,
                 onAdjust: _prefillPlanAdjust,
+                  ),
+                ),
               ),
             ],
           ],
