@@ -203,7 +203,7 @@ function Demo() {
       <Reveal>
         <div className="demo">
           <video src="/Heracles/video/heracles-30s.mp4" poster="/Heracles/shots/chat.webp"
-            controls muted loop playsInline preload="metadata" />
+            autoPlay muted loop playsInline controls preload="auto" />
         </div>
       </Reveal>
     </section>
