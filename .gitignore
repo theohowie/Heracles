@@ -80,3 +80,8 @@ site/.vitepress/dist/
 # （构建产物发 gh-pages）
 web/node_modules/
 web/dist/
+
+# 2026-10-26：仓库只保留 app / backend / web 三个目录。
+# video/ 是本地渲染管线与素材，成片放 web/public/video/ 随网页发布；site/ 是已下线的旧文档站（历史里仍可查）。
+video/
+site/
