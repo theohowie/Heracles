@@ -394,7 +394,7 @@ class WorkspaceDrawer extends StatelessWidget {
                   child: Row(
                     mainAxisSize: MainAxisSize.min,
                     children: [
-                      Icon(CupertinoIcons.phone, size: 18, color: h.accent),
+                      Icon(CupertinoIcons.house_fill, size: 18, color: h.accent),
                       const SizedBox(width: HSpace.sm),
                       Text('使用默认工作区',
                           style: TextStyle(fontSize: 12.5, color: h.accent)),
@@ -877,7 +877,7 @@ class _AddWorkspaceMenu extends StatelessWidget {
         ),
         _item(
           value: 'app',
-          icon: CupertinoIcons.phone,
+          icon: CupertinoIcons.house_fill,
           title: '默认工作区',
         ),
       ],

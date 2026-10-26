@@ -273,6 +273,13 @@ class IosButton extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final scheme = CupertinoTheme.of(context).primaryColor;
+    // 填充按钮的文字色按底色明度取：深色主题下 accent 是近白色，
+    // 旧版文字恒白 → 白底白字看不见（2026-10-26 真机报：
+    // 抽屉/引导页「选择文件夹」）。浅底用黑字、深底用白字。
+    final fillColor = color ?? scheme;
+    final onFill = fillColor.computeLuminance() > 0.5
+        ? CupertinoColors.black
+        : CupertinoColors.white;
     // 全局按压反馈（2026-10-26 用户定）：0.96 微缩 + 内阴影 + 回弹
     return Pressable(
       borderRadius: BorderRadius.circular(dense ? 15 : 19),
@@ -287,8 +294,8 @@ class IosButton extends StatelessWidget {
         decoration: BoxDecoration(
           color: filled
               ? (onPressed == null || busy
-                  ? (color ?? scheme).withValues(alpha: 0.3)
-                  : (color ?? scheme))
+                  ? fillColor.withValues(alpha: 0.3)
+                  : fillColor)
               : null,
           borderRadius: BorderRadius.circular(dense ? 15 : 19),
           border: filled ? null : Border.all(color: (color ?? scheme)),
@@ -296,7 +303,7 @@ class IosButton extends StatelessWidget {
         child: busy
             ? CupertinoActivityIndicator(
                 radius: 7,
-                color: filled ? CupertinoColors.white : (color ?? scheme),
+                color: filled ? onFill : fillColor,
               )
             : Row(
                 mainAxisSize: MainAxisSize.min,
@@ -316,7 +323,7 @@ class IosButton extends StatelessWidget {
                       style: TextStyle(
                         fontSize: dense ? 13 : 15,
                         fontWeight: FontWeight.w600,
-                        color: filled ? CupertinoColors.white : (color ?? scheme),
+                        color: filled ? onFill : fillColor,
                       ),
                     ),
                   ),

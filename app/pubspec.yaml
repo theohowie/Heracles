@@ -67,6 +67,7 @@ dependencies:
   # 版本与 backend 自己声明的一致（`dio: ^5.11.1`），避免同一份代码
   # 在两端解析出两个不兼容的 dio 主版本。
   dio: ^5.11.1
+  package_info_plus: ^10.2.2
 
 
 dev_dependencies:

@@ -408,6 +408,118 @@ Future<void> showApprovalModeSheet(
 /// 审批档位行（概念图 10 定式）：单选圆圈 + 标题 + 说明的描边卡片，
 /// 选中 = 深描边 + 圆圈实心点。不用图标、不用右上对勾（用户对着
 /// 真机图一与概念图二拍板改成图二样式）。
+/// **通用单选抽屉**（2026-10-26）：与审批模式同一套单选卡行，
+/// 给短列表选择器用（替代 CupertinoActionSheet 的旧弹窗 ——
+/// 用户报「添加提供商 · API 协议」选择器还是古老 UI）。
+Future<T?> showBwRadioSheet<T>(
+  BuildContext context, {
+  required String title,
+  String? subtitle,
+  required List<T> options,
+  required T current,
+  required String Function(T) labelOf,
+}) async {
+  final h = Hue.of(context);
+  return showModalBottomSheet<T>(
+    context: context,
+    backgroundColor: h.surfaceAlt,
+    isScrollControlled: true,
+    shape: const RoundedRectangleBorder(
+      borderRadius: BorderRadius.vertical(top: Radius.circular(24)),
+    ),
+    builder: (sheetCtx) => BwSheetShell(
+      onDismissRequest: () => Navigator.of(sheetCtx).pop(),
+      child: SafeArea(
+        child: Padding(
+          padding: const EdgeInsets.fromLTRB(20, 10, 20, 18),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Center(
+                child: Container(
+                  width: 36,
+                  height: 4,
+                  decoration: BoxDecoration(
+                    color: h.border,
+                    borderRadius: BorderRadius.circular(999),
+                  ),
+                ),
+              ),
+              const SizedBox(height: 14),
+              Text(title,
+                  style: TextStyle(
+                      fontSize: 17,
+                      fontWeight: FontWeight.w700,
+                      color: h.text)),
+              if (subtitle != null) ...[
+                const SizedBox(height: 2),
+                Text(subtitle,
+                    style: TextStyle(fontSize: 12, color: h.textFaint)),
+              ],
+              const SizedBox(height: 12),
+              for (final o in options) ...[
+                GestureDetector(
+                  onTap: () => Navigator.of(sheetCtx).pop(o),
+                  behavior: HitTestBehavior.opaque,
+                  child: Container(
+                    padding: const EdgeInsets.symmetric(
+                        horizontal: 16, vertical: 14),
+                    decoration: BoxDecoration(
+                      color: o == current ? h.bg : Colors.transparent,
+                      border: Border.all(
+                        color: o == current ? h.text : h.border,
+                        width: 2,
+                      ),
+                      borderRadius: BorderRadius.circular(18),
+                    ),
+                    child: Row(
+                      children: [
+                        Container(
+                          width: 22,
+                          height: 22,
+                          decoration: BoxDecoration(
+                            shape: BoxShape.circle,
+                            border: Border.all(
+                              color: o == current ? h.text : h.border,
+                              width: 2,
+                            ),
+                          ),
+                          child: o == current
+                              ? Center(
+                                  child: Container(
+                                    width: 11,
+                                    height: 11,
+                                    decoration: BoxDecoration(
+                                      shape: BoxShape.circle,
+                                      color: h.text,
+                                    ),
+                                  ),
+                                )
+                              : null,
+                        ),
+                        const SizedBox(width: 12),
+                        Expanded(
+                          child: Text(labelOf(o),
+                              style: TextStyle(
+                                  fontSize: 15,
+                                  fontWeight: FontWeight.w600,
+                                  color: h.text)),
+                        ),
+                      ],
+                    ),
+                  ),
+                ),
+                const SizedBox(height: 8),
+              ],
+            ],
+          ),
+        ),
+      ),
+    ),
+  );
+}
+
 class _ApprovalModeRow extends StatelessWidget {
   const _ApprovalModeRow({
     required this.h,
