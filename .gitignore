@@ -75,3 +75,8 @@ site/.vitepress/dist/
 # 2026-10-26 发布产物**不进仓库**（用户裁定：走平台 Releases 附件）。
 # 这里是本地留档目录，用来把 APK 上传到 GitHub Releases / Gitee 发行版。
 /dist/
+
+# 2026-10-26 宣传落地页（React + Vite）：源码入库，依赖与产物不入库
+# （构建产物发 gh-pages）
+web/node_modules/
+web/dist/
