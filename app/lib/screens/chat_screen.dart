@@ -373,7 +373,10 @@ class _ChatScreenState extends State<ChatScreen> {
         padding: const EdgeInsets.only(right: 14),
         child: Column(
           mainAxisAlignment: MainAxisAlignment.center,
-          crossAxisAlignment: CrossAxisAlignment.end,
+          // ★ 左对齐（2026-10-26 用户指正）：右对齐时两行按各自
+          // 文字宽度收尾，短行（命中）的圆环被推得更靠右，两个圈
+          // 上下对不齐 —— 改左对齐后两个圈成一列、文字跟在圈后。
+          crossAxisAlignment: CrossAxisAlignment.start,
           children: [
             TopMetricLine(
               label: '上下文',

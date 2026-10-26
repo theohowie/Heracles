@@ -330,7 +330,7 @@ class _InputBarState extends State<InputBar>
                         color: h.dark
                             ? h.surface
                             : Color.alphaBlend(
-                                Colors.black.withValues(alpha: 0.055),
+                                Colors.black.withValues(alpha: 0.12),
                                 h.surface),
                         // ★ 6 圆角要「读得出」：台阶角必须在重叠带内
                         // 走完弧线 —— 上圆角 14（小、完整露在台阶上），
@@ -344,10 +344,14 @@ class _InputBarState extends State<InputBar>
                           bottomRight: Radius.circular(28),
                         ),
                         boxShadow: [
+                          // 阴影只留一层很淡的：卡与托盘各挂一层时，
+                          // 两层方形晕叠在托盘带上，用户连着两次看成
+                          // 「圆角外面还有直角」——这次托盘靠填充色
+                          // 本身立轮廓（对齐图二的灰度差），阴影退后。
                           BoxShadow(
                             color: Colors.black
-                                .withValues(alpha: h.dark ? 0.30 : 0.07),
-                            blurRadius: 14,
+                                .withValues(alpha: h.dark ? 0.30 : 0.05),
+                            blurRadius: 18,
                             offset: const Offset(0, 4),
                           ),
                         ],
@@ -366,14 +370,8 @@ class _InputBarState extends State<InputBar>
                             color: h.dark ? h.surfaceAlt : Colors.white,
                             borderRadius: BorderRadius.circular(24),
                             border: Border.all(color: h.border),
-                            boxShadow: [
-                              BoxShadow(
-                                color: Colors.black
-                                    .withValues(alpha: h.dark ? 0.20 : 0.05),
-                                blurRadius: 8,
-                                offset: const Offset(0, 2),
-                              ),
-                            ],
+                            // 无阴影：见托盘处注释（双层方形晕的问题）
+                            boxShadow: const [],
                           ),
                           clipBehavior: Clip.antiAlias,
                           child: Column(
@@ -832,8 +830,10 @@ class _SendButton extends StatelessWidget {
       enabled: active,
       child: AnimatedContainer(
       duration: const Duration(milliseconds: 150),
-      width: 46,
-      height: 46,
+      // 图二的发送圆与 ＋/麦克风同量级（约 40）；46 在小底行里
+      // 明显抢眼（用户实报「怎么还这么大」）
+      width: 40,
+      height: 40,
       // ★ 圆形 + 恒黑底白箭头（2026-10-26 对图二定）：不再随可用态
       // 变灰 —— 图二的发送键永远是主色实心圆。深色下 h.text 是白，
       // 即白底黑箭头（反色），同样恒定。
@@ -858,7 +858,7 @@ class _SendButton extends StatelessWidget {
                     ? AppIcons.stop
                     : CupertinoIcons.hourglass)
                 : AppIcons.send,
-            size: 21,
+            size: 19,
             color: h.dark ? const Color(0xFF0A0A0B) : Colors.white,
           ),
         ),
