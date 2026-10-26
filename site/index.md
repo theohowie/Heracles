@@ -61,6 +61,8 @@ Heracles 是一个**跑在 Android 手机上的 AI 编程 App**。
   <a href="/shots/settings.webp" target="_blank" rel="noreferrer"><img src="/shots/settings.webp" alt="设置" style="width:100%;border-radius:10px"></a>
 </div>
 
+更多截图（设置·模型 / 设置·外观 / 输入区特写 …）：[**界面截图 →**](/shots)
+
 ## 三步用起来
 
 1. **装 APK** —— [**直接下载 `Heracles-v0.2.0.apk`**](https://github.com/theohowie/Heracles/releases/download/v0.2.0/Heracles-v0.2.0.apk)（20.6 MB，点击即开始下载；其它版本在 [Releases](https://github.com/theohowie/Heracles/releases)）。要求：arm64 手机、Android 12+。

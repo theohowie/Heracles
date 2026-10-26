@@ -26,6 +26,7 @@ export default defineConfig({
     nav: [
       { text: '简介', link: '/' },
       { text: '快速开始', link: '/guide/getting-started' },
+      { text: '界面截图', link: '/shots' },
       { text: '从源码构建', link: '/guide/build' },
       { text: '功能与限制', link: '/status' },
     ],
@@ -37,6 +38,7 @@ export default defineConfig({
           { text: '这是什么', link: '/' },
           { text: '快速开始', link: '/guide/getting-started' },
           { text: '从源码构建', link: '/guide/build' },
+          { text: '界面截图', link: '/shots' },
         ],
       },
       {
