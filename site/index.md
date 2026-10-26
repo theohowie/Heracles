@@ -11,7 +11,7 @@ hero:
   actions:
     - theme: brand
       text: 下载 v0.2.0 APK
-      link: https://github.com/theohowie/Heracles/raw/master/dist/Heracles-v0.2.0.apk
+      link: https://github.com/theohowie/Heracles/releases
     - theme: alt
       text: 快速开始
       link: /guide/getting-started
@@ -53,7 +53,7 @@ Heracles 是一个**跑在 Android 手机上的 AI 编程 App**。
 
 ## 三步用起来
 
-1. **装 APK** —— 从 [下载页](https://github.com/theohowie/Heracles/raw/master/dist/Heracles-v0.2.0.apk) 拿 `Heracles-v0.2.0.apk`（arm64 手机，Android 12+）。
+1. **装 APK** —— 从 [下载页](https://github.com/theohowie/Heracles/releases) 拿 `Heracles-v0.2.0.apk`（arm64 手机，Android 12+）。
 2. **配模型** —— `设置 → 模型 → 添加`：选协议、填 Base URL 与 API Key、选模型名（建议用支持 function calling 的模型）。
 3. **加工作区开聊** —— 侧边栏 `⊕` 里「选择文件夹」（SAF 授权）或「默认工作区」（免授权）。
 
@@ -66,7 +66,7 @@ Heracles/
 ├── backend/          纯 Dart 包：编排(agent) / 工具 / 契约(contract) / 上下文 / 能力探测 / RAG
 ├── app/              Flutter 前端：UI(screens/widgets/theme) + 服务层(services) + Kotlin 设备桥(android)
 ├── INTERFACE.md      前后端接口与事件流契约
-├── dist/             发布产物（APK）
+├── (发布产物)         APK 走 Releases 附件，不放进仓库
 └── LICENSE           GPL-3.0
 ```
 

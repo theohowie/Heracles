@@ -71,3 +71,7 @@ backend/tool/eval_results/
 site/node_modules/
 site/.vitepress/cache/
 site/.vitepress/dist/
+
+# 2026-10-26 发布产物**不进仓库**（用户裁定：走平台 Releases 附件）。
+# 这里是本地留档目录，用来把 APK 上传到 GitHub Releases / Gitee 发行版。
+/dist/

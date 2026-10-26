@@ -6,7 +6,7 @@
 
 | 方式 | 说明 |
 |---|---|
-| **下载 APK** | [`Heracles-v0.2.0.apk`](https://github.com/theohowie/Heracles/raw/master/dist/Heracles-v0.2.0.apk) · **20.6 MB** · sha256 `F9F1E087AEF64D5333E27CDDC8813E51A2F9C4B0886B8A60CA0DAAD85D327DBC` |
+| **下载 APK** | [GitHub Releases](https://github.com/theohowie/Heracles/releases) · [Gitee 发行版](https://gitee.com/theohowie/heracles/releases) —— 附件 `Heracles-v0.2.0.apk` · **20.6 MB** · sha256 `F9F1E087AEF64D5333E27CDDC8813E51A2F9C4B0886B8A60CA0DAAD85D327DBC` |
 | **自己构建** | 见 [从源码构建](/guide/build) |
 
 要求：**Android 12（API 31）及以上**、**arm64 手机**。

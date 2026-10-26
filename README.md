@@ -20,17 +20,18 @@
 
 ## 下载与安装
 
-| 文件 | 适用 |
+| 来源 | 说明 |
 |---|---|
-| [`dist/Heracles-v0.2.0.apk`](dist/) | **arm64 手机** · **20.6 MB** |
+| **GitHub Releases** | **[v0.2.0](https://github.com/theohowie/Heracles/releases)** —— 附件 `Heracles-v0.2.0.apk`（**20.6 MB**） |
+| **Gitee 发行版** | **[heracles 发行版](https://gitee.com/theohowie/heracles/releases)** —— 同一份附件 |
+| **自己构建** | 见 [从源码构建](#从源码构建) |
 
+- 校验（可选）：`sha256 = F9F1E087AEF64D5333E27CDDC8813E51A2F9C4B0886B8A60CA0DAAD85D327DBC`
 - ⚠️ **只支持 arm64（arm64-v8a）机型**：Flutter 引擎 `libflutter.so` / `libapp.so` **只打包了 arm64-v8a**；
   包内另有两个插件的 `armeabi-v7a` / `x86_64` `.so`（合计约 0.2 MB），所以 `aapt2 dump badging` 会显示三个 ABI，
   但**32 位手机装上也起不来**（见 [已知问题](#已知问题)）。
 - 这是 **release** 构建，但**用 debug 密钥签名**（还没有正式发布密钥，见 [已知问题](#已知问题)）⇒
   安装时需要允许「未知来源」，安装后系统可能提示"来自未知开发者"。
-- 只发源码的话，也可以自己构建 —— 见 [从源码构建](#从源码构建)。
-- 校验（可选）：`sha256 = F9F1E087AEF64D5333E27CDDC8813E51A2F9C4B0886B8A60CA0DAAD85D327DBC`
 
 ---
 
@@ -67,7 +68,7 @@
 
 ### 1. 装 App
 
-从 [`dist/`](dist/) 装 v0.2.0 的 APK（或自己构建），要求 **Android 12（API 31）及以上**。
+从 **[下载与安装](#下载与安装)** 里的 Release 附件装 v0.2.0 的 APK（或自己构建），要求 **Android 12（API 31）及以上**、**arm64** 手机。
 
 ### 2. 配模型
 
