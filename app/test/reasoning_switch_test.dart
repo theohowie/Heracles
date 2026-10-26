@@ -580,12 +580,10 @@ void main() {
     /// 胶囊 = GestureDetector 包着 Text，行尾文字不在 GestureDetector 里，
     /// 所以按「GestureDetector 里的 Text」定位。
     Future<void> tapChip(WidgetTester tester, String label) async {
-      await tester.tap(find
-          .ancestor(
-            of: find.text(label),
-            matching: find.byType(GestureDetector),
-          )
-          .first);
+      // 分段控件 2026-10-26 改整轨单个手势检测器（点选+可拖动）：
+      // 点文字本身即可，位置决定档位 —— 不再找祖先 GestureDetector
+      // （那会点到整轨中心、选错档）。
+      await tester.tap(find.text(label));
       await tester.pumpAndSettle();
     }
 

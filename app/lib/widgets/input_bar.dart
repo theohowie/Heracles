@@ -1,4 +1,6 @@
 import 'dart:io';
+import 'dart:math' as math;
+import 'dart:ui' as ui;
 
 import 'package:flutter/cupertino.dart';
 import 'package:flutter/material.dart';
@@ -7,6 +9,7 @@ import '../models/attachment.dart';
 import '../models/settings.dart';
 import '../theme/app_theme.dart';
 import '../theme/cupertino_kit.dart';
+import '../theme/pressable.dart';
 import 'bw_approval.dart';
 import 'bw_model_sheet.dart';
 
@@ -168,7 +171,8 @@ class InputBar extends StatefulWidget {
   State<InputBar> createState() => _InputBarState();
 }
 
-class _InputBarState extends State<InputBar> {
+class _InputBarState extends State<InputBar>
+    with SingleTickerProviderStateMixin {
   /// 内部自建的控制器 —— 仅当上层**没有**传 [InputBar.inputController]
   /// 时才创建/销毁（外部控制器由上层持有，dispose 归上层管）
   TextEditingController? _ownController;
@@ -177,9 +181,19 @@ class _InputBarState extends State<InputBar> {
   final _focus = FocusNode();
   bool _hasText = false;
 
+  /// 生成中流光动画（6s 一圈）：旋转描边 + 呼吸光晕共用
+  late final AnimationController _glow = AnimationController(
+    vsync: this,
+    duration: const Duration(seconds: 6),
+  );
+
+  /// 当前会话正在生成时才发光（别的会话在跑不算）
+  bool get _glowActive => widget.busy && widget.stopLabel;
+
   @override
   void initState() {
     super.initState();
+    if (_glowActive) _glow.repeat();
     _controller.addListener(() {
       final has = _controller.text.trim().isNotEmpty;
       if (has != _hasText) setState(() => _hasText = has);
@@ -187,7 +201,18 @@ class _InputBarState extends State<InputBar> {
   }
 
   @override
+  void didUpdateWidget(InputBar old) {
+    super.didUpdateWidget(old);
+    if (_glowActive && !_glow.isAnimating) {
+      _glow.repeat();
+    } else if (!_glowActive && _glow.isAnimating) {
+      _glow.stop();
+    }
+  }
+
+  @override
   void dispose() {
+    _glow.dispose();
     _ownController?.dispose();
     _focus.dispose();
     super.dispose();
@@ -237,36 +262,111 @@ class _InputBarState extends State<InputBar> {
                 canPin: i > 0,
               ),
 
-            // ---- ★ 输入大卡（2026-10-26，用户按 TRAE 参考图定版）----
+            // ---- ★ 输入大卡 + 托盘（2026-10-26，用户对图三修正）----
             //
-            // 一张圆角大卡自上而下：附件 tile 区（有附件时）→ 文本区 →
-            // 底行（＋ / 权限 / 模型胶囊 / 发送）；卡下沿贴一条信息条
-            // （工作区 · 连接 Github · 选择分支）。不要麦克风（用户明说）。
-            // 模型胶囊回到卡内底行、只一枚只显模型名（思考等级在模型
-            // 抽屉里调）——2026-10-25「移到卡上方」的方案被本版覆盖：
-            // 参考图的字号更小、底行更宽，长名不再被截成「dee…」。
+            // 轮廓 6 个圆角（用户数过）：白卡左上/右上 2 个 + 灰色托盘
+            // 比白卡宽一圈、在卡下沿两侧探出「台阶角」2 个 + 托盘左下/
+            // 右下 2 个。托盘灰要够灰（旧版信息条和卡同白、色对不上）：
+            // 浅色用 surface 再压一层 7% 黑，深色直接用 surface（本就
+            // 比卡面 surfaceAlt 深一档）。信息条透明坐在托盘露出的
+            // 下沿带上，无分隔线（图三靠色阶分层）。不要麦克风。
             Padding(
               padding: const EdgeInsets.fromLTRB(
                 HSpace.md, HSpace.sm + 2, HSpace.md, HSpace.md,
               ),
-              child: Container(
-                decoration: BoxDecoration(
-                  color: h.surfaceAlt,
-                  borderRadius: BorderRadius.circular(26),
-                  border: Border.all(color: h.border),
-                  boxShadow: [
-                    BoxShadow(
-                      color:
-                          Colors.black.withValues(alpha: h.dark ? 0.30 : 0.08),
-                      blurRadius: 10,
-                      offset: const Offset(0, 3),
+              child: Stack(
+                children: [
+                  // ---- 生成中弥散光晕（卡背后，呼吸）----
+                  Positioned(
+                    left: 0,
+                    right: 0,
+                    bottom: -8,
+                    height: 118,
+                    child: IgnorePointer(
+                      child: AnimatedOpacity(
+                        opacity: _glowActive ? 1 : 0,
+                        duration: const Duration(milliseconds: 350),
+                        child: AnimatedBuilder(
+                          animation: _glow,
+                          builder: (context, _) {
+                            final breathe =
+                                0.55 + 0.30 * math.sin(_glow.value * 2 * math.pi);
+                            final base = h.glowColors.isNotEmpty
+                                ? h.glowColors.first
+                                : h.text;
+                            return Opacity(
+                              opacity: breathe,
+                              child: ImageFiltered(
+                                imageFilter: ui.ImageFilter.blur(
+                                    sigmaX: 24, sigmaY: 24),
+                                child: Container(
+                                  decoration: BoxDecoration(
+                                    gradient: RadialGradient(
+                                      center: const Alignment(0, 0.9),
+                                      radius: 1.1,
+                                      colors: [
+                                        base.withValues(
+                                            alpha: h.dark ? 0.30 : 0.20),
+                                        base.withValues(alpha: 0),
+                                      ],
+                                    ),
+                                  ),
+                                ),
+                              ),
+                            );
+                          },
+                        ),
+                      ),
                     ),
-                  ],
-                ),
-                clipBehavior: Clip.antiAlias,
-                child: Column(
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
+                  ),
+                  Positioned(
+                    left: 0,
+                    right: 0,
+                    bottom: 0,
+                    // 信息条高 44 + 与白卡重叠 14
+                    height: 58,
+                    child: DecoratedBox(
+                      decoration: BoxDecoration(
+                        color: h.dark
+                            ? h.surface
+                            : Color.alphaBlend(
+                                Colors.black.withValues(alpha: 0.07),
+                                h.surface),
+                        borderRadius: BorderRadius.circular(28),
+                        boxShadow: [
+                          BoxShadow(
+                            color: Colors.black
+                                .withValues(alpha: h.dark ? 0.30 : 0.10),
+                            blurRadius: 12,
+                            offset: const Offset(0, 4),
+                          ),
+                        ],
+                      ),
+                    ),
+                  ),
+                  Column(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      Padding(
+                        padding: const EdgeInsets.symmetric(horizontal: 5),
+                        child: Container(
+                          decoration: BoxDecoration(
+                            color: h.surfaceAlt,
+                            borderRadius: BorderRadius.circular(24),
+                            border: Border.all(color: h.border),
+                            boxShadow: [
+                              BoxShadow(
+                                color: Colors.black
+                                    .withValues(alpha: h.dark ? 0.20 : 0.05),
+                                blurRadius: 8,
+                                offset: const Offset(0, 2),
+                              ),
+                            ],
+                          ),
+                          clipBehavior: Clip.antiAlias,
+                          child: Column(
+                            mainAxisSize: MainAxisSize.min,
+                            children: [
                     // ---- 附件 tile 区（卡内顶部，图二形态）----
                     if (widget.attachments.isNotEmpty)
                       _AttachmentRow(
@@ -360,15 +460,42 @@ class _InputBarState extends State<InputBar> {
                         ],
                       ),
                     ),
-                    // ---- 信息条（卡下沿，图一形态）----
-                    _EnvStrip(
-                      h: h,
-                      workspaceLabel: widget.workspaceLabel,
-                      onWorkspaceTap: widget.onWorkspaceTap,
-                      onGithubTap: widget.onGithubTap,
+                            ],
+                          ),
+                        ),
+                      ),
+                      // ---- 信息条（坐在托盘下沿带上）----
+                      _EnvStrip(
+                        h: h,
+                        workspaceLabel: widget.workspaceLabel,
+                        onWorkspaceTap: widget.onWorkspaceTap,
+                        onGithubTap: widget.onGithubTap,
+                      ),
+                    ],
+                  ),
+                  // ---- 生成中旋转流光描边（贴白卡轮廓）----
+                  Positioned(
+                    left: 5,
+                    right: 5,
+                    top: 0,
+                    bottom: 44,
+                    child: IgnorePointer(
+                      child: AnimatedOpacity(
+                        opacity: _glowActive ? 1 : 0,
+                        duration: const Duration(milliseconds: 350),
+                        child: CustomPaint(
+                          painter: _FlowBorderPainter(
+                            progress: _glow,
+                            radius: 24,
+                            colors: h.glowColors.isNotEmpty
+                                ? h.glowColors
+                                : [h.text],
+                          ),
+                        ),
+                      ),
                     ),
-                  ],
-                ),
+                  ),
+                ],
               ),
             ),
           ],
@@ -408,11 +535,10 @@ class _EnvStrip extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    // 透明：底色是身后的托盘（比卡宽一圈的灰盘），条带高 44 与
+    // 输入卡 Stack 里托盘的高度常量（58 = 44 + 14 重叠）对应。
     return Container(
-      decoration: BoxDecoration(
-        color: h.surface,
-        border: Border(top: BorderSide(color: h.border)),
-      ),
+      height: 44,
       padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 3),
       child: Row(
         children: [
@@ -685,7 +811,10 @@ class _SendButton extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final active = enabled || busy;
-    return AnimatedContainer(
+    return Pressable(
+      borderRadius: BorderRadius.circular(999),
+      enabled: active,
+      child: AnimatedContainer(
       duration: const Duration(milliseconds: 150),
       width: 46,
       height: 46,
@@ -720,6 +849,7 @@ class _SendButton extends StatelessWidget {
           ),
         ),
       ),
+    ),
     );
   }
 }
@@ -739,7 +869,10 @@ class _CircleButton extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final active = onTap != null;
-    return SizedBox(
+    return Pressable(
+      borderRadius: BorderRadius.circular(999),
+      enabled: active,
+      child: SizedBox(
       width: 46,
       height: 46,
       child: Material(
@@ -757,6 +890,7 @@ class _CircleButton extends StatelessWidget {
           ),
         ),
       ),
+    ),
     );
   }
 }
@@ -792,7 +926,10 @@ class _PermissionIconButton extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return SizedBox(
+    return Pressable(
+      borderRadius: BorderRadius.circular(999),
+      enabled: enabled,
+      child: SizedBox(
       width: 34,
       height: 46,
       child: Material(
@@ -811,6 +948,7 @@ class _PermissionIconButton extends StatelessWidget {
           ),
         ),
       ),
+    ),
     );
   }
 }
@@ -886,7 +1024,9 @@ class _ModelSelector extends StatelessWidget {
         );
     // 单枚胶囊：模型名 + ⌄（思考等级在模型抽屉里调，胶囊上不再显）。
     // 名字躺在 Flexible 里才能真收缩，宽度不足走省略号。
-    return Material(
+    return Pressable(
+      borderRadius: BorderRadius.circular(999),
+      child: Material(
       color: Colors.transparent,
       child: InkWell(
         onTap: () => _open(context),
@@ -915,6 +1055,7 @@ class _ModelSelector extends StatelessWidget {
           ),
         ),
       ),
+    ),
     );
   }
 }
@@ -1046,4 +1187,57 @@ class _QueuedRow extends StatelessWidget {
       ),
     );
   }
+}
+/// **旋转流光描边**（2026-10-26，用户定：输入框在会话生成时带
+/// 动态弥散光晕边框）：一条渐变光弧沿圆角矩形边框缓慢旋转
+/// （SweepGradient + GradientRotation），黑白主题下是单色微光，
+/// 极光/活力主题下用主题的光晕色组。
+class _FlowBorderPainter extends CustomPainter {
+  _FlowBorderPainter({
+    required this.progress,
+    required this.radius,
+    required this.colors,
+  }) : super(repaint: progress);
+
+  final Animation<double> progress;
+  final double radius;
+  final List<Color> colors;
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    final rect = Offset.zero & size;
+    final c0 = colors.first;
+    final sweep = colors.length >= 2
+        ? [
+            c0.withValues(alpha: 0),
+            c0.withValues(alpha: 0.55),
+            colors[1].withValues(alpha: 0.55),
+            colors[1].withValues(alpha: 0),
+            c0.withValues(alpha: 0.30),
+            c0.withValues(alpha: 0),
+          ]
+        : [
+            c0.withValues(alpha: 0),
+            c0.withValues(alpha: 0.50),
+            c0.withValues(alpha: 0),
+            c0.withValues(alpha: 0.26),
+            c0.withValues(alpha: 0),
+          ];
+    final gradient = SweepGradient(
+      transform: GradientRotation(progress.value * 2 * math.pi),
+      colors: sweep,
+    );
+    final paint = Paint()
+      ..shader = gradient.createShader(rect)
+      ..style = PaintingStyle.stroke
+      ..strokeWidth = 1.6;
+    canvas.drawRRect(
+      RRect.fromRectAndRadius(rect, Radius.circular(radius)),
+      paint,
+    );
+  }
+
+  @override
+  bool shouldRepaint(_FlowBorderPainter old) =>
+      old.radius != radius || old.colors != colors;
 }

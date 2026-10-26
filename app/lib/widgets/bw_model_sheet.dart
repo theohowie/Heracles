@@ -3,6 +3,8 @@ import 'package:flutter/material.dart';
 import '../models/settings.dart';
 import '../theme/app_theme.dart';
 import '../theme/cupertino_kit.dart';
+import '../theme/stretch_segmented.dart';
+import 'bw_approval.dart';
 
 /// 模型与思考半抽屉（原型 09，2026-10-25 晚按用户对照图六再对齐）。
 ///
@@ -52,7 +54,9 @@ Future<void> showModelSheet(
     shape: const RoundedRectangleBorder(
       borderRadius: BorderRadius.vertical(top: Radius.circular(24)),
     ),
-    builder: (sheetCtx) => SafeArea(
+    builder: (sheetCtx) => BwSheetShell(
+      onDismissRequest: () => Navigator.of(sheetCtx).pop(),
+      child: SafeArea(
       child: SingleChildScrollView(
         child: Padding(
           padding: const EdgeInsets.fromLTRB(20, 10, 20, 18),
@@ -185,7 +189,7 @@ Future<void> showModelSheet(
           ),
         ),
       ),
-    ),
+    )),
   );
 }
 
@@ -329,51 +333,25 @@ class _SegBar extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return Container(
-      padding: const EdgeInsets.all(3),
-      decoration: BoxDecoration(
-        color: h.surface,
-        borderRadius: BorderRadius.circular(12),
-      ),
-      child: Row(
-        children: [
-          for (var i = 0; i < labels.length; i++)
-            Expanded(
-              child: GestureDetector(
-                onTap: () => onSelected(i),
-                behavior: HitTestBehavior.opaque,
-                child: Container(
-                  padding: const EdgeInsets.symmetric(vertical: 7),
-                  decoration: BoxDecoration(
-                    color:
-                        i == selected ? h.surfaceAlt : Colors.transparent,
-                    borderRadius: BorderRadius.circular(9),
-                    boxShadow: i == selected
-                        ? [
-                            BoxShadow(
-                              color:
-                                  Colors.black.withValues(alpha: 0.08),
-                              blurRadius: 4,
-                              offset: const Offset(0, 1),
-                            ),
-                          ]
-                        : null,
-                  ),
-                  child: Text(
-                    labels[i],
-                    textAlign: TextAlign.center,
-                    style: TextStyle(
-                      fontSize: 13,
-                      fontWeight:
-                          i == selected ? FontWeight.w600 : FontWeight.w400,
-                      color: i == selected ? h.text : h.textDim,
-                    ),
-                  ),
-                ),
-              ),
-            ),
-        ],
-      ),
+    // 与通用设置的分段控件同一套弹性拉伸动画（StretchSegmented），
+    // 只换皮：白块＋轻投影（抽屉里是浅底托深字）。
+    return StretchSegmented(
+      labels: labels,
+      selected: selected,
+      onSelected: onSelected,
+      trackColor: h.surface,
+      blockColor: h.surfaceAlt,
+      blockShadow: [
+        BoxShadow(
+          color: Colors.black.withValues(alpha: 0.08),
+          blurRadius: 4,
+          offset: const Offset(0, 1),
+        ),
+      ],
+      selectedLabelColor: h.text,
+      labelColor: h.textDim,
+      fontSize: 13,
     );
   }
 }
+

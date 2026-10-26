@@ -20,6 +20,7 @@ import '../services/model_context_table.dart';
 import '../services/settings_controller.dart';
 import '../theme/app_theme.dart';
 import '../theme/cupertino_kit.dart';
+import '../theme/pressable.dart';
 import 'settings_screen.dart';
 import '../widgets/bw_topbar.dart';
 import '../widgets/bw_usage_sheet.dart';
@@ -4699,7 +4700,9 @@ class _ChatScreenState extends State<ChatScreen> {
         borderRadius: BorderRadius.vertical(top: Radius.circular(24)),
       ),
       builder: (sheetCtx) {
-        return StatefulBuilder(
+        return BwSheetShell(
+          onDismissRequest: () => Navigator.of(sheetCtx).pop(),
+          child: StatefulBuilder(
           builder: (ctx, setDlgState) {
             final q = questions[page];
             final id = (q['id'] as String?) ?? 'q${page + 1}';
@@ -4930,7 +4933,7 @@ class _ChatScreenState extends State<ChatScreen> {
               ),
             );
           },
-        );
+        ));
       },
     );
 
@@ -5686,13 +5689,21 @@ class _WelcomeState extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return Padding(
-      padding: const EdgeInsets.fromLTRB(22, 52, 22, 0),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Text(
-            '今天想做些什么？\n找我，我都可以帮你！',
+    // ★ 可滚动（2026-10-26 真机溢出修复）：键盘弹起时消息区高度
+    // 被压缩，固定 Column 直接 BOTTOM OVERFLOWED 115px —— 改成
+    // 「至少撑满视口、超高可滚」：LayoutBuilder 拿真实高度做
+    // minHeight，空间够时顶格排布，不够时滚动，不再溢出。
+    return LayoutBuilder(
+      builder: (context, c) => SingleChildScrollView(
+        child: ConstrainedBox(
+          constraints: BoxConstraints(minHeight: c.maxHeight),
+          child: Padding(
+            padding: const EdgeInsets.fromLTRB(22, 52, 22, 0),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  '今天想做些什么？\n找我，我都可以帮你！',
             style: TextStyle(
               fontSize: 30,
               fontWeight: FontWeight.w700,
@@ -5701,16 +5712,19 @@ class _WelcomeState extends StatelessWidget {
             ),
           ),
           const SizedBox(height: 34),
-          for (final (icon, label) in _suggestions) ...[
-            _SuggestChip(
-              h: h,
-              icon: icon,
-              label: label,
-              onTap: () => onSuggest(label),
+                for (final (icon, label) in _suggestions) ...[
+                  _SuggestChip(
+                    h: h,
+                    icon: icon,
+                    label: label,
+                    onTap: () => onSuggest(label),
+                  ),
+                  const SizedBox(height: 10),
+                ],
+              ],
             ),
-            const SizedBox(height: 10),
-          ],
-        ],
+          ),
+        ),
       ),
     );
   }
@@ -5732,7 +5746,9 @@ class _SuggestChip extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return Material(
+    return Pressable(
+      borderRadius: BorderRadius.circular(HRadius.pill),
+      child: Material(
       color: Colors.transparent,
       child: InkWell(
         onTap: onTap,
@@ -5753,6 +5769,7 @@ class _SuggestChip extends StatelessWidget {
           ),
         ),
       ),
+    ),
     );
   }
 }

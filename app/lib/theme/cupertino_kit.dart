@@ -61,6 +61,8 @@
 library;
 
 import 'package:flutter/cupertino.dart';
+
+import 'pressable.dart';
 import 'package:flutter/material.dart'
     show NoSplash, SnackBar, ScaffoldMessenger, Widget, BuildContext, Color;
 
@@ -271,7 +273,11 @@ class IosButton extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final scheme = CupertinoTheme.of(context).primaryColor;
-    return CupertinoButton(
+    // 全局按压反馈（2026-10-26 用户定）：0.96 微缩 + 内阴影 + 回弹
+    return Pressable(
+      borderRadius: BorderRadius.circular(dense ? 15 : 19),
+      enabled: !busy && onPressed != null,
+      child: CupertinoButton(
       padding: EdgeInsets.zero,
       onPressed: busy ? null : onPressed,
       child: Container(
@@ -317,6 +323,7 @@ class IosButton extends StatelessWidget {
                 ],
               ),
       ),
+    ),
     );
   }
 }

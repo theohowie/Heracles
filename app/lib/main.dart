@@ -5,6 +5,7 @@ import 'models/settings.dart';
 import 'screens/chat_screen.dart';
 import 'services/settings_controller.dart';
 import 'theme/app_theme.dart';
+import 'theme/theme_reveal.dart';
 
 /// Heracles —— 手机上的开发智能体。
 ///
@@ -70,7 +71,10 @@ class HeraclesApp extends StatelessWidget {
           //   根件保留 `MaterialApp`：全 App 的 `Theme.of`/`Scaffold`/`Hue`
           //   体系都挂在 Material 上，换 `CupertinoApp` 会整树崩 ——
           //   设计语言由**控件与转场**决定，不由根件名字决定。
-          builder: (context, child) => HueScope(
+          // ThemeRevealHost：深浅切换的圆形扩散过渡（快照圆揭），
+          // 边界包住整个 App 内容、旧图盖在最上层
+          builder: (context, child) => ThemeRevealHost(
+            child: HueScope(
             hue: Hue.forTheme(s.themeStyle, dark),
             // ★ 字号设置的真实落点：MediaQuery.textScaler
             //
@@ -85,6 +89,7 @@ class HeraclesApp extends StatelessWidget {
               maxScaleFactor: s.fontSize / 15,
               child: child ?? const SizedBox.shrink(),
             ),
+          ),
           ),
           home: ChatScreen(settings: settings),
         );
