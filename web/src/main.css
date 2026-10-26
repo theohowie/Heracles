@@ -82,10 +82,10 @@ img { max-width: 100%; display: block; }
 .cta { display: flex; gap: 12px; flex-wrap: wrap; }
 .cta-note { color: var(--fg-dimmer); font-size: 13px; margin-top: 16px; }
 .cta-note a { color: var(--fg-dim); text-decoration: underline; }
-.hero-phone { display: flex; justify-content: center; }
-.hero-phone img {
-  width: min(330px, 78vw); border-radius: 30px; border: 1px solid var(--line);
-  box-shadow: var(--shadow-lift);
+.hero-video { display: flex; justify-content: center; align-items: center; }
+.hero-video video {
+  width: 100%; max-width: 620px; border-radius: 20px; border: 1px solid var(--line);
+  box-shadow: var(--shadow-lift); background: #000; display: block;
 }
 
 /* ---------- 通用 section ---------- */
@@ -215,7 +215,7 @@ img { max-width: 100%; display: block; }
 /* ---------- 响应式 ---------- */
 @media (max-width: 1000px) {
   .hero-inner { grid-template-columns: 1fr; }
-  .hero-phone { order: -1; }
+  .hero-video { order: -1; }
   .how { grid-template-columns: 1fr; }
   .how-tabs { flex-direction: row; overflow-x: auto; padding-bottom: 4px; }
   .how-tab { white-space: nowrap; }
@@ -239,3 +239,10 @@ img { max-width: 100%; display: block; }
 /* ---------- 视频 ---------- */
 .demo { border-radius: 24px; overflow: hidden; border: 1px solid var(--line); box-shadow: var(--shadow-lift); background: #000; }
 .demo video { width: 100%; display: block; }
+
+.hero-video { flex-direction: column; }
+.hero-video-more {
+  margin-top: 12px; font-size: 13px; color: var(--fg-dim);
+  border-bottom: 1px solid var(--line-strong); padding-bottom: 1px;
+}
+.hero-video-more:hover { color: var(--fg); }

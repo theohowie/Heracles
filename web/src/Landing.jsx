@@ -38,36 +38,36 @@ const FEATURES = [
 
 const STEPS = [
   {
-    key: 'workspace', label: '加工作区', shot: '/Heracles/shots/empty.webp', title: '先把项目放进来',
+    key: 'workspace', label: '加工作区', shot: '/Heracles/shots/empty-v2.webp', title: '先把项目放进来',
     body: '侧边栏「选择文件夹」用系统选择器授权项目目录，或使用不受限的默认工作区。授权之后它读到的是你真实的工程文件，不是上传到云端的副本。',
     points: ['SAF 授权，不复制项目', '支持 /sdcard 上的既有工程', '工作区之间互不串台'],
   },
   {
-    key: 'talk', label: '说明需求', shot: '/Heracles/shots/chat.webp', title: '像跟人说话一样描述任务',
+    key: 'talk', label: '说明需求', shot: '/Heracles/shots/chat-v2.webp', title: '像跟人说话一样描述任务',
     body: '说清要改什么，它自己决定调哪些工具。每次调用都是一张可展开的卡片：读了哪个文件、改了哪几行、命令输出是什么，都留在会话里可回查。',
     points: ['工具调用可展开核对', '改文件给出行级 diff', '随时中断、排队发送'],
   },
   {
-    key: 'model', label: '配模型', shot: '/Heracles/shots/modelsheet.webp', title: '模型与思考档位随时切',
+    key: 'model', label: '配模型', shot: '/Heracles/shots/modelsheet-v2.webp', title: '模型与思考档位随时切',
     body: '多家提供商并存，默认用哪个一目了然。思考档位与最大轮次在同一个抽屉里，切换只对新消息生效，不会打断正在跑的任务。',
     points: ['OpenAI 兼容 / Anthropic / Responses', '思考档位按协议自适应', '最大轮次可限制花费'],
   },
   {
-    key: 'build', label: '在手机上出包', shot: '/Heracles/shots/perms.webp', title: '权限与构建都在本机完成',
+    key: 'build', label: '在手机上出包', shot: '/Heracles/shots/perms-v2.webp', title: '权限与构建都在本机完成',
     body: '设备权限一页看清六项状态与当前执行路由；工具链就绪后即可在手机上完成构建、对齐与签名。手机过热会主动暂停，而不是把任务跑崩。',
     points: ['六项权限与路由诊断', '进程内对齐并自校验', '温度熔断保护'],
   },
 ]
 
 const GALLERY = [
-  { src: '/Heracles/shots/empty.webp', title: '空态' },
-  { src: '/Heracles/shots/chat.webp', title: '会话与工具调用' },
-  { src: '/Heracles/shots/generating.webp', title: '生成中' },
-  { src: '/Heracles/shots/modelsheet.webp', title: '模型与思考' },
-  { src: '/Heracles/shots/perms.webp', title: '设备权限' },
-  { src: '/Heracles/shots/home.webp', title: '设置首页' },
-  { src: '/Heracles/shots/appearance.webp', title: '设置·外观' },
-  { src: '/Heracles/shots/about.webp', title: '关于' },
+  { src: '/Heracles/shots/empty-v2.webp', title: '空态' },
+  { src: '/Heracles/shots/chat-v2.webp', title: '会话与工具调用' },
+  { src: '/Heracles/shots/generating-v2.webp', title: '生成中' },
+  { src: '/Heracles/shots/modelsheet-v2.webp', title: '模型与思考' },
+  { src: '/Heracles/shots/perms-v2.webp', title: '设备权限' },
+  { src: '/Heracles/shots/home-v2.webp', title: '设置首页' },
+  { src: '/Heracles/shots/appearance-v2.webp', title: '设置·外观' },
+  { src: '/Heracles/shots/about-v2.webp', title: '关于' },
 ]
 
 const WORKS = ['会话与守卫（在途结果不串台）', '审批门禁（允许 / 需确认 / 拒绝）', '取消、排队发送、上下文压缩',
@@ -137,9 +137,13 @@ function Hero() {
           </motion.div>
           <p className="cta-note">点击即开始下载 · 也可以在 <a href={RELEASES} target="_blank" rel="noreferrer">Releases</a> 里挑版本与校验值</p>
         </div>
-        <motion.div className="hero-phone" initial={reduce ? false : { opacity: 0, y: 34 }} animate={{ opacity: 1, y: 0 }}
+        <motion.div className="hero-video" initial={reduce ? false : { opacity: 0, y: 34 }} animate={{ opacity: 1, y: 0 }}
           transition={{ duration: 0.9, delay: 0.15 }}>
-          <img src="/Heracles/shots/chat.webp" alt="Heracles 会话界面" />
+          <video src="/Heracles/video/hero-loop.mp4" poster="/Heracles/shots/chat-v2.webp"
+            autoPlay muted loop playsInline preload="auto" />
+          <a className="hero-video-more" href="/Heracles/video/heracles-30s.mp4" target="_blank" rel="noreferrer">
+            看完整 30 秒版本
+          </a>
         </motion.div>
       </div>
     </section>
@@ -192,23 +196,6 @@ function How() {
   )
 }
 
-
-function Demo() {
-  return (
-    <section className="section" id="demo">
-      <Reveal>
-        <h2 className="section-title">30 秒看它怎么工作</h2>
-        <p className="section-sub">真机录屏：发一条消息，它调用工具、给出结果。没有加速剪辑。</p>
-      </Reveal>
-      <Reveal>
-        <div className="demo">
-          <video src="/Heracles/video/heracles-30s.mp4" poster="/Heracles/shots/chat.webp"
-            autoPlay muted loop playsInline controls preload="auto" />
-        </div>
-      </Reveal>
-    </section>
-  )
-}
 
 function Features() {
   return (
@@ -352,7 +339,6 @@ export default function Landing() {
       <Nav />
       <main>
         <Hero />
-        <Demo />
         <How />
         <Features />
         <Shots />
