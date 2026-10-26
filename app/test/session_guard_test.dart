@@ -219,18 +219,23 @@ void main() {
 
   /// **手机尺寸夹具**（2026-10-26，前端"TRAE 式输入区 + 空态大字问候/建议胶囊"之后）。
   ///
-  /// 新 UI 比旧版高，而 `flutter test` 的**默认窗口是 800×600**（不是手机）：
-  /// 这个高度装不下"空态大字 + 建议胶囊 + 更高的输入区" ⇒
-  /// `RenderFlex overflowed by 75 pixels on the bottom`，且长按/点按坐标会落到屏外
+  /// 由来：新 UI 一度比旧版高，而 `flutter test` 的**默认窗口是 800×600**（不是手机）——
+  /// 那个高度当时装不下"空态大字 + 建议胶囊 + 更高的输入区" ⇒
+  /// `RenderFlex overflowed by 75 pixels on the bottom`，长按/点按坐标还会落到屏外
   /// （表现为"找不到菜单项"这种**误导性**报错，12 条用例曾因此全红）。
-  /// 真机是竖屏手机（本机 411×915dp）⇒ 手机尺寸才是接近真实的夹具
+  ///
+  /// ✅ **该缺陷前端已修**（`2ff0220`"空态溢出修复"）。本侧独立复验（探针实测）：
+  /// **800×600 / 390×600 / 390×844 三种尺寸都不再溢出**。
+  ///
+  /// 那为什么还留着这个夹具：**默认窗口不是手机** —— 抽屉、长按菜单、上拉面板在矮窗口里的
+  /// 行为不代表真机（真机竖屏 411×915dp），用手机尺寸是更接近真实的夹具
   /// （同 `chat_screen_app_workspace_test.usePhoneSurface` 想做的事）。
   ///
   /// 为什么不用 `setUp`：`setSurfaceSize` 内部有 `inTest` 断言，**只能在测试体内**调
   /// （放 `setUp` 会 12 条一起失败）。
   ///
-  /// ⚠️ 这条治的是**窗口高度 ≠ 手机**，**不是**用放宽夹具掩盖横向溢出：
-  /// 横向那条已由前端 `d5152dc` 修掉，回归测试在 `input_bar_overflow_test.dart`。
+  /// ⚠️ 这条治的是**窗口尺寸 ≠ 手机**，**不是**用放宽夹具掩盖横向溢出：
+  /// 横向那条由前端 `d5152dc` 修掉，回归测试在 `input_bar_overflow_test.dart`。
   void phoneTest(String description, Future<void> Function(WidgetTester) body) {
     testWidgets(description, (tester) async {
       await tester.binding.setSurfaceSize(const Size(390, 844));
