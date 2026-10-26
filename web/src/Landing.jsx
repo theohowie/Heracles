@@ -62,6 +62,7 @@ const STEPS = [
 const GALLERY = [
   { src: '/Heracles/shots/empty.webp', title: '空态' },
   { src: '/Heracles/shots/chat.webp', title: '会话与工具调用' },
+  { src: '/Heracles/shots/generating.webp', title: '生成中' },
   { src: '/Heracles/shots/modelsheet.webp', title: '模型与思考' },
   { src: '/Heracles/shots/perms.webp', title: '设备权限' },
   { src: '/Heracles/shots/home.webp', title: '设置首页' },
