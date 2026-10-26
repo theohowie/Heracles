@@ -226,6 +226,17 @@ img { max-width: 100%; display: block; }
 .dl-sha code { font-size: 12px; color: var(--fg-dim); background: rgba(255, 255, 255, .06); padding: 3px 10px; border-radius: 8px; word-break: break-all; }
 .dl-note { position: relative; color: var(--fg-dimmer); font-size: 13px; margin: 14px 0 0; }
 .dl-note a { text-decoration: underline; color: var(--fg-dim); }
+.dl-verified {
+  position: relative;
+  margin: 22px auto 0;
+  max-width: 46em;
+  font-size: 13.5px;
+  color: var(--fg-dim);
+  background: rgba(80, 220, 140, .08);
+  border: 1px solid rgba(80, 220, 140, .22);
+  border-radius: 12px;
+  padding: 10px 16px;
+}
 
 /* ---------- 页脚 ---------- */
 .footer { border-top: 1px solid var(--line); margin-top: 40px; padding: 34px 20px 46px; background: var(--bg-soft); }

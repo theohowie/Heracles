@@ -255,6 +255,10 @@ function Download() {
             <div><span>签名</span>debug keystore（暂）</div>
             <div className="dl-sha"><span>sha256</span><code>{SHA}</code></div>
           </div>
+          <p className="dl-verified">
+            ✅ 这个包已在一台真机（Android 17 / arm64）上覆盖安装并冒烟：冷启 <strong>825 ms</strong>、
+            运行日志无异常、界面无溢出条纹。
+          </p>
           <p className="dl-note">
             ⚠️ 这是 alpha 阶段：release 暂用 debug 密钥签名，安装时需允许「未知来源」；
             32 位手机装上也起不来。其它版本见 <a href={RELEASES} target="_blank" rel="noreferrer">Releases</a>。
