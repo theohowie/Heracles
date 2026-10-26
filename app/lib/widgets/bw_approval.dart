@@ -1,5 +1,6 @@
 import 'package:flutter/cupertino.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/physics.dart';
 
 import '../models/settings.dart';
 import '../theme/app_theme.dart';
@@ -15,6 +16,116 @@ import '../theme/app_theme.dart';
 ///   接后端 N1 的 `approval_required` 事件。
 
 /// 完全访问二次确认抽屉。返回 true = 用户勾选并确认。
+
+/// **抽屉动效壳**（2026-10-26，用户按 TRAE 级动效定）：
+///
+/// - **弹性入场**：弹簧把面板从下方 16px 推到位、轻微过冲再回落
+///   稳定（route 自带的匀速滑入之上再叠这一层回弹）；
+/// - **橡皮筋拖拽**（allowDrag 的抽屉）：整块面板跟手上下动，
+///   往上拖过头只剩 0.32 倍位移（阻尼拉伸感），往下拖是自由行程；
+/// - **速度吸附**：松手时下拖超过 110px 或下甩速度 > 620px/s →
+///   滑出关闭（等同该抽屉的取消语义，由 onDismissRequest 决定
+///   pop 的值）；否则弹簧吸回原位。
+///
+/// 安全抽屉（审批请求、完全访问二次确认）allowDrag=false：
+/// 只能按钮决策，下滑/点外都不构成决定——只保留入场弹性。
+class BwSheetShell extends StatefulWidget {
+  const BwSheetShell({
+    super.key,
+    required this.onDismissRequest,
+    required this.child,
+    this.allowDrag = true,
+  });
+
+  final VoidCallback onDismissRequest;
+  final bool allowDrag;
+  final Widget child;
+
+  @override
+  State<BwSheetShell> createState() => _BwSheetShellState();
+}
+
+class _BwSheetShellState extends State<BwSheetShell>
+    with SingleTickerProviderStateMixin {
+  late final AnimationController _anim;
+  double _dy = 16;
+  double _dragTotal = 0;
+  bool _dismissing = false;
+
+  @override
+  void initState() {
+    super.initState();
+    _anim = AnimationController.unbounded(vsync: this)
+      ..addListener(() {
+        if (mounted) setState(() => _dy = _anim.value);
+      });
+    _anim.value = 16;
+    _anim.animateWith(SpringSimulation(
+      const SpringDescription(mass: 1, stiffness: 200, damping: 19),
+      16,
+      0,
+      0,
+    ));
+  }
+
+  @override
+  void dispose() {
+    _anim.dispose();
+    super.dispose();
+  }
+
+  double get _visualDy => _dy < 0 ? _dy * 0.32 : _dy;
+
+  void _springBack(double velocity) {
+    _anim.animateWith(SpringSimulation(
+      const SpringDescription(mass: 1, stiffness: 320, damping: 27),
+      _dy,
+      0,
+      velocity,
+    ));
+  }
+
+  void _dismiss() {
+    if (_dismissing) return;
+    _dismissing = true;
+    _anim
+        .animateTo(480, duration: const Duration(milliseconds: 190), curve: Curves.easeIn)
+        .whenComplete(() {
+      if (mounted) widget.onDismissRequest();
+    });
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final body = Transform.translate(
+      offset: Offset(0, _visualDy),
+      child: widget.child,
+    );
+    if (!widget.allowDrag) return body;
+    return GestureDetector(
+      behavior: HitTestBehavior.translucent,
+      onVerticalDragStart: (_) {
+        _anim.stop();
+        _dragTotal = _dy;
+      },
+      onVerticalDragUpdate: (d) {
+        _dragTotal += d.delta.dy;
+        setState(() => _dy = _dragTotal);
+      },
+      onVerticalDragEnd: (d) {
+        final v = d.primaryVelocity ?? 0;
+        if (_dragTotal > 110 || v > 620) {
+          _dismiss();
+        } else {
+          _springBack(v);
+        }
+      },
+      onVerticalDragCancel: () => _springBack(0),
+      child: body,
+    );
+  }
+}
+
 Future<bool> showFullAccessConfirmSheet(BuildContext context) async {
   final h = Hue.of(context);
   final confirmed = await showModalBottomSheet<bool>(
@@ -28,7 +139,11 @@ Future<bool> showFullAccessConfirmSheet(BuildContext context) async {
     shape: const RoundedRectangleBorder(
       borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
     ),
-    builder: (sheetCtx) => _FullAccessConfirmSheet(h: h),
+    builder: (sheetCtx) => BwSheetShell(
+      onDismissRequest: () => Navigator.of(sheetCtx).pop(false),
+      allowDrag: false,
+      child: _FullAccessConfirmSheet(h: h),
+    ),
   );
   return confirmed == true;
 }
@@ -207,7 +322,9 @@ Future<void> showApprovalModeSheet(
     shape: const RoundedRectangleBorder(
       borderRadius: BorderRadius.vertical(top: Radius.circular(24)),
     ),
-    builder: (sheetCtx) => SafeArea(
+    builder: (sheetCtx) => BwSheetShell(
+      onDismissRequest: () => Navigator.of(sheetCtx).pop(),
+      child: SafeArea(
       child: ConstrainedBox(
         // 矮屏上三档卡片放不下时内部滚动，不溢出（单选卡改高后
         // 600 高的测试面溢出过 16px —— 小屏真机同理）
@@ -281,7 +398,7 @@ Future<void> showApprovalModeSheet(
           ),
         ),
       ),
-    ),
+    )),
   );
   if (picked != null && picked != current) {
     onPicked(picked);
@@ -414,12 +531,67 @@ Future<ApprovalDecision?> showApprovalRequestSheet(
     shape: const RoundedRectangleBorder(
       borderRadius: BorderRadius.vertical(top: Radius.circular(24)),
     ),
-    builder: (sheetCtx) => SafeArea(
+    builder: (sheetCtx) => BwSheetShell(
+      onDismissRequest: () => Navigator.of(sheetCtx).pop(),
+      allowDrag: false,
+      child: _ApprovalRequestBody(
+        h: h,
+        tool: tool,
+        argsPreview: argsPreview,
+        hasArgs: hasArgs,
+        risk: risk,
+        note: note,
+        workspaceInside: workspaceInside,
+        allowStop: allowStop,
+      ),
+    ),
+  );
+}
+
+
+/// **审批请求抽屉体 · 分步版**（2026-10-26，用户定）：
+///
+/// 第 1 步 = 批准请求（拒绝 / 允许一次 / 始终允许）；点「始终允许」
+/// 不再直接生效，而是**在同一块面板里横滑到第 2 步**二次确认，
+/// 面板高度随两步内容平滑变高/变矮（AnimatedSize）。点「返回」
+/// 滑回第 1 步；点「确认始终允许」才 pop(ApprovalDecision.always)
+/// —— 对外语义与旧版一条不变，只是把长期授权的确认收进同一步
+/// 流程，不再是「点完就生效」或另开一层抽屉。
+class _ApprovalRequestBody extends StatefulWidget {
+  const _ApprovalRequestBody({
+    required this.h,
+    required this.tool,
+    required this.argsPreview,
+    required this.hasArgs,
+    required this.risk,
+    required this.note,
+    required this.workspaceInside,
+    required this.allowStop,
+  });
+
+  final Hue h;
+  final String tool;
+  final String argsPreview;
+  final bool hasArgs;
+  final String? risk;
+  final String? note;
+  final bool workspaceInside;
+  final bool allowStop;
+
+  @override
+  State<_ApprovalRequestBody> createState() => _ApprovalRequestBodyState();
+}
+
+class _ApprovalRequestBodyState extends State<_ApprovalRequestBody> {
+  int _step = 0;
+
+  @override
+  Widget build(BuildContext context) {
+    final h = widget.h;
+    return SafeArea(
       child: ConstrainedBox(
-        // 高度随内容自适应但有上限；中间区可滚、按钮区钉底 ——
-        // 长参数 + 长风险说明也不会再把按钮顶出屏幕（真机溢出 62px 的教训）
         constraints: BoxConstraints(
-          maxHeight: MediaQuery.sizeOf(sheetCtx).height * 0.88,
+          maxHeight: MediaQuery.sizeOf(context).height * 0.88,
         ),
         child: Padding(
           padding: const EdgeInsets.fromLTRB(20, 10, 20, 16),
@@ -438,132 +610,240 @@ Future<ApprovalDecision?> showApprovalRequestSheet(
                 ),
               ),
               const SizedBox(height: 16),
-              Row(
-                children: [
-                  Icon(CupertinoIcons.exclamationmark_shield_fill,
-                      size: 21, color: h.text),
-                  const SizedBox(width: 8),
-                  const Text(
-                    '需要你的批准',
-                    style: TextStyle(fontSize: 17, fontWeight: FontWeight.w700),
-                  ),
-                ],
-              ),
-              const SizedBox(height: 12),
-              Text(
-                tool,
-                style: const TextStyle(
-                    fontSize: 15, fontWeight: FontWeight.w600),
-              ),
               Flexible(
                 child: SingleChildScrollView(
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      // 风险说明 = 解释段（概念图 11 的那句话）：中性色，
-                      // 不再整段橙字
-                      if (risk != null) ...[
-                        const SizedBox(height: 8),
-                        Text(
-                          risk,
-                          style: TextStyle(
-                              fontSize: 13.5, height: 1.55, color: h.textDim),
-                        ),
-                      ],
-                      // note（后端 message）正文里嵌着参数全文 —— 黑块已给
-                      // 全文时不再重复渲染（真机上出现过参数印两遍）；
-                      // 没有参数时它就是唯一的说明，照常显示。
-                      if (note != null && note.isNotEmpty && !hasArgs) ...[
-                        const SizedBox(height: 8),
-                        Text(
-                          note,
-                          style: TextStyle(
-                              fontSize: 13, height: 1.5, color: h.textDim),
-                        ),
-                      ],
-                      if (hasArgs) ...[
-                        const SizedBox(height: 12),
-                        // 参数黑块（概念图 11）：等宽字、全文不截断，
-                        // 过长时块内滚动
-                        Container(
-                          width: double.infinity,
-                          padding: const EdgeInsets.all(14),
-                          decoration: BoxDecoration(
-                            color: h.text,
-                            borderRadius: BorderRadius.circular(14),
-                          ),
-                          child: ConstrainedBox(
-                            constraints:
-                                const BoxConstraints(maxHeight: 190),
-                            child: SingleChildScrollView(
-                              child: Text(
-                                argsPreview,
-                                style: TextStyle(
-                                  fontSize: 13,
-                                  height: 1.55,
-                                  fontFamily: kMonoFontFamily,
-                                  fontFamilyFallback: kMonoFallback,
-                                  color: h.bg,
+                  child: AnimatedSize(
+                    duration: const Duration(milliseconds: 300),
+                    curve: Curves.easeInOutCubic,
+                    alignment: Alignment.topCenter,
+                    child: LayoutBuilder(
+                      builder: (context, c) {
+                        final w = c.maxWidth;
+                        return ClipRect(
+                          child: TweenAnimationBuilder<double>(
+                            tween: Tween(end: _step.toDouble()),
+                            duration: const Duration(milliseconds: 300),
+                            curve: Curves.easeInOutCubic,
+                            builder: (context, v, _) =>
+                                Transform.translate(
+                              offset: Offset(-v * w, 0),
+                              child: OverflowBox(
+                                alignment: Alignment.topLeft,
+                                maxWidth: 2 * w,
+                                child: Row(
+                                  crossAxisAlignment:
+                                      CrossAxisAlignment.start,
+                                  children: [
+                                    SizedBox(width: w, child: _step0(context)),
+                                    SizedBox(width: w, child: _step1(context)),
+                                  ],
                                 ),
                               ),
                             ),
                           ),
-                        ),
-                      ],
-                      const SizedBox(height: 10),
-                      Text(
-                        workspaceInside ? '在工作区内操作' : '超出工作区范围',
-                        style: TextStyle(fontSize: 12, color: h.textFaint),
-                      ),
-                    ],
-                  ),
-                ),
-              ),
-              const SizedBox(height: 16),
-              // 概念图 11 的按钮式样：拒绝 / 允许一次 = 灰钮，
-              // 始终允许 = 黑钮（把「长期授权」做成最重的那一个）
-              Row(
-                children: [
-                  Expanded(
-                    child: _approvalButton(
-                        sheetCtx, h, '拒绝', ApprovalDecision.deny,
-                        filled: false),
-                  ),
-                  const SizedBox(width: 8),
-                  Expanded(
-                    child: _approvalButton(
-                        sheetCtx, h, '允许一次', ApprovalDecision.once,
-                        filled: false),
-                  ),
-                  const SizedBox(width: 8),
-                  Expanded(
-                    child: _approvalButton(
-                        sheetCtx, h, '始终允许', ApprovalDecision.always,
-                        filled: true),
-                  ),
-                ],
-              ),
-              if (allowStop) ...[
-                const SizedBox(height: 4),
-                Center(
-                  child: CupertinoButton(
-                    padding: const EdgeInsets.symmetric(vertical: 8),
-                    onPressed: () => Navigator.of(sheetCtx)
-                        .pop(ApprovalDecision.stop),
-                    child: Text(
-                      '停止任务',
-                      style: TextStyle(
-                          fontSize: 14, color: HColors.errorOn(h.dark)),
+                        );
+                      },
                     ),
                   ),
                 ),
-              ],
+              ),
             ],
           ),
         ),
       ),
-    ),
-  );
+    );
+  }
+
+  Widget _step0(BuildContext context) {
+    final h = widget.h;
+    return Column(
+      mainAxisSize: MainAxisSize.min,
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Row(
+          children: [
+            Icon(CupertinoIcons.exclamationmark_shield_fill,
+                size: 21, color: h.text),
+            const SizedBox(width: 8),
+            const Text(
+              '需要你的批准',
+              style: TextStyle(fontSize: 17, fontWeight: FontWeight.w700),
+            ),
+          ],
+        ),
+        const SizedBox(height: 12),
+        Text(
+          widget.tool,
+          style: const TextStyle(fontSize: 15, fontWeight: FontWeight.w600),
+        ),
+        if (widget.risk != null) ...[
+          const SizedBox(height: 8),
+          Text(
+            widget.risk!,
+            style: TextStyle(fontSize: 13.5, height: 1.55, color: h.textDim),
+          ),
+        ],
+        if (widget.note != null &&
+            widget.note!.isNotEmpty &&
+            !widget.hasArgs) ...[
+          const SizedBox(height: 8),
+          Text(
+            widget.note!,
+            style: TextStyle(fontSize: 13, height: 1.5, color: h.textDim),
+          ),
+        ],
+        if (widget.hasArgs) ...[
+          const SizedBox(height: 12),
+          Container(
+            width: double.infinity,
+            padding: const EdgeInsets.all(14),
+            decoration: BoxDecoration(
+              color: h.text,
+              borderRadius: BorderRadius.circular(14),
+            ),
+            child: ConstrainedBox(
+              constraints: const BoxConstraints(maxHeight: 190),
+              child: SingleChildScrollView(
+                child: Text(
+                  widget.argsPreview,
+                  style: TextStyle(
+                    fontSize: 13,
+                    height: 1.55,
+                    fontFamily: kMonoFontFamily,
+                    fontFamilyFallback: kMonoFallback,
+                    color: h.bg,
+                  ),
+                ),
+              ),
+            ),
+          ),
+        ],
+        const SizedBox(height: 10),
+        Text(
+          widget.workspaceInside ? '在工作区内操作' : '超出工作区范围',
+          style: TextStyle(fontSize: 12, color: h.textFaint),
+        ),
+        const SizedBox(height: 16),
+        Row(
+          children: [
+            Expanded(
+              child: _approvalButton(
+                  context, h, '拒绝', ApprovalDecision.deny,
+                  filled: false),
+            ),
+            const SizedBox(width: 8),
+            Expanded(
+              child: _approvalButton(
+                  context, h, '允许一次', ApprovalDecision.once,
+                  filled: false),
+            ),
+            const SizedBox(width: 8),
+            Expanded(
+              child: CupertinoButton(
+                padding: const EdgeInsets.symmetric(vertical: 12),
+                color: h.text,
+                borderRadius: BorderRadius.circular(14),
+                // ★ 分步：点它只滑到第 2 步确认，不直接生效
+                onPressed: () => setState(() => _step = 1),
+                child: Text(
+                  '始终允许',
+                  style: TextStyle(
+                    fontSize: 15,
+                    fontWeight: FontWeight.w600,
+                    color: h.bg,
+                  ),
+                ),
+              ),
+            ),
+          ],
+        ),
+        if (widget.allowStop) ...[
+          const SizedBox(height: 4),
+          Center(
+            child: CupertinoButton(
+              padding: const EdgeInsets.symmetric(vertical: 8),
+              onPressed: () =>
+                  Navigator.of(context).pop(ApprovalDecision.stop),
+              child: Text(
+                '停止任务',
+                style: TextStyle(
+                    fontSize: 14, color: HColors.errorOn(h.dark)),
+              ),
+            ),
+          ),
+        ],
+      ],
+    );
+  }
+
+  Widget _step1(BuildContext context) {
+    final h = widget.h;
+    return Column(
+      mainAxisSize: MainAxisSize.min,
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Row(
+          children: [
+            Icon(CupertinoIcons.checkmark_shield_fill,
+                size: 21, color: h.text),
+            const SizedBox(width: 8),
+            const Text(
+              '始终允许这个工具？',
+              style: TextStyle(fontSize: 17, fontWeight: FontWeight.w700),
+            ),
+          ],
+        ),
+        const SizedBox(height: 12),
+        Text(
+          widget.tool,
+          style: const TextStyle(fontSize: 15, fontWeight: FontWeight.w600),
+        ),
+        const SizedBox(height: 8),
+        Text(
+          '之后再调用这个工具时会直接执行、不再询问你。随时可在'
+          '「通用设置 · 已始终允许的工具」里撤销。',
+          style: TextStyle(fontSize: 13.5, height: 1.55, color: h.textDim),
+        ),
+        if (widget.hasArgs) ...[
+          const SizedBox(height: 10),
+          Text(
+            '本次参数：${widget.argsPreview}',
+            maxLines: 1,
+            overflow: TextOverflow.ellipsis,
+            style: TextStyle(
+              fontSize: 12,
+              fontFamily: kMonoFontFamily,
+              fontFamilyFallback: kMonoFallback,
+              color: h.textFaint,
+            ),
+          ),
+        ],
+        const SizedBox(height: 16),
+        Row(
+          children: [
+            Expanded(
+              child: CupertinoButton(
+                padding: const EdgeInsets.symmetric(vertical: 12),
+                color: h.surface,
+                borderRadius: BorderRadius.circular(14),
+                onPressed: () => setState(() => _step = 0),
+                child: Text(
+                  '返回',
+                  style: TextStyle(fontSize: 15, color: h.text),
+                ),
+              ),
+            ),
+            const SizedBox(width: 8),
+            Expanded(
+              child: _approvalButton(
+                  context, h, '确认始终允许', ApprovalDecision.always,
+                  filled: true),
+            ),
+          ],
+        ),
+      ],
+    );
+  }
 }
 
 /// 审批抽屉的按钮（灰 / 黑两式，圆角 14 与参数黑块呼应）
@@ -609,7 +889,9 @@ Future<bool> showBwConfirmSheet(
     shape: const RoundedRectangleBorder(
       borderRadius: BorderRadius.vertical(top: Radius.circular(24)),
     ),
-    builder: (sheetCtx) => SafeArea(
+    builder: (sheetCtx) => BwSheetShell(
+      onDismissRequest: () => Navigator.of(sheetCtx).pop(),
+      child: SafeArea(
       child: Padding(
         padding: const EdgeInsets.fromLTRB(20, 10, 20, 16),
         child: Column(
@@ -676,7 +958,7 @@ Future<bool> showBwConfirmSheet(
           ],
         ),
       ),
-    ),
+    )),
   );
   return r == true;
 }
@@ -700,14 +982,16 @@ Future<String?> showBwTextInputSheet(
     shape: const RoundedRectangleBorder(
       borderRadius: BorderRadius.vertical(top: Radius.circular(24)),
     ),
-    builder: (sheetCtx) => _BwTextInputSheet(
+    builder: (sheetCtx) => BwSheetShell(
+      onDismissRequest: () => Navigator.of(sheetCtx).pop(),
+      child: _BwTextInputSheet(
       h: h,
       title: title,
       initial: initial,
       placeholder: placeholder,
       confirmLabel: confirmLabel,
       clearLabel: clearLabel,
-    ),
+    )),
   );
 }
 

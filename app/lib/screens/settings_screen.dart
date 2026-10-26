@@ -11,6 +11,8 @@ import '../services/settings_controller.dart';
 import '../theme/app_theme.dart';
 import '../theme/cupertino_kit.dart';
 import '../theme/elastic_switch.dart';
+import '../theme/stretch_segmented.dart';
+import '../theme/theme_reveal.dart';
 import '../widgets/bw_approval.dart';
 
 /// 设置主页 —— 分类列表（对应参考图的侧栏结构）。
@@ -1418,12 +1420,13 @@ class GeneralSettingsPage extends StatelessWidget {
                 style: TextStyle(fontSize: 14, color: h.textDim),
               ),
               child: Column(
+                // stretch 是关键：Column 默认 center 会把滑杆收成
+                // 中间一截（用户指着真机图说「滑动器要长一点」）
+                crossAxisAlignment: CrossAxisAlignment.stretch,
                 children: [
-                  CupertinoSlider(
+                  _FontSlider(
+                    h: h,
                     value: s.fontSize,
-                    min: 12,
-                    max: 20,
-                    activeColor: h.text,
                     onChanged: controller.setFontSize,
                   ),
                   Padding(
@@ -2563,7 +2566,31 @@ class AppearanceSettingsPage extends StatelessWidget {
             const _SectionLabel('深浅'),
             _AppearancePreviewRow(
               value: s.appearance,
-              onChanged: controller.setAppearance,
+              onChanged: (v, center) {
+                if (v == s.appearance) return;
+                // 深浅切换圆形扩散（2026-10-26 用户定）：变深 = 新
+                // 配色从卡片位置扩散铺满；变浅 = 沿原路收回。
+                // 目标与当前实际深浅相同（如跟随系统恰好同色）时
+                // 没有可扩散的变化，直接切换。
+                final platformDark =
+                    MediaQuery.platformBrightnessOf(context) ==
+                        Brightness.dark;
+                final toDark = switch (v) {
+                  AppAppearance.dark => true,
+                  AppAppearance.light => false,
+                  AppAppearance.system => platformDark,
+                };
+                final nowDark = Hue.of(context).dark;
+                if (toDark == nowDark) {
+                  controller.setAppearance(v);
+                } else {
+                  ThemeReveal.instance.reveal(
+                    center,
+                    () => controller.setAppearance(v),
+                    toDark: toDark,
+                  );
+                }
+              },
             ),
             // ★ 主题选择（2026-10-24，用户拍板）：代替已移除的强调色选择。
             //   只换颜色与背景，不换布局；默认黑白。
@@ -2826,7 +2853,7 @@ class _AppearancePreviewRow extends StatelessWidget {
   const _AppearancePreviewRow({required this.value, required this.onChanged});
 
   final AppAppearance value;
-  final void Function(AppAppearance) onChanged;
+  final void Function(AppAppearance, Offset) onChanged;
 
   @override
   Widget build(BuildContext context) {
@@ -2841,7 +2868,8 @@ class _AppearancePreviewRow extends StatelessWidget {
               child: _AppearanceOption(
                 option: AppAppearance.values[i],
                 selected: AppAppearance.values[i] == value,
-                onTap: () => onChanged(AppAppearance.values[i]),
+                onTap: (center) =>
+                    onChanged(AppAppearance.values[i], center),
               ),
             ),
           ],
@@ -2860,13 +2888,21 @@ class _AppearanceOption extends StatelessWidget {
 
   final AppAppearance option;
   final bool selected;
-  final VoidCallback onTap;
+  final ValueChanged<Offset> onTap;
 
   @override
   Widget build(BuildContext context) {
     final h = Hue.of(context);
     return GestureDetector(
-      onTap: onTap,
+      // 圆揭的圆心 = 这张卡的中心（全局坐标）
+      onTap: () {
+        final rb = context.findRenderObject() as RenderBox?;
+        if (rb != null && rb.hasSize) {
+          onTap(rb.localToGlobal(rb.size.center(Offset.zero)));
+        } else {
+          onTap(Offset.zero);
+        }
+      },
       behavior: HitTestBehavior.opaque,
       child: Container(
         padding: const EdgeInsets.all(10),
@@ -3030,6 +3066,112 @@ class _SettingsCard extends StatelessWidget {
 
 /// 分段胶囊（离散档位专用，2026-10-25 晚）：一排等分选项，
 /// 选中 = 主色底 + 反色粗字。连续量（字号）不要用它，用滑杆。
+/// **字号滑杆**（2026-10-26，用户按真机体验定）：
+///
+/// 自绘长滑杆 —— 轨道占满卡片整宽；填充进度、滑钮位置、右上读数
+/// 与全局预览全部由 controller 的同一个 fontSize 值驱动，拖动时
+/// 每一帧同源更新，节奏天然一致（系统 CupertinoSlider 轨道短、
+/// 滑钮与读数各走各的节奏，用户嫌不连贯）。拖动中滑钮微微放大。
+class _FontSlider extends StatefulWidget {
+  const _FontSlider({required this.h, required this.value, required this.onChanged});
+
+  final Hue h;
+  final double value;
+  final ValueChanged<double> onChanged;
+
+  @override
+  State<_FontSlider> createState() => _FontSliderState();
+}
+
+class _FontSliderState extends State<_FontSlider> {
+  bool _dragging = false;
+  static const _thumbR = 13.5;
+
+  void _seek(double dx, double w) {
+    final t = ((dx - _thumbR) / (w - 2 * _thumbR)).clamp(0.0, 1.0);
+    widget.onChanged(12 + t * 8);
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final h = widget.h;
+    return LayoutBuilder(
+      builder: (context, c) {
+        final w = c.maxWidth;
+        final t = ((widget.value - 12) / 8).clamp(0.0, 1.0);
+        final cx = _thumbR + t * (w - 2 * _thumbR);
+        return GestureDetector(
+          behavior: HitTestBehavior.opaque,
+          onHorizontalDragStart: (d) {
+            setState(() => _dragging = true);
+            _seek(d.localPosition.dx, w);
+          },
+          onHorizontalDragUpdate: (d) => _seek(d.localPosition.dx, w),
+          onHorizontalDragEnd: (_) => setState(() => _dragging = false),
+          onHorizontalDragCancel: () => setState(() => _dragging = false),
+          onTapDown: (d) => _seek(d.localPosition.dx, w),
+          child: SizedBox(
+            height: 34,
+            child: Stack(
+              clipBehavior: Clip.none,
+              children: [
+                Positioned(
+                  left: 0,
+                  right: 0,
+                  top: (34 - 5) / 2,
+                  child: Container(
+                    height: 5,
+                    decoration: BoxDecoration(
+                      color: h.border,
+                      borderRadius: BorderRadius.circular(HRadius.pill),
+                    ),
+                  ),
+                ),
+                Positioned(
+                  left: 0,
+                  top: (34 - 5) / 2,
+                  child: Container(
+                    width: cx,
+                    height: 5,
+                    decoration: BoxDecoration(
+                      color: h.text,
+                      borderRadius: BorderRadius.circular(HRadius.pill),
+                    ),
+                  ),
+                ),
+                Positioned(
+                  left: cx - _thumbR,
+                  top: 17 - _thumbR,
+                  child: AnimatedScale(
+                    scale: _dragging ? 1.12 : 1.0,
+                    duration: const Duration(milliseconds: 150),
+                    child: Container(
+                      width: 27,
+                      height: 27,
+                      decoration: BoxDecoration(
+                        color: Colors.white,
+                        shape: BoxShape.circle,
+                        border: Border.all(color: h.border),
+                        boxShadow: [
+                          BoxShadow(
+                            color: Colors.black.withValues(alpha: 0.18),
+                            blurRadius: 6,
+                            offset: const Offset(0, 2),
+                          ),
+                        ],
+                      ),
+                    ),
+                  ),
+                ),
+              ],
+            ),
+          ),
+        );
+      },
+    );
+  }
+}
+
 class _SegControl<T> extends StatelessWidget {
   const _SegControl({
     required this.value,
@@ -3046,45 +3188,18 @@ class _SegControl<T> extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final h = Hue.of(context);
-    return Container(
-      decoration: BoxDecoration(
-        color: h.surface,
-        borderRadius: BorderRadius.circular(12),
-      ),
-      padding: const EdgeInsets.all(3),
-      child: Row(
-        children: [
-          for (final o in options)
-            Expanded(
-              child: GestureDetector(
-                // 选同一档不回调 —— 不产生无意义的写盘（与模型抽屉同语义）
-        onTap: () {
-          if (o != value) onChanged(o);
-        },
-                behavior: HitTestBehavior.opaque,
-                child: Container(
-                  padding: const EdgeInsets.symmetric(vertical: 7),
-                  decoration: o == value
-                      ? BoxDecoration(
-                          color: h.text,
-                          borderRadius: BorderRadius.circular(9),
-                        )
-                      : null,
-                  child: Text(
-                    labelOf(o),
-                    textAlign: TextAlign.center,
-                    style: TextStyle(
-                      fontSize: 13.5,
-                      fontWeight:
-                          o == value ? FontWeight.w600 : FontWeight.w400,
-                      color: o == value ? h.bg : h.textDim,
-                    ),
-                  ),
-                ),
-              ),
-            ),
-        ],
-      ),
+    // 弹性拉伸动画走共用实现（StretchSegmented）；这里只做
+    // 泛型 T → 下标 的映射与「选同一档不回调」守卫（同值不写盘）。
+    return StretchSegmented(
+      labels: [for (final o in options) labelOf(o)],
+      selected: options.indexOf(value),
+      onSelected: (i) {
+        if (options[i] != value) onChanged(options[i]);
+      },
+      trackColor: h.surface,
+      blockColor: h.text,
+      selectedLabelColor: h.bg,
+      labelColor: h.textDim,
     );
   }
 }

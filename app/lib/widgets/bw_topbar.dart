@@ -16,6 +16,11 @@ import '../theme/cupertino_kit.dart';
 /// 收起 = 一颗小黑胶囊（呼吸圆点 + 当前步骤 + 进度），点按展开；
 /// 展开 = 同一胶囊纵向展开为计划面板（AnimatedSize，300ms easeOutCubic），
 /// 再点收回。状态由父级持有（与 `PlanChecklist` 同一套数据）。
+/// 灵动岛形变曲线（2026-10-26，用户要水滴式流体感）：控制点 y
+/// 越过 1 产生约 5% 的尺寸过冲——胶囊展开像被轻轻撑开再稳住，
+/// 高阻尼、不弹跳。展开/收起与圆角变化共用这一条曲线才同步。
+const _kFluidCurve = Cubic(0.22, 1.18, 0.36, 1.0);
+
 class DynamicIsland extends StatefulWidget {
   const DynamicIsland({
     super.key,
@@ -79,10 +84,12 @@ class _DynamicIslandState extends State<DynamicIsland>
     return GestureDetector(
       onTap: widget.onToggle,
       child: AnimatedSize(
-        duration: const Duration(milliseconds: 300),
-        curve: Curves.easeOutCubic,
+        duration: const Duration(milliseconds: 520),
+        curve: _kFluidCurve,
         alignment: Alignment.topCenter,
-        child: Container(
+        child: AnimatedContainer(
+          duration: const Duration(milliseconds: 520),
+          curve: _kFluidCurve,
           constraints: const BoxConstraints(maxWidth: 280),
           padding: const EdgeInsets.symmetric(horizontal: 13, vertical: 9),
           decoration: BoxDecoration(
