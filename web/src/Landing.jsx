@@ -1,11 +1,11 @@
 import { useState } from 'react'
 import { motion, AnimatePresence, useReducedMotion } from 'framer-motion'
 
-const APK = 'https://github.com/theohowie/Heracles/releases/download/v0.2.1/Heracles-v0.2.1.apk'
+const APK = 'https://github.com/theohowie/Heracles/releases/download/v0.2.2/Heracles-v0.2.2.apk'
 const RELEASES = 'https://github.com/theohowie/Heracles/releases'
 const REPO = 'https://github.com/theohowie/Heracles'
 const GITEE = 'https://gitee.com/theohowie/heracles'
-const SHA = '9A1227BA4A6ADDABC3997A5065C4AF0FBBF67B39E5DBD55EA8C746B2275944FB'
+const SHA = '3530158C4319917419B3307401DD36214F391472578D7B83E4FDDF230765FDD2'
 
 /* ---------- 内联 SVG 图标（全站不用 emoji） ---------- */
 const Icon = ({ d, size = 22 }) => (
@@ -129,7 +129,7 @@ function Hero() {
           <motion.div className="cta" initial={reduce ? false : { opacity: 0, y: 16 }} animate={{ opacity: 1, y: 0 }}
             transition={{ duration: 0.7, delay: 0.2 }}>
             <a className="btn btn-primary btn-lg" href={APK} download>
-              <Icon d={ICONS.download} size={18} /> 下载 v0.2.1（20.9 MB）
+              <Icon d={ICONS.download} size={18} /> 下载 v0.2.2（20.9 MB）
             </a>
             <a className="btn btn-ghost btn-lg" href={REPO} target="_blank" rel="noreferrer">
               查看源码 <Icon d={ICONS.arrow} size={18} />
@@ -288,7 +288,7 @@ function Download() {
             <Icon d={ICONS.download} size={20} /> 下载 APK
           </a>
           <div className="dl-meta">
-            <div><span>版本</span>v0.2.1</div>
+            <div><span>版本</span>v0.2.2</div>
             <div><span>系统</span>Android 12+ · arm64</div>
             <div><span>许可</span>GPL-3.0</div>
           </div>
