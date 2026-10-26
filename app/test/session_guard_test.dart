@@ -217,6 +217,28 @@ void main() {
     }
   }
 
+  /// **手机尺寸夹具**（2026-10-26，前端"TRAE 式输入区 + 空态大字问候/建议胶囊"之后）。
+  ///
+  /// 新 UI 比旧版高，而 `flutter test` 的**默认窗口是 800×600**（不是手机）：
+  /// 这个高度装不下"空态大字 + 建议胶囊 + 更高的输入区" ⇒
+  /// `RenderFlex overflowed by 75 pixels on the bottom`，且长按/点按坐标会落到屏外
+  /// （表现为"找不到菜单项"这种**误导性**报错，12 条用例曾因此全红）。
+  /// 真机是竖屏手机（本机 411×915dp）⇒ 手机尺寸才是接近真实的夹具
+  /// （同 `chat_screen_app_workspace_test.usePhoneSurface` 想做的事）。
+  ///
+  /// 为什么不用 `setUp`：`setSurfaceSize` 内部有 `inTest` 断言，**只能在测试体内**调
+  /// （放 `setUp` 会 12 条一起失败）。
+  ///
+  /// ⚠️ 这条治的是**窗口高度 ≠ 手机**，**不是**用放宽夹具掩盖横向溢出：
+  /// 横向那条已由前端 `d5152dc` 修掉，回归测试在 `input_bar_overflow_test.dart`。
+  void phoneTest(String description, Future<void> Function(WidgetTester) body) {
+    testWidgets(description, (tester) async {
+      await tester.binding.setSurfaceSize(const Size(390, 844));
+      addTearDown(() => tester.binding.setSurfaceSize(null));
+      await body(tester);
+    });
+  }
+
   /// **打开抽屉**：原型 01（`1f52b1d`，2026-10-25）之后顶栏左侧**不再有 ☰ 线条图标**，
 /// 换成**品牌图标**（真实 App 图标，点它开抽屉 —— 用户禁用线条式图标）。
 /// 所以按 **asset 名**定位，而不是按图标字形（否则 finder 会随 UI 改版失效）。
@@ -238,20 +260,22 @@ void main() {
   /// 打开**工作区行的长按菜单**（原型 04，2026-10-25）：
   /// 工作区操作（路径 / 新建会话 / 从列表移除）收进**长按菜单**，行面不再有 ⊕/⋯ 按钮。
   Future<void> openWorkspaceMenu(WidgetTester tester, String workspaceName) async {
-    // ⚠️ 别在**文本**上取 `.first`：工作区名会同时出现在**顶栏标题**里
-    //   （探针实测 `find.text('proj')` 命中 2 处，树序最前者是顶栏，
-    //   它没有 InkWell 祖先 ⇒ `Bad state: No element`）。
-    //   这里直接从**所有**同名文本找承载 `onLongPress` 的 InkWell —— 恰好 1 个。
+    // ⚠️ 别在**文本**上取 `.first`、也别只找"任一 InkWell 祖先"：2026-10-26 的原型 04
+    //   抽屉里工作区名会命中 **3 处**（顶栏标题 / 抽屉工作区行 / 另一处），
+    //   其中带 `onLongPress` 的 InkWell **只有工作区行那一个**。
+    //   探针实测：`.first` 会拿到别的节点（`Bad state: No element` 或长按无效），
+    //   而按"**带 onLongPress 的 InkWell**"锚定 ⇒ 恰好 1 个、rect 340×42（= 工作区行）。
     final row = find
         .ancestor(
           of: find.text(workspaceName),
-          matching: find.byType(InkWell),
+          matching: find.byWidgetPredicate(
+              (w) => w is InkWell && w.onLongPress != null),
         )
         .first;
     expect(row, findsOneWidget,
         reason: '抽屉里必须有可长按的工作区行「$workspaceName」—— 没有说明抽屉又改了');
     await tester.longPress(row);
-    await settle(tester, times: 20); // 长按菜单是弹出面板，多推几拍等动画
+    await settle(tester, times: 20); // 长按菜单是上拉小面板，多推几拍等动画
   }
 
   /// 切到会话 B：开抽屉 → 点它
@@ -287,7 +311,7 @@ void main() {
   // ★ 核心回归：运行中切会话，结果不得串过去
   // ==================================================================
 
-  testWidgets('★★ 运行中切到别的会话 → A 的结果不得插进 B 的列表，且 _busy 已复位',
+  phoneTest('★★ 运行中切到别的会话 → A 的结果不得插进 B 的列表，且 _busy 已复位',
       (tester) async {
     final c = await freshController();
 
@@ -356,7 +380,7 @@ void main() {
         reason: '_busy 未复位 → 输入框永久禁用。这是本修复最容易写错的地方');
   });
 
-  testWidgets('★ 未切会话时结果照常渲染（守卫不能误伤正常路径）', (tester) async {
+  phoneTest('★ 未切会话时结果照常渲染（守卫不能误伤正常路径）', (tester) async {
     final c = await freshController();
 
     installMocks(onRunAgent: () async {
@@ -377,7 +401,7 @@ void main() {
     expect(inputEnabled(tester), isTrue);
   });
 
-  testWidgets('★★ 切会话后事件流订阅确实被取消（B 不会被 A 的事件污染）',
+  phoneTest('★★ 切会话后事件流订阅确实被取消（B 不会被 A 的事件污染）',
       (tester) async {
     final c = await freshController();
 
@@ -465,7 +489,7 @@ void main() {
   // 其它"换上下文"路径也必须让在途运行失效
   // ==================================================================
 
-  testWidgets('★ 新建会话后，A 的结果也不得串进新会话', (tester) async {
+  phoneTest('★ 新建会话后，A 的结果也不得串进新会话', (tester) async {
     final c = await freshController();
 
     final gate = Completer<void>();
@@ -498,7 +522,7 @@ void main() {
     expect(inputEnabled(tester), isTrue);
   });
 
-  testWidgets('★ 守卫生效时失败也会复位 _busy（不会永久禁用输入框）',
+  phoneTest('★ 守卫生效时失败也会复位 _busy（不会永久禁用输入框）',
       (tester) async {
     final c = await freshController();
 
@@ -561,7 +585,7 @@ void main() {
   // M-1：移除工作区也是"换上下文"，必须让在途运行失效
   // ==================================================================
 
-  testWidgets('★★ M-1：移除工作区后，在途运行的结果不得渲染进来',
+  phoneTest('★★ M-1：移除工作区后，在途运行的结果不得渲染进来',
       (tester) async {
     final c = await freshController();
 
@@ -643,7 +667,7 @@ void main() {
   ///
   /// 所以：**禁用仍然禁用，但必须显示说明横幅**，
   /// 且按钮从"停止"改成"等待"（别的会话在跑时，"停止"是误导）。
-  testWidgets('★★ 有运行在途且切到别的会话 → 输入框禁用但【必须说明原因】',
+  phoneTest('★★ 有运行在途且切到别的会话 → 输入框禁用但【必须说明原因】',
       (tester) async {
     final c = await freshController();
     final gate = Completer<void>();
@@ -686,7 +710,7 @@ void main() {
     await tester.pump(const Duration(milliseconds: 300));
   });
 
-  testWidgets('★★ 运行结束后输入框恢复可用（不永久禁用）', (tester) async {
+  phoneTest('★★ 运行结束后输入框恢复可用（不永久禁用）', (tester) async {
     final c = await freshController();
     final gate = Completer<void>();
 
@@ -732,7 +756,7 @@ void main() {
   /// 防"停止键又变回发送键"。两个方向都断言：
   ///   · 点停止 → `cancelRun` 被调用**一次**，且**没有**再发一条 runAgent
   ///   · 这是最容易回退的地方（两处 onTap 长得一样）
-  testWidgets('★★ 点停止按钮 → 调 cancelRun，且不再发消息（暂停不了的真身）',
+  phoneTest('★★ 点停止按钮 → 调 cancelRun，且不再发消息（暂停不了的真身）',
       (tester) async {
     final c = await freshController();
     final gate = Completer<void>();
@@ -784,7 +808,7 @@ void main() {
   });
 
   /// 没有在跑的时候点"停止"不该误伤 —— 幂等，且不写"已停止"消息。
-  testWidgets('★ 没在跑时点停止 → 不报错、不写多余消息（幂等）',
+  phoneTest('★ 没在跑时点停止 → 不报错、不写多余消息（幂等）',
       (tester) async {
     final c = await freshController();
     installMocks(onRunAgent: () async {});
@@ -822,7 +846,7 @@ void main() {
   /// | ❌ | 任意 | 发送 | 发送 |
   ///
   /// 这条测试钉第一行 —— 防"忙时恒为停止"回退。
-  testWidgets('★★ 忙 + 输入框有字 → 按钮变发送，点下去进队列不停止',
+  phoneTest('★★ 忙 + 输入框有字 → 按钮变发送，点下去进队列不停止',
       (tester) async {
     final c = await freshController();
     final gate = Completer<void>();
@@ -893,7 +917,7 @@ void main() {
   ///   · 运行中输入框**可用**（能输入、能发送）
   ///   · 忙时发送 → **不并行**，而是进队列（runStarts 仍为 1）
   ///   · 前一个结束后 → 队列消息**自动发出**（runStarts 变成 2）
-  testWidgets('★★ 排队发送：忙时能发（进队列），前一个结束后自动发出',
+  phoneTest('★★ 排队发送：忙时能发（进队列），前一个结束后自动发出',
       (tester) async {
     final c = await freshController();
     final gate1 = Completer<void>();
