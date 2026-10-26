@@ -65,16 +65,19 @@ Heracles 是一个**跑在 Android 手机上的 AI 编程 App**。
 Heracles/
 ├── backend/          纯 Dart 包：编排(agent) / 工具 / 契约(contract) / 上下文 / 能力探测 / RAG
 ├── app/              Flutter 前端：UI(screens/widgets/theme) + 服务层(services) + Kotlin 设备桥(android)
+├── site/             项目主页源码（VitePress）
 ├── INTERFACE.md      前后端接口与事件流契约
-├── (发布产物)         APK 走 Releases 附件，不放进仓库
 └── LICENSE           GPL-3.0
 ```
 
-- **内核与协议**在 `backend/`：不依赖 Flutter、不依赖 Android，能在 PC 上 `dart test` 毫秒级回归。
+- **内核与协议**在 `backend/`：不依赖 Flutter、不依赖 Android，可以直接 `dart test`。
 - **界面**在 `app/lib/screens|widgets|theme`；**设备能力**（文件、shell、Shizuku、构建服务）由 `app/android` 的 Kotlin 桥提供。
 - 事件流走进程内通道：`AgentBridge.events`（不再有跨进程的 EventChannel）。
+- 安装包见 [Releases](https://github.com/theohowie/Heracles/releases)（不进仓库）。
 
-## 一句话现状
+## 当前状态
 
-**已经能自己用**：真机验证过的部分（会话与守卫、审批门禁、取消/排队、设备权限六项、内核 269 项单测）
-写进了 [状态与问题](/status)；**还没验证的也不藏着** —— 包括"真 Key 的线上字段验证一次都没做过"这件事。
+**已经可用**：会话与守卫、审批门禁、取消与排队发送、设备权限总览、内核 269 项单测 —— 都在真机上跑通过。
+
+**尚未验证**：线上字段的真 Key 验证、Anthropic / Responses 两条协议轨、图片多模态、SAF 工作区内构建等。
+完整清单见 [功能与限制](/status)。

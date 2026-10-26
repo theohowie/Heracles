@@ -27,7 +27,7 @@ export default defineConfig({
       { text: '简介', link: '/' },
       { text: '快速开始', link: '/guide/getting-started' },
       { text: '从源码构建', link: '/guide/build' },
-      { text: '状态与问题', link: '/status' },
+      { text: '功能与限制', link: '/status' },
     ],
 
     sidebar: [
@@ -42,7 +42,7 @@ export default defineConfig({
       {
         text: '参考',
         items: [
-          { text: '现在是什么状态', link: '/status' },
+          { text: '功能与限制', link: '/status' },
           { text: '许可（GPL-3.0）', link: '/license' },
         ],
       },
