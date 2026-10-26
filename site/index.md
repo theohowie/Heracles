@@ -51,6 +51,16 @@ Heracles 是一个**跑在 Android 手机上的 AI 编程 App**。
 | 想改一个现成的 APK | 解包（资源或 smali）→ 改 → 重打包 → 签名 → 装回去 |
 | 只是想有个手机上的编程助手 | 不带工作区也能聊；多轮工具调用、任务计划、随时中断 |
 
+## 界面
+
+![Heracles 的三个界面：空态 / 会话 / 设置](/shots/hero.webp)
+
+<div style="display:grid;grid-template-columns:repeat(3,1fr);gap:16px;margin:24px 0">
+  <a href="/shots/empty.webp" target="_blank" rel="noreferrer"><img src="/shots/empty.webp" alt="空态" style="width:100%;border-radius:10px"></a>
+  <a href="/shots/chat.webp" target="_blank" rel="noreferrer"><img src="/shots/chat.webp" alt="会话与工具调用" style="width:100%;border-radius:10px"></a>
+  <a href="/shots/settings.webp" target="_blank" rel="noreferrer"><img src="/shots/settings.webp" alt="设置" style="width:100%;border-radius:10px"></a>
+</div>
+
 ## 三步用起来
 
 1. **装 APK** —— [**直接下载 `Heracles-v0.2.0.apk`**](https://github.com/theohowie/Heracles/releases/download/v0.2.0/Heracles-v0.2.0.apk)（20.6 MB，点击即开始下载；其它版本在 [Releases](https://github.com/theohowie/Heracles/releases)）。要求：arm64 手机、Android 12+。
