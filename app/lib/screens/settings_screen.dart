@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 
@@ -208,7 +209,8 @@ class DevicePermissionPage extends StatefulWidget {
   State<DevicePermissionPage> createState() => _DevicePermissionPageState();
 }
 
-class _DevicePermissionPageState extends State<DevicePermissionPage> {
+class _DevicePermissionPageState extends State<DevicePermissionPage>
+    with WidgetsBindingObserver {
   bool? _granted;
   String _guidance = '';
 
@@ -223,6 +225,7 @@ class _DevicePermissionPageState extends State<DevicePermissionPage> {
   /// 执行路由诊断（ping / granted / sui）——
   /// 解释「命令执行成功但 Shizuku 显示 0 个已授权应用」
   Map<String, dynamic> _diag = const {};
+
 
   /// **编码层自检**进行中（2026-10-17）—— 构建要 1–3 分钟，按钮要能锁住
   bool _selfCheckBusy = false;
@@ -241,7 +244,23 @@ class _DevicePermissionPageState extends State<DevicePermissionPage> {
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addObserver(this);
     _refresh();
+  }
+
+  @override
+  void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
+    super.dispose();
+  }
+
+  /// 从系统授权界面（运行时弹窗/设置页）回到前台 → 立刻重查状态，
+  /// 开关跟着真实授权状态走（用户在系统里拒了，开关自己弹回去）。
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.resumed && mounted) {
+      unawaited(_refresh());
+    }
   }
 
   Future<void> _refresh() async {
@@ -258,9 +277,8 @@ class _DevicePermissionPageState extends State<DevicePermissionPage> {
   }
 
   /// 权限总览卡（2026-10-25 晚按概念图 07 重做）：一张卡六行，
-  /// 每行 名称 + 说明 + 右侧状态胶囊 —— 已授权 = 黑色实心胶囊，
-  /// 其余 = 灰胶囊（Shizuku 未授权时胶囊可点 =「去开启」一键授权），
-  /// 不再用彩色文字堆一张表。
+  /// 每行 名称 + 说明 + 右侧控件。2026-10-27 起能拨的项改弹性开关
+  /// （拨动拉起系统授权流程，见 [control]），只剩状态声明类用胶囊。
   ///
   /// 两个渲染口径（后端对接清单 §6，必须照做）：
   /// · `allFiles` 的 denied 是**正常态**（按设计不申请所有文件访问，
@@ -270,48 +288,125 @@ class _DevicePermissionPageState extends State<DevicePermissionPage> {
   Widget _permOverview(Hue h) {
     const rows = [
       ('shizuku', 'Shizuku', '执行系统级命令与设备操作'),
-      ('files', '文件访问', '读写已授权的工作区文件夹'),
+      ('files', '文件夹访问', '读写已授权的工作区文件夹'),
       ('allFiles', '所有文件访问', '按设计不申请，文件经授权目录访问'),
+      ('media', '图片与视频', '读取相册，用于发送图片、视频附件'),
+      ('camera', '相机', '拍照后直接作为附件发送'),
       ('notifications', '通知', '任务完成与审批请求提醒'),
+      ('calendar', '日历', '后续自动化任务可能需要读写日历'),
       ('accessibility', '无障碍服务', '读取界面元素、辅助点击操作'),
       ('overlay', '悬浮窗', '在其他应用上方显示运行状态'),
+      ('automation', '屏幕自动化', '厂商专属开关（如小米），接口预留'),
+      ('install', '安装未知应用', '安装构建出的安装包时申请'),
     ];
 
-    Widget pill(String key) {
-      final v = _perms[key] ?? 'unknown';
-      // (文案, 是否实心, 是否可点去开启)
-      final (label, filled, action) = switch ((key, v)) {
-        ('allFiles', 'denied') => ('未开启 · 按设计', false, false),
-        ('shizuku', 'unknown') => ('未启动', false, false),
-        (_, 'granted') =>
-          (key == 'notifications' ? '已开启' : '已授权', true, false),
-        ('shizuku', 'denied') => ('去开启', false, true),
-        (_, 'denied') => ('未授权', false, false),
-        _ => ('未知', false, false),
-      };
-      final chip = Container(
+    // 右侧控件（2026-10-27 改）：**能拨的项一律弹性开关** ——
+    // 拨开就走系统授权流程（通知弹运行时授权框；无障碍/悬浮窗去
+    // 各自的系统设置页；Shizuku 走既有一键授权）。开关的开/合只绑
+    // 真实查询结果，用户在系统里拒绝，回来刷新后开关自己弹回去。
+    // 仍是胶囊的只有两类：`allFiles`（按设计不申请，是声明不是
+    // 开关）与 `files`（SAF 工作区授权的状态汇总，没有总开关）、
+    // 以及 Shizuku 未启动（服务没跑，拨了也没用，写明「未启动」）。
+    Widget pill(String label, bool filled) {
+      return Container(
         padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 7),
         decoration: BoxDecoration(
           color: filled ? h.text : h.surface,
           borderRadius: BorderRadius.circular(999),
         ),
-        child: action && _shizukuBusy
-            ? CupertinoActivityIndicator(radius: 8, color: h.text)
-            : Text(
-                label,
-                style: TextStyle(
-                  fontSize: 13,
-                  fontWeight: FontWeight.w600,
-                  color: filled ? h.bg : h.text,
-                ),
-              ),
+        child: Text(
+          label,
+          style: TextStyle(
+            fontSize: 13,
+            fontWeight: FontWeight.w600,
+            color: filled ? h.bg : h.text,
+          ),
+        ),
       );
-      if (!action) return chip;
-      return GestureDetector(
-        onTap: _shizukuBusy ? null : () => _runShizuku(force: false),
-        behavior: HitTestBehavior.opaque,
-        child: chip,
-      );
+    }
+
+    Widget control(String key) {
+      final v = _perms[key] ?? 'unknown';
+      switch ((key, v)) {
+        case ('allFiles', 'denied'):
+          return pill('未开启 · 按设计', false);
+        case ('allFiles', _):
+          return pill(v == 'granted' ? '已授权' : '未知', v == 'granted');
+        case ('files', _):
+          // 文件夹访问的「申请」= 走一次工作区文件夹授权（SAF
+          // 选择器，选中即授权 + 登记）—— 这就是本 App 的文件夹
+          // 权限模型；取消授权 = 在工作区列表移除该文件夹。
+          return ElasticSwitch(
+            value: v == 'granted',
+            onChanged: (want) {
+              if (want) {
+                unawaited(_grantFolder());
+              } else {
+                showIosToast(context, '取消授权请在工作区列表移除该文件夹');
+              }
+            },
+          );
+        case ('media', _):
+          return ElasticSwitch(
+            value: v == 'granted',
+            onChanged: (want) => unawaited(
+                _requestPermission(want ? 'media' : 'appSettings')),
+          );
+        case ('camera', _):
+          return ElasticSwitch(
+            value: v == 'granted',
+            onChanged: (want) => unawaited(
+                _requestPermission(want ? 'camera' : 'appSettings')),
+          );
+        case ('calendar', _):
+          return ElasticSwitch(
+            value: v == 'granted',
+            onChanged: (want) => unawaited(
+                _requestPermission(want ? 'calendar' : 'appSettings')),
+          );
+        case ('automation', _):
+          // 厂商专属（小米「后台弹出界面」等），无统一申请方式：
+          // 占位 + 写明预留，不给一个拨了没反应的假开关。
+          return pill('接口预留', false);
+        case ('install', _):
+          // 按用户定：未知来源安装在「点安装」时才申请，权限页
+          // 只显示状态（已开启 / 安装时申请）。
+          return pill(
+              v == 'granted' ? '已开启' : '安装时申请', v == 'granted');
+        case ('shizuku', 'unknown'):
+          return pill('未启动', false);
+        case ('shizuku', _):
+          return ElasticSwitch(
+            value: v == 'granted',
+            onChanged: _shizukuBusy
+                ? null
+                : (want) {
+                    if (want) {
+                      unawaited(_runShizuku(force: false));
+                    } else {
+                      showIosToast(context, '关闭授权请在 Shizuku 应用里操作');
+                    }
+                  },
+          );
+        case ('notifications', _):
+          return ElasticSwitch(
+            value: v == 'granted',
+            onChanged: (want) => unawaited(
+                _requestPermission(want ? 'notifications' : 'notificationsOff')),
+          );
+        case ('accessibility', _):
+          return ElasticSwitch(
+            value: v == 'granted',
+            onChanged: (_) => unawaited(_requestPermission('accessibility')),
+          );
+        case ('overlay', _):
+          return ElasticSwitch(
+            value: v == 'granted',
+            onChanged: (_) => unawaited(_requestPermission('overlay')),
+          );
+        default:
+          return pill('未知', false);
+      }
     }
 
     return Container(
@@ -345,7 +440,7 @@ class _DevicePermissionPageState extends State<DevicePermissionPage> {
                     ),
                   ),
                   const SizedBox(width: 12),
-                  pill(rows[i].$1),
+                  control(rows[i].$1),
                 ],
               ),
             ),
@@ -353,6 +448,36 @@ class _DevicePermissionPageState extends State<DevicePermissionPage> {
         ],
       ),
     );
+  }
+
+  /// **文件夹访问开关拨开** = 走一次工作区文件夹授权
+  /// （[AgentBridge.pickWorkspace]：系统选择器，选中即 SAF 授权 +
+  /// 登记为工作区）。受限目录等失败原因由桥如实带回，直接展示。
+  Future<void> _grantFolder() async {
+    try {
+      final r = await AgentBridge().pickWorkspace();
+      if (!mounted) return;
+      if (r != null && r['ok'] == false) {
+        showIosToast(context, (r['error'] as String?) ?? '这个位置无法授权');
+      }
+    } on AgentBridgeException catch (e) {
+      if (mounted) showIosToast(context, e.message);
+    }
+    if (mounted) await _refresh();
+  }
+
+  /// **开关拨动 → 拉起系统授权流程**（通知/无障碍/悬浮窗共用）。
+  /// 结果不猜：回到前台时 [didChangeAppLifecycleState] 会重查；
+  /// 这里再补一次延时重查，覆盖运行时弹窗那种不切生命周期的情况。
+  Future<void> _requestPermission(String kind) async {
+    final ok = await AgentBridge().requestPermission(kind);
+    if (!mounted) return;
+    if (!ok) {
+      showIosToast(context, '没能打开系统授权界面');
+      return;
+    }
+    await Future<void>.delayed(const Duration(milliseconds: 700));
+    if (mounted) await _refresh();
   }
 
   /// Shizuku 授权动作（胶囊「去开启」/ 一键授权 / 重新申请共用）：
@@ -958,7 +1083,11 @@ class _GlobalMemoryPageState extends State<GlobalMemoryPage> {
       context: context,
       isScrollControlled: true,
       backgroundColor: Colors.transparent,
-      builder: (_) => _MemoryEditorSheet(memory: _memory, entry: entry),
+      shape: const RoundedRectangleBorder(),
+      builder: (sheetCtx) => BwSheetShell(
+        onDismissRequest: () => Navigator.of(sheetCtx).pop(),
+        child: _MemoryEditorSheet(memory: _memory, entry: entry),
+      ),
     );
     if (saved == true) {
       await _load();
@@ -1287,15 +1416,12 @@ class _MemoryEditorSheetState extends State<_MemoryEditorSheet> {
   @override
   Widget build(BuildContext context) {
     final h = Hue.of(context);
+    // 表面由外层 BwSheetShell 提供（2026-10-27 统一）—— 这里只剩
+    // 键盘避让 + 内边距 + 内容；内部块面色随之与壳面互换保持对比。
     return Padding(
       padding:
           EdgeInsets.only(bottom: MediaQuery.viewInsetsOf(context).bottom),
-      child: Container(
-        decoration: BoxDecoration(
-          color: h.surface,
-          borderRadius:
-              const BorderRadius.vertical(top: Radius.circular(20)),
-        ),
+      child: Padding(
         padding: const EdgeInsets.fromLTRB(
             HSpace.lg, HSpace.md, HSpace.lg, HSpace.lg),
         child: SafeArea(
@@ -1334,7 +1460,7 @@ class _MemoryEditorSheetState extends State<_MemoryEditorSheet> {
                 placeholderStyle:
                     TextStyle(fontSize: 15, color: h.textFaint),
                 decoration: BoxDecoration(
-                  color: h.surfaceAlt,
+                  color: h.surface,
                   borderRadius: BorderRadius.circular(HRadius.md),
                   border: Border.all(color: h.border),
                 ),
@@ -1352,7 +1478,7 @@ class _MemoryEditorSheetState extends State<_MemoryEditorSheet> {
                           padding: const EdgeInsets.symmetric(
                               horizontal: 12, vertical: 7),
                           decoration: BoxDecoration(
-                            color: _kind == kind ? h.text : h.surfaceAlt,
+                            color: _kind == kind ? h.text : h.surface,
                             borderRadius: BorderRadius.circular(999),
                             border: Border.all(color: h.border),
                           ),
@@ -1653,6 +1779,42 @@ class ModelSettingsPage extends StatelessWidget {
   }
 }
 
+/// 提供商菜单行（与全 App 抽屉菜单同一规格）。
+Widget _providerMenuRow(
+  Hue h, {
+  required IconData icon,
+  required String label,
+  String? subtitle,
+  bool danger = false,
+  required VoidCallback onTap,
+}) {
+  final color = danger ? HColors.errorOn(h.dark) : h.text;
+  return InkWell(
+    borderRadius: BorderRadius.circular(12),
+    onTap: onTap,
+    child: Padding(
+      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 11),
+      child: Row(
+        children: [
+          Icon(icon, size: 19, color: color),
+          const SizedBox(width: 12),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(label, style: TextStyle(fontSize: 15, color: color)),
+                if (subtitle != null)
+                  Text(subtitle,
+                      style: TextStyle(fontSize: 11.5, color: h.textFaint)),
+              ],
+            ),
+          ),
+        ],
+      ),
+    ),
+  );
+}
+
 class _ProviderCard extends StatelessWidget {
   const _ProviderCard({
     required this.provider,
@@ -1681,33 +1843,50 @@ class _ProviderCard extends StatelessWidget {
   Future<void> _showActions(BuildContext context) async {
     if (onDelete == null) return; // 官方账号不可删
     final h = Hue.of(context);
-    final confirmed = await showCupertinoModalPopup<bool>(
+    final confirmed = await showModalBottomSheet<bool>(
       context: context,
-      builder: (sheetCtx) => CupertinoActionSheet(
-        title: Text(
-          provider.name.isEmpty ? '(未命名)' : provider.name,
-          style: TextStyle(fontSize: 14, color: h.textDim),
-        ),
-        actions: [
-          CupertinoActionSheetAction(
-            onPressed: () => Navigator.of(sheetCtx).pop(false),
-            child: const Text('编辑'),
-          ),
-          CupertinoActionSheetAction(
-            isDestructiveAction: true,
-            onPressed: () => Navigator.of(sheetCtx).pop(true),
+      backgroundColor: Colors.transparent,
+      isScrollControlled: true,
+      shape: const RoundedRectangleBorder(),
+      builder: (sheetCtx) => BwSheetShell(
+        onDismissRequest: () => Navigator.of(sheetCtx).pop(),
+        child: SafeArea(
+          child: Padding(
+            padding: const EdgeInsets.fromLTRB(10, 10, 10, 12),
             child: Column(
               mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.stretch,
               children: [
-                const Text('删除'),
-                Text(
-                  '同时清除已保存的 API Key',
-                  style: TextStyle(fontSize: 11.5, color: h.textFaint),
+                Padding(
+                  padding: const EdgeInsets.fromLTRB(12, 4, 12, 8),
+                  child: Text(
+                    provider.name.isEmpty ? '(未命名)' : provider.name,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: TextStyle(
+                        fontSize: 13,
+                        fontWeight: FontWeight.w600,
+                        color: h.text),
+                  ),
+                ),
+                _providerMenuRow(
+                  h,
+                  icon: CupertinoIcons.square_pencil_fill,
+                  label: '编辑',
+                  onTap: () => Navigator.of(sheetCtx).pop(false),
+                ),
+                _providerMenuRow(
+                  h,
+                  icon: CupertinoIcons.trash_fill,
+                  label: '删除',
+                  subtitle: '同时清除已保存的 API Key',
+                  danger: true,
+                  onTap: () => Navigator.of(sheetCtx).pop(true),
                 ),
               ],
             ),
           ),
-        ],
+        ),
       ),
     );
     if (!context.mounted) return;
@@ -2837,12 +3016,7 @@ class _AboutPageState extends State<AboutPage> {
 
   void _copy(BuildContext context, String text) {
     Clipboard.setData(ClipboardData(text: text));
-    ScaffoldMessenger.of(context).showSnackBar(
-      const SnackBar(
-        content: Text('链接已复制'),
-        duration: Duration(seconds: 1),
-      ),
-    );
+    showIosToast(context, '链接已复制');
   }
 
   @override

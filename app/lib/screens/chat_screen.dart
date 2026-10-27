@@ -16,6 +16,7 @@ import '../models/settings.dart';
 import '../models/view_options.dart';
 import '../models/workspace.dart';
 import '../services/agent_bridge.dart';
+import '../services/device_capabilities.dart';
 import '../services/model_context_table.dart';
 import '../services/settings_controller.dart';
 import '../theme/app_theme.dart';
@@ -307,6 +308,10 @@ class _ChatScreenState extends State<ChatScreen> {
 
   /// 运行序号 —— 每次 `runAgent` 发起时自增（见 [_RunOrigin.runSeq]）。
   int _runSeq = 0;
+
+  /// 已被用户停止、但运行还没收尾的那一轮的 runSeq —— 「已停止」
+  /// 提示**等它收尾后**再补在最末尾（见 [_stopRun] 的 2026-10-27 修复）。
+  int? _stopNoteRunSeq;
 
   // ---- 会话用量累计（2026-10-11，t13；需求 `docs/24`）----
 
@@ -800,8 +805,9 @@ class _ChatScreenState extends State<ChatScreen> {
   /// 1. 改选**子文件夹** ⇒ 重新拉起选择器（走 [_openWorkspacePicker]）
   /// 2. 「默认工作区」⇒ App 私有目录（[ensureAppWorkspace]，完全不经过 SAF）
   ///
-  /// 视觉与 [_editQueued] 同一套宽弹窗规格：屏宽 88% / 圆角 16 / surfaceAlt /
-  /// 左对齐 —— 不让长解释再被 iOS alert 挤成又高又窄的一条。
+  /// 视觉：2026-10-27 起与全 App 统一走底部抽屉（BwSheetShell）——
+  /// 此前与 [_editQueued] 共用一套"屏宽 88% 居中宽弹窗"规格，
+  /// 居中弹窗退役后一并迁移，内容（原因正文 + 出路卡片）不变。
   Future<void> _showPickWorkspaceFailure(Map<String, dynamic> ws) async {
     final error = (ws['error'] as String?)?.trim() ?? '';
     final reason = (ws['reasonCode'] as String?)?.trim() ?? '';
@@ -845,26 +851,23 @@ class _ChatScreenState extends State<ChatScreen> {
       return i == 0 ? 'pick_subfolder' : 'use_app_workspace';
     }
 
-    final action = await showCupertinoDialog<String>(
+    final action = await showModalBottomSheet<String>(
       context: context,
+      backgroundColor: Colors.transparent,
+      isScrollControlled: true,
+      shape: const RoundedRectangleBorder(),
       builder: (dlgCtx) {
         final h = Hue.of(dlgCtx);
         // 键盘此时一般不在，但仍按"剩余高度"算，避免大字号时溢出
         final insets = MediaQuery.viewInsetsOf(dlgCtx).bottom;
         final available = MediaQuery.sizeOf(dlgCtx).height - insets;
-        return Padding(
-          padding: EdgeInsets.only(
-              left: HSpace.lg, right: HSpace.lg, bottom: insets),
-          child: Center(
-            child: Container(
-              width: MediaQuery.sizeOf(dlgCtx).width * 0.88,
-              padding: const EdgeInsets.fromLTRB(
-                  HSpace.lg, HSpace.lg, HSpace.lg, HSpace.md),
-              decoration: BoxDecoration(
-                color: h.surfaceAlt,
-                borderRadius: BorderRadius.circular(16),
-                border: Border.all(color: h.border),
-              ),
+        return BwSheetShell(
+          onDismissRequest: () => Navigator.of(dlgCtx).pop(),
+          child: SafeArea(
+            top: false,
+            child: Padding(
+              padding: EdgeInsets.fromLTRB(
+                  HSpace.lg, HSpace.md, HSpace.lg, HSpace.md + insets),
               child: Column(
                 mainAxisSize: MainAxisSize.min,
                 crossAxisAlignment: CrossAxisAlignment.start,
@@ -1075,6 +1078,20 @@ class _ChatScreenState extends State<ChatScreen> {
     _switchContext();
     await _bridge.removeWorkspace(workspaceId);
     await _reload();
+  }
+
+  /// **在系统文件管理里打开工作区文件夹**（抽屉工作区菜单点路径）。
+  /// 打不开（系统限制/无文件管理器）时 toast 如实提示，不假装成功。
+  Future<void> _openWorkspaceFolder(String workspaceId) async {
+    HWorkspace? ws;
+    for (final w in _workspaces) {
+      if (w.id == workspaceId) ws = w;
+    }
+    if (ws == null) return;
+    final err = await const FolderOpener().open(ws.path);
+    if (err != null && mounted) {
+      showIosToast(context, err);
+    }
   }
 
   void _toggleWorkspace(String workspaceId) {
@@ -1608,30 +1625,35 @@ class _ChatScreenState extends State<ChatScreen> {
     final h = Hue.of(context);
     final source = await showModalBottomSheet<String>(
       context: context,
-      backgroundColor: h.surfaceAlt,
-      shape: const RoundedRectangleBorder(
-        borderRadius: BorderRadius.vertical(top: Radius.circular(HRadius.lg)),
-      ),
-      builder: (ctx) => SafeArea(
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            ListTile(
-              leading: Icon(AppIcons.image, color: h.accent),
-              title: Text('照片', style: TextStyle(color: h.text)),
-              subtitle: Text('截图、图片',
-                  style: TextStyle(fontSize: 11.5, color: h.textFaint)),
-              onTap: () => Navigator.of(ctx).pop('image'),
+      backgroundColor: Colors.transparent,
+      isScrollControlled: true,
+      shape: const RoundedRectangleBorder(),
+      builder: (ctx) => BwSheetShell(
+        onDismissRequest: () => Navigator.of(ctx).pop(),
+        child: SafeArea(
+          child: Padding(
+            padding: const EdgeInsets.fromLTRB(10, 10, 10, 12),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                _sheetPickRow(
+                  h,
+                  icon: AppIcons.image,
+                  label: '照片',
+                  subtitle: '截图、图片',
+                  onTap: () => Navigator.of(ctx).pop('image'),
+                ),
+                _sheetPickRow(
+                  h,
+                  icon: AppIcons.folder,
+                  label: '文件',
+                  subtitle: '代码、文本、文档',
+                  onTap: () => Navigator.of(ctx).pop('file'),
+                ),
+              ],
             ),
-            ListTile(
-              leading: Icon(AppIcons.folder, color: h.accent),
-              title: Text('文件', style: TextStyle(color: h.text)),
-              subtitle: Text('代码、文本、文档',
-                  style: TextStyle(fontSize: 11.5, color: h.textFaint)),
-              onTap: () => Navigator.of(ctx).pop('file'),
-            ),
-            const SizedBox(height: HSpace.sm),
-          ],
+          ),
         ),
       ),
     );
@@ -3114,15 +3136,17 @@ class _ChatScreenState extends State<ChatScreen> {
   ///
   /// ## 交互
   ///
-  /// 点排队项 → `showCupertinoDialog` + `CupertinoTextField`（预填原文，
+  /// 点排队项 → 底部抽屉 + `CupertinoTextField`（预填原文，
   /// 占位符也是原文，清空后仍能看到原话）→ 保存后**替换这条的文本**。
   /// 附件与它在队列里的位置都保持不变（只改用户要改的那句话）。
   ///
-  /// ## 为什么用自绘宽弹窗而不是 `CupertinoAlertDialog`
+  /// ## 为什么不用 `CupertinoAlertDialog`
   ///
   /// 排队内容常常是整段任务描述。iOS alert 只有约 270dp 宽，长文案会被
   /// 挤成又高又窄的一条 —— 与用户对「权限二次确认框」的抱怨（同一类
-  /// iOS alert 通病）是同一个问题。这里按屏宽 88% 自绘：左对齐、行高 1.5。
+  /// iOS alert 通病）是同一个问题。此前用自绘居中宽弹窗（屏宽 88%），
+  /// 2026-10-27 全 App 弹层统一底部抽屉后迁到 BwSheetShell，宽度问题
+  /// 随之消失（抽屉全宽），内容与行高规格不变。
   Future<void> _editQueued(int index) async {
     if (index < 0 || index >= _queue.length) return;
     final original = _queue[index].text;
@@ -3132,31 +3156,25 @@ class _ChatScreenState extends State<ChatScreen> {
 
     String? edited;
     try {
-      edited = await showCupertinoDialog<String>(
+      edited = await showModalBottomSheet<String>(
         context: context,
+        backgroundColor: Colors.transparent,
+        isScrollControlled: true,
+        shape: const RoundedRectangleBorder(),
         builder: (dlgCtx) {
           // 键盘占掉的底部高度：弹窗整体上移，输入区才不会被盖住。
           final insets = MediaQuery.viewInsetsOf(dlgCtx).bottom;
           // 键盘弹起后**剩余**的高度 —— 输入框上限按它算。直接用"屏高 35%"
           // 的话，键盘一弹出来总高度就会超过可用空间（BOTTOM OVERFLOWED）。
           final available = MediaQuery.sizeOf(dlgCtx).height - insets;
-          return Padding(
-            padding: EdgeInsets.only(
-              left: HSpace.xl,
-              right: HSpace.xl,
-              bottom: insets,
-            ),
-            child: Center(
-            child: Container(
-              width: MediaQuery.sizeOf(dlgCtx).width * 0.88,
-              padding: const EdgeInsets.fromLTRB(
-                  HSpace.lg, HSpace.lg, HSpace.lg, HSpace.md),
-              decoration: BoxDecoration(
-                color: h.surfaceAlt,
-                borderRadius: BorderRadius.circular(16),
-                border: Border.all(color: h.border),
-              ),
-              child: Column(
+          return BwSheetShell(
+            onDismissRequest: () => Navigator.of(dlgCtx).pop(),
+            child: SafeArea(
+              top: false,
+              child: Padding(
+                padding: EdgeInsets.fromLTRB(
+                    HSpace.lg, HSpace.md, HSpace.lg, HSpace.md + insets),
+                child: Column(
                 mainAxisSize: MainAxisSize.min,
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
@@ -3267,8 +3285,11 @@ class _ChatScreenState extends State<ChatScreen> {
   ///    这个面板可以退化成可选入口，[_editQueued] 的逻辑可原样复用。
   Future<void> _openQueueManager() async {
     if (_queue.isEmpty) return;
-    await showCupertinoModalPopup<void>(
+    await showModalBottomSheet<void>(
       context: context,
+      backgroundColor: Colors.transparent,
+      isScrollControlled: true,
+      shape: const RoundedRectangleBorder(),
       builder: (sheetCtx) {
         final h = Hue.of(sheetCtx);
         return StatefulBuilder(
@@ -3320,13 +3341,8 @@ class _ChatScreenState extends State<ChatScreen> {
               );
             }
 
-            return Container(
-              decoration: BoxDecoration(
-                color: h.surfaceAlt,
-                borderRadius: const BorderRadius.vertical(
-                  top: Radius.circular(HRadius.xl),
-                ),
-              ),
+            return BwSheetShell(
+              onDismissRequest: () => Navigator.of(sheetCtx).pop(),
               child: SafeArea(
                 top: false,
                 child: Column(
@@ -3443,61 +3459,40 @@ class _ChatScreenState extends State<ChatScreen> {
       return;
     }
 
-    // ★★ 先收尾**残留步骤**，再停订阅（2026-10-21 真机 bug，反复出现）★★
+    // ★★ 「已停止」**不在这里写**（2026-10-27 图二 bug）★★
     //
-    // ## 用户反复报的现象
+    // ## 用户报的现象
     //
-    // 「点击暂停之后还是会有『正在生成』」—— 输入框确实复位了、也出现了
-    // 「已停止」，但**上面那张步骤卡片仍然停在"正在生成 10050ms"并转圈**。
+    // 暂停之后，「已停止。你可以继续发消息。」出现在**思考/步骤的上方**。
     //
-    // ## 根因（这次查清了）
+    // ## 根因
     //
-    // 收尾逻辑 `_settleOrphanSteps()` 只在收到 `Finished` / `Failed` **事件**时触发。
-    // 而本方法紧接着调 `_stopLive()` **取消事件订阅** —— 取消之后那两个事件
-    // **永远收不到** ⇒ 收尾永远不执行 ⇒ 步骤卡片永远"正在生成"。
+    // 旧实现在这里同步 `_messages.add(已停止)` —— 但取消只是给后端
+    // 打了个标记，运行还要等当前轮次/工具到边界才真正收尾；它在
+    // 收尾前发出的最后一批事件（步骤完成、工具卡片、收尾 Failed）
+    // 还在事件流里排队，会**在这条提示之后**才被处理 ⇒ 步骤全落在
+    // 提示下面，看起来像「先停止、后思考」。
     //
-    // 原来那句 `_messages.removeWhere((m) => m is HProgress)` **清错了对象**：
-    // `HProgress` 是旧的「正在生成…」占位行，而真机上显示的是
-    // `HStepStream`（逐字步骤卡片）—— 它不在 `HProgress` 的判定里，所以没被清掉。
+    // ## 现在的做法
     //
-    // ⇒ 在取消订阅**之前**主动调 `_settleOrphanSteps(true)`（true = 按中断收尾，
-    //   卡片会显示成"已中断"而不是"成功"——**不许把中断画成完成**）。
-    _settleOrphanSteps(true);
-    _messages.removeWhere((m) => m is HProgress);
-
+    // · 这里只做两件立刻该做的事：复位 `_busy`（输入框/停止键马上
+    //   恢复 —— 2026-10-13 的修复，不许回退）、登记「这一轮欠一条
+    //   已停止提示」；
+    // · 事件订阅**不取消**、残留步骤**不在这里收尾** —— 让收尾事件
+    //   正常到达（`kFailed` 的处理里有 `_settleOrphanSteps`）；
+    // · `_runAgent` 拿到 `cancelled` 结果时，若用户还看着这个会话、
+    //   且没有更新的运行接棒，才把提示补在**最末尾**（见结果处理处）。
+    //
+    // 代价是诚实的：工具卡在长命令上时，提示会等它到边界才出现 ——
+    // 但那段时间步骤区也确实还在转，界面没有撒谎说「已经停了」。
+    final seq = _inflightRun?.runSeq ?? _liveOrigin?.runSeq;
     setState(() {
-      // ★ 2026-10-13 修：**必须立刻复位 `_busy`**
-      //
-      // 用户报：「暂停了还在显示正在生成，输入框的发送按钮也还是暂停按钮」。
-      //
-      // 根因：`_stopRun` 原来只调 `_stopLive()`（停事件订阅），
-      // 而 `_busy` 要等 `_runAgent` 的 `await` 返回、在它的 `finally`
-      // 里才复位 —— 那是**几百毫秒到几秒之后**。于是：
-      //   · 顶部/卡片还显示"正在生成"
-      //   · 发送键还是停止图标（用户以为没停掉）
-      //
-      // 取消是**用户显式动作**，界面必须**立刻**反映 —— 不等 Kotlin 往返。
+      // ★ 2026-10-13 修：**必须立刻复位 `_busy`** —— 取消是用户显式
+      //   动作，界面必须立刻反映，不等后端收尾。
       _busy = false;
       _inflightRun = null;
-      _stopLive();
-      if (!silent) {
-        _messages.add(HAssistantMessage(
-          id: _nextId(),
-          text: '已停止。你可以继续发消息。',
-        ));
-      }
+      if (!silent && seq != null) _stopNoteRunSeq = seq;
     });
-    // 「已停止」是**新消息**：跟随时才滚过去（不跟随时别打断阅读）
-    _followBottomIfNeeded();
-
-    // ⚠️ 关于"后端是不是还在跑"（用户的原话疑问）
-    //
-    // **会真停**，不是只把前端遮起来：
-    //   · 模型生成期间 → `job.cancel()` 传播到 `HttpJson.postSse`
-    //     的 `finally`，`close()` 输入流打断阻塞中的 `read()`
-    //   · 工具执行期间 → `ToolSpec.execute` 是 **suspend** 函数，
-    //     取消同样在挂起点生效
-    // 所以这里不需要额外做"后台回收"。
   }
 
   /// 取某会话的当前标题（找不到返回 null）。
@@ -3818,8 +3813,41 @@ class _ChatScreenState extends State<ChatScreen> {
       final stillHere = _isViewingRun(origin);
       // ★ 被用户取消的那一轮：结果字段全是空的，**不能当正常回答渲染**
       //   （否则会往列表里塞一个空 turns + 空 finalText 的"回答"）。
-      //   `_stopRun` 已经写过一条「已停止」的助手消息，这里只需跳过补齐。
       final wasCancelled = result.cancelled;
+      if (wasCancelled) {
+        // ★★ 「已停止」在这里补到最末尾（2026-10-27 图二修复，见 _stopRun）★★
+        //
+        // 到这一步，收尾事件已经先行到达并处理完（事件流在 run 返回前
+        // 关闭）⇒ 此刻追加必在全部步骤之后，顺序天然正确。
+        //
+        // 三个条件缺一不可：
+        // · 登记过（`_stopNoteRunSeq` 对得上）—— silent 停止不写；
+        // · 用户还看着这个会话（stillHere）—— 切走了就不往别人列表里写，
+        //   回来时从磁盘重放（磁盘上本来就没有这条提示，与旧行为一致）；
+        // · 没有更新的运行接棒（`_runSeq` 没变）—— 中断发送已起新一轮时，
+        //   再补一句「已停止」只会插进新对话中间。
+        final wantNote = _stopNoteRunSeq == origin.runSeq;
+        if (wantNote) _stopNoteRunSeq = null;
+        if (stillHere && wantNote && _runSeq == origin.runSeq) {
+          // 兜底收尾：正常情况下 kFailed 事件已做过；事件没到时这里补，
+          // 幂等 —— 不许留永远转圈的步骤或「正在生成…」占位。
+          _settleOrphanSteps(true);
+          setState(() {
+            final pid = _progressId;
+            if (pid != null) {
+              _messages.removeWhere((m) => m.id == pid);
+              _progressId = null;
+            }
+            _messages.removeWhere((m) => m is HProgress);
+            _messages.add(HAssistantMessage(
+              id: _nextId(),
+              text: '已停止。你可以继续发消息。',
+            ));
+          });
+          // 「已停止」是**新消息**：跟随时才滚过去（不跟随时别打断阅读）
+          _followBottomIfNeeded();
+        }
+      }
       if (stillHere && !wasCancelled) {
         setState(() {
           // ---- 兜底补齐 ----
@@ -4188,6 +4216,7 @@ class _ChatScreenState extends State<ChatScreen> {
         //   两个入口互不兜底：一个选用户自己的项目，一个进能构建的内置目录。
         onAddAppWorkspace: _addAppWorkspace,
         onRemoveWorkspace: _removeWorkspace,
+        onOpenWorkspaceFolder: _openWorkspaceFolder,
         onRenameSession: _renameSession,
         onDeleteSession: _deleteSession,
         onToggleStar: _toggleStar,
@@ -5306,54 +5335,72 @@ class _ChatScreenState extends State<ChatScreen> {
     final h = Hue.of(context);
     final picked = await showModalBottomSheet<String>(
       context: context,
-      backgroundColor: h.surfaceAlt,
-      shape: const RoundedRectangleBorder(
-        borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
-      ),
-      builder: (sheetCtx) => SafeArea(
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            const SizedBox(height: HSpace.sm),
-            Padding(
-              padding:
-                  const EdgeInsets.symmetric(horizontal: HSpace.lg),
-              child: Row(
-                children: [
-                  Text('${p.name} 的模型',
-                      style: TextStyle(
-                          fontSize: 15, fontWeight: FontWeight.w600,
-                          color: h.text)),
-                  const Spacer(),
-                  Text('${p.modelCatalog.length} 个',
-                      style: TextStyle(fontSize: 12, color: h.textFaint)),
-                ],
+      backgroundColor: Colors.transparent,
+      isScrollControlled: true,
+      shape: const RoundedRectangleBorder(),
+      builder: (sheetCtx) => BwSheetShell(
+        onDismissRequest: () => Navigator.of(sheetCtx).pop(),
+        child: SafeArea(
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              const SizedBox(height: HSpace.sm),
+              Padding(
+                padding: const EdgeInsets.symmetric(horizontal: HSpace.lg),
+                child: Row(
+                  children: [
+                    Text('${p.name} 的模型',
+                        style: TextStyle(
+                            fontSize: 15,
+                            fontWeight: FontWeight.w600,
+                            color: h.text)),
+                    const Spacer(),
+                    Text('${p.modelCatalog.length} 个',
+                        style: TextStyle(fontSize: 12, color: h.textFaint)),
+                  ],
+                ),
               ),
-            ),
-            const SizedBox(height: HSpace.xs),
-            // ★ 可滚动 —— 目录可能几十项（中转站的常态）
-            Flexible(
-              child: ListView.builder(
-                shrinkWrap: true,
-                itemCount: p.modelCatalog.length,
-                itemBuilder: (_, i) {
-                  final id = p.modelCatalog[i];
-                  final isCurrent =
-                      p.id == widget.settings.value.activeProviderId &&
-                          id == p.model;
-                  return ListTile(
-                    dense: true,
-                    title: Text(id, style: TextStyle(fontSize: 14, color: h.text)),
-                    trailing: isCurrent
-                        ? Icon(AppIcons.check, size: 18, color: h.accent)
-                        : null,
-                    onTap: () => Navigator.of(sheetCtx).pop(id),
-                  );
-                },
+              const SizedBox(height: HSpace.xs),
+              // ★ 可滚动 + 限高 —— 目录可能几十项（中转站的常态）；
+              //   限高用 ConstrainedBox 而不是 Flexible：抽屉壳按自然
+              //   高度测量，无界高度里 Flexible 会触发断言。
+              ConstrainedBox(
+                constraints: BoxConstraints(
+                  maxHeight: MediaQuery.sizeOf(sheetCtx).height * 0.45,
+                ),
+                child: ListView.builder(
+                  shrinkWrap: true,
+                  itemCount: p.modelCatalog.length,
+                  itemBuilder: (_, i) {
+                    final id = p.modelCatalog[i];
+                    final isCurrent =
+                        p.id == widget.settings.value.activeProviderId &&
+                            id == p.model;
+                    return InkWell(
+                      onTap: () => Navigator.of(sheetCtx).pop(id),
+                      child: Padding(
+                        padding: const EdgeInsets.symmetric(
+                            horizontal: HSpace.lg, vertical: 10),
+                        child: Row(
+                          children: [
+                            Expanded(
+                              child: Text(id,
+                                  style: TextStyle(
+                                      fontSize: 14, color: h.text)),
+                            ),
+                            if (isCurrent)
+                              Icon(AppIcons.check,
+                                  size: 18, color: h.accent),
+                          ],
+                        ),
+                      ),
+                    );
+                  },
+                ),
               ),
-            ),
-            const SizedBox(height: HSpace.sm),
-          ],
+              const SizedBox(height: HSpace.sm),
+            ],
+          ),
         ),
       ),
     );
@@ -5533,6 +5580,41 @@ class _QueueChip extends StatelessWidget {
 /// 动作语义与 `InputBar` 的排队条**保持一致**（见 `_QueuedRow` 的说明）：
 /// · 置顶 ⇒ 下一个发，不打断当前运行
 /// · 立即发送 ⇒ 插话（当前在跑就 `interruptRun`），不是排队
+/// 抽屉里的「图标 + 标题 + 副标题」选择行（附件来源等短菜单用，
+/// 与全 App 的 BwSheetShell 菜单行同一套规格）。
+Widget _sheetPickRow(
+  Hue h, {
+  required IconData icon,
+  required String label,
+  String? subtitle,
+  required VoidCallback onTap,
+}) {
+  return InkWell(
+    borderRadius: BorderRadius.circular(12),
+    onTap: onTap,
+    child: Padding(
+      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 11),
+      child: Row(
+        children: [
+          Icon(icon, size: 19, color: h.textDim),
+          const SizedBox(width: 12),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(label, style: TextStyle(fontSize: 15, color: h.text)),
+                if (subtitle != null)
+                  Text(subtitle,
+                      style: TextStyle(fontSize: 11.5, color: h.textFaint)),
+              ],
+            ),
+          ),
+        ],
+      ),
+    ),
+  );
+}
+
 class _QueueManageRow extends StatelessWidget {
   const _QueueManageRow({
     required this.h,

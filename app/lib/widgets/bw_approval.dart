@@ -48,24 +48,30 @@ class BwSheetShell extends StatefulWidget {
 class _BwSheetShellState extends State<BwSheetShell>
     with SingleTickerProviderStateMixin {
   late final AnimationController _anim;
-  double _dy = 16;
-  double _dragTotal = 0;
+  final GlobalKey _measureKey = GlobalKey();
+
+  /// 内容的自然高度（实测）。测得前为 null（不约束、按自然渲染）。
+  double? _natural;
+
+  /// 当前抽屉高度（px）。表面由本壳自带并**恒铺满这个高度** ——
+  /// 上拉只是把高度加大，下方永远是抽屉自己的白色表面，
+  /// 不会露出底下的页面（2026-10-27 图三，用户原话「下面直接透明了」）。
+  double _extent = 0;
+
+  /// 当前停在"自然高度"档（内容增高时跟着长）。
+  bool _atNatural = true;
+  bool _dragging = false;
   bool _dismissing = false;
+  double _dragExtent = 0;
+  double _availH = 0;
 
   @override
   void initState() {
     super.initState();
     _anim = AnimationController.unbounded(vsync: this)
       ..addListener(() {
-        if (mounted) setState(() => _dy = _anim.value);
+        if (mounted) setState(() => _extent = _anim.value);
       });
-    _anim.value = 16;
-    _anim.animateWith(SpringSimulation(
-      const SpringDescription(mass: 1, stiffness: 200, damping: 19),
-      16,
-      0,
-      0,
-    ));
   }
 
   @override
@@ -74,68 +80,164 @@ class _BwSheetShellState extends State<BwSheetShell>
     super.dispose();
   }
 
-  double get _visualDy => _dy < 0 ? _dy * 0.32 : _dy;
+  /// 测内容自然高度（只在静止时采信：拖动/动画中内容的高度会被
+  /// 当前 extent 影响，量出来是假的）。
+  void _scheduleMeasure() {
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted || _dragging || _anim.isAnimating) return;
+      final box =
+          _measureKey.currentContext?.findRenderObject() as RenderBox?;
+      if (box == null || !box.hasSize) return;
+      final hgt = box.size.height;
+      if (hgt <= 0) return;
+      final old = _natural;
+      if (old != null && (hgt - old).abs() < 0.5) return;
+      setState(() {
+        _natural = hgt;
+        if (_atNatural || _extent <= 0) {
+          _extent = hgt;
+          _atNatural = true;
+        }
+      });
+    });
+  }
 
-  void _springBack(double velocity) {
-    _anim.animateWith(SpringSimulation(
-      const SpringDescription(mass: 1, stiffness: 320, damping: 27),
-      _dy,
-      0,
-      velocity,
-    ));
+  /// 停靠点：自然高度 + 屏高 66% / 80%（只收比自然高度大的，
+  /// 矮抽屉拉到 66% 就够、不会有空档点）。
+  List<double> _detents() {
+    final n = _natural ?? 0;
+    final out = <double>[n];
+    for (final f in const [0.66, 0.80]) {
+      final d = _availH * f;
+      if (d > n + 8 && d <= _availH * 0.98) out.add(d);
+    }
+    return out;
+  }
+
+  void _snapTo(double target, double velocity) {
+    _anim
+        .animateWith(SpringSimulation(
+          const SpringDescription(mass: 1, stiffness: 320, damping: 27),
+          _extent,
+          target,
+          velocity,
+        ))
+        .whenComplete(() {
+      if (mounted) {
+        setState(() => _atNatural = _natural != null && target == _natural);
+      }
+    });
   }
 
   void _dismiss() {
     if (_dismissing) return;
     _dismissing = true;
     _anim
-        .animateTo(480, duration: const Duration(milliseconds: 190), curve: Curves.easeIn)
+        .animateTo(0,
+            duration: const Duration(milliseconds: 190), curve: Curves.easeIn)
         .whenComplete(() {
       if (mounted) widget.onDismissRequest();
     });
   }
 
+  void _onDragEnd(double velocity) {
+    _dragging = false;
+    final n = _natural ?? _extent;
+    final detents = _detents();
+    if (velocity > 620) {
+      // 快速下滑：在高档先回自然档（误触保护），已在自然档就关闭
+      if (_extent > n + 4 && detents.length > 1) {
+        _snapTo(n, velocity);
+      } else {
+        _dismiss();
+      }
+      return;
+    }
+    if (_extent < n - 110) {
+      _dismiss();
+      return;
+    }
+    if (velocity < -620) {
+      // 向上甩 → 进上一档
+      var target = detents.last;
+      for (final d in detents) {
+        if (d > _extent + 4) {
+          target = d;
+          break;
+        }
+      }
+      _snapTo(target, velocity);
+      return;
+    }
+    // 就近停靠
+    var target = detents.first;
+    var best = double.infinity;
+    for (final d in detents) {
+      final diff = (d - _extent).abs();
+      if (diff < best) {
+        best = diff;
+        target = d;
+      }
+    }
+    _snapTo(target, velocity);
+  }
+
   @override
   Widget build(BuildContext context) {
-    // ★ 表面必须在 Transform 里面（2026-10-27，真机 bug）：
-    //   旧版表面由 showModalBottomSheet 的 backgroundColor/shape 画，
-    //   它不在本壳的 Transform 里 —— 拖拽/入场时只有内容（文字）在动、
-    //   白卡不动，标题直接飘出卡外（用户原话「上拉抽屉就字动」）。
-    //   现在表面（色+圆角+裁剪）由本壳自带、与内容同为一个整体：
-    //   要动一起动。调用点 modal 已改透明底 + 直角 shape 配合。
+    _scheduleMeasure();
+    // ★ 表面必须由本壳自带（2026-10-27 真机 bug「上拉就字动」）：
+    //   表面（色+圆角+裁剪）与内容是同一个盒子，要动一起动；
+    //   调用点 modal 已改透明底 + 直角 shape 配合。
+    //
+    // ★ 高度模型（2026-10-27 图三）：盒子高度 = _extent，表面铺满它；
+    //   内容按自然高度摆在顶部（OverflowBox 允许超出、由盒子裁剪）——
+    //   上拉 = 盒子变高（停靠 66%/80%），下方始终是白色表面。
     final h = Hue.of(context);
-    final body = Transform.translate(
-      offset: Offset(0, _visualDy),
-      child: Container(
-        decoration: BoxDecoration(
-          color: h.surfaceAlt,
-          borderRadius:
-              const BorderRadius.vertical(top: Radius.circular(24)),
-        ),
-        clipBehavior: Clip.antiAlias,
-        child: widget.child,
-      ),
+    final measured = KeyedSubtree(key: _measureKey, child: widget.child);
+    final Widget body = LayoutBuilder(
+      builder: (context, constraints) {
+        _availH = constraints.maxHeight;
+        final height = (_natural == null || _extent <= 0)
+            ? null
+            : _extent.clamp(0.0, _availH);
+        final surface = Container(
+          decoration: BoxDecoration(
+            color: h.surfaceAlt,
+            borderRadius:
+                const BorderRadius.vertical(top: Radius.circular(24)),
+          ),
+          clipBehavior: Clip.antiAlias,
+          child: OverflowBox(
+            alignment: Alignment.topCenter,
+            maxHeight: double.infinity,
+            child: measured,
+          ),
+        );
+        if (height == null) return surface;
+        return SizedBox(height: height, child: surface);
+      },
     );
     if (!widget.allowDrag) return body;
     return GestureDetector(
       behavior: HitTestBehavior.translucent,
       onVerticalDragStart: (_) {
         _anim.stop();
-        _dragTotal = _dy;
+        _dragging = true;
+        _dragExtent = _extent;
       },
       onVerticalDragUpdate: (d) {
-        _dragTotal += d.delta.dy;
-        setState(() => _dy = _dragTotal);
+        _dragExtent = (_dragExtent - d.delta.dy)
+            .clamp(0.0, _availH > 0 ? _availH : double.infinity);
+        setState(() {
+          _extent = _dragExtent;
+          _atNatural = _natural != null && (_extent - _natural!).abs() < 1;
+        });
       },
-      onVerticalDragEnd: (d) {
-        final v = d.primaryVelocity ?? 0;
-        if (_dragTotal > 110 || v > 620) {
-          _dismiss();
-        } else {
-          _springBack(v);
-        }
+      onVerticalDragEnd: (d) => _onDragEnd(d.primaryVelocity ?? 0),
+      onVerticalDragCancel: () {
+        _dragging = false;
+        _snapTo(_natural ?? _extent, 0);
       },
-      onVerticalDragCancel: () => _springBack(0),
       child: body,
     );
   }

@@ -1,7 +1,9 @@
 package com.theohowie.heracles.bridge
 
 import android.app.Activity
+import android.content.Intent
 import android.os.Handler
+import android.provider.DocumentsContract
 import android.webkit.MimeTypeMap
 import io.flutter.embedding.engine.FlutterEngine
 import io.flutter.plugin.common.MethodCall
@@ -200,6 +202,16 @@ class DeviceChannel(
                 scope.launch { reply(result, fs.copy(from, to)) }
             }
 
+            // ---------------------------------------------------------- 打开文件夹
+            //
+            // ★ 2026-10-27（用户要求）：工作区菜单里点路径 → 在系统
+            //   「文件」里打开那个目录。handler 本来就在主线程，直接做。
+            "fs.openFolder" -> {
+                val path = call.stringArg("path")
+                    ?: return reply(result, failure("fs.openFolder 缺少参数 path"))
+                reply(result, openFolderInFiles(path))
+            }
+
             // ---------------------------------------------------------- 命令
             "exec.run" -> {
                 val cmd = call.stringArg("cmd")
@@ -258,6 +270,83 @@ class DeviceChannel(
             }
 
             else -> reply(result, failure("未知方法：${call.method}"))
+        }
+    }
+
+    // ------------------------------------------------------------ 打开文件夹
+
+    /**
+     * 在系统「文件」里打开 [path] 指向的文件夹。两段式，逐级降级：
+     *
+     * 1. **DocumentsUI 直达**：路径换成 externalstorage 的 document Uri
+     *    用 ACTION_VIEW 打开，系统文件直接停在那个目录；
+     * 2. **文档树选择器兜底**：ACTION_OPEN_DOCUMENT_TREE 带初始位置 ——
+     *    是选择器不是浏览器，但一样能看到目录内容。
+     *
+     * ## 已知限制（如实回错，不假装成功）
+     *
+     * Android 11+ 对 `Android/data` 有系统级浏览限制，DocumentsUI 可能
+     * 拒绝停靠（本 App 自己的 app-workspace 也在 `Android/data/<pkg>`
+     * 下）。两段都失败时回 `ok:false` 让 UI 如实提示，
+     * **不许**静默吞掉装作打开了。
+     */
+    private fun openFolderInFiles(path: String): Map<String, Any?> {
+        val file = File(path)
+        if (!file.isDirectory) {
+            return failure("文件夹不存在：$path")
+        }
+        // 路径 → (卷 id, 相对路径)：内置存储是 primary，外置卡是其 UUID
+        var volume: String? = null
+        var rel: String? = null
+        for ((prefix, vol) in listOf(
+            "/storage/emulated/0" to "primary",
+            "/sdcard" to "primary",
+        )) {
+            if (path == prefix || path.startsWith("$prefix/")) {
+                volume = vol
+                rel = path.removePrefix(prefix).trim('/')
+                break
+            }
+        }
+        if (volume == null && path.startsWith("/storage/")) {
+            val rest = path.removePrefix("/storage/")
+            val vol = rest.substringBefore('/')
+            if (vol.isNotBlank() && vol != "emulated" && vol != "self") {
+                volume = vol
+                rel = rest.removePrefix(vol).trim('/')
+            }
+        }
+        val v = volume ?: return failure("这个位置不在共享存储里，系统文件打不开：$path")
+        val docId = if (rel.isNullOrEmpty()) v else "$v:$rel"
+
+        // 1) DocumentsUI 直达
+        try {
+            val uri = DocumentsContract.buildDocumentUri(
+                "com.android.externalstorage.documents", docId,
+            )
+            val intent = Intent(Intent.ACTION_VIEW).apply {
+                setDataAndType(uri, DocumentsContract.Document.MIME_TYPE_DIR)
+                addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+            }
+            activity.startActivity(intent)
+            return mapOf("ok" to true)
+        } catch (e: Throwable) {
+            // 落到兜底（无处理器 / 系统拒绝都算）
+        }
+
+        // 2) 文档树选择器兜底（带初始位置）
+        return try {
+            val treeUri = DocumentsContract.buildTreeDocumentUri(
+                "com.android.externalstorage.documents", docId,
+            )
+            val intent = Intent(Intent.ACTION_OPEN_DOCUMENT_TREE).apply {
+                putExtra(DocumentsContract.EXTRA_INITIAL_URI, treeUri)
+                addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+            }
+            activity.startActivity(intent)
+            mapOf("ok" to true)
+        } catch (e: Throwable) {
+            failure("没有能打开这个文件夹的文件管理器：${e.message ?: e.javaClass.simpleName}")
         }
     }
 

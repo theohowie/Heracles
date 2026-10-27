@@ -8,6 +8,8 @@ import '../models/message.dart';
 import '../models/settings.dart';
 import '../theme/app_theme.dart';
 import '../theme/cupertino_kit.dart';
+import 'brand_icons.dart';
+import 'bw_approval.dart';
 import 'stream_step.dart';
 import 'bw_topbar.dart';
 import 'tool_call_card.dart';
@@ -295,41 +297,38 @@ class MessageRow extends StatelessWidget {
   ///   但语义诚实：发了什么就是什么，历史不被偷偷改掉。
   Future<void> _showMessageMenu(
       BuildContext context, Hue h, String text, String id) async {
-    final action = await showCupertinoModalPopup<String>(
+    final action = await showModalBottomSheet<String>(
       context: context,
-      builder: (sheetCtx) => CupertinoActionSheet(
-        actions: [
-          CupertinoActionSheetAction(
-            onPressed: () => Navigator.of(sheetCtx).pop('copy'),
-            child: Row(
+      backgroundColor: Colors.transparent,
+      isScrollControlled: true,
+      shape: const RoundedRectangleBorder(),
+      builder: (sheetCtx) => BwSheetShell(
+        onDismissRequest: () => Navigator.of(sheetCtx).pop(),
+        child: SafeArea(
+          child: Padding(
+            padding: const EdgeInsets.fromLTRB(10, 10, 10, 12),
+            child: Column(
               mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.stretch,
               children: [
-                Icon(AppIcons.copy, size: 21, color: h.textDim),
-                const SizedBox(width: HSpace.sm),
-                const Text('复制', style: TextStyle(fontSize: 15)),
+                _menuRow(
+                  h,
+                  icon: AppIcons.copy,
+                  label: '复制',
+                  onTap: () => Navigator.of(sheetCtx).pop('copy'),
+                ),
+                if (onEdit != null)
+                  _menuRow(
+                    h,
+                    icon: AppIcons.edit,
+                    label: '编辑重发',
+                    subtitle: '把这条消息放回输入框修改后重新发送',
+                    onTap: () => Navigator.of(sheetCtx).pop('edit'),
+                  ),
               ],
             ),
           ),
-          if (onEdit != null)
-            CupertinoActionSheetAction(
-              onPressed: () => Navigator.of(sheetCtx).pop('edit'),
-              child: Column(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  Row(
-                    mainAxisSize: MainAxisSize.min,
-                    children: [
-                      Icon(AppIcons.edit, size: 21, color: h.textDim),
-                      const SizedBox(width: HSpace.sm),
-                      const Text('编辑重发', style: TextStyle(fontSize: 15)),
-                    ],
-                  ),
-                  Text('把这条消息放回输入框修改后重新发送',
-                      style: TextStyle(fontSize: 12, color: h.textFaint)),
-                ],
-              ),
-            ),
-        ],
+        ),
       ),
     );
     if (action == null || !context.mounted) return;
@@ -345,7 +344,41 @@ class MessageRow extends StatelessWidget {
     }
   }
 
-  /// 助手消息：无边框，靠间距与字体区分
+  /// 抽屉菜单行（图标 + 标题 + 可选副标题），与全 App 菜单同一规格。
+Widget _menuRow(
+  Hue h, {
+  required IconData icon,
+  required String label,
+  String? subtitle,
+  required VoidCallback onTap,
+}) {
+  return InkWell(
+    borderRadius: BorderRadius.circular(12),
+    onTap: onTap,
+    child: Padding(
+      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 11),
+      child: Row(
+        children: [
+          Icon(icon, size: 19, color: h.textDim),
+          const SizedBox(width: 12),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(label, style: TextStyle(fontSize: 15, color: h.text)),
+                if (subtitle != null)
+                  Text(subtitle,
+                      style: TextStyle(fontSize: 11.5, color: h.textFaint)),
+              ],
+            ),
+          ),
+        ],
+      ),
+    ),
+  );
+}
+
+/// 助手消息：无边框，靠间距与字体区分
   Widget _assistant(Hue h, String text, List<HChangeFile>? changes) {
     return Padding(
       padding: const EdgeInsets.only(bottom: HSpace.lg),
@@ -684,17 +717,21 @@ class _AnswerActionsState extends State<_AnswerActions> {
       children: [
         Row(
           children: [
-            _act(AppIcons.copy, '复制', _copy, h),
+            _act(Icon(AppIcons.copy, size: 16, color: h.textFaint), '复制',
+                _copy, h),
             _feedbackBtn(AppIcons.thumbUpOutline,
                 AppIcons.thumbUp, '有帮助', AnswerFeedback.up, h),
             _feedbackBtn(AppIcons.thumbDownOutline,
                 AppIcons.thumbDown, '没帮助', AnswerFeedback.down, h),
-            _act(AppIcons.branch, '新会话分支',
+            _act(GitBranchIcon(size: 17, color: h.textFaint), '新会话分支',
                 widget.onBranch == null ? null : () => widget.onBranch!(), h),
             if (widget.metrics != null)
-              _act(AppIcons.usage, '本次用量', () {
+              _act(
+                  Icon(AppIcons.usage,
+                      size: 16, color: _showUsage ? h.accent : h.textFaint),
+                  '本次用量', () {
                 setState(() => _showUsage = !_showUsage);
-              }, h, active: _showUsage),
+              }, h),
             const Spacer(),
             if (_time().isNotEmpty)
               Text(
@@ -713,8 +750,11 @@ class _AnswerActionsState extends State<_AnswerActions> {
   }
 
   /// 一个小图标按钮。`onTap == null` 时不显示（上层没给回调就别画）。
-  Widget _act(IconData icon, String tip, VoidCallback? onTap, Hue h,
-      {bool active = false}) {
+  /// 操作行小按钮。图标收 Widget 而不是 IconData —— 「新会话分支」
+  /// 用的是自绘 git-branch 象形图标（brand_icons），不是字库字形
+  /// （2026-10-27 用户报：原 arrowshape_turn_up_right 与分享箭头
+  /// 分不清）。颜色由调用方在图标上给全。
+  Widget _act(Widget icon, String tip, VoidCallback? onTap, Hue h) {
     if (onTap == null) return const SizedBox.shrink();
     return Tooltip(
       message: tip,
@@ -724,11 +764,7 @@ class _AnswerActionsState extends State<_AnswerActions> {
         child: SizedBox(
           width: 32,
           height: 32,
-          child: Icon(
-            icon,
-            size: 16,
-            color: active ? h.accent : h.textFaint,
-          ),
+          child: Center(child: icon),
         ),
       ),
     );

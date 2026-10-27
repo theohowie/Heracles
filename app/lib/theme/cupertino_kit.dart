@@ -95,7 +95,8 @@ abstract final class AppIcons {
   static const thumbUpOutline = CupertinoIcons.hand_thumbsup;
   static const thumbDown = CupertinoIcons.hand_thumbsdown_fill;
   static const thumbDownOutline = CupertinoIcons.hand_thumbsdown;
-  static const branch = CupertinoIcons.arrowshape_turn_up_right;
+  // （branch 曾用 arrowshape_turn_up_right —— 与分享箭头分不清，
+  //   2026-10-27 退役；分支图标改用 brand_icons 的 GitBranchIcon）
   static const usage = CupertinoIcons.chart_bar;
 
   // ---- 顶栏 / 导航 ----

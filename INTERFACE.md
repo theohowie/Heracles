@@ -98,8 +98,8 @@
 ### N8 设备权限状态 —— ✅ 已落地（2026-10-25，前端可接权限页）
 
 - API：`AgentBridge.devicePermissions() -> Map<String, String>`（每项 `granted/denied/unknown`）
-- 权限项（新增先登记）：`shizuku`（提权通道：binder 活且已授权；未启动=unknown）/ `files`（SAF 工作区，本 App 模式恒 granted）/ `allFiles`（Android 11+ 所有文件访问——**我们按设计不申请，denied 是正常态，前端别渲染红色警告**）/ `notifications` / `accessibility` / `overlay`
-- 只读查询；「去开启」走既有拉起流程（`shizukuGrant` 等）
+- 权限项（新增先登记）：`shizuku`（提权通道：binder 活且已授权；未启动=unknown）/ `files`（文件夹访问：有 ≥1 个 SAF 授权文件夹/工作区 = granted；2026-10-27 起不再恒 granted）/ `allFiles`（Android 11+ 所有文件访问——**我们按设计不申请，denied 是正常态，前端别渲染红色警告**）/ `notifications` / `accessibility` / `overlay` / `media`（图片与视频，2026-10-27 新增）/ `camera`（相机，拍摄接口 `takePhoto` 预留）/ `calendar`（日历读写，后续自动化预留）/ `automation`（屏幕自动化：厂商专属如小米「后台弹出界面」，无平台 API，恒 unknown，接口预留）/ `install`（安装未知应用：状态只读，申请动作在安装 APK 的流程里触发，不在权限页）
+- 状态查询只读；拉起授权走命令通道 `requestPermission{kind}`（2026-10-27）：运行时权限（notifications/media/camera/calendar）直接弹系统授权框，无障碍/悬浮窗跳系统设置页，`appSettings` 去本 App 详情页撤销权限，`installPackages` 跳未知来源授权页（**供安装流程调用**），`automation` 如实回未实现；文件夹访问的申请 = 走既有 `pickWorkspace`（SAF 选择器，选中即授权+登记工作区）
 - Kotlin 侧 `MainActivity.handleDevicePermissions`（全本地同步查询，无 binder 阻塞）
 
 ### N9 取消真生效 —— ✅ 已实现
