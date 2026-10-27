@@ -1,0 +1,16 @@
+# gh-pages 分支的忽略规则
+#
+# 这个分支只放两样东西：
+#   1. 根目录 = 站点**构建产物**（GitHub Pages 直接托管）
+#   2. _source/ = 站点**源码**
+#
+# 所以依赖、缓存、临时构建目录都不进版本库。
+
+_source/node_modules/
+_source/dist/
+_source/.vite/
+_source/.tmpcheck/
+
+node_modules/
+.DS_Store
+Thumbs.db
