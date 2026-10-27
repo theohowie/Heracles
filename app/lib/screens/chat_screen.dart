@@ -22,6 +22,7 @@ import '../theme/app_theme.dart';
 import '../theme/cupertino_kit.dart';
 import '../theme/pressable.dart';
 import 'settings_screen.dart';
+import 'archived_sessions_screen.dart';
 import '../widgets/bw_topbar.dart';
 import '../widgets/bw_usage_sheet.dart';
 import '../widgets/bw_approval.dart';
@@ -1122,8 +1123,11 @@ class _ChatScreenState extends State<ChatScreen> {
   ///
   /// ADR-015 说"不同会话的缓存语义不兼容"—— 那讲的是**发送给模型的前缀**，
   /// 不是**用户可见的历史**。两者是不同层次的东西，之前我混淆了。
-  Future<void> _selectSession(String workspaceId, String sessionId) async {
-    Navigator.of(context).pop();
+  Future<void> _selectSession(String workspaceId, String sessionId,
+      {bool popFirst = true}) async {
+    // popFirst：从抽屉点进来时先关抽屉；从「已归档对话」页打开时
+    // 路由已由调用方退干净，这里再 pop 会把聊天页自己弹掉。
+    if (popFirst) Navigator.of(context).pop();
 
     // ★ 切会话 = 换上下文：让在途运行的结果失效（否则 A 的结果会串进 B），
     //   并停掉实时流（旧会话的事件不该再进来）
@@ -1300,6 +1304,14 @@ class _ChatScreenState extends State<ChatScreen> {
             text: text,
             changes: changes.isEmpty ? null : changes,
           ));
+          // ★ 完成时间从记录 ts 恢复（2026-10-27 用户报「几点几分不显示」）：
+          //   实时路径在 _runAgent 里给 _answerTs 打点，但重放历史时
+          //   _toMessages 给每行换了新 id、又没人恢复时间戳 ⇒ 操作行
+          //   右侧的时间永远为空。记录里 ts 现成，顺手恢复。
+          final tsMs = (m['ts'] as num?)?.toInt();
+          if (tsMs != null && tsMs > 0) {
+            _answerTs[id] = DateTime.fromMillisecondsSinceEpoch(tsMs);
+          }
           _metrics[id] = TurnMetrics(
             cachedTokens: (m['cached'] as num?)?.toInt(),
             promptTokens: (m['prompt'] as num?)?.toInt() ?? 0,
@@ -1309,6 +1321,10 @@ class _ChatScreenState extends State<ChatScreen> {
         case 'system':
           // 读取出错时的提示 —— 必须显示，否则用户以为记录真的没了
           out.add(HAssistantMessage(id: id, text: text));
+          final sysTs = (m['ts'] as num?)?.toInt();
+          if (sysTs != null && sysTs > 0) {
+            _answerTs[id] = DateTime.fromMillisecondsSinceEpoch(sysTs);
+          }
 
         // ---- ★ `role=usage`：失败 run 的记账行（2026-10-19）----
         //
@@ -1399,7 +1415,9 @@ class _ChatScreenState extends State<ChatScreen> {
   }
 
   /// ★ 删除 —— 之前是空实现
-  Future<void> _deleteSession(String workspaceId, String sessionId) async {
+  /// 返回 true = 真删了（「已归档对话」页据此决定行要不要消失；
+  /// 抽屉那条路不关心返回值）。
+  Future<bool> _deleteSession(String workspaceId, String sessionId) async {
     // 2026-10-25：居中弹窗改上拉确认抽屉
     final ok = await showBwConfirmSheet(
       context,
@@ -1408,7 +1426,7 @@ class _ChatScreenState extends State<ChatScreen> {
       confirmLabel: '删除',
       destructive: true,
     );
-    if (!ok) return;
+    if (!ok) return false;
 
     await _bridge.deleteSession(workspaceId, sessionId,
         treeUri: _treeUriOf(workspaceId));
@@ -1425,6 +1443,7 @@ class _ChatScreenState extends State<ChatScreen> {
       });
     }
     await _reload();
+    return true;
   }
 
   /// ★ 收藏 —— 之前是空实现
@@ -1467,6 +1486,56 @@ class _ChatScreenState extends State<ChatScreen> {
     await _reload(silent: true);
   }
 
+  /// **批量归档 / 取消归档**（抽屉多选）：只对状态真需要变的那几条调
+  /// toggle（toggle 是翻转语义），最后统一失效缓存 + 刷新一次。
+  Future<void> _batchArchiveSessions(
+      List<(String, String)> items, bool archive) async {
+    if (items.isEmpty) return;
+    for (final (wid, sid) in items) {
+      HSession? target;
+      for (final w in _workspaces) {
+        if (w.id != wid) continue;
+        for (final x in w.sessions) {
+          if (x.id == sid) target = x;
+        }
+      }
+      if (target == null || target.archived == archive) continue;
+      await _bridge.toggleArchive(wid, sid, treeUri: _treeUriOf(wid));
+    }
+    _invalidateSessionCache();
+    await _reload(silent: true);
+  }
+
+  /// **批量删除**（抽屉多选）：确认只弹一次（带数量），然后逐条删；
+  /// 若删中当前会话，按单删同口径切走上下文，最后一并处理。
+  Future<void> _batchDeleteSessions(List<(String, String)> items) async {
+    if (items.isEmpty) return;
+    final ok = await showBwConfirmSheet(
+      context,
+      title: '删除 ${items.length} 个会话',
+      message: '这会删除所选会话的记录。\n工作区里的文件不会被删除。',
+      confirmLabel: '删除',
+      destructive: true,
+    );
+    if (!ok) return;
+
+    var deletedActive = false;
+    for (final (wid, sid) in items) {
+      await _bridge.deleteSession(wid, sid, treeUri: _treeUriOf(wid));
+      if (sid == _activeSessionId) deletedActive = true;
+    }
+    _invalidateSessionCache();
+    if (deletedActive) {
+      _switchContext();
+      setState(() {
+        _activeSessionId = null;
+        _messages.clear();
+        _metrics.clear();
+      });
+    }
+    await _reload();
+  }
+
   /// 取某个工作区的 treeUri（SAF 下必须有）
   String _treeUriOf(String workspaceId) {
     for (final w in _workspaces) {
@@ -1492,8 +1561,39 @@ class _ChatScreenState extends State<ChatScreen> {
       Navigator.of(context).pop();
     }
     Navigator.of(context).push(MaterialPageRoute(
-      builder: (_) => SettingsScreen(controller: widget.settings),
+      builder: (_) => SettingsScreen(
+        controller: widget.settings,
+        archivedCountLoader: () => _workspaces
+            .expand((w) => w.sessions)
+            .where((s) => s.archived)
+            .length,
+        onOpenArchived: _openArchivedPage,
+      ),
     ));
+  }
+
+  /// **已归档对话页**（从设置打开）：快照取当前工作区列表里的
+  /// 已归档会话；打开某条 = 退回聊天页并切换过去（仍保持已归档，
+  /// 与抽屉里点开已归档会话同口径）。
+  Future<void> _openArchivedPage() async {
+    final items = <(HWorkspace, HSession)>[
+      for (final w in _workspaces)
+        for (final s in w.sessions)
+          if (s.archived) (w, s),
+    ];
+    await Navigator.of(context).push(
+      CupertinoPageRoute(
+        builder: (_) => ArchivedSessionsScreen(
+          items: items,
+          onOpen: (wid, sid) {
+            Navigator.of(context).popUntil((r) => r.isFirst);
+            _selectSession(wid, sid, popFirst: false);
+          },
+          onUnarchive: _toggleArchive,
+          onDelete: _deleteSession,
+        ),
+      ),
+    );
   }
 
   /// **模型是否真的能用**（2026-10-19 首启引导）。
@@ -4092,6 +4192,8 @@ class _ChatScreenState extends State<ChatScreen> {
         onDeleteSession: _deleteSession,
         onToggleStar: _toggleStar,
         onToggleArchive: _toggleArchive,
+        onBatchArchiveSessions: _batchArchiveSessions,
+        onBatchDeleteSessions: _batchDeleteSessions,
         onToggleWorkspace: _toggleWorkspace,
         viewOptions: _view,
         onViewOptionsChanged: _saveView,
@@ -4706,12 +4808,10 @@ class _ChatScreenState extends State<ChatScreen> {
     //   选项多时抽屉长到上限、内部滚动，按钮行始终钉底。
     final result = await showModalBottomSheet<Map<String, List<String>>>(
       context: context,
-      backgroundColor: h.surfaceAlt,
+      backgroundColor: Colors.transparent,
       isScrollControlled: true,
       isDismissible: true,
-      shape: const RoundedRectangleBorder(
-        borderRadius: BorderRadius.vertical(top: Radius.circular(24)),
-      ),
+      shape: const RoundedRectangleBorder(),
       builder: (sheetCtx) {
         return BwSheetShell(
           onDismissRequest: () => Navigator.of(sheetCtx).pop(),

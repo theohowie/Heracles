@@ -457,6 +457,20 @@ class HRawOutput extends HMessage {
 ///
 /// **`cachedTokens` 为 null 表示 provider 未上报**，
 /// UI 必须显示"不可用"而不是 0%（`02-契约规范.md` §3.4）。
+/// token 数的人读格式（2026-10-27 用户定）：≤1000 原样，
+/// >1000 用 K、>100 万用 M，一位小数、整数去掉 .0
+/// （如 999、1K、1.2K、3.4M）。
+String formatTokenCount(int n) {
+  String trim(double v) {
+    final t = v.toStringAsFixed(1);
+    return t.endsWith('.0') ? t.substring(0, t.length - 2) : t;
+  }
+
+  if (n > 1000000) return '${trim(n / 1000000)}M';
+  if (n > 1000) return '${trim(n / 1000)}K';
+  return '$n';
+}
+
 class TurnMetrics {
   const TurnMetrics({
     required this.cachedTokens,

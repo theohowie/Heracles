@@ -49,11 +49,9 @@ Future<void> showModelSheet(
 
   await showModalBottomSheet<void>(
     context: context,
-    backgroundColor: h.surfaceAlt,
+    backgroundColor: Colors.transparent,
     isScrollControlled: true,
-    shape: const RoundedRectangleBorder(
-      borderRadius: BorderRadius.vertical(top: Radius.circular(24)),
-    ),
+    shape: const RoundedRectangleBorder(),
     builder: (sheetCtx) => BwSheetShell(
       onDismissRequest: () => Navigator.of(sheetCtx).pop(),
       child: SafeArea(
