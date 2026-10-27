@@ -29,6 +29,10 @@ app/android/.gradle/
 app/android/local.properties
 backend/.dart_tool/
 
+# 2026-10-27：内联的框架源码（core/）——源码入库，
+# 但它自己的 .dart_tool / 构建产物不入库。见 core/VENDOR.md。
+core/.dart_tool/
+
 # AgentTeams 内部协调状态（会话/邮箱/计划）—— 不属于仓库产物
 .agent-teams/
 

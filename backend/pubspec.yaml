@@ -20,7 +20,20 @@ environment:
 
 dependencies:
   # 编排层：agent 循环、工具调度、计划、循环检测、hooks、MCP、子代理
-  dart_agent_core: ^2.1.8
+  #
+  # ★ 2026-10-27：**改为仓库内 vendored 源码**（原来是 `^2.1.8` 的 hosted 包）。
+  #
+  # 为什么：框架是外部 pub 包（MIT，17,214 行），我们要改的挂载点全在它里面
+  # （`systemReminders` 注入、`ToolResultHookResult.injectedMessages`、工具流式输出、
+  # 并行工具调度）。hosted 包改不动，改 fork 又要每次上游发版手动合 ——
+  # 内联进 `core/` 后，改一行就是改一行。
+  #
+  # 代价（必须记住）：
+  #  · 它不再受 pub 版本约束，`pub upgrade` 不会动它 —— **升级要手动**（见 `core/VENDOR.md`）；
+  #  · 它带着 MIT 许可证，不是本仓库的 GPL-3.0 —— 版权声明在根目录 `THIRD_PARTY_NOTICES.md`，别删；
+  #  · 本包是纯 Dart，vendored 之后 `backend` 仍然不能 import flutter（约束不变）。
+  dart_agent_core:
+    path: ../core
 
   # 流式/取消：dart_agent_core 的 CancelToken 就来自 dio，这里必须一致
   dio: ^5.11.1

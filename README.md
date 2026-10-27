@@ -192,9 +192,14 @@ Heracles/
 │   ├── lib/          UI(screens/widgets/theme) + 服务层(services: 桥接/会话/设置)
 │   ├── test/         组件测试
 │   └── android/      Android 壳 + Kotlin 设备桥（DeviceFs / DeviceShell / Shizuku / 构建服务）
+├── core/             编排框架源码（vendored，上游 memex-lab/dart_agent_core 的裁剪副本）
+├── THIRD_PARTY_NOTICES.md  第三方代码的版权与许可声明
 ├── INTERFACE.md      前后端接口与事件流契约
-└── LICENSE           GPL-3.0
+└── LICENSE           GPL-3.0（`core/` 为 MIT，见 THIRD_PARTY_NOTICES.md）
 ```
+
+> **关于 `core/`**：这是上游框架的副本，不是本项目的代码。内联是为了能直接改它的挂载点；
+> 保留了什么、删了什么、怎么升级，都写在 `core/VENDOR.md`。
 
 **分支约定**：`master` = 内核 + App 服务层 + 测试基建；`frontend` = UI 迭代（合并方向 frontend → master）。
 

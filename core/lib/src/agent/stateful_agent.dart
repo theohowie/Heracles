@@ -1,0 +1,2015 @@
+import 'dart:async';
+import 'dart:convert';
+import 'package:dart_agent_core/src/agent/controller.dart';
+import 'package:dart_agent_core/src/agent/events.dart';
+import 'package:dart_agent_core/src/agent/exception.dart';
+import 'package:dart_agent_core/src/agent/javascript_runtime.dart';
+import 'package:dart_agent_core/src/agent/loop_detector.dart';
+import 'package:dart_agent_core/src/agent/skill.dart';
+import 'package:dart_agent_core/src/agent/sub_agent.dart';
+import 'package:dart_agent_core/src/agent/util.dart';
+import 'package:dart_agent_core/src/core/fs.dart';
+
+import 'package:dio/dio.dart';
+import 'package:logging/logging.dart';
+
+import '../core/llm_client.dart';
+import '../core/message.dart';
+import '../core/tool.dart';
+import '../llm/llm_request_util.dart';
+import 'context_compressor.dart';
+import 'planner.dart';
+import 'memory.dart';
+import 'mcp_manager.dart';
+
+part 'agent_hook.dart';
+
+class SystemPromptPart {
+  final String name;
+  final String content;
+
+  SystemPromptPart({required this.name, required this.content});
+}
+
+class SystemPromptHistoryItem {
+  final String content;
+  final int validFromMessageIndex;
+
+  SystemPromptHistoryItem({
+    required this.content,
+    required this.validFromMessageIndex,
+  });
+
+  Map<String, dynamic> toJson() => {
+    'content': content,
+    'validFromMessageIndex': validFromMessageIndex,
+  };
+
+  factory SystemPromptHistoryItem.fromJson(Map<String, dynamic> json) {
+    return SystemPromptHistoryItem(
+      content: json['content'],
+      validFromMessageIndex: json['validFromMessageIndex'],
+    );
+  }
+}
+
+class _PreparedModelCallPhase {
+  final ModelCallRequest request;
+  final CallLLMParams params;
+  final ModelMessage? syntheticResponse;
+  final int systemPromptHash;
+  final int toolsHash;
+
+  const _PreparedModelCallPhase({
+    required this.request,
+    required this.params,
+    required this.syntheticResponse,
+    required this.systemPromptHash,
+    required this.toolsHash,
+  });
+}
+
+class _PromptToolHistoryHashes {
+  final int systemPromptHash;
+  final int toolsHash;
+
+  const _PromptToolHistoryHashes({
+    required this.systemPromptHash,
+    required this.toolsHash,
+  });
+}
+
+class _AfterModelCallPhase {
+  final ModelMessage? response;
+  final String? retryReason;
+
+  const _AfterModelCallPhase.proceed(ModelMessage this.response)
+    : retryReason = null;
+
+  const _AfterModelCallPhase.retry(String this.retryReason) : response = null;
+
+  bool get shouldRetry => retryReason != null;
+}
+
+class _TurnCompletionPhase {
+  final List<LLMMessage> messages;
+
+  const _TurnCompletionPhase.accept() : messages = const [];
+
+  const _TurnCompletionPhase.continueWith(this.messages);
+
+  bool get shouldContinue => messages.isNotEmpty;
+}
+
+class _ToolCallPhase {
+  final FunctionExecutionResultMessage message;
+  final List<LLMMessage> injectedMessages;
+  final bool shouldStop;
+
+  const _ToolCallPhase({
+    required this.message,
+    required this.injectedMessages,
+    required this.shouldStop,
+  });
+}
+
+class _ModelMessageAccumulator {
+  final StringBuffer _text = StringBuffer();
+  final StringBuffer _thought = StringBuffer();
+  final List<Map<String, dynamic>> _contentBlocks = [];
+  final List<FunctionCall> _functionCalls = [];
+  final List<ModelImagePart> _imageOutputs = [];
+  final List<ModelVideoPart> _videoOutputs = [];
+  final List<ModelAudioPart> _audioOutputs = [];
+  String? stopReason;
+  ModelUsage? usage;
+  String? thoughtSignature;
+  String? responseId;
+  Map<String, dynamic>? metadata;
+
+  bool get isEmptyResponse =>
+      // Thought-only and media-only stops are still a real model turn.
+      _functionCalls.isEmpty &&
+      _text.isEmpty &&
+      _thought.isEmpty &&
+      _contentBlocks.isEmpty &&
+      _imageOutputs.isEmpty &&
+      _videoOutputs.isEmpty &&
+      _audioOutputs.isEmpty &&
+      responseId == null;
+
+  void add(ModelMessage chunk) {
+    if (chunk.textOutput != null) {
+      _text.write(chunk.textOutput);
+    }
+    if (chunk.functionCalls.isNotEmpty) {
+      _functionCalls.addAll(chunk.functionCalls);
+    }
+    if (chunk.contentBlocks.isNotEmpty) {
+      _contentBlocks.addAll(chunk.contentBlocks);
+    }
+    if (chunk.imageOutputs.isNotEmpty) {
+      _imageOutputs.addAll(chunk.imageOutputs);
+    }
+    if (chunk.videoOutputs.isNotEmpty) {
+      _videoOutputs.addAll(chunk.videoOutputs);
+    }
+    if (chunk.audioOutputs.isNotEmpty) {
+      _audioOutputs.addAll(chunk.audioOutputs);
+    }
+    if (chunk.stopReason != null) {
+      stopReason = chunk.stopReason;
+    }
+    if (chunk.usage != null) {
+      usage = chunk.usage;
+    }
+    if (chunk.metadata != null) {
+      metadata = chunk.metadata;
+    }
+    if (chunk.thought != null) {
+      _thought.write(chunk.thought!);
+    }
+    if (chunk.thoughtSignature != null) {
+      thoughtSignature = chunk.thoughtSignature;
+    }
+    if (chunk.responseId != null) {
+      responseId = chunk.responseId;
+    }
+  }
+
+  void reset() {
+    _text.clear();
+    _thought.clear();
+    _contentBlocks.clear();
+    _functionCalls.clear();
+    _imageOutputs.clear();
+    _videoOutputs.clear();
+    _audioOutputs.clear();
+    stopReason = null;
+    usage = null;
+    thoughtSignature = null;
+    responseId = null;
+    metadata = null;
+  }
+
+  ModelMessage toModelMessage(String model) {
+    return ModelMessage(
+      textOutput: _text.isNotEmpty ? _text.toString() : null,
+      functionCalls: _functionCalls,
+      contentBlocks: _contentBlocks,
+      imageOutputs: _imageOutputs,
+      videoOutputs: _videoOutputs,
+      audioOutputs: _audioOutputs,
+      stopReason: stopReason,
+      usage: usage,
+      metadata: metadata,
+      model: model,
+      thought: _thought.isNotEmpty ? _thought.toString() : null,
+      thoughtSignature: thoughtSignature,
+      responseId: responseId,
+    );
+  }
+}
+
+class ToolsHistoryItem {
+  final List<Map<String, dynamic>> tools;
+  final int validFromMessageIndex;
+
+  ToolsHistoryItem({required this.tools, required this.validFromMessageIndex});
+
+  Map<String, dynamic> toJson() => {
+    'tools': tools,
+    'validFromMessageIndex': validFromMessageIndex,
+  };
+
+  factory ToolsHistoryItem.fromJson(Map<String, dynamic> json) {
+    return ToolsHistoryItem(
+      tools: (json['tools'] as List).cast<Map<String, dynamic>>(),
+      validFromMessageIndex: json['validFromMessageIndex'],
+    );
+  }
+}
+
+/// Represents the state of an AI agent, including its history, token usage,
+/// active skills, and planning metadata.
+class AgentState {
+  /// Unique session identifier.
+  String sessionId;
+  bool isRunning;
+  Map<String, String> systemReminders;
+  AgentMessageHistory history;
+  List<ModelUsage> usages;
+  Map<String, dynamic> metadata;
+  PlanState? plan;
+  List<String>? activeSkills;
+  int totalLoopCount;
+  int currentLoopCount;
+  List<ModelUsage> currentLoopUsages;
+  String? lastError;
+  List<SystemPromptHistoryItem> systemPromptHistory;
+  List<ToolsHistoryItem> toolsHistory;
+
+  AgentState({
+    required this.sessionId,
+    AgentMessageHistory? history,
+    Map<String, String>? systemReminders,
+    List<ModelUsage>? usages,
+    List<ModelUsage>? currentLoopUsages,
+    Map<String, dynamic>? metadata,
+    this.plan,
+    this.activeSkills,
+    this.isRunning = false,
+    this.totalLoopCount = 0,
+    this.currentLoopCount = 0,
+    this.lastError,
+    List<SystemPromptHistoryItem>? systemPromptHistory,
+    List<ToolsHistoryItem>? toolsHistory,
+  }) : history = history ?? AgentMessageHistory(),
+       systemReminders = systemReminders ?? {},
+       usages = usages ?? [],
+       metadata = metadata ?? {},
+       currentLoopUsages = currentLoopUsages ?? [],
+       systemPromptHistory = systemPromptHistory ?? [],
+       toolsHistory = toolsHistory ?? [];
+
+  Map<String, dynamic> toJson() => {
+    'history': history.toJson(),
+    'usages': usages.map((e) => e.toJson()).toList(),
+    'metadata': metadata,
+    'sessionId': sessionId,
+    'systemReminders': systemReminders,
+    'plan': plan?.toJson(),
+    'activeSkills': activeSkills,
+    'isRunning': isRunning,
+    'totalLoopCount': totalLoopCount,
+    'currentLoopCount': currentLoopCount,
+    'currentLoopUsages': currentLoopUsages.map((e) => e.toJson()).toList(),
+    'lastError': lastError,
+    'systemPromptHistory': systemPromptHistory.map((e) => e.toJson()).toList(),
+    'toolsHistory': toolsHistory.map((e) => e.toJson()).toList(),
+  };
+
+  factory AgentState.empty() {
+    return AgentState(sessionId: uuid.v4());
+  }
+
+  factory AgentState.fromJson(Map<String, dynamic> json) {
+    return AgentState(
+      sessionId: json['sessionId'],
+      history: AgentMessageHistory.fromJson(json['history']),
+      usages:
+          (json['usages'] as List?)
+              ?.map((e) => ModelUsage.fromJson(e as Map<String, dynamic>))
+              .toList() ??
+          [],
+      currentLoopUsages:
+          (json['currentLoopUsages'] as List?)
+              ?.map((e) => ModelUsage.fromJson(e as Map<String, dynamic>))
+              .toList() ??
+          [],
+      metadata: json['metadata'] as Map<String, dynamic>? ?? {},
+      systemReminders: (json['systemReminders'] as Map? ?? {})
+          .cast<String, String>(),
+      plan: json['plan'] != null ? PlanState.fromJson(json['plan']) : null,
+      activeSkills: (json['activeSkills'] as List? ?? [])
+          .cast<String>()
+          .toList(),
+      isRunning: json['isRunning'] as bool? ?? false,
+      totalLoopCount: json['totalLoopCount'] as int? ?? 0,
+      currentLoopCount: json['currentLoopCount'] as int? ?? 0,
+      lastError: json['lastError'] as String?,
+      systemPromptHistory:
+          (json['systemPromptHistory'] as List?)
+              ?.map(
+                (e) =>
+                    SystemPromptHistoryItem.fromJson(e as Map<String, dynamic>),
+              )
+              .toList() ??
+          [],
+      toolsHistory:
+          (json['toolsHistory'] as List?)
+              ?.map((e) => ToolsHistoryItem.fromJson(e as Map<String, dynamic>))
+              .toList() ??
+          [],
+    );
+  }
+}
+
+class AgentCallToolContext {
+  static final zoneKey = #AgentCallToolContext;
+
+  static AgentCallToolContext? get current {
+    return Zone.current[zoneKey] as AgentCallToolContext?;
+  }
+
+  final AgentState state;
+  final StatefulAgent agent;
+  final String batchCallId;
+  final CancelToken? cancelToken;
+
+  AgentCallToolContext({
+    required this.state,
+    required this.agent,
+    required this.batchCallId,
+    this.cancelToken,
+  });
+}
+
+class AgentToolResult {
+  final UserContentPart? content;
+  final List<UserContentPart>? contents;
+  final bool stopFlag;
+  final Map<String, dynamic>? metadata;
+
+  AgentToolResult({
+    this.content,
+    this.contents,
+    this.stopFlag = false,
+    this.metadata,
+  });
+}
+
+class ExecutionToolResult {
+  final String id;
+  final String name;
+  final String arguments;
+  final List<UserContentPart> content;
+  final Map<String, dynamic>? metadata;
+  final bool stopFlag;
+  final bool isError;
+
+  ExecutionToolResult({
+    required this.id,
+    required this.name,
+    required this.arguments,
+    required this.content,
+    this.stopFlag = false,
+    this.isError = false,
+    this.metadata,
+  });
+}
+
+class CallLLMParams {
+  final List<LLMMessage> messages;
+  final List<Tool>? tools;
+  final ToolChoice? toolChoice;
+  final ModelConfig modelConfig;
+  final bool stream;
+
+  CallLLMParams({
+    required this.messages,
+    this.tools,
+    this.toolChoice,
+    required this.modelConfig,
+    required this.stream,
+  });
+}
+
+class StatefulAgent {
+  final Logger _logger = Logger('StatefulAgent');
+
+  /// The human-readable name of the agent.
+  final String name;
+
+  /// Unique identifier generated for this agent instance.
+  final String id = uuid.v4();
+
+  /// The LLM client used to communicate with AI providers.
+  final LLMClient client;
+
+  /// Configuration for the LLM (model, temperature, etc.).
+  final ModelConfig modelConfig;
+
+  /// List of tools available to the agent.
+  final List<Tool>? tools;
+
+  /// List of system prompts that define the agent's behavior.
+  final List<String> systemPrompts;
+
+  /// Explicit instructions for tool selection.
+  final ToolChoice? toolChoice;
+
+  /// The current state of the agent.
+  final AgentState state;
+
+  /// Optional compressor for managing long contexts.
+  final ContextCompressor? compressor;
+  late final Planner _planner;
+
+  /// The planning mode (auto, must, or null to disable).
+  final PlanMode? planMode;
+
+  /// Modular capabilities that can be activated/deactivated.
+  final List<Skill>? skills;
+
+  /// Directory-mode skills root paths (SKILL.md).
+  ///
+  /// This mode is mutually exclusive with [skills].
+  /// You must provide the agent with read, LS, and other file-operation tools yourself; otherwise directory skill functionality will not work.
+  final List<String>? skillDirectoryPaths;
+  final JavaScriptRuntime? javaScriptRuntime;
+  final JavaScriptBridgeRegistry? javaScriptBridgeRegistry;
+
+  /// MCP Manager for interacting with MCP (Model Context Protocol) servers.
+  ///
+  /// When provided, the agent will:
+  /// - Include MCP server info in the system prompt (Layer 1: progressive disclosure)
+  /// - Register bridge tools (mcp_list_tools, mcp_call_tool, etc.)
+  /// - Manage MCP session lifecycle
+  final McpManager? mcpManager;
+
+  /// Registered sub-agents for task delegation.
+  final List<SubAgent>? subAgents;
+
+  /// Whether to disable sub-agent delegation.
+  final bool disableSubAgents;
+
+  /// Whether to include general principles in the system message.
+  final bool withGeneralPrinciples;
+
+  /// Controller for intercepting agent events.
+  final AgentController? controller;
+
+  /// Ordered control pipeline for run/model/tool/persistence lifecycle phases.
+  final List<AgentHook> hooks;
+  late final AgentHookPipeline _hookPipeline;
+
+  /// Whether this agent is running as a sub-agent.
+  final bool isSubAgent;
+
+  /// Mechanism for detecting infinite tool loops.
+  late final LoopDetector loopDetector;
+
+  /// Optional callback for persisting state on changes.
+  final Function(AgentState state)? autoSaveStateFunc;
+
+  /// Maximum number of hook-driven final-turn continuations allowed in a run.
+  final int maxTurnContinuations;
+  List<DirectorySkillMetadata> _directorySkills = [];
+  late final JavaScriptBridgeRegistry _jsBridgeRegistry;
+
+  /// Maximum number of turns (LLM calls) allowed in a single run.
+  final int maxTurns;
+
+  StatefulAgent({
+    required this.name,
+    List<String>? systemPrompts,
+    required this.client,
+    required this.modelConfig,
+    required this.state,
+    this.tools,
+    this.toolChoice,
+    this.compressor,
+    this.planMode,
+    this.skills,
+    this.skillDirectoryPaths,
+    this.javaScriptRuntime,
+    this.javaScriptBridgeRegistry,
+    this.mcpManager,
+    this.subAgents,
+    this.withGeneralPrinciples = true,
+    this.autoSaveStateFunc,
+    this.controller,
+    List<AgentHook>? hooks,
+    LoopDetector? loopDetector,
+    this.isSubAgent = false,
+    this.disableSubAgents = false,
+    this.maxTurnContinuations = 3,
+    this.maxTurns = 20,
+  }) : assert(
+         skills == null ||
+             skills.isEmpty ||
+             skillDirectoryPaths == null ||
+             skillDirectoryPaths.every((path) => path.trim().isEmpty),
+         'skills and skillDirectoryPaths cannot be enabled at the same time',
+       ),
+       hooks = hooks ?? const [],
+       systemPrompts = systemPrompts ?? [] {
+    _planner = Planner(this, controller);
+    _jsBridgeRegistry = javaScriptBridgeRegistry ?? JavaScriptBridgeRegistry();
+    _hookPipeline = AgentHookPipeline(this.hooks);
+    this.loopDetector =
+        loopDetector ??
+        DefaultLoopDetector(
+          state: state,
+          client: client,
+          modelConfig: modelConfig,
+        );
+  }
+
+  SystemMessage? composeSystemMessage() {
+    List<SystemPromptPart> parts = [];
+
+    // 1. User System Prompt
+    if (systemPrompts.isNotEmpty) {
+      parts.add(
+        SystemPromptPart(
+          name: 'system_prompt',
+          content: systemPrompts.join('\n\n'),
+        ),
+      );
+    }
+
+    //2. Sub Agents
+    if (!isEffectivelySubAgent(this)) {
+      if (!disableSubAgents) {
+        final subAgentInstruction = buildSubAgentSystemPrompt(state, subAgents);
+        if (subAgentInstruction != null) {
+          parts.add(subAgentInstruction);
+        }
+      }
+    }
+
+    // 3. Skills
+    if (_isDirectorySkillModeEnabled) {
+      final skillInstruction = buildDirectorySkillsSystemPrompt(
+        _directorySkills,
+        javaScriptExecutionEnabled: javaScriptRuntime != null,
+      );
+      if (skillInstruction != null) {
+        parts.add(skillInstruction);
+      }
+    } else if (skills != null && skills!.isNotEmpty) {
+      final skillInstruction = buildSkillSystemPrompt(state, skills);
+      if (skillInstruction != null) {
+        parts.add(skillInstruction);
+      }
+    }
+
+    // 3.5 MCP Servers (progressive disclosure: Layer 1 - server list only)
+    if (mcpManager != null && mcpManager!.hasServers) {
+      final mcpInstruction = mcpManager!.buildMcpSystemPrompt();
+      if (mcpInstruction != null) {
+        parts.add(mcpInstruction);
+      }
+    }
+
+    // 4. General instructions
+    if (withGeneralPrinciples) {
+      final buffer = StringBuffer("# General Principles:\n");
+      buffer.writeln("- Concise output (< 4 lines unless asked for detail)");
+      buffer.writeln("- No \"Here is.\" or \"| will..\" —just do it");
+      buffer.writeln("- Do work with tools, not text explanations");
+      buffer.writeln(
+        "- Run independent tools in parallel; execute dependent tools sequentially",
+      );
+      if (planMode != null &&
+          (planMode == PlanMode.auto || planMode == PlanMode.must)) {
+        buffer.writeln("- Track tasks with Planner");
+      }
+      parts.add(
+        SystemPromptPart(
+          name: 'general_principles',
+          content: buffer.toString(),
+        ),
+      );
+    }
+
+    if (parts.isEmpty) return null;
+
+    return SystemMessage(parts.map((p) => p.content).join('\n\n'));
+  }
+
+  List<Tool> composeTools() {
+    List<Tool> toolsCopy = List.from(tools ?? []);
+
+    // 1. Inject planner tools
+    if (planMode != null &&
+        (planMode == PlanMode.auto || planMode == PlanMode.must)) {
+      toolsCopy.addAll(_planner.tools);
+    }
+
+    // 2. Inject skill tools (legacy in-memory skills only)
+    if (!_isDirectorySkillModeEnabled && skills != null && skills!.isNotEmpty) {
+      // Only inject skill operation tools if not all skills are force activate
+      if (!skills!.every((s) => s.forceActivate)) {
+        toolsCopy.addAll(skillOperationTools);
+      }
+
+      final forceActiveSkillNames = skills!
+          .where((s) => s.forceActivate)
+          .map((s) => s.name)
+          .toList();
+      final activeSkillNames = ({
+        ...?(state.activeSkills),
+        ...forceActiveSkillNames,
+      }).toList();
+      for (var skillName in activeSkillNames) {
+        Skill? skill;
+        for (final candidate in skills!) {
+          if (candidate.name == skillName) {
+            skill = candidate;
+            break;
+          }
+        }
+        if (skill == null) {
+          _logger.warning('[$name] Ignoring unknown active skill "$skillName"');
+          continue;
+        }
+        toolsCopy.addAll(skill.tools ?? []);
+      }
+    }
+
+    if (_isDirectorySkillModeEnabled && javaScriptRuntime != null) {
+      toolsCopy.add(
+        Tool(
+          name: 'RunJavaScript',
+          description:
+              'Execute a JavaScript (.js) script from the directory skill workspace.',
+          executable: (dynamic scriptPath, dynamic args, dynamic timeoutMs) =>
+              _runJavaScriptScript(
+                scriptPath?.toString() ?? '',
+                _javaScriptArgsAsString(args),
+                _javaScriptTimeoutMs(timeoutMs),
+              ),
+          resultIsError: (result) =>
+              result is String && result.startsWith('Error:'),
+          parameters: {
+            'type': 'object',
+            'properties': {
+              'script_path': {
+                'type': 'string',
+                'description': 'Absolute path to a JavaScript file.',
+              },
+              'args': {
+                'type': 'string',
+                'description':
+                    'Optional JSON object string (for example: {"xx":"yy"}). The framework deserializes it, and JavaScript reads fields from `ctx.args` directly (for example: `ctx.args.xx`).',
+              },
+              'timeout_ms': {
+                'type': 'integer',
+                'description':
+                    'Optional timeout in milliseconds. Default 30000.',
+              },
+            },
+            'required': ['script_path'],
+          },
+        ),
+      );
+    }
+
+    // 3. Inject sub agent tools
+    if (!isEffectivelySubAgent(this)) {
+      if (!disableSubAgents) {
+        toolsCopy.addAll(subAgentTools);
+      }
+    }
+
+    // 4. Inject memory tools
+    if (state.history.episodicMemories.isNotEmpty) {
+      toolsCopy.addAll(memoryTools);
+    }
+
+    // 5. Inject MCP bridge tools
+    if (mcpManager != null && mcpManager!.hasServers) {
+      toolsCopy.addAll(mcpManager!.getBridgeTools());
+    }
+
+    return toolsCopy;
+  }
+
+  List<String> get _normalizedSkillDirectoryPaths {
+    final normalized = <String>[];
+    final seen = <String>{};
+    for (final rawPath in skillDirectoryPaths ?? const <String>[]) {
+      final path = rawPath.trim();
+      if (path.isEmpty) continue;
+      final absolutePath = fsAbsolutePath(path);
+      if (seen.add(absolutePath)) {
+        normalized.add(absolutePath);
+      }
+    }
+    return normalized;
+  }
+
+  bool get _isDirectorySkillModeEnabled =>
+      _normalizedSkillDirectoryPaths.isNotEmpty;
+
+  void registerJavaScriptBridgeChannel(
+    String channel,
+    JavaScriptBridgeHandler handler,
+  ) {
+    _jsBridgeRegistry.register(channel, handler);
+  }
+
+  void unregisterJavaScriptBridgeChannel(String channel) {
+    _jsBridgeRegistry.unregister(channel);
+  }
+
+  Future<String> _runJavaScriptScript(
+    String scriptPath,
+    String? args,
+    int? timeoutMs,
+  ) async {
+    if (!_isDirectorySkillModeEnabled) {
+      return 'Error: directory skill mode is not enabled.';
+    }
+    if (javaScriptRuntime == null) {
+      return 'Error: JavaScript runtime is not configured.';
+    }
+    if (!_isAbsolutePath(scriptPath)) {
+      return 'Error: script_path must be an absolute path.';
+    }
+
+    final resolvedAbsolute = fsAbsolutePath(scriptPath);
+    final rootPaths = _normalizedSkillDirectoryPaths;
+    final matchedRoot = rootPaths.firstWhere((root) {
+      final rootWithSep = root.endsWith(fsPathSeparator)
+          ? root
+          : '$root$fsPathSeparator';
+      return resolvedAbsolute == root ||
+          resolvedAbsolute.startsWith(rootWithSep);
+    }, orElse: () => '');
+    if (matchedRoot.isEmpty) {
+      return 'Error: script path must stay under one of the skillDirectoryPaths.';
+    }
+    if (!resolvedAbsolute.toLowerCase().endsWith('.js')) {
+      return 'Error: only .js script files are supported.';
+    }
+    if (!fsFileExistsSync(resolvedAbsolute)) {
+      return 'Error: script file not found: $scriptPath';
+    }
+    Map<String, dynamic>? parsedArgs;
+    if (args != null && args.trim().isNotEmpty) {
+      try {
+        final decoded = jsonDecode(args);
+        if (decoded is Map) {
+          parsedArgs = decoded.cast<String, dynamic>();
+        } else {
+          return 'Error: args must be a JSON object string.';
+        }
+      } catch (e) {
+        return 'Error: failed to parse args as JSON object string: $e';
+      }
+    }
+
+    final result = await javaScriptRuntime!.executeFile(
+      scriptPath: resolvedAbsolute,
+      args: parsedArgs,
+      timeout: Duration(milliseconds: timeoutMs ?? 30000),
+      bridgeRegistry: _jsBridgeRegistry,
+      bridgeContext: JavaScriptBridgeContext(
+        agentName: name,
+        sessionId: state.sessionId,
+        scriptPath: resolvedAbsolute,
+        scriptArgs: parsedArgs ?? <String, dynamic>{},
+      ),
+    );
+
+    return jsonEncode({
+      'success': result.success,
+      if (result.result != null) 'result': result.result,
+      if (result.error != null) 'error': result.error,
+      if (result.stdout.isNotEmpty) 'stdout': result.stdout,
+      if (result.stderr.isNotEmpty) 'stderr': result.stderr,
+    });
+  }
+
+  bool _isAbsolutePath(String path) {
+    final isAbsolute =
+        path.startsWith('/') || (path.length >= 2 && path[1] == ':');
+    return isAbsolute;
+  }
+
+  String? _javaScriptArgsAsString(dynamic rawArgs) {
+    if (rawArgs == null) return null;
+    if (rawArgs is String) return rawArgs;
+    if (rawArgs is Map) return jsonEncode(rawArgs);
+    return rawArgs.toString();
+  }
+
+  int? _javaScriptTimeoutMs(dynamic rawTimeout) {
+    if (rawTimeout is num) return rawTimeout.toInt();
+    if (rawTimeout is String && rawTimeout.trim().isNotEmpty) {
+      return int.tryParse(rawTimeout);
+    }
+    return null;
+  }
+
+  Future<void> _prepareDirectorySkills(
+    List<LLMMessage> incomingMessages,
+  ) async {
+    final rootPaths = _normalizedSkillDirectoryPaths;
+    if (rootPaths.isEmpty) return;
+
+    final allSkills = <DirectorySkillMetadata>[];
+    final seenSkillPaths = <String>{};
+    for (final root in rootPaths) {
+      final loaded = await loadDirectorySkillsFromRoot(root);
+      for (final skill in loaded.skills) {
+        if (seenSkillPaths.add(fsAbsolutePath(skill.pathToSkillMd))) {
+          allSkills.add(skill);
+        }
+      }
+      for (final error in loaded.errors) {
+        _logger.warning(
+          '[$name] directory skill load error (${error.path}): ${error.message}',
+        );
+      }
+    }
+    _directorySkills = allSkills;
+
+    if (_directorySkills.isEmpty) {
+      _logger.info(
+        '[$name] no directory skills found under: ${rootPaths.join(", ")}',
+      );
+      return;
+    }
+
+    final mentionedSkills = collectExplicitDirectorySkillMentions(
+      incomingMessages,
+      _directorySkills,
+    );
+    if (mentionedSkills.isEmpty) {
+      return;
+    }
+
+    final injections = await buildDirectorySkillInjections(mentionedSkills);
+    for (final warning in injections.warnings) {
+      _logger.warning('[$name] $warning');
+    }
+    if (injections.items.isNotEmpty) {
+      state.history.messages.addAll(injections.items);
+      _logger.info(
+        '[$name] injected ${injections.items.length} directory skill instruction message(s)',
+      );
+    }
+  }
+
+  Future<List<LLMMessage>> resume({
+    CancelToken? cancelToken,
+    bool useStream = true,
+    int? maxTurns,
+  }) async {
+    if (!state.isRunning) {
+      throw AgentException(
+        AgentExceptionCode.resumeFailed,
+        'Agent is not running',
+      );
+    }
+    controller?.publish(AgentResumedEvent(this));
+    return run(
+      [],
+      cancelToken: cancelToken,
+      useStream: useStream,
+      maxTurns: maxTurns,
+    );
+  }
+
+  Stream<StreamingEvent> resumeStream({
+    CancelToken? cancelToken,
+    bool useStream = true,
+    int? maxTurns,
+  }) async* {
+    if (!state.isRunning) {
+      throw AgentException(
+        AgentExceptionCode.resumeFailed,
+        'Agent is not running',
+      );
+    }
+    controller?.publish(AgentResumedEvent(this));
+    yield* runStream(
+      [],
+      cancelToken: cancelToken,
+      useStream: useStream,
+      maxTurns: maxTurns,
+    );
+  }
+
+  Future<List<LLMMessage>> run(
+    List<LLMMessage> messages, {
+    CancelToken? cancelToken,
+    bool useStream = true,
+    int? maxTurns,
+  }) async {
+    final streamResponse = runStream(
+      messages,
+      cancelToken: cancelToken,
+      useStream: useStream,
+      maxTurns: maxTurns,
+    );
+    final responses = <LLMMessage>[];
+    await for (final event in streamResponse) {
+      if (event.eventType == StreamingEventType.fullModelMessage ||
+          event.eventType == StreamingEventType.functionCallResult) {
+        responses.add(event.data);
+      }
+    }
+    return responses;
+  }
+
+  Stream<StreamingEvent> runStream(
+    List<LLMMessage> messages, {
+    CancelToken? cancelToken,
+    bool useStream = true,
+    int? maxTurns,
+  }) async* {
+    AgentException? error;
+    final modelMessages = <ModelMessage>[];
+    var effectiveInput = List<LLMMessage>.from(messages);
+    final currentMaxTurns = maxTurns ?? this.maxTurns;
+    int currentRetryCount = 0;
+    const int maxRetryCount = 3;
+    int turnContinuationCount = 0;
+    var stopReason = 'unknown';
+    try {
+      effectiveInput = await _prepareRunPhase(
+        effectiveInput,
+        useStream: useStream,
+        cancelToken: cancelToken,
+      );
+      controller?.publish(AgentStartedEvent(this, effectiveInput));
+
+      if (effectiveInput.isNotEmpty) {
+        state.history.messages.addAll(effectiveInput);
+      }
+      await _prepareDirectorySkills(effectiveInput);
+      state.currentLoopCount = 0;
+      state.currentLoopUsages.clear();
+      int? lastSystemPromptHash = _lastRecordedSystemPromptHash();
+      int? lastToolsHash = _lastRecordedToolsHash();
+
+      state.isRunning = true;
+      state.lastError = null;
+      while (true) {
+        if (state.currentLoopCount >= currentMaxTurns) {
+          throw AgentException(
+            AgentExceptionCode.loopDetection,
+            'Maximum turns reached ($currentMaxTurns). Possible infinite loop.',
+          );
+        }
+
+        if (compressor != null) {
+          await compressor!.compress(state);
+        }
+
+        final modelCall = await _prepareModelCallPhase(
+          useStream: useStream,
+          lastSystemPromptHash: lastSystemPromptHash,
+          lastToolsHash: lastToolsHash,
+          cancelToken: cancelToken,
+        );
+        lastSystemPromptHash = modelCall.systemPromptHash;
+        lastToolsHash = modelCall.toolsHash;
+
+        final modelCallRequest = modelCall.request;
+        final params = modelCall.params;
+        final syntheticModelResponse = modelCall.syntheticResponse;
+
+        controller?.publish(BeforeCallLLMEvent(this, params));
+
+        yield StreamingEvent(
+          eventType: StreamingEventType.beforeCallModel,
+          data: params,
+        );
+
+        if (cancelToken?.isCancelled ?? false) {
+          throw AgentException(
+            AgentExceptionCode.cancelled,
+            'Agent cancelled by user',
+            error: cancelToken!.cancelError,
+          );
+        }
+        // totalLoopCount counts every LLM attempt; currentLoopCount only after
+        // a reply is committed past empty/hook retries (maxTurns budget).
+        state.totalLoopCount++;
+
+        final aggregation = _ModelMessageAccumulator();
+
+        if (syntheticModelResponse != null) {
+          final chunk = await _applyModelChunkPhase(
+            params,
+            syntheticModelResponse,
+            detectLoop: false,
+          );
+          if (chunk != null) {
+            aggregation.add(chunk);
+            controller?.publish(LLMChunkEvent(this, params, chunk));
+            yield StreamingEvent(
+              eventType: StreamingEventType.modelChunkMessage,
+              data: chunk,
+            );
+          }
+        } else if (params.stream) {
+          final stream = await client.stream(
+            params.messages,
+            tools: params.tools,
+            toolChoice: params.toolChoice,
+            modelConfig: params.modelConfig,
+            cancelToken: cancelToken,
+          );
+
+          await for (final streamingMessage in stream) {
+            if (streamingMessage.modelMessage != null) {
+              final chunk = await _applyModelChunkPhase(
+                params,
+                streamingMessage.modelMessage!,
+                detectLoop: true,
+              );
+              if (chunk == null) {
+                continue;
+              }
+              aggregation.add(chunk);
+
+              controller?.publish(LLMChunkEvent(this, params, chunk));
+
+              yield StreamingEvent(
+                eventType: StreamingEventType.modelChunkMessage,
+                data: chunk,
+              );
+            } else if (streamingMessage.controlMessage != null) {
+              final controlMessage = streamingMessage.controlMessage!;
+              if (controlMessage.controlFlag == StreamingControlFlag.retry) {
+                final retryReason = controlMessage.data?["retryReason"];
+                _logger.warning(
+                  '[$name] 🔄 Model requested retry!, reason:$retryReason',
+                );
+                yield StreamingEvent(
+                  eventType: StreamingEventType.modelRetrying,
+                  data: controlMessage.data,
+                );
+                aggregation.reset();
+                controller?.publish(LLMRetryingEvent(this, retryReason));
+              }
+            }
+          }
+        } else {
+          var fullMessage = await client.generate(
+            params.messages,
+            tools: params.tools,
+            toolChoice: params.toolChoice,
+            modelConfig: params.modelConfig,
+            cancelToken: cancelToken,
+          );
+          final chunk = await _applyModelChunkPhase(
+            params,
+            fullMessage,
+            detectLoop: true,
+          );
+          if (chunk == null) {
+            fullMessage = ModelMessage(model: modelConfig.model);
+          } else {
+            fullMessage = chunk;
+          }
+          aggregation.add(fullMessage);
+
+          controller?.publish(LLMChunkEvent(this, params, fullMessage));
+
+          yield StreamingEvent(
+            eventType: StreamingEventType.modelChunkMessage,
+            data: fullMessage,
+          );
+        }
+
+        if (aggregation.stopReason == null) {
+          _logger.warning(
+            '[$name] ⚠️ Model returned empty stop reason, retry again',
+          );
+          currentRetryCount++;
+          if (currentRetryCount >= maxRetryCount) {
+            throw AgentException(
+              AgentExceptionCode.loopDetection,
+              'Maximum consecutive empty stop reason retries reached ($maxRetryCount).',
+            );
+          }
+          yield StreamingEvent(
+            eventType: StreamingEventType.modelRetrying,
+            data: {"retryReason": "Model returned empty stop reason"},
+          );
+          controller?.publish(
+            LLMRetryingEvent(this, "Model returned empty stop reason"),
+          );
+          continue;
+        }
+
+        if (aggregation.isEmptyResponse) {
+          _logger.warning(
+            '[$name] ⚠️ Model returned empty response, retry again',
+          );
+          currentRetryCount++;
+          if (currentRetryCount >= maxRetryCount) {
+            throw AgentException(
+              AgentExceptionCode.loopDetection,
+              'Maximum consecutive empty response retries reached ($maxRetryCount).',
+            );
+          }
+          yield StreamingEvent(
+            eventType: StreamingEventType.modelRetrying,
+            data: {"retryReason": "Model returned empty response"},
+          );
+          controller?.publish(
+            LLMRetryingEvent(this, "Model returned empty response"),
+          );
+          continue;
+        }
+
+        var fullMessage = aggregation.toModelMessage(modelConfig.model);
+
+        final afterModel = await _applyAfterModelCallPhase(params, fullMessage);
+        if (afterModel.shouldRetry) {
+          currentRetryCount++;
+          if (currentRetryCount >= maxRetryCount) {
+            throw AgentException(
+              AgentExceptionCode.loopDetection,
+              'Maximum consecutive hook retries reached ($maxRetryCount).',
+            );
+          }
+          final retryReason = afterModel.retryReason!;
+          yield StreamingEvent(
+            eventType: StreamingEventType.modelRetrying,
+            data: {'retryReason': retryReason},
+          );
+          controller?.publish(LLMRetryingEvent(this, retryReason));
+          continue;
+        }
+        fullMessage = afterModel.response!;
+        currentRetryCount = 0;
+        // maxTurns uses currentLoopCount; empty/hook retries already returned.
+        state.currentLoopCount++;
+
+        _logModelMessage(fullMessage, false);
+        stopReason = fullMessage.stopReason ?? "unknown";
+
+        controller?.publish(
+          AfterCallLLMEvent(this, params, fullMessage, stopReason),
+        );
+
+        yield StreamingEvent(
+          eventType: StreamingEventType.fullModelMessage,
+          data: fullMessage,
+        );
+        modelMessages.add(fullMessage);
+
+        if (fullMessage.usage != null) {
+          state.usages.add(fullMessage.usage!);
+          state.currentLoopUsages.add(fullMessage.usage!);
+        }
+
+        final toolCalls = fullMessage.functionCalls;
+        if (toolCalls.isEmpty) {
+          state.history.messages.add(fullMessage);
+
+          final completion = await _applyTurnCompletionPhase(
+            fullMessage,
+            continuationCount: turnContinuationCount,
+          );
+          if (completion.shouldContinue) {
+            turnContinuationCount++;
+            state.history.messages.addAll(completion.messages);
+            continue;
+          }
+
+          break;
+        }
+
+        yield StreamingEvent(
+          eventType: StreamingEventType.functionCallRequest,
+          data: toolCalls,
+        );
+
+        final toolPhase = await _executeToolCallPhase(
+          toolCalls,
+          modelMessage: fullMessage,
+          availableTools: modelCallRequest.tools,
+          cancelToken: cancelToken,
+        );
+
+        yield StreamingEvent(
+          eventType: StreamingEventType.functionCallResult,
+          data: toolPhase.message,
+        );
+
+        state.history.messages.addAll([fullMessage, toolPhase.message]);
+        if (toolPhase.injectedMessages.isNotEmpty) {
+          state.history.messages.addAll(toolPhase.injectedMessages);
+        }
+        await _persistState('afterToolCall');
+
+        if (toolPhase.shouldStop) {
+          _logger.info('[$name] 🤖 Stop flag hit, breaking loop');
+          break;
+        }
+
+        if (cancelToken?.isCancelled ?? false) {
+          _logger.warning(
+            '[$name] 🤖 Agent run cancelled: ${cancelToken!.cancelError}',
+          );
+          throw AgentException(
+            AgentExceptionCode.cancelled,
+            'Agent cancelled by user',
+            error: cancelToken.cancelError,
+          );
+        }
+
+        // Loop continues to stream the NEXT response
+      }
+      state.isRunning = false;
+
+      controller?.publish(
+        AgentRunSuccessedEvent(this, effectiveInput, modelMessages, stopReason),
+      );
+    } on AgentException catch (e) {
+      error = e;
+      // Match DioException: persist lastError and notify the controller.
+      state.lastError = e.error?.toString() ?? e.message;
+      if (e.code == AgentExceptionCode.cancelled) {
+        _logger.warning(
+          '[$name] 🤖 Agent run cancelled: ${e.message}, reason: ${e.error?.toString()}',
+        );
+        controller?.publish(OnAgentCancelEvent(this, e, e.error?.toString()));
+      } else {
+        _logger.severe('[$name] ❌ Agent run failed: $e');
+        controller?.publish(OnAgentExceptionEvent(this, e));
+      }
+      rethrow;
+    } on DioException catch (e) {
+      state.lastError = e.error?.toString() ?? e.message;
+      if (isCancelled(e)) {
+        _logger.warning(
+          '[$name] 🤖 Agent run cancelled: ${e.message}, reason: ${e.error?.toString()}',
+        );
+        controller?.publish(OnAgentCancelEvent(this, e, e.error?.toString()));
+        error = AgentException(
+          AgentExceptionCode.cancelled,
+          'Agent cancelled by user, reason: ${e.error?.toString()}',
+          error: e,
+        );
+        throw error;
+      } else {
+        _logger.severe('[$name] ❌ Agent run failed: $e');
+        controller?.publish(OnAgentExceptionEvent(this, e));
+        error = AgentException(
+          AgentExceptionCode.unknown,
+          'Agent run failed, msg: ${e.toString()}',
+          error: e,
+        );
+        throw error;
+      }
+    } on Exception catch (e) {
+      _logger.severe('[$name] ❌ Agent run failed: $e');
+      state.lastError = e.toString();
+      controller?.publish(OnAgentExceptionEvent(this, e));
+      error = AgentException(
+        AgentExceptionCode.unknown,
+        'Agent run failed, msg: ${e.toString()}',
+        error: e,
+      );
+      throw error;
+    } on Error catch (e) {
+      _logger.severe('[$name] ❌ Agent run failed: $e');
+      state.lastError = e.toString();
+      controller?.publish(OnAgentErrorEvent(this, e.toString()));
+      error = AgentException(
+        AgentExceptionCode.unknown,
+        'Agent run failed, msg: ${e.toString()}',
+        error: e,
+      );
+      throw error;
+    } finally {
+      await _hookPipeline.afterRun(
+        AfterRunHookContext(
+          this,
+          input: effectiveInput,
+          modelMessages: modelMessages,
+          error: error,
+        ),
+      );
+      await _persistState('finally', runError: error);
+      // Disconnect MCP sessions when run ends
+      // (MCP connections are per-run, not per-agent lifetime)
+      if (mcpManager != null && mcpManager!.hasServers) {
+        await mcpManager!.disconnectAll();
+      }
+      controller?.publish(
+        AgentStoppedEvent(this, effectiveInput, modelMessages, error: error),
+      );
+    }
+  }
+
+  Future<void> _persistState(String reason, {AgentException? runError}) async {
+    final context = StatePersistenceHookContext(
+      this,
+      reason: reason,
+      runError: runError,
+    );
+    final decision = await _hookPipeline.beforePersistState(context);
+    switch (decision.action) {
+      case StatePersistenceHookAction.abort:
+        throw _hookAbortException(
+          'beforePersistState',
+          decision.error,
+          decision.reason,
+        );
+      case StatePersistenceHookAction.skip:
+        return;
+      case StatePersistenceHookAction.proceed:
+        if (autoSaveStateFunc != null) {
+          await autoSaveStateFunc!(state);
+        }
+        await _hookPipeline.afterPersistState(context);
+    }
+  }
+
+  Future<List<LLMMessage>> _prepareRunPhase(
+    List<LLMMessage> input, {
+    required bool useStream,
+    required CancelToken? cancelToken,
+  }) async {
+    final beforeRun = await _hookPipeline.beforeRun(
+      BeforeRunHookContext(
+        this,
+        input: input,
+        stream: useStream,
+        cancelToken: cancelToken,
+      ),
+    );
+    if (beforeRun.action == BeforeRunHookAction.abort) {
+      throw _hookAbortException('beforeRun', beforeRun.error, beforeRun.reason);
+    }
+    return List<LLMMessage>.from(beforeRun.input ?? input);
+  }
+
+  Future<_PreparedModelCallPhase> _prepareModelCallPhase({
+    required bool useStream,
+    required int? lastSystemPromptHash,
+    required int? lastToolsHash,
+    required CancelToken? cancelToken,
+  }) async {
+    final requestMessages = List<LLMMessage>.from(state.history.messages);
+    _injectSystemReminder(requestMessages);
+
+    var modelCallRequest = ModelCallRequest(
+      systemMessage: composeSystemMessage(),
+      requestMessages: requestMessages,
+      tools: composeTools(),
+      toolChoice: toolChoice,
+      modelConfig: modelConfig,
+      stream: useStream,
+    );
+
+    final beforeModel = await _hookPipeline.beforeModelCall(
+      ModelCallHookContext(
+        this,
+        request: modelCallRequest,
+        turnIndex: state.currentLoopCount,
+        cancelToken: cancelToken,
+      ),
+    );
+    if (beforeModel.action == ModelCallHookAction.abort) {
+      throw _hookAbortException(
+        'beforeModelCall',
+        beforeModel.error,
+        beforeModel.reason,
+      );
+    }
+
+    modelCallRequest = beforeModel.request ?? modelCallRequest;
+
+    final hashes = _recordModelContextHistory(
+      modelCallRequest,
+      lastSystemPromptHash: lastSystemPromptHash,
+      lastToolsHash: lastToolsHash,
+    );
+
+    return _PreparedModelCallPhase(
+      request: modelCallRequest,
+      params: modelCallRequest.toCallLLMParams(),
+      syntheticResponse: beforeModel.action == ModelCallHookAction.respond
+          ? beforeModel.response
+          : null,
+      systemPromptHash: hashes.systemPromptHash,
+      toolsHash: hashes.toolsHash,
+    );
+  }
+
+  _PromptToolHistoryHashes _recordModelContextHistory(
+    ModelCallRequest request, {
+    required int? lastSystemPromptHash,
+    required int? lastToolsHash,
+  }) {
+    final currentSystemPromptHash =
+        request.systemMessage?.content.hashCode ?? 0;
+    final toolNames = request.tools.map((t) => t.name).toList()..sort();
+    final currentToolsHash = toolNames.join(',').hashCode;
+
+    if (lastSystemPromptHash == null ||
+        currentSystemPromptHash != lastSystemPromptHash) {
+      if (lastSystemPromptHash != null) {
+        _logger.info(
+          '[$name] 🔄 System Prompt changed! Hash: $lastSystemPromptHash -> $currentSystemPromptHash',
+        );
+      }
+      state.systemPromptHistory.add(
+        SystemPromptHistoryItem(
+          content: request.systemMessage?.content ?? '',
+          validFromMessageIndex: state.history.messages.length,
+        ),
+      );
+    }
+
+    if (lastToolsHash == null || currentToolsHash != lastToolsHash) {
+      if (lastToolsHash != null) {
+        _logger.info(
+          '[$name] 🔄 Tools attributes changed! Hash: $lastToolsHash -> $currentToolsHash',
+        );
+      }
+      state.toolsHistory.add(
+        ToolsHistoryItem(
+          tools: request.tools.map((t) => t.toJson()).toList(),
+          validFromMessageIndex: state.history.messages.length,
+        ),
+      );
+    }
+
+    return _PromptToolHistoryHashes(
+      systemPromptHash: currentSystemPromptHash,
+      toolsHash: currentToolsHash,
+    );
+  }
+
+  int? _lastRecordedSystemPromptHash() {
+    if (state.systemPromptHistory.isEmpty) {
+      return null;
+    }
+    return state.systemPromptHistory.last.content.hashCode;
+  }
+
+  int? _lastRecordedToolsHash() {
+    if (state.toolsHistory.isEmpty) {
+      return null;
+    }
+    final toolNames =
+        state.toolsHistory.last.tools
+            .map((t) => t['name'] as String? ?? '')
+            .toList()
+          ..sort();
+    return toolNames.join(',').hashCode;
+  }
+
+  Future<ModelMessage?> _applyModelChunkPhase(
+    CallLLMParams params,
+    ModelMessage chunk, {
+    required bool detectLoop,
+  }) async {
+    final chunkResult = await _hookPipeline.onModelChunk(
+      ModelChunkHookContext(this, params: params, chunk: chunk),
+    );
+    if (chunkResult.action == ModelChunkHookAction.abort) {
+      throw _hookAbortException(
+        'onModelChunk',
+        chunkResult.error,
+        chunkResult.reason,
+      );
+    }
+    if (chunkResult.action == ModelChunkHookAction.drop) {
+      return null;
+    }
+
+    final nextChunk = chunkResult.chunk ?? chunk;
+    _logModelMessage(nextChunk, true);
+    if (detectLoop) {
+      final loopDetectResult = await loopDetector.detect(nextChunk);
+      if (loopDetectResult.isLoop) {
+        throw AgentException(
+          AgentExceptionCode.loopDetection,
+          'Loop detected, ${loopDetectResult.message}',
+        );
+      }
+    }
+    return nextChunk;
+  }
+
+  Future<_AfterModelCallPhase> _applyAfterModelCallPhase(
+    CallLLMParams params,
+    ModelMessage response,
+  ) async {
+    final afterModel = await _hookPipeline.afterModelCall(
+      ModelResponseHookContext(this, params: params, response: response),
+    );
+    switch (afterModel.action) {
+      case ModelResponseHookAction.abort:
+        throw _hookAbortException(
+          'afterModelCall',
+          afterModel.error,
+          afterModel.reason,
+        );
+      case ModelResponseHookAction.retry:
+        return _AfterModelCallPhase.retry(
+          afterModel.retryReason ?? 'Hook requested retry',
+        );
+      case ModelResponseHookAction.proceed:
+        return _AfterModelCallPhase.proceed(afterModel.response ?? response);
+    }
+  }
+
+  Future<_TurnCompletionPhase> _applyTurnCompletionPhase(
+    ModelMessage finalMessage, {
+    required int continuationCount,
+  }) async {
+    if (continuationCount >= maxTurnContinuations) {
+      if (!_hookPipeline.isEmpty) {
+        _logger.warning(
+          '[$name] turn-completion continuation budget exhausted '
+          '($maxTurnContinuations); accepting completion.',
+        );
+      }
+      return const _TurnCompletionPhase.accept();
+    }
+
+    final completion = await _hookPipeline.onTurnCompletion(
+      TurnCompletionHookContext(
+        this,
+        finalMessage: finalMessage,
+        continuationCount: continuationCount,
+        maxContinuations: maxTurnContinuations,
+      ),
+    );
+    if (completion.action == TurnCompletionHookAction.abort) {
+      throw _hookAbortException(
+        'onTurnCompletion',
+        completion.error,
+        completion.reason,
+      );
+    }
+    if (completion.action == TurnCompletionHookAction.continueRun &&
+        completion.messages.isNotEmpty) {
+      return _TurnCompletionPhase.continueWith(completion.messages);
+    }
+    return const _TurnCompletionPhase.accept();
+  }
+
+  Future<_ToolCallPhase> _executeToolCallPhase(
+    List<FunctionCall> toolCalls, {
+    required ModelMessage modelMessage,
+    required List<Tool> availableTools,
+    required CancelToken? cancelToken,
+  }) async {
+    if (cancelToken?.isCancelled ?? false) {
+      throw AgentException(
+        AgentExceptionCode.cancelled,
+        'Agent cancelled by user',
+        error: cancelToken!.cancelError,
+      );
+    }
+    _logger.info(
+      '[$name] 🔧 Executing tools\n:  ${toolCalls.map((e) => '${e.name}: ${e.arguments}').join("\n  ")}',
+    );
+
+    final callsToExecute = <FunctionCall>[];
+    final syntheticResults = <String, ExecutionToolResult>{};
+    for (final toolCall in toolCalls) {
+      controller?.publish(BeforeToolCallEvent(this, toolCall));
+      final beforeTool = await _hookPipeline.beforeToolCall(
+        ToolCallHookContext(
+          this,
+          call: toolCall,
+          modelMessage: modelMessage,
+          availableTools: availableTools,
+        ),
+      );
+      switch (beforeTool.action) {
+        case ToolCallHookAction.abort:
+          throw _hookAbortException(
+            'beforeToolCall',
+            beforeTool.error,
+            beforeTool.reason,
+          );
+        case ToolCallHookAction.deny:
+        case ToolCallHookAction.defer:
+          syntheticResults[toolCall.id] = _syntheticToolResult(
+            toolCall,
+            beforeTool,
+          );
+        case ToolCallHookAction.proceed:
+          callsToExecute.add(beforeTool.call ?? toolCall);
+      }
+    }
+
+    final executedResults = callsToExecute.isEmpty
+        ? <ExecutionToolResult>[]
+        : await _executeTools(
+            callsToExecute,
+            availableTools,
+            state,
+            cancelToken: cancelToken,
+          );
+    final executedById = {for (final r in executedResults) r.id: r};
+    final toolExecutionResults = toolCalls
+        .map((c) => executedById[c.id] ?? syntheticResults[c.id]!)
+        .toList();
+    final functionExecutionResults = toolExecutionResults.map((result) {
+      return FunctionExecutionResult(
+        id: result.id,
+        name: result.name,
+        isError: result.isError,
+        arguments: result.arguments,
+        content: result.content,
+        metadata: result.metadata,
+      );
+    }).toList();
+
+    final finalFunctionExecutionResults = <FunctionExecutionResult>[];
+    final injectedMessages = <LLMMessage>[];
+    var stopByHook = false;
+    for (final toolResult in functionExecutionResults) {
+      final afterTool = await _hookPipeline.afterToolCall(
+        ToolResultHookContext(
+          this,
+          result: toolResult,
+          modelMessage: modelMessage,
+        ),
+      );
+      if (afterTool.action == ToolResultHookAction.abort) {
+        throw _hookAbortException(
+          'afterToolCall',
+          afterTool.error,
+          afterTool.reason,
+        );
+      }
+      final finalToolResult = afterTool.result ?? toolResult;
+      finalFunctionExecutionResults.add(finalToolResult);
+      injectedMessages.addAll(afterTool.injectedMessages);
+      if (afterTool.action == ToolResultHookAction.stop) {
+        stopByHook = true;
+      }
+      controller?.publish(AfterToolCallEvent(this, finalToolResult));
+    }
+
+    _logger.info(
+      '[$name] 🔧 Executed tools\n: ${finalFunctionExecutionResults.map((e) => '${e.name}: Success:${e.isError ? '❌ No' : '✅ Yes'}').join("\n  ")}',
+    );
+
+    return _ToolCallPhase(
+      message: FunctionExecutionResultMessage(
+        results: finalFunctionExecutionResults,
+      ),
+      injectedMessages: injectedMessages,
+      shouldStop:
+          stopByHook || toolExecutionResults.any((result) => result.stopFlag),
+    );
+  }
+
+  ExecutionToolResult _syntheticToolResult(
+    FunctionCall call,
+    ToolCallHookResult result,
+  ) {
+    final supplied = result.syntheticResult;
+    if (supplied != null) {
+      return ExecutionToolResult(
+        id: call.id,
+        name: supplied.name,
+        arguments: supplied.arguments,
+        content: supplied.content,
+        metadata: supplied.metadata,
+        stopFlag: supplied.stopFlag,
+        isError: supplied.isError,
+      );
+    }
+    final actionText = result.action == ToolCallHookAction.defer
+        ? 'deferred by hook'
+        : 'denied by hook';
+    return ExecutionToolResult(
+      id: call.id,
+      name: call.name,
+      arguments: call.arguments,
+      content:
+          result.syntheticContent ??
+          [TextPart('Tool call ${call.name} $actionText.')],
+      metadata: result.metadata,
+      isError: result.syntheticIsError,
+    );
+  }
+
+  AgentException _hookAbortException(
+    String phase,
+    Exception? error,
+    String? reason,
+  ) {
+    final suffix = reason == null || reason.isEmpty ? '' : ': $reason';
+    return AgentException(
+      AgentExceptionCode.stopByController,
+      'Agent hook aborted at $phase$suffix',
+      error: error,
+    );
+  }
+
+  void _logModelMessage(ModelMessage message, bool isChunk) {
+    StringBuffer buffer = StringBuffer();
+    if (!isChunk) {
+      buffer.writeln('======= Full Agent Message ($name) =========');
+    }
+    buffer.writeln('🤖 Agent:');
+    if (message.thought != null && message.thought!.isNotEmpty) {
+      buffer.writeln('  🤔 [Thought]: ${message.thought!.trim()}');
+    }
+
+    if (message.textOutput != null && message.textOutput!.isNotEmpty) {
+      if (isChunk) {
+        buffer.writeln('  📖 [Chunk]:  ${message.textOutput!.trim()}');
+      } else {
+        buffer.writeln('  📖 [Text Output]: ${message.textOutput!.trim()}');
+      }
+    }
+
+    if (message.functionCalls.isNotEmpty) {
+      buffer.writeln('  🔧 [Function Calls]');
+      for (var call in message.functionCalls) {
+        buffer.writeln('    > ${call.name}: ${call.arguments}');
+      }
+    }
+
+    if (message.imageOutputs.isNotEmpty) {
+      buffer.writeln('  🖼️ Images: ${message.imageOutputs.length}');
+    }
+    if (message.videoOutputs.isNotEmpty) {
+      buffer.writeln('  📹 Video: ${message.videoOutputs.length}');
+    }
+    if (message.audioOutputs.isNotEmpty) {
+      buffer.writeln('  🔊 Audio: ${message.audioOutputs.length}');
+    }
+
+    if (message.usage != null) {
+      buffer.writeln(
+        '  📊 [Usage]: Input: ${message.usage!.promptTokens}(cached: ${message.usage!.cachedToken}) | Output: ${message.usage!.completionTokens}(thought: ${message.usage!.thoughtToken}) | Total: ${message.usage!.totalTokens}',
+      );
+    }
+
+    if (message.stopReason != null) {
+      buffer.writeln('  [Stop Reason]: ${message.stopReason}');
+    }
+
+    _logger.info(buffer.toString());
+  }
+
+  Future<List<ExecutionToolResult>> _executeTools(
+    List<FunctionCall> calls,
+    List<Tool>? tools,
+    AgentState state, {
+    CancelToken? cancelToken,
+  }) async {
+    final batchCallId = uuid.v4();
+    final futures = calls.map((call) async {
+      final tool = tools?.firstWhere(
+        (t) => t.name == call.name,
+        orElse: () => Tool(name: 'unknown', description: '', parameters: {}),
+      );
+      if (tool == null || tool.executable == null) {
+        return ExecutionToolResult(
+          id: call.id,
+          name: call.name,
+          arguments: call.arguments,
+          content: [TextPart('Function ${call.name} failed or not found.')],
+          isError: true,
+        );
+      }
+
+      try {
+        // Handle positional and named arguments
+        final positionalArgs = <dynamic>[];
+        final namedArgs = <Symbol, dynamic>{};
+
+        Map<String, dynamic> decodedArgs;
+        try {
+          if (call.arguments.trim().isEmpty) {
+            decodedArgs = {};
+          } else {
+            decodedArgs = (jsonDecode(call.arguments) as Map)
+                .cast<String, dynamic>();
+          }
+        } catch (e) {
+          return ExecutionToolResult(
+            id: call.id,
+            name: call.name,
+            arguments: call.arguments,
+            content: [TextPart('Error decoding arguments: $e')],
+            isError: true,
+          );
+        }
+
+        // We need to know which parameters are named and their types.
+        final properties = (tool.parameters['properties'] as Map? ?? {})
+            .cast<String, dynamic>();
+
+        void addArgument(String key, dynamic value) {
+          dynamic castedValue = value;
+          final prop = (properties[key] as Map?)?.cast<String, dynamic>();
+
+          if (prop != null) {
+            final type = prop['type'];
+
+            if (value is List && type == 'array') {
+              final items = (prop['items'] as Map?)?.cast<String, dynamic>();
+              if (items != null) {
+                final itemType = items['type'];
+                if (itemType == 'string') {
+                  castedValue = value.cast<String>();
+                } else if (itemType == 'integer') {
+                  castedValue = value.cast<int>();
+                } else if (itemType == 'number') {
+                  castedValue = value
+                      .map((e) => (e as num).toDouble())
+                      .toList();
+                } else if (itemType == 'boolean') {
+                  castedValue = value.cast<bool>();
+                }
+              }
+            } else if (type == 'integer' && value is num) {
+              castedValue = value.toInt();
+            } else if (type == 'number' && value is num) {
+              castedValue = value.toDouble();
+            }
+          }
+
+          if (tool.namedParameters.contains(key)) {
+            namedArgs[Symbol(key)] = castedValue;
+          } else {
+            positionalArgs.add(castedValue);
+          }
+        }
+
+        // Logic: Iterate over keys defined in Schema (ordered)
+        for (var key in properties.keys) {
+          if (decodedArgs.containsKey(key)) {
+            addArgument(key, decodedArgs[key]);
+          } else {
+            // Missing argument handling
+            if (!tool.namedParameters.contains(key)) {
+              // Vital: Positional arg missing in JSON. Must pad with null to maintain alignment.
+              positionalArgs.add(null);
+            }
+          }
+        }
+
+        final result = runZoned(
+          () {
+            if (tool.parameterMode == ToolParameterMode.object) {
+              // Object parameter mode: pass the decoded args Map directly
+              return tool.executable!(decodedArgs);
+            }
+            // Function parameter mode: use Function.apply with positional and named args
+            return Function.apply(tool.executable!, positionalArgs, namedArgs);
+          },
+          zoneValues: {
+            AgentCallToolContext.zoneKey: AgentCallToolContext(
+              state: state,
+              agent: this,
+              batchCallId: batchCallId,
+              cancelToken: cancelToken,
+            ),
+          },
+        );
+
+        dynamic resultValue;
+        // Handle Futures if the tool returns a Future
+        if (result is Future) {
+          resultValue = (await result);
+        } else {
+          resultValue = result;
+        }
+        // A tool may return normally after observing cancellation. Do not let
+        // its stopFlag or a worker result turn a cancelled task into success.
+        if (cancelToken?.isCancelled ?? false) {
+          throw cancelToken!.cancelError!;
+        }
+        final isError = tool.resultIsError?.call(resultValue) ?? false;
+        bool stopFlag = false;
+        List<UserContentPart> resultContent = [];
+        Map<String, dynamic>? metadata;
+        if (resultValue is AgentToolResult) {
+          if (resultValue.content != null) {
+            resultContent.add(resultValue.content!);
+          }
+          if (resultValue.contents != null) {
+            resultContent.addAll(resultValue.contents!);
+          }
+          stopFlag = resultValue.stopFlag;
+          metadata = resultValue.metadata;
+        } else {
+          resultContent.add(TextPart(resultValue.toString()));
+        }
+        return ExecutionToolResult(
+          id: call.id,
+          name: call.name,
+          arguments: call.arguments,
+          content: resultContent,
+          stopFlag: stopFlag,
+          isError: isError,
+          metadata: metadata,
+        );
+      } catch (e) {
+        // Exception codes alone do not define task scope: a worker can stop
+        // locally. Only the shared cancellation token terminates this run.
+        if (cancelToken?.isCancelled ?? false) {
+          throw cancelToken!.cancelError!;
+        }
+        _logger.severe(
+          '[$name] ❌ Error executing ${call.name} with args ${call.arguments}: $e',
+        );
+        return ExecutionToolResult(
+          id: call.id,
+          name: call.name,
+          arguments: call.arguments,
+          content: [TextPart('Error executing ${call.name}: $e')],
+          isError: true,
+        );
+      }
+    });
+
+    return Future.wait(futures);
+  }
+
+  bool isSuspend(DioException error) {
+    if (CancelToken.isCancel(error) && error.message == "Suspend") {
+      return true;
+    }
+    return false;
+  }
+
+  bool isCancelled(Object error) {
+    return isLlmRequestCancelled(error);
+  }
+
+  void _injectSystemReminder(List<LLMMessage> requestMessages) {
+    if (state.systemReminders.isEmpty) return;
+
+    final buffer = StringBuffer();
+    bool hasReminders = false;
+
+    buffer.writeln("<system-reminders>");
+    buffer.writeln("<note>Note: This is for your information only.</note>");
+
+    for (var entry in state.systemReminders.entries) {
+      if (entry.value.isNotEmpty) {
+        buffer.writeln("<system-reminder>");
+        buffer.writeln("<key>${entry.key}</key>");
+        buffer.writeln("<content>");
+        buffer.writeln(entry.value);
+        buffer.writeln("</content>");
+        buffer.writeln("</system-reminder>");
+        hasReminders = true;
+      }
+    }
+    buffer.writeln("</system-reminders>");
+
+    if (hasReminders && requestMessages.isNotEmpty) {
+      // Find the last UserMessage index
+      int insertIndex = -1;
+      for (var i = requestMessages.length - 1; i >= 0; i--) {
+        if (requestMessages[i] is UserMessage) {
+          insertIndex = i;
+          break;
+        }
+      }
+
+      if (insertIndex != -1) {
+        requestMessages.insert(
+          insertIndex,
+          UserMessage.text(buffer.toString()),
+        );
+      } else {
+        // Fallback: if no user message found, insert at the beginning
+        requestMessages.insert(0, UserMessage.text(buffer.toString()));
+      }
+    }
+  }
+}
