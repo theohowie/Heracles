@@ -6,6 +6,7 @@ import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.PendingIntent
 import android.content.Intent
+import android.net.Uri
 import android.content.pm.PackageManager
 import android.os.Build
 import android.os.Bundle
@@ -196,6 +197,8 @@ class MainActivity : FlutterActivity() {
             "devicePermission" -> handleDevicePermission(result)
             // ★ N8（2026-10-25，INTERFACE.md §4.N8）：权限页统一查询
             "devicePermissions" -> handleDevicePermissions(result)
+            // ★ 2026-10-27：权限页改弹性开关 —— 开关拨动拉起系统授权流程
+            "requestPermission" -> handleRequestPermission(call, result)
             "shizukuGrant" -> handleShizukuGrant(force = false, result = result)
             "shizukuForceRequest" -> handleShizukuGrant(force = true, result = result)
 
@@ -424,6 +427,109 @@ class MainActivity : FlutterActivity() {
      *
      * 全部本地同步查询（无 binder 调用），不需要切线程。
      */
+    /**
+     * **拉起某项权限的系统授权流程**（权限页弹性开关，2026-10-27）。
+     *
+     * · `notifications`：API 33+ 直接弹运行时授权框（POST_NOTIFICATIONS
+     *   已在 Manifest 声明）；低版本无此权限 → 去应用通知设置页；
+     * · `notificationsOff`：关通知只能去应用通知设置页（系统不许
+     *   App 自己撤销运行时权限）；
+     * · `accessibility`：无障碍没有授权弹窗，只能去无障碍设置页；
+     * · `overlay`：悬浮窗去它自己的授权页（带包名直达本 App）；
+     * · `media` / `camera` / `calendar`：运行时权限，直接弹系统授权框
+     *   （2026-10-27 权限页扩容；Manifest 已声明）；
+     * · `appSettings`：本 App 的系统详情页 —— 关已授的运行时权限
+     *   只能让用户去那里撤销；
+     * · `installPackages`：未知来源安装的授权页 —— **预留给安装
+     *   流程**（构建出 APK 点安装时调），权限页本身不拨它；
+     * · `automation`：屏幕自动化是厂商专属开关（小米「后台弹出
+     *   界面」等），无统一申请方式 → 如实回未实现（接口预留）。
+     *
+     * 本方法只负责"拉起"，结果由权限页回到前台时重新查询
+     * `devicePermissions` 得到 —— **不在这里猜用户点了允许还是拒绝**。
+     */
+    private fun handleRequestPermission(call: MethodCall, result: MethodChannel.Result) {
+        val kind = call.argument<String>("kind").orEmpty()
+        try {
+            when (kind) {
+                "notifications" -> {
+                    if (Build.VERSION.SDK_INT >= 33) {
+                        requestPermissions(
+                            arrayOf(Manifest.permission.POST_NOTIFICATIONS), 4021,
+                        )
+                    } else {
+                        startActivity(
+                            Intent(Settings.ACTION_APP_NOTIFICATION_SETTINGS).apply {
+                                putExtra(Settings.EXTRA_APP_PACKAGE, packageName)
+                                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                            },
+                        )
+                    }
+                }
+                "notificationsOff" -> startActivity(
+                    Intent(Settings.ACTION_APP_NOTIFICATION_SETTINGS).apply {
+                        putExtra(Settings.EXTRA_APP_PACKAGE, packageName)
+                        addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                    },
+                )
+                "media" -> requestPermissions(
+                    if (Build.VERSION.SDK_INT >= 33)
+                        arrayOf(
+                            Manifest.permission.READ_MEDIA_IMAGES,
+                            Manifest.permission.READ_MEDIA_VIDEO,
+                        )
+                    else
+                        @Suppress("DEPRECATION")
+                        arrayOf(Manifest.permission.READ_EXTERNAL_STORAGE),
+                    4022,
+                )
+                "camera" -> requestPermissions(
+                    arrayOf(Manifest.permission.CAMERA), 4023)
+                "calendar" -> requestPermissions(
+                    arrayOf(
+                        Manifest.permission.READ_CALENDAR,
+                        Manifest.permission.WRITE_CALENDAR,
+                    ),
+                    4024,
+                )
+                "appSettings" -> startActivity(
+                    Intent(
+                        Settings.ACTION_APPLICATION_DETAILS_SETTINGS,
+                        Uri.parse("package:$packageName"),
+                    ).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK),
+                )
+                "installPackages" -> startActivity(
+                    Intent(
+                        Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES,
+                        Uri.parse("package:$packageName"),
+                    ).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK),
+                )
+                "automation" -> return reply(
+                    result,
+                    mapOf(
+                        "ok" to false,
+                        "error" to "厂商专属权限，暂无统一申请方式（接口预留）",
+                    ),
+                )
+                "accessibility" -> startActivity(
+                    Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS)
+                        .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK),
+                )
+                "overlay" -> startActivity(
+                    Intent(
+                        Settings.ACTION_MANAGE_OVERLAY_PERMISSION,
+                        Uri.parse("package:$packageName"),
+                    ).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK),
+                )
+                else -> return reply(
+                    result, mapOf("ok" to false, "error" to "未知权限项：$kind"))
+            }
+            reply(result, mapOf("ok" to true))
+        } catch (e: Throwable) {
+            reply(result, mapOf("ok" to false, "error" to "拉起失败：${e.message}"))
+        }
+    }
+
     private fun handleDevicePermissions(result: MethodChannel.Result) {
         val ctx = applicationContext
         val shizuku = runCatching {
@@ -457,13 +563,55 @@ class MainActivity : FlutterActivity() {
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R && Environment.isExternalStorageManager()) "granted" else "denied"
         }.getOrDefault("unknown")
 
+        // ---- 2026-10-27 权限页扩容（INTERFACE.md §4.N8 登记） ----
+        // 文件夹访问：有至少一个用户经 SAF 授权的文件夹（工作区）才算
+        // granted —— 不再恒 granted（那等于没有这个权限项）。
+        val files = runCatching {
+            if (registry.list().any { it.isSaf }) "granted" else "denied"
+        }.getOrDefault("unknown")
+
+        fun has(perm: String): Boolean =
+            ctx.checkSelfPermission(perm) == PackageManager.PERMISSION_GRANTED
+
+        val media = runCatching {
+            val ok = if (Build.VERSION.SDK_INT >= 33) {
+                has(Manifest.permission.READ_MEDIA_IMAGES) &&
+                    has(Manifest.permission.READ_MEDIA_VIDEO)
+            } else {
+                @Suppress("DEPRECATION")
+                has(Manifest.permission.READ_EXTERNAL_STORAGE)
+            }
+            if (ok) "granted" else "denied"
+        }.getOrDefault("unknown")
+
+        val camera = runCatching {
+            if (has(Manifest.permission.CAMERA)) "granted" else "denied"
+        }.getOrDefault("unknown")
+
+        val calendar = runCatching {
+            if (has(Manifest.permission.READ_CALENDAR) &&
+                has(Manifest.permission.WRITE_CALENDAR)) "granted" else "denied"
+        }.getOrDefault("unknown")
+
+        val install = runCatching {
+            if (Build.VERSION.SDK_INT < 26 ||
+                ctx.packageManager.canRequestPackageInstalls()) "granted" else "denied"
+        }.getOrDefault("unknown")
+
         reply(result, mapOf(
             "shizuku" to shizuku,
-            "files" to "granted", // SAF 模式：工作区读写由系统授权流程保证
+            "files" to files,
             "allFiles" to allFiles,
             "notifications" to notifications,
             "accessibility" to accessibility,
             "overlay" to overlay,
+            "media" to media,
+            "camera" to camera,
+            "calendar" to calendar,
+            // 屏幕自动化：厂商专属，无平台 API 可查 —— 恒 unknown，
+            // 前端渲染为「接口预留」，不猜状态。
+            "automation" to "unknown",
+            "install" to install,
         ))
     }
 

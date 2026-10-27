@@ -200,6 +200,24 @@ String? errorOf(Map<String, Object?> raw) {
 /// `renameTo()` 对目录不可靠）。本实现的做法是**原样透传那句 `error`**：
 /// 不重试、不降级成"逐个复制"、不假装成功。理由：模型看到
 /// 「SAF 工作区不支持重命名目录」才知道该换策略；看到"成功"会以为改完了。
+/// **在系统文件管理里打开文件夹**（UI 专用：抽屉工作区菜单点路径时用）。
+///
+/// 走宿主 `fs.openFolder`（DocumentsUI 直达 / 文档树选择器兜底）。
+/// 成功返回 null；失败返回人话原因，由 UI 用 toast 如实提示 ——
+/// Android 11+ 对 `Android/data` 有系统级浏览限制，系统拒绝时
+/// **不假装打开了**。
+class FolderOpener {
+  const FolderOpener({DeviceChannelClient? channel})
+      : _ch = channel ?? const DeviceChannelClient();
+
+  final DeviceChannelClient _ch;
+
+  Future<String?> open(String path) async {
+    final raw = await _ch.call('fs.openFolder', <String, Object?>{'path': path});
+    return errorOf(raw);
+  }
+}
+
 class DeviceWorkspaceCapability implements WorkspaceCapability {
   /// [workspaceRoot] 必须是**绝对路径**，且是设备上真实存在的目录
   /// （通常来自 `picker.folder` 或内置的 `app-workspace`）。

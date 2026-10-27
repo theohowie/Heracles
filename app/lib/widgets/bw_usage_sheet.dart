@@ -4,6 +4,7 @@ import 'package:flutter/material.dart';
 
 import '../models/session_usage.dart';
 import '../theme/app_theme.dart';
+import 'bw_approval.dart';
 
 /// 用量半抽屉（2026-10-24 黑白改版，替代右侧抽屉）。
 ///
@@ -20,11 +21,13 @@ Future<void> showUsageSheet(
 ) {
   return showModalBottomSheet<void>(
     context: context,
-    backgroundColor: Hue.of(context).bg,
-    shape: const RoundedRectangleBorder(
-      borderRadius: BorderRadius.vertical(top: Radius.circular(24)),
+    backgroundColor: Colors.transparent,
+    isScrollControlled: true,
+    shape: const RoundedRectangleBorder(),
+    builder: (sheetCtx) => BwSheetShell(
+      onDismissRequest: () => Navigator.of(sheetCtx).pop(),
+      child: _UsageSheet(usage: usage, contextUsage: contextUsage),
     ),
-    builder: (_) => _UsageSheet(usage: usage, contextUsage: contextUsage),
   );
 }
 

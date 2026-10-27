@@ -74,4 +74,67 @@ void main() {
     await gesture.up();
     await tester.pump(const Duration(milliseconds: 400));
   });
+
+  testWidgets('上拉停靠：矮抽屉停在 66% 档、表面铺满且贴底', (tester) async {
+    await tester.pumpWidget(MaterialApp(
+      theme: buildHeraclesTheme(dark: false),
+      builder: (context, inner) => HueScope(
+        hue: Hue.forDark(false, 0xFFFF7A45),
+        child: inner ?? const SizedBox.shrink(),
+      ),
+      home: Scaffold(
+        body: Builder(
+          builder: (ctx) => Center(
+            child: TextButton(
+              onPressed: () => showBwRadioSheet<String>(
+                ctx,
+                title: '选择一档',
+                options: const ['甲', '乙'],
+                current: '甲',
+                labelOf: (v) => v,
+              ),
+              child: const Text('open2'),
+            ),
+          ),
+        ),
+      ),
+    ));
+    await tester.tap(find.text('open2'));
+    for (var i = 0; i < 20; i++) {
+      await tester.pump(const Duration(milliseconds: 50));
+    }
+    final surfaceFinder = find
+        .descendant(
+          of: find.byType(BwSheetShell),
+          matching: find.byWidgetPredicate(
+            (w) => w is Container && w.decoration is BoxDecoration,
+          ),
+        )
+        .first;
+    final screenH = tester.view.physicalSize.height /
+        tester.view.devicePixelRatio;
+    final naturalH = tester.getSize(surfaceFinder).height;
+    expect(naturalH, lessThan(screenH * 0.66 - 20),
+        reason: '前提：这个抽屉自然高度应明显低于 66% 档');
+
+    // 上拉 160px 后松手 → 就近停靠到 66% 档
+    final gesture = await tester.startGesture(
+      tester.getCenter(find.text('选择一档')),
+    );
+    for (var i = 0; i < 8; i++) {
+      await gesture.moveBy(const Offset(0, -20));
+      await tester.pump(const Duration(milliseconds: 16));
+    }
+    await gesture.up();
+    for (var i = 0; i < 25; i++) {
+      await tester.pump(const Duration(milliseconds: 40));
+    }
+    final hgt = tester.getSize(surfaceFinder).height;
+    expect(hgt, closeTo(screenH * 0.66, 8),
+        reason: '上拉后应停靠在屏高 66% 档');
+    final bottom = tester.getBottomLeft(surfaceFinder).dy;
+    expect(bottom, closeTo(screenH, 1.5),
+        reason: '表面底边必须贴屏幕底 —— 下方全是白色表面，不透出页面');
+    expect(tester.takeException(), isNull);
+  });
 }

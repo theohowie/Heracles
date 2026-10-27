@@ -122,6 +122,34 @@ void main() {
     expect(tester.takeException(), isNull);
   });
 
+  testWidgets('文件树分组：工作区组头 + 点「回档」直接取消归档', (tester) async {
+    await tester.pumpWidget(page(fixture()));
+    await settle(tester);
+    // 组头：两个工作区名都以组头出现
+    expect(find.text('proj'), findsOneWidget);
+    expect(find.text('lab'), findsOneWidget);
+    // 每行常驻回档按钮
+    expect(find.text('回档'), findsNWidgets(2));
+    await tester.tap(find.text('回档').first);
+    await settle(tester);
+    expect(unarchived.length, 1, reason: '点回档必须触发取消归档回调');
+    expect(unarchived.single.$2, isNotEmpty);
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('组头点按折叠/展开会话行', (tester) async {
+    await tester.pumpWidget(page(fixture()));
+    await settle(tester);
+    await tester.tap(find.text('proj'));
+    await settle(tester);
+    expect(find.text('旧会话一'), findsNothing);
+    expect(find.text('较新的归档'), findsOneWidget);
+    await tester.tap(find.text('proj'));
+    await settle(tester);
+    expect(find.text('旧会话一'), findsOneWidget);
+    expect(tester.takeException(), isNull);
+  });
+
   testWidgets('空态：说明去哪归档', (tester) async {
     await tester.pumpWidget(page(const []));
     await settle(tester);

@@ -982,12 +982,18 @@ class AgentBridge {
   /// 返回每项 `granted / denied / unknown`（unknown = 探测不了，如 Shizuku
   /// 未启动）。权限项清单（新增先登记到 INTERFACE.md）：
   /// · `shizuku` —— 提权通道（binder 活且已授权）
-  /// · `files` —— SAF 工作区读写（本 App 模式下恒 granted）
+  /// · `files` —— 文件夹访问（有 ≥1 个 SAF 授权文件夹/工作区 = granted；
+  ///   2026-10-27 起不再恒 granted）
   /// · `allFiles` —— Android 11+「所有文件访问」（**我们按设计不申请**，
   ///   denied 是正常态——前端别渲染成红色警告）
   /// · `notifications` —— 通知（前台服务/构建进度依赖）
   /// · `accessibility` —— 无障碍服务
   /// · `overlay` —— 悬浮窗
+  /// · `media` —— 图片与视频（33+ READ_MEDIA_IMAGES/VIDEO；以下存储权限）
+  /// · `camera` —— 相机（拍照上传用，拍摄接口见 [takePhoto] 预留）
+  /// · `calendar` —— 日历读写（后续自动化任务预留）
+  /// · `automation` —— 屏幕自动化（厂商专属，恒 unknown，接口预留）
+  /// · `install` —— 安装未知应用（在安装 APK 的流程里申请，不在权限页拨）
   ///
   /// 「去开启」走既有拉起流程（如 [shizukuGrant]），本方法只读。
   Future<Map<String, String>> devicePermissions() async {
@@ -1000,6 +1006,45 @@ class AgentBridge {
       return const {};
     }
   }
+
+  /// **拉起某项权限的系统授权流程**（2026-10-27，权限页弹性开关）。
+  ///
+  /// kind 取值：
+  /// · `notifications` —— API 33+ 直接弹运行时授权框；低版本去通知设置页
+  /// · `notificationsOff` —— 去应用通知设置页（关通知只能在那里）
+  /// · `accessibility` —— 无障碍设置页（系统没有授权弹窗）
+  /// · `overlay` —— 悬浮窗授权页（直达本 App）
+  /// · `media` / `camera` / `calendar` —— 运行时权限，直接弹系统授权框
+  /// · `appSettings` —— 本 App 系统详情页（撤销已授运行时权限只能去那）
+  /// · `installPackages` —— 未知来源安装授权页（**预留给安装流程**：
+  ///   构建出 APK 点安装时、未授权才调它，不在权限页里拨）
+  /// · `automation` —— 屏幕自动化（厂商专属，如小米「后台弹出界面」；
+  ///   无统一申请方式，宿主如实返回未实现，接口预留）
+  ///
+  /// 返回 true = 已拉起。**结果不在这里回** —— 用户在系统界面里点完
+  /// 回到 App，页面重新查 [devicePermissions] 才是权威状态。
+  Future<bool> requestPermission(String kind) async {
+    try {
+      final m = await _channel.invokeMapMethod<String, dynamic>(
+        'requestPermission',
+        <String, Object?>{'kind': kind},
+      );
+      return (m?['ok'] as bool?) ?? false;
+    } on MissingPluginException {
+      return false;
+    } on PlatformException {
+      return false;
+    }
+  }
+
+  /// **拍照并作为附件发送 —— 接口预留**（2026-10-27 用户定）。
+  ///
+  /// 契约先行：返回拍到的图片文件路径，调用方把它当普通图片附件
+  /// 走既有附件管线。相机权限行已进权限页（`camera`），本方法
+  /// 等宿主实现（预计落在设备通道 `picker.takePhoto`：拉起系统
+  /// 相机 → 落盘到缓存目录 → 回路径）。**未实现前恒返回 null**，
+  /// 调用方必须按「暂不可用」如实处理，不得假装拍到了。
+  Future<String?> takePhoto() async => null;
 
   /// **拉取后端的可用模型列表**（2026-10-14，接入第三方 API 服务）。
   /// ## 为什么需要它

@@ -52,6 +52,7 @@ class WorkspaceDrawer extends StatefulWidget {
     this.onToggleArchive,
     this.onToggleWorkspace,
     this.onClose,
+    this.onOpenWorkspaceFolder,
     this.onBatchArchiveSessions,
     this.onBatchDeleteSessions,
     this.loading = false,
@@ -74,6 +75,9 @@ class WorkspaceDrawer extends StatefulWidget {
   final void Function(String workspaceId, String sessionId)? onToggleArchive;
   final void Function(String workspaceId)? onToggleWorkspace;
   final VoidCallback? onClose;
+
+  /// 在系统文件管理里打开该工作区文件夹（工作区菜单里点路径）。
+  final void Function(String workspaceId)? onOpenWorkspaceFolder;
 
   /// **批量归档 / 取消归档**（多选）：items 为 (工作区id, 会话id) 列表，
   /// archive = 目标状态（true 归档、false 取消归档）。
@@ -128,6 +132,7 @@ class _WorkspaceDrawerState extends State<WorkspaceDrawer> {
       onToggleArchive: widget.onToggleArchive,
       onToggleWorkspace: widget.onToggleWorkspace,
       onClose: widget.onClose,
+      onOpenFolder: widget.onOpenWorkspaceFolder,
       loading: widget.loading,
       selecting: _selecting,
       selectedKeys: _selected,
@@ -169,6 +174,7 @@ class _WorkspaceDrawerBody extends StatelessWidget {
     this.onToggleWorkspace,
     this.onClose,
     this.loading = false,
+    this.onOpenFolder,
     this.selecting = false,
     this.selectedKeys = const {},
     this.onEnterSelect,
@@ -210,6 +216,9 @@ class _WorkspaceDrawerBody extends StatelessWidget {
 
   final VoidCallback? onClose;
   final bool loading;
+
+  /// 在系统文件管理里打开工作区文件夹（按工作区 id）。
+  final void Function(String workspaceId)? onOpenFolder;
 
   // ---- 多选模式（2026-10-27）：状态由外层 WorkspaceDrawer 持有 ----
   final bool selecting;
@@ -385,6 +394,9 @@ class _WorkspaceDrawerBody extends StatelessWidget {
           onToggle: () => onToggleWorkspace?.call(w.id),
           onNewSession: () => onNewSession(w.id),
           onRemove: () => onRemoveWorkspace?.call(w.id),
+          onOpenFolder: onOpenFolder == null
+              ? null
+              : () => onOpenFolder!.call(w.id),
           onSelectSession: (sid) => onSelectSession(w.id, sid),
           onRename: (sid) => onRenameSession?.call(w.id, sid),
           onDelete: (sid) => onDeleteSession?.call(w.id, sid),
@@ -508,11 +520,12 @@ class _WorkspaceDrawerBody extends StatelessWidget {
     if (!already) onToggleSelectKey?.call(w.id, s.id);
     showModalBottomSheet<void>(
       context: context,
-      backgroundColor: h.surfaceAlt,
-      shape: const RoundedRectangleBorder(
-        borderRadius: BorderRadius.vertical(top: Radius.circular(24)),
-      ),
-      builder: (ctx) => SafeArea(
+      backgroundColor: Colors.transparent,
+      isScrollControlled: true,
+      shape: const RoundedRectangleBorder(),
+      builder: (ctx) => BwSheetShell(
+        onDismissRequest: () => Navigator.of(ctx).pop(),
+        child: SafeArea(
         child: Padding(
           padding: const EdgeInsets.fromLTRB(10, 10, 10, 12),
           child: Column(
@@ -554,6 +567,7 @@ class _WorkspaceDrawerBody extends StatelessWidget {
             ],
           ),
         ),
+      ),
       ),
     );
   }
@@ -776,11 +790,12 @@ class _WorkspaceDrawerBody extends StatelessWidget {
 
     await showModalBottomSheet<void>(
       context: context,
-      backgroundColor: h.surfaceAlt,
-      shape: const RoundedRectangleBorder(
-        borderRadius: BorderRadius.vertical(top: Radius.circular(HRadius.lg)),
-      ),
-      builder: (ctx) => StatefulBuilder(
+      backgroundColor: Colors.transparent,
+      isScrollControlled: true,
+      shape: const RoundedRectangleBorder(),
+      builder: (ctx) => BwSheetShell(
+        onDismissRequest: () => Navigator.of(ctx).pop(),
+        child: StatefulBuilder(
         builder: (ctx, setSheet) {
           Widget check(bool on) => on
               ? Icon(AppIcons.check, size: 19, color: h.accent)
@@ -837,6 +852,7 @@ class _WorkspaceDrawerBody extends StatelessWidget {
             ),
           );
         },
+      ),
       ),
     );
 
@@ -920,11 +936,12 @@ void _sessionMenu(
 ) {
   showModalBottomSheet<void>(
     context: context,
-    backgroundColor: h.surfaceAlt,
-    shape: const RoundedRectangleBorder(
-      borderRadius: BorderRadius.vertical(top: Radius.circular(24)),
-    ),
-    builder: (ctx) => SafeArea(
+    backgroundColor: Colors.transparent,
+    isScrollControlled: true,
+    shape: const RoundedRectangleBorder(),
+    builder: (ctx) => BwSheetShell(
+      onDismissRequest: () => Navigator.of(ctx).pop(),
+      child: SafeArea(
       child: Padding(
         padding: const EdgeInsets.fromLTRB(10, 10, 10, 12),
         child: Column(
@@ -974,6 +991,7 @@ void _sessionMenu(
           ],
         ),
       ),
+    ),
     ),
   );
 }
@@ -1124,31 +1142,9 @@ class _AddWorkspaceMenu extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return PopupMenuButton<String>(
-      tooltip: '添加工作区',
-      padding: EdgeInsets.zero,
-      offset: const Offset(0, 36),
-      color: h.surface,
-      shape: RoundedRectangleBorder(
-        borderRadius: BorderRadius.circular(HRadius.md),
-        side: BorderSide(color: h.border),
-      ),
-      onSelected: (v) {
-        if (v == 'folder') onPickFolder?.call();
-        if (v == 'app') onAddApp?.call();
-      },
-      itemBuilder: (_) => [
-        _item(
-          value: 'folder',
-          icon: CupertinoIcons.folder_open,
-          title: '选择文件夹',
-        ),
-        _item(
-          value: 'app',
-          icon: CupertinoIcons.house_fill,
-          title: '默认工作区',
-        ),
-      ],
+    return InkWell(
+      borderRadius: BorderRadius.circular(10),
+      onTap: () => _open(context),
       child: SizedBox(
         width: 36,
         height: 36,
@@ -1158,25 +1154,50 @@ class _AddWorkspaceMenu extends StatelessWidget {
     );
   }
 
-  PopupMenuItem<String> _item({
-    required String value,
-    required IconData icon,
-    required String title,
-  }) =>
-      PopupMenuItem<String>(
-        value: value,
-        height: 48,
-        child: Row(
-          children: [
-            Icon(icon, size: 19, color: h.textDim),
-            const SizedBox(width: HSpace.sm + 2),
-            Expanded(
-              child: Text(title,
-                  style: TextStyle(fontSize: 13.5, color: h.text)),
+  /// 两项菜单走全 App 统一的底部抽屉（2026-10-27 旧样式统一；
+  /// 此前是 Material 的 PopupMenuButton 锚点菜单，全 App 仅剩这一处）。
+  void _open(BuildContext context) {
+    showModalBottomSheet<void>(
+      context: context,
+      backgroundColor: Colors.transparent,
+      isScrollControlled: true,
+      shape: const RoundedRectangleBorder(),
+      builder: (ctx) => BwSheetShell(
+        onDismissRequest: () => Navigator.of(ctx).pop(),
+        child: SafeArea(
+          child: Padding(
+            padding: const EdgeInsets.fromLTRB(10, 10, 10, 12),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                _bwSheetHandle(h),
+                const SizedBox(height: 8),
+                _bwMenuRow(
+                  h,
+                  icon: CupertinoIcons.folder_fill,
+                  label: '选择文件夹',
+                  onTap: () {
+                    Navigator.of(ctx).pop();
+                    onPickFolder?.call();
+                  },
+                ),
+                _bwMenuRow(
+                  h,
+                  icon: CupertinoIcons.house_fill,
+                  label: '默认工作区',
+                  onTap: () {
+                    Navigator.of(ctx).pop();
+                    onAddApp?.call();
+                  },
+                ),
+              ],
             ),
-          ],
+          ),
         ),
-      );
+      ),
+    );
+  }
 }
 
 class _MiniAction extends StatelessWidget {
@@ -1226,6 +1247,7 @@ class _WorkspaceGroup extends StatelessWidget {
     this.selectedKeys = const {},
     this.onToggleSelect,
     this.onBatchMenu,
+    this.onOpenFolder,
   });
 
   final HWorkspace workspace;
@@ -1244,6 +1266,7 @@ class _WorkspaceGroup extends StatelessWidget {
   final Set<(String, String)> selectedKeys;
   final void Function(String sessionId)? onToggleSelect;
   final void Function(String sessionId)? onBatchMenu;
+  final VoidCallback? onOpenFolder;
 
   @override
   Widget build(BuildContext context) {
@@ -1390,11 +1413,12 @@ class _WorkspaceGroup extends StatelessWidget {
   void _workspaceMenu(BuildContext context) {
     showModalBottomSheet<void>(
       context: context,
-      backgroundColor: h.surfaceAlt,
-      shape: const RoundedRectangleBorder(
-        borderRadius: BorderRadius.vertical(top: Radius.circular(24)),
-      ),
-      builder: (ctx) => SafeArea(
+      backgroundColor: Colors.transparent,
+      isScrollControlled: true,
+      shape: const RoundedRectangleBorder(),
+      builder: (ctx) => BwSheetShell(
+        onDismissRequest: () => Navigator.of(ctx).pop(),
+        child: SafeArea(
         child: Padding(
           padding: const EdgeInsets.fromLTRB(10, 10, 10, 12),
           child: Column(
@@ -1402,24 +1426,39 @@ class _WorkspaceGroup extends StatelessWidget {
             children: [
               _bwSheetHandle(h),
               const SizedBox(height: 8),
-              // 路径（只读信息行，不可点）
-              Padding(
-                padding:
-                    const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
-                child: Row(
-                  children: [
-                    Icon(CupertinoIcons.folder_fill,
-                        size: 20, color: h.textDim),
-                    const SizedBox(width: 12),
-                    Expanded(
-                      child: Text(
-                        workspace.path,
-                        maxLines: 2,
-                        overflow: TextOverflow.ellipsis,
-                        style: TextStyle(fontSize: 12, color: h.textDim),
+              // 路径行：点按 → 在系统文件管理里打开这个文件夹
+              // （宿主 fs.openFolder；打不开时外层 toast 如实提示）
+              InkWell(
+                borderRadius: BorderRadius.circular(12),
+                onTap: onOpenFolder == null
+                    ? null
+                    : () {
+                        Navigator.of(ctx).pop();
+                        onOpenFolder!.call();
+                      },
+                child: Padding(
+                  padding:
+                      const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+                  child: Row(
+                    children: [
+                      Icon(CupertinoIcons.folder_fill,
+                          size: 20, color: h.textDim),
+                      const SizedBox(width: 12),
+                      Expanded(
+                        child: Text(
+                          workspace.path,
+                          maxLines: 2,
+                          overflow: TextOverflow.ellipsis,
+                          style: TextStyle(fontSize: 12, color: h.textDim),
+                        ),
                       ),
-                    ),
-                  ],
+                      if (onOpenFolder != null) ...[
+                        const SizedBox(width: 8),
+                        Icon(AppIcons.chevronRight,
+                            size: 14, color: h.textFaint),
+                      ],
+                    ],
+                  ),
                 ),
               ),
               _bwMenuRow(
@@ -1445,6 +1484,7 @@ class _WorkspaceGroup extends StatelessWidget {
             ],
           ),
         ),
+      ),
       ),
     );
   }
