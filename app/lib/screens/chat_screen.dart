@@ -1304,6 +1304,14 @@ class _ChatScreenState extends State<ChatScreen> {
             text: text,
             changes: changes.isEmpty ? null : changes,
           ));
+          // ★ 完成时间从记录 ts 恢复（2026-10-27 用户报「几点几分不显示」）：
+          //   实时路径在 _runAgent 里给 _answerTs 打点，但重放历史时
+          //   _toMessages 给每行换了新 id、又没人恢复时间戳 ⇒ 操作行
+          //   右侧的时间永远为空。记录里 ts 现成，顺手恢复。
+          final tsMs = (m['ts'] as num?)?.toInt();
+          if (tsMs != null && tsMs > 0) {
+            _answerTs[id] = DateTime.fromMillisecondsSinceEpoch(tsMs);
+          }
           _metrics[id] = TurnMetrics(
             cachedTokens: (m['cached'] as num?)?.toInt(),
             promptTokens: (m['prompt'] as num?)?.toInt() ?? 0,
@@ -1313,6 +1321,10 @@ class _ChatScreenState extends State<ChatScreen> {
         case 'system':
           // 读取出错时的提示 —— 必须显示，否则用户以为记录真的没了
           out.add(HAssistantMessage(id: id, text: text));
+          final sysTs = (m['ts'] as num?)?.toInt();
+          if (sysTs != null && sysTs > 0) {
+            _answerTs[id] = DateTime.fromMillisecondsSinceEpoch(sysTs);
+          }
 
         // ---- ★ `role=usage`：失败 run 的记账行（2026-10-19）----
         //

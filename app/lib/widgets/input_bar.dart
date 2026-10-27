@@ -9,6 +9,7 @@ import '../models/attachment.dart';
 import '../models/settings.dart';
 import '../theme/app_theme.dart';
 import '../theme/cupertino_kit.dart';
+import 'brand_icons.dart';
 import '../theme/pressable.dart';
 import 'bw_approval.dart';
 import 'bw_model_sheet.dart';
@@ -581,25 +582,28 @@ class _EnvStrip extends StatelessWidget {
           // （连接 Github / 选择分支）在 360dp 以上不截断（溢出回归守着）。
           Expanded(
             flex: 3,
-            child: _item(CupertinoIcons.folder_fill, workspaceLabel ?? '工作区',
-                onWorkspaceTap, dim: false, align: Alignment.centerLeft),
+            child: _item(
+                Icon(CupertinoIcons.folder_fill,
+                    size: 15, color: h.textDim),
+                workspaceLabel ?? '工作区', onWorkspaceTap,
+                dim: false, align: Alignment.centerLeft),
           ),
           Expanded(
             flex: 4,
-            child: _item(CupertinoIcons.link, '连接 Github', onGithubTap,
-                dim: false, align: Alignment.center),
+            child: _item(GitHubIcon(size: 15, color: h.textDim), '连接 Github',
+                onGithubTap, dim: false, align: Alignment.center),
           ),
           Expanded(
             flex: 3,
-            child: _item(CupertinoIcons.arrow_branch, '选择分支', null,
-                dim: true, align: Alignment.centerRight),
+            child: _item(GitBranchIcon(size: 15, color: h.textFaint), '选择分支',
+                null, dim: true, align: Alignment.centerRight),
           ),
         ],
       ),
     );
   }
 
-  Widget _item(IconData icon, String label, VoidCallback? onTap,
+  Widget _item(Widget icon, String label, VoidCallback? onTap,
       {required bool dim, required Alignment align}) {
     return Align(
       alignment: align,
@@ -613,7 +617,7 @@ class _EnvStrip extends StatelessWidget {
             child: Row(
               mainAxisSize: MainAxisSize.min,
               children: [
-                Icon(icon, size: 15, color: dim ? h.textFaint : h.textDim),
+                icon,
                 const SizedBox(width: 5),
                 Flexible(
                   child: Text(

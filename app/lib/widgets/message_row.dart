@@ -770,15 +770,17 @@ class _AnswerActionsState extends State<_AnswerActions> {
   ///    模型往返（`provider.generate` / 流式收流），**不含工具执行、审批等待、压缩**。
   ///    用户曾拿这里的数当任务耗时质疑「才 5172ms 怎么可能」—— 那是口径被隐藏的错。
   ///    现在标签写「模型」并**改成秒**（毫秒对任务级耗时既不准读也没意义）。
-  /// 2. **缓存命中 = 单轮**，与侧栏的累计·加权命中率**不是同一个数**
-  ///    （用户看到 94% vs 96% 以为是 bug）。这里标签写「本轮」。
+  /// 2. **本轮用量 = 这一轮的总 token**（prompt + output）。
+  ///    缓存命中率曾在这里与顶栏累计口径打架（94% vs 96%），
+  ///    2026-10-27 用户拍板：**这里不再显示命中率**，改显示本轮
+  ///    用量（[formatTokenCount] 的 K/M 格式）；命中率只看顶栏累计。
   Widget _usagePanel(Hue h, TurnMetrics m) {
-    final rate = m.hitRate;
+    final total = m.promptTokens + m.outputTokens;
     String row(String k, String v) => '$k：$v';
     final lines = <String>[
-      if (rate != null) row('本轮缓存命中', '${(rate * 100).round()}%'),
-      // ⚠️ 未上报时**不写 0%** —— null 不是 0（契约 §3.4）
-      if (rate == null) '本轮缓存命中：本次未上报',
+      if (total > 0) row('本轮用量', '${formatTokenCount(total)} tokens'),
+      // ⚠️ 未上报时**不写 0** —— 没数就是没数，不编造（契约 §3.4 同纪律）
+      if (total == 0) '本轮用量：本次未上报',
       // ★ 秒级（用户要求）+ 标注「模型」+ 写明不含工具
       row('模型耗时（不含工具）', '${(m.wallMs / 1000).toStringAsFixed(1)} 秒'),
       if (m.outputTokens > 0) row('输出', '${m.outputTokens} tokens'),

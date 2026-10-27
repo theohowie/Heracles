@@ -68,6 +68,7 @@ dependencies:
   # 在两端解析出两个不兼容的 dio 主版本。
   dio: ^5.11.1
   package_info_plus: ^10.2.2
+  flutter_svg: ^2.3.0
 
 
 dev_dependencies:
