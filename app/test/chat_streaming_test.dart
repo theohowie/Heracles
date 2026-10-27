@@ -1,16 +1,26 @@
 import 'dart:async';
 
+import 'package:flutter/cupertino.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
+import 'package:heracles/models/attachment.dart';
 import 'package:heracles/models/message.dart';
+import 'package:heracles/models/settings.dart';
 import 'package:heracles/screens/chat_screen.dart';
+import 'package:heracles/services/agent_bridge.dart'
+    show AgentBridge, AgentEvent, AgentRunResult, AgentTurn, ToolState;
+import 'package:heracles/services/local_agent.dart';
 import 'package:heracles/services/settings_controller.dart';
 import 'package:heracles/theme/app_theme.dart';
+import 'package:heracles/theme/cupertino_kit.dart' show AppIcons;
+import 'package:heracles/widgets/bw_topbar.dart' show PlainToolLine;
 import 'package:heracles/widgets/message_row.dart';
 import 'package:heracles/widgets/stream_step.dart';
+
+import 'support/secure_storage_mock.dart';
 
 /// **会话区实时渲染的测试**（2026-10-10 流式，t3）。
 ///
@@ -20,15 +30,43 @@ import 'package:heracles/widgets/stream_step.dart';
 /// > "我发送消息，但是很长一段时间没有反应，
 /// >  只有在回答完我的问题后才可以看到全部输出结果"
 ///
-/// 修完之后**最怕的回归**是：事件通道悄悄断了，界面又变回"跑完才显示"。
+/// 修完之后**最怕的回归**是：事件流悄悄断了，界面又变回"跑完才显示"。
 /// 那种回归不会报错、不会崩 —— 只是用户又开始干等。
-/// 所以这里用 mock 平台通道，把"事件到达 → 界面立刻变化"这条链路钉死：
-/// 推送 `ToolStarted` 之后**在 run 还没返回时**就断言卡片已经出现。
+///
+/// ## ★★ mock 基建重接（2026-10-25，mock 回家第二批）
+///
+/// 旧夹具 mock 的是**已删除的传输**：`heracles/command` 的
+/// `runAgent` / `listSessions` / `loadMessages` + `EventChannel('heracles/events')`
+/// 的 `sink.success`。内核迁到进程内 Dart 后（见 `agent_bridge.dart` 顶部注释，
+/// 2026-10-22）那条传输在 `app/lib` 里**零构造** ⇒ mock 永远不被调用、
+/// 事件永远不出现 —— 表现就是这个文件**整份挂死**（本机实测：第 1 条用例
+/// 10 分钟 `TimeoutException`，且**不是** `errno 10013`）。
+///
+/// 现在的形状（与生产同一条事件路径）：
+/// · `AgentBridge.executorFactoryForTest` 注入 [_FakeExecutor] —— 它的
+///   `run()` 返回本地流 + 可控 Future，事件经
+///   `handle.events → AgentBridge.emitLocalEvent → UI`（生产同路）；
+/// · 会话/消息走 `heracles/device` 的 `fs.*`（`SessionStore` 的真通道）；
+/// · 工作区登记表仍在 `heracles/command`（登记表在 Kotlin，至今未变）。
+///
+/// **测试体与断言零改动**（除 finder 随 UI 改版换过，见下）。
+///
+/// ## ★ 顺手修掉的两类"过期 finder"（UI 改版，不是本文件要测的行为）
+///
+/// 1. 输入条已换成 `CupertinoTextField.borderless`（原型 01）⇒
+///    `find.byType(TextField)` 找不到控件，改 `CupertinoTextField`；
+/// 2. 回答操作行已 Cupertino 化 ⇒ `Icons.copy_rounded` 等 5 个 Material
+///    finder 换成 `AppIcons.*`（**只换 finder，断言未动**）。
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
 
+  // ★ 安全存储通道 mock（坑 36）：没有它，任何 `SettingsController.load()`
+  //   的用例都会**永久挂死**（那个 await 的 Future 永不完成）。
+  setUp(installSecureStorageMock);
+  tearDown(removeSecureStorageMock);
+
   const commandChannel = MethodChannel('heracles/command');
-  const eventChannel = EventChannel('heracles/events');
+  const deviceChannel = MethodChannel('heracles/device');
 
   const workspaceMap = <String, dynamic>{
     'path': '/storage/emulated/0/proj',
@@ -37,88 +75,98 @@ void main() {
     'writable': true,
   };
 
-  /// 挂 mock 平台端。
+  /// 推一条事件到 UI（等价旧 `sink.success`，事件形状仍按 Map 描述）。
   ///
-  /// [runAgentPushes] 在 `runAgent` 被调用时执行 —— 用来**在 await 返回前**
-  /// 推事件，从而证明"边跑边显示"而不是"跑完才显示"。
+  /// ⚠️ 声明必须在 [installMocks] **之前**：那个函数体内的闭包会引用它
+  /// （Dart 的局部变量不能先引用后声明）。
   Future<void> Function(Map<String, dynamic>)? pushRef;
 
-  MockStreamHandlerEventSink? sink;
-
+  /// 挂 mock 平台端：[onScript] 在假执行器 `run()` 被调用时执行 ——
+  /// 用来**在结果返回前**推事件，从而证明"边跑边显示"而不是"跑完才显示"。
+  ///
+  /// [closeEvents]=false：run 收尾时**不关事件流** —— 只有那一条
+  /// 「运行结束后订阅被取消」的用例需要它（否则关流本身就会触发
+  /// `onCancel`，断言变成空话）。
   void installMocks({
-    required Future<void> Function() onRunAgent,
+    required Future<void> Function() onScript,
+    bool closeEvents = true,
+    void Function()? onEventsCancelled,
   }) {
     final messenger =
         TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger;
 
+    // ---- 工作区登记表（heracles/command —— 这条至今是 Kotlin 的）----
     messenger.setMockMethodCallHandler(commandChannel, (call) async {
       switch (call.method) {
         case 'listWorkspaces':
           return [workspaceMap];
-        case 'listSessions':
-          return <Map<String, dynamic>>[];
-        case 'loadMessages':
-          return <Map<String, dynamic>>[];
-        case 'runAgent':
-          await onRunAgent();
-          return <String, dynamic>{
-            'stopReason': '已给出最终回答',
-            'finalText': '最终回答内容',
-            'totalCachedTokens': 0,
-            'totalPromptTokens': 0,
-            'totalOutputTokens': 0,
-            'steadyHitRate': null,
-            'turns': [
-              {
-                'index': 1,
-                'verdict': '工具成功',
-                'tool': 'write_file',
-                'args': {'path': 'a.txt'},
-                'result': '已写入',
-                'wallMs': 3,
-                'cachedTokens': null,
-                'promptTokens': 10,
-                'outputTokens': 5,
-              },
-              {
-                'index': 2,
-                'verdict': '最终回答',
-                'tool': null,
-                'args': null,
-                'result': null,
-                'wallMs': 5,
-                'cachedTokens': null,
-                'promptTokens': 12,
-                'outputTokens': 6,
-              },
-            ],
-          };
         default:
           return null;
       }
     });
 
-    messenger.setMockStreamHandler(
-      eventChannel,
-      MockStreamHandler.inline(
-        onListen: (arguments, events) {
-          sink = events;
-          pushRef = (Map<String, dynamic> e) async {
-            sink!.success(e);
-            // 让事件穿过 messenger 到达 Dart 的 listen
-            await Future<void>.delayed(Duration.zero);
+    // ---- 会话存储（heracles/device 的 fs.* —— SessionStore 的真通道）----
+    //
+    // 本文件不考察读写会话，只要求**通道活着且返回合法形状**：
+    // 索引为空数组 ⇒ 侧边栏没有会话；消息为空 ⇒ 没有历史。
+    messenger.setMockMethodCallHandler(deviceChannel, (call) async {
+      final args = call.arguments is Map ? call.arguments as Map : const {};
+      final path = args['path'] as String? ?? '';
+      switch (call.method) {
+        case 'fs.stat':
+          return <String, dynamic>{'ok': true, 'exists': false};
+        case 'fs.readText':
+          // 索引（空数组）/ 会话文件（空文本）都当"还没有内容"
+          return <String, dynamic>{
+            'ok': true,
+            'text': path.endsWith('sessions.json') ? '[]' : '',
+            'truncated': false,
           };
-        },
-        onCancel: (arguments) {
-          sink = null;
-        },
-      ),
-    );
+        case 'fs.readTailLines':
+          return <String, dynamic>{'ok': true, 'lines': <String>[]};
+        case 'fs.appendText':
+        case 'fs.writeText':
+        case 'fs.mkdir':
+        case 'fs.delete':
+          return <String, dynamic>{'ok': true};
+        default:
+          return <String, dynamic>{
+            'ok': false,
+            'error': '测试 mock：未知方法 ${call.method}',
+          };
+      }
+    });
+
+    // ---- run 注入（executorFactoryForTest —— 生产同路）----
+    AgentBridge.executorFactoryForTest =
+        ({required workspacePath, required settings, required sessionStore, askGate}) {
+      return _FakeExecutor(
+        workspacePath: workspacePath,
+        settings: settings,
+        sessionStore: sessionStore,
+        askGate: askGate,
+        onScript: onScript,
+        closeEvents: closeEvents,
+        onEventsCancelled: onEventsCancelled,
+        onReady: (push) => pushRef = push,
+      );
+    };
   }
 
+  /// 造一个**已配置**的设置控制器 —— 不配 provider 时 `AgentBridge.run()`
+  /// 会**就地抛错**（ADR-035 S4 有意为之），根本走不到假执行器。
   Future<SettingsController> freshController() async {
     SharedPreferences.setMockInitialValues({});
-    return SettingsController.load();
+    final c = await SettingsController.load();
+    await c.updateProvider(const ModelProviderConfig(
+      id: 'deepseek-account',
+      name: 'DeepSeek 账号',
+      baseUrl: 'https://api.deepseek.com/v1',
+      model: 'deepseek-chat',
+      apiKey: 'sk-test',
+    ));
+    await c.setActiveProvider('deepseek-account');
+    return c;
   }
 
   Widget wrap(SettingsController c, Widget child) => MaterialApp(
@@ -142,8 +190,8 @@ void main() {
     final messenger =
         TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger;
     messenger.setMockMethodCallHandler(commandChannel, null);
-    messenger.setMockStreamHandler(eventChannel, null);
-    sink = null;
+    messenger.setMockMethodCallHandler(deviceChannel, null);
+    AgentBridge.executorFactoryForTest = null;
     pushRef = null;
   });
 
@@ -166,7 +214,10 @@ void main() {
 
       expect(find.text('正在生成…（第 2 轮）'), findsOneWidget);
       // 转圈指示 —— 让用户知道"在动"，不是卡死
-      expect(find.byType(CircularProgressIndicator), findsOneWidget);
+      // ★ 2026-10-25：HProgress 的转圈已 Cupertino 化（旧 Material
+      //   `CircularProgressIndicator` ⇒ `CupertinoActivityIndicator`，
+      //   见 message_row.dart 的 `_progress`）—— **只换 finder，断言未动**。
+      expect(find.byType(CupertinoActivityIndicator), findsOneWidget);
     });
 
     testWidgets('★ HBlocked 显示「已拦截，未执行」而不是工具失败', (tester) async {
@@ -290,25 +341,33 @@ void main() {
       await tester.pump();
 
       // 六个元素都在（时间用文本，其余用图标）
-      expect(find.byIcon(Icons.copy_rounded), findsOneWidget, reason: '复制');
-      expect(find.byIcon(Icons.thumb_up_alt_outlined), findsOneWidget,
+      // ★ 2026-10-25：图标随 Cupertino 化换过（旧 Material
+      //   `Icons.copy_rounded` 等）—— **只换 finder，断言未动**。
+      expect(find.byIcon(AppIcons.copy), findsOneWidget, reason: '复制');
+      expect(find.byIcon(AppIcons.thumbUpOutline), findsOneWidget,
           reason: '点赞');
-      expect(find.byIcon(Icons.thumb_down_alt_outlined), findsOneWidget,
+      expect(find.byIcon(AppIcons.thumbDownOutline), findsOneWidget,
           reason: '点踩');
-      expect(find.byIcon(Icons.call_split_rounded), findsOneWidget,
+      // ★ 2026-10-27：`AppIcons.branch` 已退役（frontend 12f5bfd 把它换成
+      //   自绘的 `GitBranchIcon`(CustomPaint) —— 原 arrowshape_turn_up_right
+      //   与分享箭头分不清）。**`find.byIcon` 对 CustomPaint 无效**，
+      //   改用 Tooltip 文案定位：它是 `_act()` 唯一的可辨识标识，
+      //   且与图标实现解耦（将来再换图标也不用改这条）。
+      //   断言强度不变：仍是「这个按钮存在且唯一」。
+      expect(find.byTooltip('新会话分支'), findsOneWidget,
           reason: '新会话分支');
-      expect(find.byIcon(Icons.data_usage_rounded), findsOneWidget,
+      expect(find.byIcon(AppIcons.usage), findsOneWidget,
           reason: '本次用量');
       expect(find.text('14:32'), findsOneWidget, reason: '时间');
 
       // 点赞 / 点踩 / 分支都能回传
-      await tester.tap(find.byIcon(Icons.thumb_up_alt_outlined));
+      await tester.tap(find.byIcon(AppIcons.thumbUpOutline));
       await tester.pump();
       expect(up, 1, reason: '点赞要回调');
-      await tester.tap(find.byIcon(Icons.thumb_down_alt_outlined));
+      await tester.tap(find.byIcon(AppIcons.thumbDownOutline));
       await tester.pump();
       expect(down, 1, reason: '点踩要回调');
-      await tester.tap(find.byIcon(Icons.call_split_rounded));
+      await tester.tap(find.byTooltip('新会话分支'));
       await tester.pump();
       expect(branch, 1, reason: '分支要回调');
     });
@@ -346,6 +405,12 @@ void main() {
       await tester.pump(const Duration(milliseconds: 100));
       expect(find.text('已复制'), findsOneWidget,
           reason: '复制是"看不见结果"的操作，必须有回执');
+
+      // ★ 2026-10-25：把回执的计时器**放干净**再收尾 —— 否则 flutter_test
+      //   会判 "A Timer is still pending even after the widget tree was
+      //   disposed"（测试收尾问题，不是产品问题：回执已按设计弹出并断言过）。
+      //   手法与 `session_guard_test.dart` 收尾 toast 时一致。
+      await tester.pump(const Duration(seconds: 3));
     });
 
     testWidgets('★★ 长按 → 编辑重发 → onEdit 回传原文', (tester) async {
@@ -379,9 +444,15 @@ void main() {
         Scaffold(
           body: MessageRow(
             message: const HAssistantMessage(id: 'a2', text: '回答'),
+            // ★ 2026-10-25 夹具修正：`promptTokens` 的语义已于 2026-10-23
+            //   改成**整段**（含命中的那部分）—— `hitRate = cached / prompt`
+            //   （见 `TurnMetrics.hitRate` 的说明）。要构造 90% 命中，
+            //   prompt 必须是 1000（900 命中 + 100 未命中）；
+            //   旧夹具的 `cached 90 / prompt 10` 今天会算出 **900%**，
+            //   断言会"红得对"（不是产品坏了，是夹具还按旧公式写的）。
             metrics: const TurnMetrics(
-              cachedTokens: 90,
-              promptTokens: 10,
+              cachedTokens: 900,
+              promptTokens: 1000,
               outputTokens: 12,
               wallMs: 1500,
             ),
@@ -393,19 +464,36 @@ void main() {
       // 展开前没有明细
       expect(find.textContaining('不含工具'), findsNothing);
 
-      await tester.tap(find.byIcon(Icons.data_usage_rounded));
+      await tester.tap(find.byIcon(AppIcons.usage));
       await tester.pump();
 
       // ★ 2026-10-21（BUG-5）：耗时改成**秒级**并标注「模型 / 不含工具」。
       //   1500 ms → "1.5 秒"。毫秒对任务级耗时没有意义，且用户明确要求改秒。
       expect(find.textContaining('模型耗时（不含工具）：1.5 秒'), findsOneWidget,
           reason: '用量面板要显示本轮**模型**耗时（秒级，不含工具）');
-      // ★ 单轮命中率口径写明「本轮」—— 与侧栏的累计·加权命中率不是同一个数
-      expect(find.textContaining('本轮缓存命中：90%'), findsOneWidget,
-          reason: '本轮命中率 = 90/(90+10)');
+      // ★ 2026-10-27（frontend dc55842 产品变更）：用量面板**不再显示命中率**
+      //   （用户拍板：命中率只看顶栏累计，避免"单轮 94% vs 累计 96%"打架），
+      //   改为显示**本轮总用量**（prompt + output，K/M 格式）。
+      //   ⇒ 断言随口径搬移，但强度不减：仍然钉住"这一轮的 token 数真的是
+      //     1000 + 12 = 1012 并渲染出来"，而不是只看有没有那行字。
+      expect(find.textContaining('本轮用量：1K tokens'), findsOneWidget,
+          reason: '本轮用量 = prompt 1000 + output 12 = 1012 → 1K（K/M 格式）');
+      // 反向断言：命中率行**必须已经不存在**（防止将来又被加回来打架）
+      expect(find.textContaining('本轮缓存命中'), findsNothing,
+          reason: '命中率只归顶栏累计，面板里不许再出现单轮命中率');
     });
 
-    testWidgets('★★ 未上报缓存时不写 0%（null ≠ 0，契约 §3.4）', (tester) async {
+    // ★ 2026-10-27 改写（frontend dc55842 把命中率行从面板移除了）。
+    //
+    // 原用例测的是「cachedTokens == null 时不写 0%」—— 那个对象已经不存在：
+    // 面板现在只显示**本轮总用量**（prompt + output），不再有命中率行。
+    //
+    // 但**原意必须保住**：「没数就是没数，不许编造一个 0」这条契约 §3.4 的
+    // 纪律仍然适用，只是触发条件变成 `prompt + output == 0`。
+    // 所以这里改成构造真正会走"未上报"分支的输入（两个数都是 0），
+    // 并额外加一条反向断言：**不许出现 "0 tokens"**（那正是"编造 0"）。
+    testWidgets('★★ 本轮用量为 0 时不写「0 tokens」（没数≠0，契约 §3.4）',
+        (tester) async {
       final c = await freshController();
       await tester.pumpWidget(wrap(
         c,
@@ -414,19 +502,22 @@ void main() {
             message: const HAssistantMessage(id: 'a3', text: '回答'),
             metrics: const TurnMetrics(
               cachedTokens: null, // 未上报
-              promptTokens: 100,
-              outputTokens: 5,
+              promptTokens: 0,
+              outputTokens: 0,
               wallMs: 200,
             ),
           ),
         ),
       ));
       await tester.pump();
-      await tester.tap(find.byIcon(Icons.data_usage_rounded));
+      await tester.tap(find.byIcon(AppIcons.usage));
       await tester.pump();
 
-      expect(find.textContaining('本次未上报'), findsOneWidget,
-          reason: '未上报要如实说"未上报"');
+      expect(find.textContaining('本轮用量：本次未上报'), findsOneWidget,
+          reason: '总 token 为 0 时要如实说"未上报"');
+      // ⚠️ 这条守住原意：不许编造一个 "0 tokens" 冒充有数据
+      expect(find.textContaining('本轮用量：0 tokens'), findsNothing,
+          reason: '没数就是没数 —— 写 0 tokens 是编造');
       expect(find.textContaining('0%'), findsNothing,
           reason: 'null 不是 0 —— 写 0% 会让用户以为缓存坏了');
     });
@@ -439,9 +530,11 @@ void main() {
         Scaffold(
           body: MessageRow(
             message: const HAssistantMessage(id: 'a4', text: '回答'),
+            // ★ 2026-10-25 夹具修正（同「本次用量」那条）：prompt 是**整段**，
+            //   要 90% 命中就得是 900/1000（旧夹具 90/10 今天算 900%）。
             metrics: const TurnMetrics(
-              cachedTokens: 90,
-              promptTokens: 10,
+              cachedTokens: 900,
+              promptTokens: 1000,
               outputTokens: 5,
               wallMs: 900,
             ),
@@ -451,9 +544,10 @@ void main() {
       await tester.pump();
 
       // 旧版的胶囊文案形如「命中 90%」——用户要求跑完不要再显示
+      // （单轮命中率只在"本次用量"展开里，且带「本轮」口径标签）。
       expect(find.textContaining('命中 90%'), findsNothing,
-          reason: '2026-10-13：单轮命中率不再显示，'
-              '会话平均命中率看标题栏指示器');
+          reason: '2026-10-13：单轮命中率不再显示在消息外'
+              '（会话平均命中率在半抽屉的「缓存命中」页）');
     });
   });
 
@@ -499,11 +593,11 @@ void main() {
       (tester) async {
     final c = await freshController();
 
-    // runAgent 被调用后：先推事件，再卡住不返回 ——
+    // 假执行器：先推事件，再卡住不返回 ——
     // 这样"事件已经渲染出来"就**只能**是实时路径的功劳
     final gate = Completer<void>();
 
-    installMocks(onRunAgent: () async {
+    installMocks(onScript: () async {
       await pushRef!({'type': 'turn_started', 'ts': 1, 'index': 1});
       await pushRef!({
         'type': 'tool_started',
@@ -519,16 +613,21 @@ void main() {
     await tester.pumpWidget(wrap(c, ChatScreen(settings: c)));
     await settle(tester);
 
-    // 发一条消息
-    final field = find.byType(TextField);
+    // 发一条消息（输入条 = CupertinoTextField，原型 01 起）
+    final field = find.byType(CupertinoTextField);
     expect(field, findsOneWidget);
     await tester.enterText(field.first, '写个文件');
     await tester.testTextInput.receiveAction(TextInputAction.done);
     await settle(tester);
 
-    // ★ 此刻 runAgent 仍被 gate 卡住，但界面已经有工具卡片了
-    //   运行中的标题是「正在…」形态（2026-10-13 人话标题）
-    expect(find.text('正在修改文件代码'), findsOneWidget,
+    // ★ 此刻 run 仍被 gate 卡住，但界面已经有工具卡片了
+    //
+    // ★ 2026-10-25：卡片标题随工具面整改换过 —— 旧文案是
+    //   `friendlyToolName` 的「正在修改文件代码」，今天运行中的标题来自
+    //   `toolCallLabel`（`toolVerbs`）：「正在写入 <目标>」
+    //   （见 tool_call_card.dart）。**只换文案 finder，断言（"不等 run 返回
+    //   就必须画出来"）未动**。
+    expect(find.text('正在写入 a.txt'), findsOneWidget,
         reason: 'ToolStarted 必须立刻渲染，不能等 run() 返回');
 
     // 放行，让 await 返回
@@ -541,7 +640,7 @@ void main() {
       (tester) async {
     final c = await freshController();
 
-    installMocks(onRunAgent: () async {
+    installMocks(onScript: () async {
       await pushRef!({'type': 'turn_started', 'ts': 1, 'index': 1});
       await pushRef!({
         'type': 'tool_started',
@@ -565,15 +664,36 @@ void main() {
     await tester.pumpWidget(wrap(c, ChatScreen(settings: c)));
     await settle(tester);
 
-    await tester.enterText(find.byType(TextField).first, '写个文件');
+    await tester.enterText(find.byType(CupertinoTextField).first, '写个文件');
     await tester.testTextInput.receiveAction(TextInputAction.done);
     await settle(tester);
     await tester.pump(const Duration(milliseconds: 400));
 
     // run() 的 turns 里也有同一个 write_file —— 但**只能有一张卡片**
-    expect(find.text('修改文件代码'), findsOneWidget,
+    // ★ 2026-10-25：标题文案换成 `toolCallLabel` 的完成态「写入了 <目标>」
+    //   （旧的是 friendlyToolName 的「修改文件代码」）；断言意图未动。
+    expect(find.text('写入了 a.txt'), findsOneWidget,
         reason: '实时路径与兜底路径必须去重，不能出现两张同样的卡片');
-    expect(find.text('已写入'), findsWidgets);
+    // ★ 2026-10-25：`find.text('已写入')`（工具结果正文）今天**默认看不见**，
+    //   而且工具调用**不再用 `ToolCallCard` 渲染**了 —— 2026-10-24 黑白改版
+    //   起是**纯文字行** `PlainToolLine`（`message_row._toolLine`），
+    //   按「步骤详略」设置默认折叠 `detailLines`（结果在里面）。
+    //   所以改成两条**等价且更精确**的断言：
+    //   ① 那条（唯一的）工具行**拿着**实时结果（不只是"屏幕上出现了这三个字"）；
+    //   ② 用户点开它就能看到结果 —— 折叠 ≠ 丢数据。
+    final lines = tester
+        .widgetList<PlainToolLine>(find.byType(PlainToolLine))
+        .toList();
+    expect(lines, hasLength(1),
+        reason: '实时路径与兜底路径共用同一条工具行（去重）');
+    expect(lines.single.detailLines, contains('已写入'),
+        reason: '实时那条行必须带着 run() 的最终结果 —— 结果不能丢');
+
+    await tester.tap(find.byType(PlainToolLine));
+    await tester.pump();
+    expect(find.textContaining('已写入'), findsWidgets,
+        reason: '点开工具行必须能看到结果（折叠 ≠ 丢）');
+
     expect(find.text('最终回答内容'), findsOneWidget);
   });
 
@@ -581,47 +701,58 @@ void main() {
       (tester) async {
     final c = await freshController();
 
-    // 一个事件都不推 —— 模拟 EventChannel 失效
-    installMocks(onRunAgent: () async {
+    // 一个事件都不推 —— 模拟事件流失效（生产里是"流丢了"）
+    installMocks(onScript: () async {
       await Future<void>.delayed(const Duration(milliseconds: 10));
     });
 
     await tester.pumpWidget(wrap(c, ChatScreen(settings: c)));
     await settle(tester);
 
-    await tester.enterText(find.byType(TextField).first, '写个文件');
+    await tester.enterText(find.byType(CupertinoTextField).first, '写个文件');
     await tester.testTextInput.receiveAction(TextInputAction.done);
     await settle(tester);
     await tester.pump(const Duration(milliseconds: 400));
 
     // 结果不能丢 —— 这是"流式是增强、不是数据通路"的保障
-    expect(find.text('修改文件代码'), findsOneWidget);
+    // ★ 2026-10-25：同上，标题文案换成完成态「写入了 <目标>」。
+    expect(find.text('写入了 a.txt'), findsOneWidget);
     expect(find.text('最终回答内容'), findsOneWidget);
   });
 
   testWidgets('★ 运行结束后订阅被取消（不泄漏，且不影响后续）', (tester) async {
     final c = await freshController();
 
-    installMocks(onRunAgent: () async {
-      await pushRef!({'type': 'turn_started', 'ts': 1, 'index': 1});
-    });
+    // ★ 2026-10-25 等价物：旧断言读的是 EventChannel mock 的
+    //   `onCancel`（`sink == null`）——事件流已不在平台上，等价判据是
+    //   **假执行器的事件流订阅被摘掉**（`StreamController.broadcast` 的
+    //   `onCancel`）。为此这条用例**不关流**：否则关流本身就会触发 onCancel，
+    //   断言就成了空话（那正是在这里要避免的"假绿"）。
+    var eventsCancelled = false;
+    installMocks(
+      onScript: () async {},
+      closeEvents: false,
+      onEventsCancelled: () => eventsCancelled = true,
+    );
 
     await tester.pumpWidget(wrap(c, ChatScreen(settings: c)));
     await settle(tester);
 
-    await tester.enterText(find.byType(TextField).first, '你好');
+    await tester.enterText(find.byType(CupertinoTextField).first, '你好');
     await tester.testTextInput.receiveAction(TextInputAction.done);
     await settle(tester);
     await tester.pump(const Duration(milliseconds: 400));
 
-    // 运行结束后 _stopLive / finally 已取消订阅 —— mock 侧的 onCancel 被调用
-    expect(sink, isNull, reason: 'run 结束后必须取消订阅，否则平台侧一直持有 sink');
+    // run 结束后 finally 已取消订阅 —— 否则事件流一直持着 UI 的监听器
+    expect(eventsCancelled, isTrue,
+        reason: 'run 结束后必须取消事件订阅，否则流一直持有监听器（泄漏）');
   });
 
-  testWidgets('Blocked 事件渲染为「已拦截，未执行」，不是工具失败', (tester) async {
+  testWidgets('Blocked 事件渲染为「已拦截，未执行」，不是工具失败',
+      (tester) async {
     final c = await freshController();
 
-    installMocks(onRunAgent: () async {
+    installMocks(onScript: () async {
       await pushRef!({'type': 'turn_started', 'ts': 1, 'index': 1});
       await pushRef!({
         'type': 'blocked',
@@ -635,7 +766,7 @@ void main() {
     await tester.pumpWidget(wrap(c, ChatScreen(settings: c)));
     await settle(tester);
 
-    await tester.enterText(find.byType(TextField).first, '写个文件');
+    await tester.enterText(find.byType(CupertinoTextField).first, '写个文件');
     await tester.testTextInput.receiveAction(TextInputAction.done);
     await settle(tester);
     await tester.pump(const Duration(milliseconds: 400));
@@ -742,4 +873,98 @@ void main() {
         reason: 'final 是回答，正常渲染');
     });
   });
+}
+
+// ============================================================================
+// 假执行器（2026-10-25 mock 基建重接）：走 AgentBridge.executorFactoryForTest
+// —— 事件经 handle.events → emitLocalEvent → UI（生产同一条路径）。
+// ============================================================================
+
+/// 脚本化执行器：`run()` 立即返回句柄；事件由测试经 [onReady] 给的推送函数
+/// 注入；结果在脚本（[onScript]）完成后以旧 mock 的同一份罐头数据收尾。
+class _FakeExecutor extends LocalAgentExecutor {
+  _FakeExecutor({
+    required super.workspacePath,
+    required super.settings,
+    required super.sessionStore,
+    super.askGate,
+    required this.onScript,
+    required this.onReady,
+    this.closeEvents = true,
+    this.onEventsCancelled,
+  });
+
+  final Future<void> Function() onScript;
+  final void Function(Future<void> Function(Map<String, dynamic>) push) onReady;
+
+  /// run 收尾时是否关掉事件流（与生产同形）。唯一例外见
+  /// 「运行结束后订阅被取消」那条用例。
+  final bool closeEvents;
+
+  /// 事件流订阅被取消时回调（等价旧 EventChannel mock 的 `onCancel`）。
+  final void Function()? onEventsCancelled;
+
+  @override
+  Future<LocalRunHandle> run({
+    required String request,
+    String? sessionId,
+    List<HAttachment> attachments = const [],
+  }) async {
+    final controller = StreamController<AgentEvent>.broadcast(
+      onCancel: onEventsCancelled == null ? null : () => onEventsCancelled!(),
+    );
+    final done = Completer<AgentRunResult>();
+    onReady((m) async {
+      if (!controller.isClosed) controller.add(AgentEvent.fromMap(m));
+      await Future<void>.delayed(Duration.zero);
+    });
+
+    // 脚本在句柄返回后的一拍再跑 —— 保证 AgentBridge 已挂上订阅
+    //（广播流不缓冲，早推会丢）。
+    unawaited(Future<void>(() async {
+      await onScript();
+      if (closeEvents && !controller.isClosed) {
+        unawaited(controller.close());
+      }
+      if (!done.isCompleted) done.complete(_cannedResult());
+    }));
+
+    return LocalRunHandle(
+      events: controller.stream,
+      result: done.future,
+      cancel: () async => true,
+    );
+  }
+
+  /// 旧 Kotlin mock 的罐头返回值（形状对齐 AgentRunResult）。
+  static AgentRunResult _cannedResult() => AgentRunResult(
+        stopReason: '已给出最终回答',
+        finalText: '最终回答内容',
+        sessionId: 'sess-A',
+        totalCachedTokens: 0,
+        totalPromptTokens: 0,
+        totalOutputTokens: 0,
+        turns: [
+          AgentTurn(
+            index: 1,
+            verdict: '工具成功',
+            tool: 'write_file',
+            args: const {'path': 'a.txt'},
+            result: '已写入',
+            wallMs: 3,
+            cachedTokens: null,
+            promptTokens: 10,
+            outputTokens: 5,
+            toolState: ToolState.succeeded,
+          ),
+          AgentTurn(
+            index: 2,
+            verdict: '最终回答',
+            wallMs: 5,
+            cachedTokens: null,
+            promptTokens: 12,
+            outputTokens: 6,
+          ),
+        ],
+      );
 }
