@@ -169,8 +169,36 @@ class SessionStore {
   /// 索引相对工作区的位置（与旧实现同款）。
   static const String _indexRel = '.heracles/sessions.json';
 
+  /// 存储根目录（相对工作区）。
+  static const String _storeRel = '.heracles';
+
   /// 会话文件所在目录（相对工作区）。
   static const String _dirRel = '.heracles/sessions';
+
+  /// 存储目录是否已确保过存在（见 [_ensureStorageDirs]）。
+  bool _dirsEnsured = false;
+
+  /// ★ 确保 `.heracles/` 与 `.heracles/sessions/` 存在（2026-10-27）。
+  ///
+  /// ## 真机 bug「重进会话记录全没了、工作区里根本没有 .heracles」
+  ///
+  /// 整个会话存储链（建会话 / 写索引 / 追加消息）此前**没有任何一处
+  /// 建目录**，全靠宿主 `fs.writeText` 顺手建父目录、或目录被旧版本
+  /// 建过。宿主不建父目录时（普通文件写的正常语义），每一次写都失败，
+  /// 而失败又全程静默（`createSession` 不查 `_writeIndex` 结果、
+  /// agent 循环不查 `appendMessage` 返回值）⇒ 聊的时候一切正常
+  /// （消息都在内存里），重进会话才发现什么都没落盘。
+  /// **目录是应用自己的存储结构，本就该由应用建，不该指望用户
+  /// 或宿主的顺手行为。**
+  ///
+  /// 写入口统一兜底：一实例只建一次；结果不查 —— 目录已存在时
+  /// 宿主报不报错都无所谓，成败由随后写操作自己的报错决定。
+  Future<void> _ensureStorageDirs() async {
+    if (_dirsEnsured) return;
+    _dirsEnsured = true;
+    await _ch.call('fs.mkdir', <String, Object?>{'path': '$_root/$_storeRel'});
+    await _ch.call('fs.mkdir', <String, Object?>{'path': '$_root/$_dirRel'});
+  }
 
   /// **长会话只加载最近这么多条**（2026-10-23）。
   ///
@@ -460,6 +488,7 @@ class SessionStore {
 
   /// 整体重写索引（**这是唯一允许整体重写的文件** —— 它是索引不是会话）。
   Future<bool> _writeIndex(List<SessionMeta> list) async {
+    await _ensureStorageDirs();
     final arr = <Map<String, dynamic>>[for (final m in list) m.toMap()];
     final text = jsonEncode(arr);
     final raw = await _ch.call('fs.writeText', <String, Object?>{
@@ -767,24 +796,37 @@ class SessionStore {
         return false;
       }
 
+      // ---- ⓪ 先确保目录在（2026-10-27）：真追加与读改写都要求
+      //      父目录已存在，缺了它每一次写都会失败 ----
+      await _ensureStorageDirs();
+
       // ---- ① 优先：真追加（O(追加量)）----
       final appended = await _appendViaChannel(path, '$line\n');
       if (appended.ok) return true;
       if (!appended.supported) {
         // 通道不支持 ⇒ 回落读改写（旧 APK）。**不是失败**，只是慢。
         //
-        // ⚠️ `return await`（不是 `return`）：这里是 `try` 块，而 `finally`
-        //   里要复位 `_appending` 这个**并发闸**。若直接 `return` 一个 Future，
-        //   `finally` 会在 Future 完成**之前**就执行 ⇒ 闸提前放开 ⇒ 同一会话的
-        //   第二次 append 可能挤进来读到半截文件（那正是丢行的场景）。
-        //   `flutter analyze` 的 `unawaited_return_in_try_block` 报的就是它。
-        return await _appendReadModifyWrite(sessionId, path, '$line\n');
+        // ⚠️ 仍在 `try` 块内 `await` 后再 return：`finally` 要等
+        //   回落写完才复位 `_appending` 并发闸 —— 闸提前放开会让
+        //   同一会话的第二次 append 挤进来读到半截文件（丢行场景）。
+        final ok = await _appendReadModifyWrite(sessionId, path, '$line\n');
+        if (!ok) _reportAppendFailure(sessionId);
+        return ok;
       }
       lastError = appended.error;
+      _reportAppendFailure(sessionId);
       return false;
     } finally {
       _appending = false;
     }
+  }
+
+  /// 落盘失败时留一条诊断日志（2026-10-27）：此前 append 失败全程
+  /// 静默，是「记录全没了」迟迟定位不到的帮凶。日志走既有
+  /// `[heracles][session]` 前缀，logcat 可查。
+  void _reportAppendFailure(String sessionId) {
+    // ignore: avoid_print
+    print('[heracles][session] 消息落盘失败（$sessionId）：$lastError');
   }
 
   /// 走 `fs.appendText` 真追加。

@@ -97,9 +97,24 @@ class _BwSheetShellState extends State<BwSheetShell>
 
   @override
   Widget build(BuildContext context) {
+    // ★ 表面必须在 Transform 里面（2026-10-27，真机 bug）：
+    //   旧版表面由 showModalBottomSheet 的 backgroundColor/shape 画，
+    //   它不在本壳的 Transform 里 —— 拖拽/入场时只有内容（文字）在动、
+    //   白卡不动，标题直接飘出卡外（用户原话「上拉抽屉就字动」）。
+    //   现在表面（色+圆角+裁剪）由本壳自带、与内容同为一个整体：
+    //   要动一起动。调用点 modal 已改透明底 + 直角 shape 配合。
+    final h = Hue.of(context);
     final body = Transform.translate(
       offset: Offset(0, _visualDy),
-      child: widget.child,
+      child: Container(
+        decoration: BoxDecoration(
+          color: h.surfaceAlt,
+          borderRadius:
+              const BorderRadius.vertical(top: Radius.circular(24)),
+        ),
+        clipBehavior: Clip.antiAlias,
+        child: widget.child,
+      ),
     );
     if (!widget.allowDrag) return body;
     return GestureDetector(
@@ -130,15 +145,13 @@ Future<bool> showFullAccessConfirmSheet(BuildContext context) async {
   final h = Hue.of(context);
   final confirmed = await showModalBottomSheet<bool>(
     context: context,
-    backgroundColor: h.surfaceAlt,
+    backgroundColor: Colors.transparent,
     // 安全语义不变：必须显式选择，点遮罩/下滑都不算确认
     isDismissible: false,
     enableDrag: false,
     // 矮屏（小屏/横屏/分屏）下内容可滚，不溢出
     isScrollControlled: true,
-    shape: const RoundedRectangleBorder(
-      borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
-    ),
+    shape: const RoundedRectangleBorder(),
     builder: (sheetCtx) => BwSheetShell(
       onDismissRequest: () => Navigator.of(sheetCtx).pop(false),
       allowDrag: false,
@@ -317,11 +330,9 @@ Future<void> showApprovalModeSheet(
   };
   final picked = await showModalBottomSheet<PermissionMode>(
     context: context,
-    backgroundColor: h.surfaceAlt,
+    backgroundColor: Colors.transparent,
     isScrollControlled: true,
-    shape: const RoundedRectangleBorder(
-      borderRadius: BorderRadius.vertical(top: Radius.circular(24)),
-    ),
+    shape: const RoundedRectangleBorder(),
     builder: (sheetCtx) => BwSheetShell(
       onDismissRequest: () => Navigator.of(sheetCtx).pop(),
       child: SafeArea(
@@ -422,11 +433,9 @@ Future<T?> showBwRadioSheet<T>(
   final h = Hue.of(context);
   return showModalBottomSheet<T>(
     context: context,
-    backgroundColor: h.surfaceAlt,
+    backgroundColor: Colors.transparent,
     isScrollControlled: true,
-    shape: const RoundedRectangleBorder(
-      borderRadius: BorderRadius.vertical(top: Radius.circular(24)),
-    ),
+    shape: const RoundedRectangleBorder(),
     builder: (sheetCtx) => BwSheetShell(
       onDismissRequest: () => Navigator.of(sheetCtx).pop(),
       child: SafeArea(
@@ -636,13 +645,11 @@ Future<ApprovalDecision?> showApprovalRequestSheet(
   final hasArgs = argsPreview.trim().isNotEmpty && argsPreview != '（无参数）';
   return showModalBottomSheet<ApprovalDecision>(
     context: context,
-    backgroundColor: h.surfaceAlt,
+    backgroundColor: Colors.transparent,
     isDismissible: false,
     enableDrag: false,
     isScrollControlled: true,
-    shape: const RoundedRectangleBorder(
-      borderRadius: BorderRadius.vertical(top: Radius.circular(24)),
-    ),
+    shape: const RoundedRectangleBorder(),
     builder: (sheetCtx) => BwSheetShell(
       onDismissRequest: () => Navigator.of(sheetCtx).pop(),
       allowDrag: false,
@@ -728,33 +735,42 @@ class _ApprovalRequestBodyState extends State<_ApprovalRequestBody> {
                     duration: const Duration(milliseconds: 300),
                     curve: Curves.easeInOutCubic,
                     alignment: Alignment.topCenter,
-                    child: LayoutBuilder(
-                      builder: (context, c) {
-                        final w = c.maxWidth;
+                    // ★ 2026-10-27 真机 bug「审批抽屉整片空白」：
+                    //   旧实现用 LayoutBuilder + OverflowBox 把两步横排
+                    //   再位移 —— OverflowBox 在滚动视图里拿到**无界高**，
+                    //   布局直接断言失败，release 下整片内容不渲染、
+                    //   只剩一张空抽屉。改 AnimatedSwitcher 横滑：
+                    //   第 2 步从右滑入、返回时第 1 步从左滑入，
+                    //   布局始终有界。回归测试 approval_sheet_render_test。
+                    child: AnimatedSwitcher(
+                      duration: const Duration(milliseconds: 300),
+                      switchInCurve: Curves.easeInOutCubic,
+                      switchOutCurve: Curves.easeInOutCubic,
+                      layoutBuilder: (currentChild, previousChildren) =>
+                          Stack(
+                        alignment: Alignment.topCenter,
+                        children: <Widget>[
+                          ...previousChildren,
+                          ?currentChild,
+                        ],
+                      ),
+                      transitionBuilder: (child, animation) {
+                        final fromRight = child.key == const ValueKey<int>(1);
                         return ClipRect(
-                          child: TweenAnimationBuilder<double>(
-                            tween: Tween(end: _step.toDouble()),
-                            duration: const Duration(milliseconds: 300),
-                            curve: Curves.easeInOutCubic,
-                            builder: (context, v, _) =>
-                                Transform.translate(
-                              offset: Offset(-v * w, 0),
-                              child: OverflowBox(
-                                alignment: Alignment.topLeft,
-                                maxWidth: 2 * w,
-                                child: Row(
-                                  crossAxisAlignment:
-                                      CrossAxisAlignment.start,
-                                  children: [
-                                    SizedBox(width: w, child: _step0(context)),
-                                    SizedBox(width: w, child: _step1(context)),
-                                  ],
-                                ),
-                              ),
-                            ),
+                          child: SlideTransition(
+                            position: Tween<Offset>(
+                              begin: Offset(fromRight ? 1 : -1, 0),
+                              end: Offset.zero,
+                            ).animate(animation),
+                            child: child,
                           ),
                         );
                       },
+                      child: KeyedSubtree(
+                        key: ValueKey<int>(_step),
+                        child:
+                            _step == 0 ? _step0(context) : _step1(context),
+                      ),
                     ),
                   ),
                 ),
@@ -997,10 +1013,8 @@ Future<bool> showBwConfirmSheet(
   final h = Hue.of(context);
   final r = await showModalBottomSheet<bool>(
     context: context,
-    backgroundColor: h.surfaceAlt,
-    shape: const RoundedRectangleBorder(
-      borderRadius: BorderRadius.vertical(top: Radius.circular(24)),
-    ),
+    backgroundColor: Colors.transparent,
+    shape: const RoundedRectangleBorder(),
     builder: (sheetCtx) => BwSheetShell(
       onDismissRequest: () => Navigator.of(sheetCtx).pop(),
       child: SafeArea(
@@ -1089,11 +1103,9 @@ Future<String?> showBwTextInputSheet(
   final h = Hue.of(context);
   return showModalBottomSheet<String>(
     context: context,
-    backgroundColor: h.surfaceAlt,
+    backgroundColor: Colors.transparent,
     isScrollControlled: true,
-    shape: const RoundedRectangleBorder(
-      borderRadius: BorderRadius.vertical(top: Radius.circular(24)),
-    ),
+    shape: const RoundedRectangleBorder(),
     builder: (sheetCtx) => BwSheetShell(
       onDismissRequest: () => Navigator.of(sheetCtx).pop(),
       child: _BwTextInputSheet(

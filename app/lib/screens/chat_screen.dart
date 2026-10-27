@@ -4706,12 +4706,10 @@ class _ChatScreenState extends State<ChatScreen> {
     //   选项多时抽屉长到上限、内部滚动，按钮行始终钉底。
     final result = await showModalBottomSheet<Map<String, List<String>>>(
       context: context,
-      backgroundColor: h.surfaceAlt,
+      backgroundColor: Colors.transparent,
       isScrollControlled: true,
       isDismissible: true,
-      shape: const RoundedRectangleBorder(
-        borderRadius: BorderRadius.vertical(top: Radius.circular(24)),
-      ),
+      shape: const RoundedRectangleBorder(),
       builder: (sheetCtx) {
         return BwSheetShell(
           onDismissRequest: () => Navigator.of(sheetCtx).pop(),
