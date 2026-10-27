@@ -28,7 +28,11 @@ import 'bw_approval.dart';
 ///
 /// 桌面版用**悬浮**才显示行内操作。手机没有鼠标，所以**全部常驻显示**。
 /// 侧边栏本体也是抽屉式滑出 —— 手机屏幕窄，常驻会挤掉对话区。
-class WorkspaceDrawer extends StatelessWidget {
+
+/// 工作区抽屉（公开外壳）：本体渲染在 [_WorkspaceDrawerBody]，
+/// 这里只持有**多选模式**的状态（是否在选、选了哪些），
+/// 这样本体保持无状态、既有构造参数一个不变。
+class WorkspaceDrawer extends StatefulWidget {
   const WorkspaceDrawer({
     super.key,
     required this.workspaces,
@@ -48,7 +52,131 @@ class WorkspaceDrawer extends StatelessWidget {
     this.onToggleArchive,
     this.onToggleWorkspace,
     this.onClose,
+    this.onBatchArchiveSessions,
+    this.onBatchDeleteSessions,
     this.loading = false,
+  });
+
+  final List<HWorkspace> workspaces;
+  final void Function(String workspaceId, String sessionId) onSelectSession;
+  final void Function(String workspaceId) onNewSession;
+  final VoidCallback onOpenSettings;
+  final ViewOptions viewOptions;
+  final void Function(ViewOptions) onViewOptionsChanged;
+  final String searchQuery;
+  final void Function(String) onSearchChanged;
+  final VoidCallback? onAddWorkspace;
+  final VoidCallback? onAddAppWorkspace;
+  final void Function(String workspaceId)? onRemoveWorkspace;
+  final void Function(String workspaceId, String sessionId)? onRenameSession;
+  final void Function(String workspaceId, String sessionId)? onDeleteSession;
+  final void Function(String workspaceId, String sessionId)? onToggleStar;
+  final void Function(String workspaceId, String sessionId)? onToggleArchive;
+  final void Function(String workspaceId)? onToggleWorkspace;
+  final VoidCallback? onClose;
+
+  /// **批量归档 / 取消归档**（多选）：items 为 (工作区id, 会话id) 列表，
+  /// archive = 目标状态（true 归档、false 取消归档）。
+  final void Function(List<(String, String)> items, bool archive)?
+      onBatchArchiveSessions;
+
+  /// **批量删除**（多选）：删除确认由调用方统一弹一次（带数量），
+  /// 不逐条确认。
+  final void Function(List<(String, String)> items)? onBatchDeleteSessions;
+
+  final bool loading;
+
+  @override
+  State<WorkspaceDrawer> createState() => _WorkspaceDrawerState();
+}
+
+class _WorkspaceDrawerState extends State<WorkspaceDrawer> {
+  bool _selecting = false;
+  final Set<(String, String)> _selected = {};
+
+  void _enterSelect() => setState(() => _selecting = true);
+
+  void _exitSelect() => setState(() {
+        _selecting = false;
+        _selected.clear();
+      });
+
+  void _toggleKey(String wid, String sid) => setState(() {
+        final k = (wid, sid);
+        if (!_selected.remove(k)) _selected.add(k);
+      });
+
+  @override
+  Widget build(BuildContext context) {
+    final batchWired = widget.onBatchArchiveSessions != null ||
+        widget.onBatchDeleteSessions != null;
+    return _WorkspaceDrawerBody(
+      workspaces: widget.workspaces,
+      onSelectSession: widget.onSelectSession,
+      onNewSession: widget.onNewSession,
+      onOpenSettings: widget.onOpenSettings,
+      viewOptions: widget.viewOptions,
+      onViewOptionsChanged: widget.onViewOptionsChanged,
+      searchQuery: widget.searchQuery,
+      onSearchChanged: widget.onSearchChanged,
+      onAddWorkspace: widget.onAddWorkspace,
+      onAddAppWorkspace: widget.onAddAppWorkspace,
+      onRemoveWorkspace: widget.onRemoveWorkspace,
+      onRenameSession: widget.onRenameSession,
+      onDeleteSession: widget.onDeleteSession,
+      onToggleStar: widget.onToggleStar,
+      onToggleArchive: widget.onToggleArchive,
+      onToggleWorkspace: widget.onToggleWorkspace,
+      onClose: widget.onClose,
+      loading: widget.loading,
+      selecting: _selecting,
+      selectedKeys: _selected,
+      onEnterSelect: batchWired ? _enterSelect : null,
+      onExitSelect: _exitSelect,
+      onToggleSelectKey: _toggleKey,
+      onSelectKeys: (items) => setState(() => _selected.addAll(items)),
+      onBatchArchiveTap: (archive) {
+        final items = _selected.toList();
+        _exitSelect();
+        widget.onBatchArchiveSessions?.call(items, archive);
+      },
+      onBatchDeleteTap: () {
+        final items = _selected.toList();
+        _exitSelect();
+        widget.onBatchDeleteSessions?.call(items);
+      },
+    );
+  }
+}
+
+class _WorkspaceDrawerBody extends StatelessWidget {
+  const _WorkspaceDrawerBody({
+    required this.workspaces,
+    required this.onSelectSession,
+    required this.onNewSession,
+    required this.onOpenSettings,
+    required this.viewOptions,
+    required this.onViewOptionsChanged,
+    required this.searchQuery,
+    required this.onSearchChanged,
+    this.onAddWorkspace,
+    this.onAddAppWorkspace,
+    this.onRemoveWorkspace,
+    this.onRenameSession,
+    this.onDeleteSession,
+    this.onToggleStar,
+    this.onToggleArchive,
+    this.onToggleWorkspace,
+    this.onClose,
+    this.loading = false,
+    this.selecting = false,
+    this.selectedKeys = const {},
+    this.onEnterSelect,
+    this.onExitSelect,
+    this.onToggleSelectKey,
+    this.onSelectKeys,
+    this.onBatchArchiveTap,
+    this.onBatchDeleteTap,
   });
 
   final List<HWorkspace> workspaces;
@@ -83,6 +211,16 @@ class WorkspaceDrawer extends StatelessWidget {
   final VoidCallback? onClose;
   final bool loading;
 
+  // ---- 多选模式（2026-10-27）：状态由外层 WorkspaceDrawer 持有 ----
+  final bool selecting;
+  final Set<(String, String)> selectedKeys;
+  final VoidCallback? onEnterSelect;
+  final VoidCallback? onExitSelect;
+  final void Function(String workspaceId, String sessionId)? onToggleSelectKey;
+  final void Function(List<(String, String)> items)? onSelectKeys;
+  final void Function(bool archive)? onBatchArchiveTap;
+  final VoidCallback? onBatchDeleteTap;
+
   @override
   Widget build(BuildContext context) {
     final h = Hue.of(context);
@@ -108,14 +246,18 @@ class WorkspaceDrawer extends StatelessWidget {
             // ⚠️ 2026-10-19：这里原有「插件 / 自动化任务 / 上下文洞察」三个入口，
             //   但它们的 `onTap` 都是空实现 —— 界面上承诺了、点了没反应。
             //   在真有功能之前**不画**（假入口比没有入口更伤信任）。
-            _SectionHeader(
-              h: h,
-              searching: searchQuery.isNotEmpty,
-              onAdd: onAddWorkspace,
-              onAddApp: onAddAppWorkspace,
-              onSearch: () => _openSearch(context),
-              onViewOptions: () => _openViewOptions(context, h),
-            ),
+            if (selecting)
+              _selectionHeader(h)
+            else
+              _SectionHeader(
+                h: h,
+                searching: searchQuery.isNotEmpty,
+                onAdd: onAddWorkspace,
+                onAddApp: onAddAppWorkspace,
+                onSearch: () => _openSearch(context),
+                onViewOptions: () => _openViewOptions(context, h),
+                onSelectMode: onEnterSelect,
+              ),
 
             if (searchQuery.isNotEmpty) _searchBanner(h),
 
@@ -248,6 +390,11 @@ class WorkspaceDrawer extends StatelessWidget {
           onDelete: (sid) => onDeleteSession?.call(w.id, sid),
           onStar: (sid) => onToggleStar?.call(w.id, sid),
           onArchive: (sid) => onToggleArchive?.call(w.id, sid),
+          selecting: selecting,
+          selectedKeys: selectedKeys,
+          onToggleSelect: (sid) => onToggleSelectKey?.call(w.id, sid),
+          onBatchMenu: (sid) => _batchMenu(
+              context, h, w, w.sessions.firstWhere((x) => x.id == sid)),
         );
       },
     );
@@ -323,8 +470,16 @@ class WorkspaceDrawer extends StatelessWidget {
           session: s,
           h: h,
           subtitle: w.name,
-          onTap: () => onSelectSession(w.id, s.id),
-          onMenu: () => _sessionMenu(
+          selecting: selecting,
+          selected: selectedKeys.contains((w.id, s.id)),
+          onTap: selecting
+              ? (s.archived
+                  ? () {}
+                  : () => onToggleSelectKey?.call(w.id, s.id))
+              : () => onSelectSession(w.id, s.id),
+          onMenu: selecting
+              ? (s.archived ? () {} : () => _batchMenu(context, h, w, s))
+              : () => _sessionMenu(
             context,
             h,
             w,
@@ -338,6 +493,109 @@ class WorkspaceDrawer extends StatelessWidget {
       },
     );
   }
+
+  // ------------------------------------------------------------ 多选模式
+
+  /// 多选时**长按**任意一条可选项 → 上拉抽屉里选归档 / 删除
+  /// （用户定：不要底部常驻操作条，沿用全 App 的长按出抽屉习惯）。
+  /// 长按的那条若还没勾上，先自动勾上，计数含它。
+  void _batchMenu(BuildContext context, Hue h, HWorkspace w, HSession s) {
+    final key = (w.id, s.id);
+    final already = selectedKeys.contains(key);
+    // ★ 先算 n 再勾：selectedKeys 与外壳状态是同一个 Set 对象，
+    //   onToggleSelectKey 一调它就同步变了，顺序反了会多算一个。
+    final n = selectedKeys.length + (already ? 0 : 1);
+    if (!already) onToggleSelectKey?.call(w.id, s.id);
+    showModalBottomSheet<void>(
+      context: context,
+      backgroundColor: h.surfaceAlt,
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(24)),
+      ),
+      builder: (ctx) => SafeArea(
+        child: Padding(
+          padding: const EdgeInsets.fromLTRB(10, 10, 10, 12),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              _bwSheetHandle(h),
+              const SizedBox(height: 8),
+              Padding(
+                padding: const EdgeInsets.fromLTRB(12, 4, 12, 8),
+                child: Text(
+                  '已选 $n 个会话',
+                  style: TextStyle(
+                      fontSize: 13,
+                      fontWeight: FontWeight.w600,
+                      color: h.text),
+                ),
+              ),
+              _bwMenuRow(
+                h,
+                icon: CupertinoIcons.archivebox_fill,
+                label: '归档',
+                subtitle: '归档后在设置中查看',
+                onTap: () {
+                  Navigator.of(ctx).pop();
+                  onBatchArchiveTap?.call(true);
+                },
+              ),
+              _bwMenuRow(
+                h,
+                icon: CupertinoIcons.trash_fill,
+                label: '删除',
+                danger: true,
+                onTap: () {
+                  Navigator.of(ctx).pop();
+                  onBatchDeleteTap?.call();
+                },
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _selectionHeader(Hue h) {
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(HSpace.xl, HSpace.md, HSpace.sm, 0),
+      child: Row(
+        children: [
+          Text(
+            '已选 ${selectedKeys.length} 个',
+            style: TextStyle(
+              fontSize: 12,
+              fontWeight: FontWeight.w600,
+              color: h.text,
+              letterSpacing: 0.6,
+            ),
+          ),
+          const Spacer(),
+          _textAction(h, '全选', () {
+            // 全选 = 当前筛选下**看得见**的会话（_visible 已应用筛选/搜索）
+            final items = <(String, String)>[
+              for (final w in _visible)
+                for (final s in w.sessions)
+                  if (!s.archived) (w.id, s.id),
+            ];
+            onSelectKeys?.call(items);
+          }),
+          _textAction(h, '取消', onExitSelect),
+        ],
+      ),
+    );
+  }
+
+  Widget _textAction(Hue h, String label, VoidCallback? onTap) => InkWell(
+        borderRadius: BorderRadius.circular(8),
+        onTap: onTap,
+        child: Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+          child: Text(label, style: TextStyle(fontSize: 13, color: h.text)),
+        ),
+      );
 
   Widget _noResults(Hue h) => Center(
         child: Padding(
@@ -784,6 +1042,7 @@ class _SectionHeader extends StatelessWidget {
     this.onAddApp,
     this.onSearch,
     this.onViewOptions,
+    this.onSelectMode,
   });
 
   final Hue h;
@@ -795,6 +1054,9 @@ class _SectionHeader extends StatelessWidget {
 
   final VoidCallback? onSearch;
   final VoidCallback? onViewOptions;
+
+  /// 进入多选模式（批量归档 / 删除）；未接批量回调时不画这个入口。
+  final VoidCallback? onSelectMode;
 
   @override
   Widget build(BuildContext context) {
@@ -820,6 +1082,12 @@ class _SectionHeader extends StatelessWidget {
           ),
           // ★ 视图选项 —— 之前是空实现，现在真的能改分组/排序/筛选
           _MiniAction(icon: CupertinoIcons.slider_horizontal_3, h: h, onTap: onViewOptions),
+          if (onSelectMode != null)
+            _MiniAction(
+              icon: CupertinoIcons.checkmark_square,
+              h: h,
+              onTap: onSelectMode,
+            ),
           // ★★ ⊕ = **两项菜单**（2026-10-17）★★
           //
           // ## 为什么一项不够
@@ -954,6 +1222,10 @@ class _WorkspaceGroup extends StatelessWidget {
     required this.onDelete,
     required this.onStar,
     required this.onArchive,
+    this.selecting = false,
+    this.selectedKeys = const {},
+    this.onToggleSelect,
+    this.onBatchMenu,
   });
 
   final HWorkspace workspace;
@@ -966,6 +1238,12 @@ class _WorkspaceGroup extends StatelessWidget {
   final void Function(String sessionId) onDelete;
   final void Function(String sessionId) onStar;
   final void Function(String sessionId) onArchive;
+
+  // 多选模式穿线（分组列表）
+  final bool selecting;
+  final Set<(String, String)> selectedKeys;
+  final void Function(String sessionId)? onToggleSelect;
+  final void Function(String sessionId)? onBatchMenu;
 
   @override
   Widget build(BuildContext context) {
@@ -1078,8 +1356,19 @@ class _WorkspaceGroup extends StatelessWidget {
                       _SessionRow(
                         session: ss,
                         h: h,
-                        onTap: () => onSelectSession(ss.id),
-                        onMenu: () => _sessionMenu(
+                        selecting: selecting,
+                        selected:
+                            selectedKeys.contains((workspace.id, ss.id)),
+                        onTap: selecting
+                            ? (ss.archived
+                                ? () {}
+                                : () => onToggleSelect?.call(ss.id))
+                            : () => onSelectSession(ss.id),
+                        onMenu: selecting
+                            ? (ss.archived
+                                ? () {}
+                                : () => onBatchMenu?.call(ss.id))
+                            : () => _sessionMenu(
                           context,
                           h,
                           workspace,
@@ -1168,6 +1457,8 @@ class _SessionRow extends StatelessWidget {
     required this.onTap,
     required this.onMenu,
     this.subtitle,
+    this.selecting = false,
+    this.selected = false,
   });
 
   final HSession session;
@@ -1180,6 +1471,10 @@ class _SessionRow extends StatelessWidget {
 
   /// 单列表模式下显示归属工作区
   final String? subtitle;
+
+  /// 多选模式：行首短竖换成勾选圈，点按改为勾选（由调用方换 onTap）。
+  final bool selecting;
+  final bool selected;
 
   @override
   Widget build(BuildContext context) {
@@ -1206,16 +1501,34 @@ class _SessionRow extends StatelessWidget {
                 horizontal: HSpace.md, vertical: 10),
             child: Row(
               children: [
-                // 每条会话前一根独立短竖：当前 = 深色，其余 = 浅灰，
-                // 段与段之间断开，不连成整线。
-                Container(
-                  width: 3,
-                  height: 18,
-                  decoration: BoxDecoration(
-                    color: active ? h.text : h.border,
-                    borderRadius: BorderRadius.circular(1.5),
+                if (selecting && !session.archived)
+                  // 多选：勾选圈（选中 = 实心 + 对勾，未选 = 描边空圈）。
+                  // 已归档的**不给选** —— 归档会话后续归设置里管。
+                  Container(
+                    width: 22,
+                    height: 22,
+                    decoration: BoxDecoration(
+                      shape: BoxShape.circle,
+                      color: selected ? h.text : Colors.transparent,
+                      border: Border.all(
+                          color: selected ? h.text : h.border, width: 1.5),
+                    ),
+                    child: selected
+                        ? Icon(CupertinoIcons.checkmark,
+                            size: 12, color: h.bg)
+                        : null,
+                  )
+                else
+                  // 每条会话前一根独立短竖：当前 = 深色，其余 = 浅灰，
+                  // 段与段之间断开，不连成整线。
+                  Container(
+                    width: 3,
+                    height: 18,
+                    decoration: BoxDecoration(
+                      color: active ? h.text : h.border,
+                      borderRadius: BorderRadius.circular(1.5),
+                    ),
                   ),
-                ),
                 const SizedBox(width: 10),
                 if (session.starred)
                   Padding(

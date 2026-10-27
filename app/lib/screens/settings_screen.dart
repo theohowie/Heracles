@@ -20,9 +20,20 @@ import '../widgets/bw_approval.dart';
 
 /// 设置主页 —— 分类列表（对应参考图的侧栏结构）。
 class SettingsScreen extends StatelessWidget {
-  const SettingsScreen({super.key, required this.controller});
+  const SettingsScreen({
+    super.key,
+    required this.controller,
+    this.archivedCountLoader,
+    this.onOpenArchived,
+  });
 
   final SettingsController controller;
+
+  /// 已归档对话入口：数量借读 + 打开二级页，都由聊天页提供
+  /// （会话数据在它手里）。两者缺一就不画这一行 —— 防"入口在、
+  /// 点了没反应"。
+  final int Function()? archivedCountLoader;
+  final Future<void> Function()? onOpenArchived;
 
   @override
   Widget build(BuildContext context) {
@@ -56,6 +67,11 @@ class SettingsScreen extends StatelessWidget {
               _DevicePermissionEntry(
                 onOpen: () => _push(context, const DevicePermissionPage()),
               ),
+              if (archivedCountLoader != null && onOpenArchived != null)
+                _ArchivedEntry(
+                  countOf: archivedCountLoader!,
+                  onOpen: onOpenArchived!,
+                ),
               _HomeCard(
                 title: '模型',
                 // 与聊天页同源同字段（2026-10-15 修 BUG-5 的口径保留）：
@@ -719,6 +735,50 @@ Widget _iosBackLeading(BuildContext context) => IconButton(
       icon: const Icon(AppIcons.back, size: 21),
       onPressed: () => Navigator.of(context).pop(),
     );
+
+// ============================================================ 已归档对话
+
+/// **已归档对话入口**（2026-10-27）—— 与「全局记忆」同一形态：
+/// 主页一行 + 数量徽章，列表在二级页；从二级页返回后重读一次
+/// 数量（用户可能刚取消归档或删了几条，徽章得跟着变）。
+class _ArchivedEntry extends StatefulWidget {
+  const _ArchivedEntry({required this.countOf, required this.onOpen});
+
+  final int Function() countOf;
+
+  /// 打开二级页；**返回后**才完成（徽章据此刷新）。
+  final Future<void> Function() onOpen;
+
+  @override
+  State<_ArchivedEntry> createState() => _ArchivedEntryState();
+}
+
+class _ArchivedEntryState extends State<_ArchivedEntry> {
+  String? _badge;
+
+  @override
+  void initState() {
+    super.initState();
+    _reload();
+  }
+
+  void _reload() {
+    final n = widget.countOf();
+    setState(() => _badge = n == 0 ? '暂无' : '$n 个');
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return _HomeCard(
+      title: '已归档对话',
+      subtitle: _badge ?? '…',
+      onTap: () async {
+        await widget.onOpen();
+        if (mounted) _reload();
+      },
+    );
+  }
+}
 
 // ============================================================ 全局记忆
 
