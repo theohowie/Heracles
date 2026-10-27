@@ -17,7 +17,9 @@ import '../theme/cupertino_kit.dart';
 import '../theme/elastic_switch.dart';
 import '../theme/stretch_segmented.dart';
 import '../theme/theme_reveal.dart';
+import '../data/open_source_licenses.dart';
 import '../widgets/bw_approval.dart';
+import 'oss_licenses_screen.dart';
 
 /// 设置主页 —— 分类列表（对应参考图的侧栏结构）。
 class SettingsScreen extends StatelessWidget {
@@ -96,6 +98,11 @@ class SettingsScreen extends StatelessWidget {
                 title: '关于 Heracles',
                 subtitle: 'Dart 内核',
                 onTap: () => _push(context, const AboutPage()),
+              ),
+              _HomeCard(
+                title: '开源许可',
+                subtitle: '${kOssEntries.length} 个开源项目 · 谨此致谢',
+                onTap: () => _push(context, const OssLicensesScreen()),
               ),
             ],
           );
