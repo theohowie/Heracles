@@ -203,6 +203,10 @@ Heracles/
 
 **分支约定**：`master` = 内核 + App 服务层 + 测试基建；`frontend` = UI 迭代（合并方向 frontend → master）。
 
+> **站点（落地页）不在上面的目录里** —— 按用户裁定，站点相关文件**只存在于 `gh-pages` 分支**：
+> 根目录是构建产物（GitHub Pages 托管），`_source/` 是源码。改站点的说明见该分支的 `_source/README.md`。
+> 本仓库的 `master` / `frontend` 不含任何站点文件。
+
 ---
 
 ## 注意事项

@@ -80,15 +80,21 @@ site/.vitepress/dist/
 # 这里是本地留档目录，用来把 APK 上传到 GitHub Releases / Gitee 发行版。
 /dist/
 
-# 2026-10-26 宣传落地页（React + Vite）：源码入库，依赖与产物不入库
-# （构建产物发 gh-pages）
-web/node_modules/
-web/dist/
-
-# 2026-10-26：仓库只保留 app / backend / web 三个目录。
-# video/ 是本地渲染管线与素材，成片放 web/public/video/ 随网页发布；site/ 是已下线的旧文档站（历史里仍可查）。
-video/
+# ★ 2026-10-27 用户裁定：**站点相关文件只允许存在于 `gh-pages` 分支**。
+#   落地页源码已从 master 的 `web/` 整体搬到 `gh-pages` 的 `_source/`；
+#   构建产物在 `gh-pages` 根目录（GitHub Pages 直接托管）。
+#   ⇒ master / frontend / 任何其它分支**都不放站点文件**。
+#   下面这两条是护栏：万一有人把站点目录放回工作树，git 不会收进 master。
+#   （`/dist/` 已在上面 79-81 行定义，不重复。）
+web/
 site/
+
+# 2026-10-26：仓库只保留 app / backend / core 三个代码目录（+ 根 README/LICENSE）。
+# video/ 是本地渲染管线与素材，成片已随站点发布到 gh-pages；site/ 是已下线的旧文档站（历史里仍可查）。
+video/
 
 # 2026-10-26：本地留档目录（有用但未入库：发布脚本/素材/成片/APK），不进仓库
 temp/
+
+# 2026-10-27：AI 助手（WorkBuddy）的本地工作记忆目录 —— 本机私有，不进仓库
+.workbuddy-ai/
