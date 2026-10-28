@@ -235,7 +235,7 @@ class SettingsController extends ValueNotifier<AppSettings> {
       language: _enumOf(
           AppLanguage.values, _prefs.getString(_kLanguage), AppLanguage.zh),
       appearance: _enumOf(AppAppearance.values,
-          _prefs.getString(_kAppearance), AppAppearance.dark),
+          _prefs.getString(_kAppearance), AppAppearance.system),
       themeStyle: _enumOf(AppThemeStyle.values,
           _prefs.getString(_kThemeStyle), AppThemeStyle.bw),
       fontSize: _prefs.getDouble(_kFontSize) ?? 15,

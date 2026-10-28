@@ -436,8 +436,9 @@ class _InputBarState extends State<InputBar>
                     // ---- 底行：＋(小) / 模型胶囊 / 权限盾 / 发送 ----
                     //
                     // 2026-10-26 对图二（TRAE）再对齐：＋是小圆钮带灰底；
-                    // 权限盾挪到人家麦克风的位置（发送键左边），麦克风
-                    // 不做（用户早已明说不要）；发送键恒黑底白箭头。
+                    // 权限盾挪到发送键左边一带。麦克风 2026-10-28
+                    // 用户改令：预留一枚占位钮在盾与发送之间，后面
+                    // 接语音识别（此前「不做」的口径就此作废）。
                     //
                     // ★ 发送键语义与图标一致（2026-10-13 定）：
                     //   空闲 → 发送；忙 + 无内容 → 停止；忙 + 有内容 →
@@ -478,6 +479,11 @@ _PermissionIconButton(
                             enabled: widget.enabled,
                             onPicked: widget.onPermissionChanged,
                           ),
+                          const SizedBox(width: 8),
+                          // ★ 麦克风占位（2026-10-28 用户令预留）：放在
+                          // 盾与发送之间，后面接语音识别；现在点按
+                          // 只提示未接入，不假装能用。
+                          _MicButton(h: h, enabled: widget.enabled),
                           const SizedBox(width: 8),
                                                     _SendButton(
                             enabled: (_hasText ||
@@ -815,6 +821,42 @@ class _RemoveBadge extends StatelessWidget {
   }
 }
 
+
+/// **麦克风占位钮**（2026-10-28 用户令预留）—— 与 ＋ 同规格的
+/// 38 圆钮（深色提亮一档、浅色沉一档），位置在权限盾与发送之间。
+/// 语音识别尚未接入：点按只给一句如实提示，不录音、不假装。
+class _MicButton extends StatelessWidget {
+  const _MicButton({required this.h, required this.enabled});
+
+  final Hue h;
+  final bool enabled;
+
+  @override
+  Widget build(BuildContext context) {
+    return Pressable(
+      borderRadius: BorderRadius.circular(999),
+      enabled: enabled,
+      child: SizedBox(
+        width: 38,
+        height: 38,
+        child: Material(
+          color: h.dark ? const Color(0xFF2C2C2E) : h.surfaceAlt,
+          shape: const CircleBorder(
+            side: BorderSide(color: Colors.transparent),
+          ),
+          child: InkWell(
+            onTap: enabled
+                ? () => showIosToast(context, '语音识别还没接入，这个按钮先占位',
+                    icon: AppIcons.mic)
+                : null,
+            customBorder: const CircleBorder(),
+            child: Icon(AppIcons.mic, size: 19, color: h.textDim),
+          ),
+        ),
+      ),
+    );
+  }
+}
 
 class _SendButton extends StatelessWidget {
   const _SendButton({

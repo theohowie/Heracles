@@ -8,9 +8,11 @@ import 'package:flutter/services.dart';
 
 import 'package:package_info_plus/package_info_plus.dart';
 
+import '../models/jev.dart';
 import '../models/settings.dart';
 import '../services/agent_bridge.dart';
 import '../services/global_memory.dart';
+import '../services/jev_service.dart';
 import '../services/settings_controller.dart';
 import '../theme/app_theme.dart';
 import '../theme/cupertino_kit.dart';
@@ -19,6 +21,7 @@ import '../theme/stretch_segmented.dart';
 import '../theme/theme_reveal.dart';
 import '../data/open_source_licenses.dart';
 import '../widgets/bw_approval.dart';
+import 'jev_settings_screen.dart';
 import 'oss_licenses_screen.dart';
 
 /// 设置主页 —— 分类列表（对应参考图的侧栏结构）。
@@ -87,6 +90,8 @@ class SettingsScreen extends StatelessWidget {
                 onTap: () => _push(
                     context, ModelSettingsPage(controller: controller)),
               ),
+              // ★ JEV 入口已按用户要求（2026-10-28）搬进「模型」页，
+              // 与提供商卡并列、点「编辑」进入 —— 设置主页不再单列。
               const _SectionLabel('应用'),
               _HomeCard(
                 title: '外观',
@@ -1753,6 +1758,16 @@ class ModelSettingsPage extends StatelessWidget {
                       ? null
                       : () => controller.removeProvider(p.id),
                 )),
+            // ★ JEV 决策引擎与提供商并列（2026-10-28 用户定）：
+            // 同一张卡式行、同样点「编辑」进编辑页。
+            _JevCard(
+              onEdit: () => Navigator.of(context).push(
+                CupertinoPageRoute(
+                  builder: (_) =>
+                      JevSettingsScreen(jev: JevController.shared()),
+                ),
+              ),
+            ),
             const SizedBox(height: HSpace.sm),
             _AddProviderButton(onTap: () => _add(context)),
           ],
@@ -2041,6 +2056,108 @@ class _ProviderCard extends StatelessWidget {
         ),
         ),
       ),
+    );
+  }
+}
+
+/// **JEV 决策引擎卡**（2026-10-28 用户定）：在「模型」页与提供商
+/// 卡并列，版式与 `_ProviderCard` 一致（状态点 + 名称 + 状态副行 +
+/// 右侧「编辑」）。状态如实：云端看接口地址是否已填，本地看模型
+/// 是否已下载（引擎未接入也直说，不假装可用）。
+class _JevCard extends StatefulWidget {
+  const _JevCard({required this.onEdit});
+
+  final VoidCallback onEdit;
+
+  @override
+  State<_JevCard> createState() => _JevCardState();
+}
+
+class _JevCardState extends State<_JevCard> {
+  final JevController _jev = JevController.shared();
+
+  @override
+  void initState() {
+    super.initState();
+    if (!_jev.loaded) unawaited(_jev.load());
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final h = Hue.of(context);
+    return AnimatedBuilder(
+      animation: _jev,
+      builder: (context, _) {
+        final config = _jev.config;
+        final bool ready;
+        final String status;
+        switch (config.source) {
+          case JevSource.cloud:
+            ready = config.cloudReady;
+            status = ready ? '已配置' : '未配置接口地址';
+          case JevSource.local08:
+          case JevSource.local2b:
+            final downloaded = _jev.isDownloaded(config.source);
+            ready = downloaded;
+            status = downloaded ? '模型已下载 · 引擎未接入' : '模型未下载';
+        }
+        return Container(
+          margin: const EdgeInsets.only(bottom: HSpace.md),
+          decoration: BoxDecoration(
+            color: h.surface,
+            borderRadius: BorderRadius.circular(HRadius.lg),
+            border: Border.all(color: h.border),
+          ),
+          child: Padding(
+            padding: const EdgeInsets.fromLTRB(
+                HSpace.lg, HSpace.md, HSpace.sm, HSpace.md),
+            child: Row(
+              children: [
+                Container(
+                  width: 7,
+                  height: 7,
+                  decoration: BoxDecoration(
+                    color: ready ? HColors.successOn(h.dark) : h.textFaint,
+                    shape: BoxShape.circle,
+                  ),
+                ),
+                const SizedBox(width: HSpace.md),
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        'JEV 决策引擎',
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: TextStyle(
+                          fontSize: 14.5,
+                          fontWeight: FontWeight.w500,
+                          color: h.text,
+                        ),
+                      ),
+                      const SizedBox(height: 2),
+                      Text(
+                        '来源 ${config.source.label} · $status',
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: TextStyle(fontSize: 11.5, color: h.textFaint),
+                      ),
+                    ],
+                  ),
+                ),
+                CupertinoButton(
+                  onPressed: widget.onEdit,
+                  minimumSize: const Size(0, 36),
+                  padding: const EdgeInsets.symmetric(horizontal: HSpace.sm),
+                  foregroundColor: h.text,
+                  child: const Text('编辑', style: TextStyle(fontSize: 12.5)),
+                ),
+              ],
+            ),
+          ),
+        );
+      },
     );
   }
 }
