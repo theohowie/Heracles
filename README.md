@@ -193,6 +193,7 @@ Heracles/
 │   ├── test/         组件测试
 │   └── android/      Android 壳 + Kotlin 设备桥（DeviceFs / DeviceShell / Shizuku / 构建服务）
 ├── core/             编排框架源码（vendored，上游 memex-lab/dart_agent_core 的裁剪副本）
+├── sandbox/          独立端侧执行沙箱（fork 自 taixu / baicodex / tianxuan，GPL-3.0，见 THIRD_PARTY_NOTICES.md）
 ├── docs/             对外文档：设计语言(DESIGN.md) + 前后端接口契约(INTERFACE.md / 接口.md)
 ├── THIRD_PARTY_NOTICES.md  第三方代码的版权与许可声明
 └── LICENSE           GPL-3.0（`core/` 为 MIT，见 THIRD_PARTY_NOTICES.md）
