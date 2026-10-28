@@ -335,63 +335,85 @@ class _GitHubRepoSheetState extends State<_GitHubRepoSheet> {
             ],
 
             // ---- 列表 ----
-            if (_loading)
-              Padding(
-                padding: const EdgeInsets.symmetric(vertical: HSpace.lg),
-                child: Row(mainAxisAlignment: MainAxisAlignment.center, children: [
-                  SizedBox(
-                    width: 15,
-                    height: 15,
-                    child: CircularProgressIndicator(
-                        strokeWidth: 2, color: h.accent),
-                  ),
-                  const SizedBox(width: HSpace.sm),
-                  Text('正在读取你的仓库…',
-                      style: TextStyle(fontSize: 13, color: h.textDim)),
-                ]),
-              )
-            else if (_error != null)
-              Padding(
-                padding: const EdgeInsets.symmetric(vertical: HSpace.md),
-                child: Column(children: [
-                  Text(_error!,
-                      textAlign: TextAlign.center,
-                      style: TextStyle(
-                          fontSize: 13, color: h.textDim, height: 1.5)),
-                  const SizedBox(height: HSpace.sm),
-                  TextButton(
-                    onPressed: _load,
-                    child: Text('重试',
-                        style: TextStyle(fontSize: 14, color: h.accent)),
-                  ),
-                ]),
-              )
-            else if (_visible.isEmpty)
-              Padding(
-                padding: const EdgeInsets.symmetric(vertical: HSpace.lg),
-                child: Text(
-                  '没有匹配「$_query」的仓库',
-                  textAlign: TextAlign.center,
-                  style: TextStyle(fontSize: 13, color: h.textDim),
-                ),
-              )
-            else
-              // ★ 列表限高：面板本身不会长太高，列表内部滚动。
-              //   高度取 360 是「大约一屏能看 5~6 个仓库」，再多就该滚了。
-              ConstrainedBox(
-                constraints: const BoxConstraints(maxHeight: 360),
-                child: ListView.separated(
-                  shrinkWrap: true,
-                  padding: EdgeInsets.zero,
-                  itemCount: _visible.length,
-                  separatorBuilder: (_, _) => Divider(
-                    height: 1,
-                    thickness: 1,
-                    color: h.border,
-                  ),
-                  itemBuilder: (_, i) => _repoRow(h, _visible[i]),
-                ),
-              ),
+            //
+            // ★ 高度**恒定 360dp**（2026-10-28 真机 bug，与连接面板同一类）
+            //
+            // `BwSheetShell` 的高度在**首帧**量一次就定死。第一版让
+            // 「加载中」只画一行 spinner（≈60dp），列表出来后变高
+            // ⇒ **面板高度没跟着长，列表被裁到屏幕外**。
+            //
+            // 真机现象：同一个面板，有时从 y≈830 开始（列表先到），
+            // 有时从 y≈1530 开始（先量到加载态）—— 后一种情况下
+            // **大部分仓库看不见、也点不到**（点击落在面板外面）。
+            //
+            // ⇒ 加载态/错误态/空态**都占同样的高度**，首帧高度 = 最终高度。
+            SizedBox(
+              height: 360,
+              child: _loading
+                  ? Center(
+                      child: Row(
+                        mainAxisAlignment: MainAxisAlignment.center,
+                        children: [
+                          SizedBox(
+                            width: 15,
+                            height: 15,
+                            child: CircularProgressIndicator(
+                                strokeWidth: 2, color: h.accent),
+                          ),
+                          const SizedBox(width: HSpace.sm),
+                          Text('正在读取你的仓库…',
+                              style:
+                                  TextStyle(fontSize: 13, color: h.textDim)),
+                        ],
+                      ),
+                    )
+                  : _error != null
+                      ? Center(
+                          child: Column(
+                            mainAxisAlignment: MainAxisAlignment.center,
+                            children: [
+                              Padding(
+                                padding: const EdgeInsets.symmetric(
+                                    horizontal: HSpace.md),
+                                child: Text(
+                                  _error!,
+                                  textAlign: TextAlign.center,
+                                  style: TextStyle(
+                                      fontSize: 13,
+                                      color: h.textDim,
+                                      height: 1.5),
+                                ),
+                              ),
+                              const SizedBox(height: HSpace.sm),
+                              TextButton(
+                                onPressed: _load,
+                                child: Text('重试',
+                                    style: TextStyle(
+                                        fontSize: 14, color: h.accent)),
+                              ),
+                            ],
+                          ),
+                        )
+                      : _visible.isEmpty
+                          ? Center(
+                              child: Text(
+                                '没有匹配「$_query」的仓库',
+                                textAlign: TextAlign.center,
+                                style: TextStyle(
+                                    fontSize: 13, color: h.textDim),
+                              ),
+                            )
+                          : ListView.separated(
+                              padding: EdgeInsets.zero,
+                              itemCount: _visible.length,
+                              separatorBuilder: (_, _) => Divider(
+                                height: 1,
+                                thickness: 1,
+                                color: h.border,
+                              ),
+                              itemBuilder: (_, i) => _repoRow(h, _visible[i]),
+                            ),
+            ),
             const SizedBox(height: HSpace.sm),
 
             // ---- 计数（如实说明只拉了最近 100 个）----

@@ -171,12 +171,52 @@ class _ChatScreenState extends State<ChatScreen> {
       _githubRepoName = choice.repo.name;
       _gitRepoPath = choice.localPath;
     });
-    showIosToast(
-      context,
-      choice.isLocal
-          ? '已选择 ${choice.repo.name}'
-          : '已选择 ${choice.repo.name}（本地还没有，点行尾 ↓ 下载）',
-    );
+    // 持久化：否则每次开 App 都得重选一次（2026-10-28）
+    unawaited(_saveSelectedRepo(choice.repo.name, choice.localPath));
+    // ⚠️ **这里刻意不弹 toast**（2026-10-28 用户反馈「上面怎么还有气泡通知」）。
+    //
+    // 选中仓库的效果**已经直接显示在界面上了**：顶部标题栏和底部信息条
+    // 第一格都变成仓库名。再弹一个顶部气泡是重复告知，而且挡住内容。
+    //
+    // 唯一需要额外说明的是"本地还没有下载" —— 那件事放在「选择分支」面板里
+    // 说（用户点进去才需要知道能不能操作），不在这里打断他。
+  }
+
+  // ---- 已选仓库的持久化（2026-10-28）----
+  //
+  // 为什么存：选中仓库是**跨会话的用户意图**，不是临时状态。
+  // 不存的话每次冷启动都退回「工作区」，用户以为自己的选择丢了。
+  //
+  // 存两个值（名字 + 路径）：名字给 UI 显示，路径给 git 面板用。
+  // 路径为空的旧数据直接忽略，不让它产生半残状态。
+  static const _kRepoName = 'github.selectedRepo.name';
+  static const _kRepoPath = 'github.selectedRepo.path';
+
+  Future<void> _saveSelectedRepo(String name, String path) async {
+    try {
+      final sp = await SharedPreferences.getInstance();
+      await sp.setString(_kRepoName, name);
+      await sp.setString(_kRepoPath, path);
+    } catch (_) {
+      // 存不下不影响本次使用（只是下次要重选）
+    }
+  }
+
+  Future<void> _restoreSelectedRepo() async {
+    try {
+      final sp = await SharedPreferences.getInstance();
+      final name = sp.getString(_kRepoName);
+      final path = sp.getString(_kRepoPath);
+      if (name == null || name.isEmpty) return;
+      if (path == null || path.isEmpty) return;
+      if (!mounted) return;
+      setState(() {
+        _githubRepoName = name;
+        _gitRepoPath = path;
+      });
+    } catch (_) {
+      // 读不到就当没选过
+    }
   }
 
   /// 读已连接的账号（启动时 / 下拉刷新时调）。
@@ -675,6 +715,7 @@ class _ChatScreenState extends State<ChatScreen> {
     // ★ 2026-10-28：读 GitHub 连接状态（见 _githubAccount 的注释 ——
     //   不读的话底部永远显示「连接 Github」，即使已经连上了）
     unawaited(_loadGitHubAccount());
+    unawaited(_restoreSelectedRepo());
     _restoreView();
     unawaited(_reload().then((_) => _consumePendingOpenSession()));
   }
@@ -856,7 +897,15 @@ class _ChatScreenState extends State<ChatScreen> {
     return null;
   }
 
-  String get _workspaceName => _activeWorkspace?.name ?? '未选择工作区';
+  /// 顶部标题栏的名字（无会话时显示）。
+  ///
+  /// ## 2026-10-28：选中 GitHub 仓库后显示**仓库名**
+  ///
+  /// 用户原话：「然后下面的显示仓库名」。底部信息条已经改了，
+  /// 顶部这一处也一起改 —— 两处显示同一个名字，用户才不会疑惑
+  /// "我到底在哪个项目里"。没选仓库时退回工作区名（原行为不变）。
+  String get _workspaceName =>
+      _githubRepoName ?? _activeWorkspace?.name ?? '未选择工作区';
 
   // ------------------------------------------------------------ 工作区操作
 

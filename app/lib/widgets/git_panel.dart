@@ -23,6 +23,7 @@
 library;
 
 import 'dart:async';
+import 'dart:io';
 
 import 'package:flutter/cupertino.dart';
 import 'package:flutter/material.dart';
@@ -74,6 +75,11 @@ class _GitPanelState extends State<_GitPanel> {
   bool _loading = true;
   String? _error;
 
+  /// 本地还没有这个仓库（选了一个 GitHub 仓库但没下载）。
+  ///
+  /// 与"不是仓库"区分：那种情况该问 init，这种情况该让用户回去下载。
+  bool _notCloned = false;
+
   /// 是不是 git 仓库（否则显示"初始化"引导）。
   bool _isRepo = false;
 
@@ -114,10 +120,29 @@ class _GitPanelState extends State<_GitPanel> {
       _error = null;
     });
     try {
+      // ★ 先分清两件完全不同的事（2026-10-28）：
+      //   · **目录不存在** ⇒ 用户选了一个 GitHub 仓库但还没下载
+      //     （选仓库时我们刻意不自动克隆，见 `github_repo_sheet.dart`）
+      //   · **目录存在但不是仓库** ⇒ 真的该问他要不要 init
+      //
+      // 不区分的话，"选了没下载的仓库"会看到「初始化 git 仓库」按钮 ——
+      // 那个按钮点下去会失败（目录都不存在），是误导。
+      if (!Directory(widget.workspacePath).existsSync()) {
+        setState(() {
+          _isRepo = false;
+          _loading = false;
+          _notCloned = true;
+          _statusText = '本地还没有这个仓库。';
+          _dirty = false;
+          _branch = '';
+        });
+        return;
+      }
       final isRepo = await _git.isRepository(widget.workspacePath);
       if (!isRepo) {
         setState(() {
           _isRepo = false;
+          _notCloned = false;
           _loading = false;
           _statusText = '这个工作区还不是 git 仓库。';
           _dirty = false;
@@ -437,6 +462,8 @@ class _GitPanelState extends State<_GitPanel> {
                 ])
               else if (_error != null)
                 _errorRow(h, _error!)
+              else if (_notCloned)
+                _notClonedPrompt(h)
               else if (!_isRepo)
                 _initPrompt(h)
               else
@@ -463,6 +490,28 @@ class _GitPanelState extends State<_GitPanel> {
           Expanded(
             child: Text(msg,
                 style: TextStyle(fontSize: 13.5, color: h.text, height: 1.5)),
+          ),
+        ],
+      );
+
+  /// 选中了 GitHub 仓库但**本地还没下载**时的提示。
+  ///
+  /// 为什么不能直接给「初始化」按钮：那个目录根本不存在，
+  /// 点下去必然失败（"目录不存在"），属于**误导性按钮**。
+  /// 这里如实说明现状 + 告诉用户去哪下载。
+  Widget _notClonedPrompt(Hue h) => Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          Text(
+            '本地还没有这个仓库。',
+            style: TextStyle(
+                fontSize: 14, fontWeight: FontWeight.w600, color: h.text),
+          ),
+          const SizedBox(height: HSpace.xs),
+          Text(
+            '回到「选择仓库」，点这个仓库右侧的 ↓ 下载图标即可。'
+            '下载完成后回来这里就能切分支、提交。',
+            style: TextStyle(fontSize: 13, color: h.textDim, height: 1.55),
           ),
         ],
       );
