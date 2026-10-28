@@ -53,6 +53,7 @@ import 'package:url_launcher/url_launcher.dart';
 import '../services/github_auth.dart';
 import '../services/github_config.dart';
 import '../theme/app_theme.dart';
+import '../theme/cupertino_kit.dart';
 import '../widgets/bw_approval.dart';
 
 /// 弹出「连接 Github」抽屉。
@@ -321,8 +322,10 @@ class _GitHubConnectSheetState extends State<_GitHubConnectSheet> {
                 : () async {
                     await Clipboard.setData(
                         ClipboardData(text: info.userCode));
-                    // 静默：码下方那行本来就写着「已自动复制 · 点码可再复制」
-                    if (mounted) setState(() => _copied = true);
+                    if (mounted) {
+                      setState(() => _copied = true);
+                      showIosToast(context, '已复制验证码');
+                    }
                   },
             child: Container(
               padding: const EdgeInsets.symmetric(vertical: 14),

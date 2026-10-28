@@ -454,6 +454,19 @@ class _GitPanelState extends State<_GitPanel> {
     await _refresh();
   }
 
+  /// 从远端拉取（只做快进，不自动合并 —— 见 `GitService.pull` 的注释）。
+  Future<void> _pull() async {
+    final token = await _auth.readToken();
+    if (token == null || token.isEmpty) {
+      _say('先连接 Github 才能拉取', error: true);
+      return;
+    }
+    await _run(
+      () => _git.pull(widget.workspacePath, token: token),
+      successToast: '已拉取',
+    );
+  }
+
   Future<void> _push() async {
     final token = await _auth.readToken();
     if (token == null || token.isEmpty) {
@@ -895,11 +908,23 @@ class _GitPanelState extends State<_GitPanel> {
 
         // ---- 推送 ----
         const SizedBox(height: HSpace.md),
-        OutlinedButton.icon(
-          onPressed: _busy ? null : _push,
-          icon: const Icon(CupertinoIcons.cloud_upload, size: 16),
-          label: const Text('推送到 GitHub'),
-        ),
+        Row(children: [
+          Expanded(
+            child: OutlinedButton.icon(
+              onPressed: _busy ? null : _pull,
+              icon: const Icon(CupertinoIcons.cloud_download, size: 16),
+              label: const Text('拉取'),
+            ),
+          ),
+          const SizedBox(width: HSpace.sm),
+          Expanded(
+            child: OutlinedButton.icon(
+              onPressed: _busy ? null : _push,
+              icon: const Icon(CupertinoIcons.cloud_upload, size: 16),
+              label: const Text('推送'),
+            ),
+          ),
+        ]),
         const SizedBox(height: HSpace.xs),
         Text(
           '推送会把本地提交发到远端仓库。首次推送会自动把当前分支设为上游。',

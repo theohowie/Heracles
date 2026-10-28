@@ -354,6 +354,35 @@ class _ChatScreenState extends State<ChatScreen> {
       return;
     }
 
+    // 「新建分支」：弹文本输入（复用既有 showBwTextInputSheet）
+    if (picked == gitBranchSheetCreate) {
+      var local2 = false;
+      try {
+        local2 = await git.isRepository(target);
+      } catch (_) {}
+      if (!mounted) return;
+      if (!local2) {
+        showIosToast(context, '这个仓库还没下载到手机');
+        return;
+      }
+      final name = await showBwTextInputSheet(
+        context,
+        title: '新建分支',
+        placeholder: '分支名，例如 feature/login',
+        confirmLabel: '创建并切换',
+      );
+      if (name == null || name.trim().isEmpty || !mounted) return;
+      final r2 = await git.checkout(target, branch: name.trim(), create: true);
+      if (!mounted) return;
+      if (r2 is CapabilityFailure) {
+        showIosToast(context, r2.reason);
+      } else {
+        showIosToast(context, '已创建并切到 ${name.trim()}');
+      }
+      unawaited(_refreshGitBranch());
+      return;
+    }
+
     // 本地仓库才真切换；远端分支只提示先下载
     var local = false;
     try {
@@ -374,6 +403,10 @@ class _ChatScreenState extends State<ChatScreen> {
     if (picked == _gitBranch) return;
     final r = await git.checkout(target, branch: picked);
     if (!mounted) return;
+    if (r is CapabilitySuccess) {
+      // 面板已关闭 ⇒ 用轻提示确认（2026-10-28 起 showIosToast 是毛玻璃胶囊）
+      showIosToast(context, '已切换到 $picked');
+    }
     if (r is CapabilityFailure) {
       // 不弹气泡：打开版本控制面板，把原因内联显示在那里
       // （切分支失败通常是"有未提交改动"，面板里正好能看到脏状态）

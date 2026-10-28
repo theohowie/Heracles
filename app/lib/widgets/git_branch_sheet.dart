@@ -52,6 +52,9 @@ import '../widgets/bw_approval.dart';
 /// 顺序确定。同时 `null` 仍然表示"用户取消"，语义不混。
 const String gitBranchSheetAdvanced = '\u0000advanced';
 
+/// 「新建分支」被点中时的哨兵。
+const String gitBranchSheetCreate = '\u0000create';
+
 /// 弹出「选择分支」面板。
 ///
 /// @param loader 异步取分支名（本地读仓库 / 远端打 API 都行）
@@ -261,9 +264,27 @@ class _GitBranchSheetState extends State<_GitBranchSheet> {
                         ),
             ),
 
+            // ---- 新建分支（与 Trae 的分支面板对齐：列表下方收敛成一个动作）----
+            const SizedBox(height: HSpace.xs),
+            Divider(height: 1, thickness: 1, color: h.border),
+            InkWell(
+              onTap: () => Navigator.of(context).pop(gitBranchSheetCreate),
+              child: Padding(
+                padding: const EdgeInsets.symmetric(vertical: 15),
+                child: Row(
+                  mainAxisAlignment: MainAxisAlignment.center,
+                  children: [
+                    Icon(CupertinoIcons.add, size: 15, color: h.accent),
+                    const SizedBox(width: HSpace.xs),
+                    Text('新建分支',
+                        style: TextStyle(fontSize: 14, color: h.accent)),
+                  ],
+                ),
+              ),
+            ),
+
             // ---- 提交 / 推送入口（第三格直接开本面板后必须有的出口）----
             if (widget.onAdvanced != null) ...[
-              const SizedBox(height: HSpace.xs),
               Divider(height: 1, thickness: 1, color: h.border),
               InkWell(
                 onTap: () => Navigator.of(context).pop(gitBranchSheetAdvanced),
