@@ -14,6 +14,8 @@ import '../services/agent_bridge.dart';
 import '../services/global_memory.dart';
 import '../services/jev_service.dart';
 import '../services/settings_controller.dart';
+import '../services/sandbox_service.dart';
+import 'sandbox_screen.dart';
 import '../theme/app_theme.dart';
 import '../theme/cupertino_kit.dart';
 import '../theme/elastic_switch.dart';
@@ -72,6 +74,9 @@ class SettingsScreen extends StatelessWidget {
               ),
               _DevicePermissionEntry(
                 onOpen: () => _push(context, const DevicePermissionPage()),
+              ),
+              _SandboxEntry(
+                onOpen: () => _push(context, const SandboxScreen()),
               ),
               if (archivedCountLoader != null && onOpenArchived != null)
                 _ArchivedEntry(
@@ -878,6 +883,48 @@ Widget _iosBackLeading(BuildContext context) => IconButton(
 /// **已归档对话入口**（2026-10-27）—— 与「全局记忆」同一形态：
 /// 主页一行 + 数量徽章，列表在二级页；从二级页返回后重读一次
 /// 数量（用户可能刚取消归档或删了几条，徽章得跟着变）。
+/// **沙箱入口**（2026-10-28）：副行如实显示激活状态，
+/// 与设备权限入口同一形态。沙箱页只是管理面（激活/状态/挂载/
+/// 通道/重置）—— 执行在对话的工具卡里看，见 [SandboxScreen]。
+class _SandboxEntry extends StatefulWidget {
+  const _SandboxEntry({required this.onOpen});
+
+  final VoidCallback onOpen;
+
+  @override
+  State<_SandboxEntry> createState() => _SandboxEntryState();
+}
+
+class _SandboxEntryState extends State<_SandboxEntry> {
+  bool? _installed;
+
+  @override
+  void initState() {
+    super.initState();
+    _refresh();
+  }
+
+  Future<void> _refresh() async {
+    final st = await SandboxService().status();
+    if (!mounted) return;
+    setState(() => _installed = st.installed);
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return _HomeCard(
+      title: '沙箱',
+      subtitle: _installed == null
+          ? '内置 Linux 环境'
+          : (_installed! ? '内置 Linux 环境 · 已激活' : '内置 Linux 环境 · 未激活'),
+      onTap: () async {
+        widget.onOpen();
+        _refresh();
+      },
+    );
+  }
+}
+
 class _ArchivedEntry extends StatefulWidget {
   const _ArchivedEntry({required this.countOf, required this.onOpen});
 

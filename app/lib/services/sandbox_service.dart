@@ -346,6 +346,18 @@ class SandboxService {
     return _statusFrom(raw);
   }
 
+  /// 重置沙箱：**整块回滚** —— 清掉 rootfs 回到未激活态（前端
+  /// 2026-10-28 补的薄封装：§8 把「整块回滚」写成沙箱的核心卖点，
+  /// 但客户端一直没有这个方法，设置页的「重置沙箱」落不了地）。
+  ///
+  /// ⚠️ 宿主侧若尚未实现 `reset`，通道调用会被收敛成失败形状，
+  /// 返回的状态仍是重置前状态 —— 调用方**必须**核对返回的
+  /// `installed` 是否真的变回 false，不要盲目报成功。
+  Future<SandboxStatus> reset() async {
+    final raw = await _client.call('reset');
+    return _statusFrom(raw);
+  }
+
   // -------------------------------------------------------------- 执行
 
   /// 在沙箱 rootfs 内执行命令。

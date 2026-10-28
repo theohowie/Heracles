@@ -83,6 +83,22 @@ class _StreamStepViewState extends State<StreamStepView> {
     return d != StepDetail.minimal;
   }
 
+  /// 思考区自己的开关（2026-10-28，用户拍板）：思考不做卡片，
+  /// 点「思考」两个字展开、再点一次收起。null = 没点过 →
+  /// 流式中默认展开（看它逐字出），结束后默认收起。
+  bool? _reasoningUserExpanded;
+
+  final ScrollController _reasoningScroll = ScrollController();
+
+  bool get _reasoningExpanded =>
+      _reasoningUserExpanded ?? !widget.step.finished;
+
+  @override
+  void dispose() {
+    _reasoningScroll.dispose();
+    super.dispose();
+  }
+
   @override
   Widget build(BuildContext context) {
     final h = Hue.of(context);
@@ -458,37 +474,74 @@ class _StreamStepViewState extends State<StreamStepView> {
   /// ⚠️ 不做 Markdown：思考内容里常出现 `*`、`#`、`` ` ``，
   /// 逐字过程中把它们渲染成格式会让文字**跳来跳去**。
   Widget _reasoning(Hue h) {
+    final expanded = _reasoningExpanded;
+    // 流式中贴底跟随：用户没滚开时，新出的思考自动跟上；
+    // 用户已经往上滚了就不抢（差值 >60 视为在回看）。
+    if (expanded && !widget.step.finished) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (!mounted || !_reasoningScroll.hasClients) return;
+        final pos = _reasoningScroll.position;
+        if (pos.maxScrollExtent - pos.pixels < 60) {
+          _reasoningScroll.jumpTo(pos.maxScrollExtent);
+        }
+      });
+    }
     return Padding(
       // 缩进到标题行标签起点（23），与工具行明细同一左线
       padding: const EdgeInsets.only(left: 23),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          Row(
-            children: [
-              Icon(AppIcons.think, size: 13, color: h.textFaint),
-              const SizedBox(width: HSpace.xs + 1),
-              Text(
-                '思考过程',
-                style: TextStyle(
-                  fontSize: 10.5,
-                  color: h.textFaint,
-                  letterSpacing: 0.4,
-                ),
+          // 开关就是「思考」两个字本身（用户拍板：无卡片、无收起按钮）
+          GestureDetector(
+            onTap: () =>
+                setState(() => _reasoningUserExpanded = !expanded),
+            behavior: HitTestBehavior.opaque,
+            child: Padding(
+              padding: const EdgeInsets.symmetric(vertical: 2),
+              child: Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Icon(AppIcons.think, size: 13, color: h.textFaint),
+                  const SizedBox(width: HSpace.xs + 1),
+                  Text(
+                    '思考',
+                    style: TextStyle(
+                      fontSize: 12,
+                      fontWeight: FontWeight.w500,
+                      color: h.textDim,
+                    ),
+                  ),
+                ],
               ),
-            ],
-          ),
-          const SizedBox(height: HSpace.xs),
-          Text(
-            widget.step.reasoning,
-            // **只做轻量装饰，不做 Markdown**：思考是过程，不是成品
-            style: TextStyle(
-              fontSize: 12.5,
-              height: 1.55,
-              fontStyle: FontStyle.italic,
-              color: h.textDim,
             ),
           ),
+          if (expanded) ...[
+            const SizedBox(height: HSpace.xs),
+            // 限高内滚：上限不标注、不显示数字；手指在思考区
+            // 滚思考，滚到头才带动会话（嵌套滚动竞技场天然如此）。
+            ConstrainedBox(
+              constraints: const BoxConstraints(maxHeight: 240),
+              child: Scrollbar(
+                controller: _reasoningScroll,
+                thickness: 3,
+                radius: const Radius.circular(2),
+                child: SingleChildScrollView(
+                  controller: _reasoningScroll,
+                  child: Text(
+                    widget.step.reasoning,
+                    // **只做轻量装饰，不做 Markdown**：思考是过程，不是成品
+                    style: TextStyle(
+                      fontSize: 12.5,
+                      height: 1.55,
+                      fontStyle: FontStyle.italic,
+                      color: h.textDim,
+                    ),
+                  ),
+                ),
+              ),
+            ),
+          ],
         ],
       ),
     );

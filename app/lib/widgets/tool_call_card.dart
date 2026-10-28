@@ -1,6 +1,7 @@
 import 'dart:convert';
 
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 
 import '../models/message.dart';
 import '../models/settings.dart';
@@ -401,6 +402,98 @@ const Set<String> kFileWritingTools = {
 /// 这次调用是否"会改文件"（决定要不要给 diff 入口）。
 bool isFileWritingTool(String tool) => kFileWritingTools.contains(tool);
 
+// ============================================================
+// ★★ 命令卡（2026-10-28，用户逐版对 HTML 预览拍板）★★
+//
+// ## 定调（先说清为什么只有命令工具长这样）
+//
+// 沙箱与手机 Shell 是 agent 的两条并行执行面：激活沙箱后命令
+// **默认全走沙箱**，只有沙箱做不了的（动 Android 本身）才落手机
+// Shell。没有独立的执行界面 —— 用户看执行，就在对话的工具卡里。
+// 所以命令类工具的展开态是一张专门的**双层卡**：
+//
+// · 上层 = 命令，下层 = 结果；**执行中只有上层**，结果层等
+//   `tool_finished` 才出现；
+// · **无标题行、无「命令/结果」标签**：退出码与复制**悬浮**在
+//   卡片右上角，不独占一行；
+// · 命令第一行 = **状态点 + 执行面名**（`SandBox` / `Shell`，
+//   点：成功绿 / 失败红 / 执行中黄），命令紧贴其后一个字符位；
+//   第 2 行起左侧是**行号**（进到执行面名开头的位置），命令
+//   紧贴行号 —— 不设统一代码列；
+// · 两层高度按 **6:4** 分上限（命令 168 / 结果 112），内容不到
+//   上限按实际高度；超出在卡内滚动（细滑轮）；长行**不换行**、
+//   横向滑；两层滚动内容末尾留让位空白，滑到底时末尾文字能
+//   完整滑出悬浮按钮下方；
+// · **不显示执行时间**。
+// ============================================================
+
+/// 命令的执行面（决定卡内第一行的名字与标题行文案）。
+enum CommandSurface {
+  sandbox('SandBox', '沙箱'),
+  shell('Shell', '手机');
+
+  const CommandSurface(this.cardName, this.zhName);
+
+  /// 卡内第一行、状态点后面的名字（用户指定拼写：SandBox / Shell）。
+  final String cardName;
+
+  /// 标题行文案用：「在沙箱/在手机执行了命令」。
+  final String zhName;
+}
+
+/// 命令层高度上限（与结果层 112 按 6:4 分，总预算 280）。
+const double kCommandLayerMaxHeight = 168;
+
+/// 结果层高度上限。
+const double kResultLayerMaxHeight = 112;
+
+/// 两层滚动内容末尾的让位空白 ≈ 悬浮「退出码 + 复制」的宽度，
+/// 保证滑到底时末尾文字不被悬浮按钮永久压住。
+const double kCommandEndClearance = 136;
+
+/// 这次命令在哪个执行面跑；判不出（不是命令类工具）返回 null。
+///
+/// 今天只有手机 Shell 真接了工具（`run_shell_command`）；沙箱侧等
+/// 后端把沙箱接进工具链后，按它登记的形状点亮 —— 判据按宽容顺序：
+/// 工具名含 sandbox，或参数里带 `surface` / `executor` 标记。
+CommandSurface? commandSurfaceOf(HToolCall call) {
+  final marker = (call.args['surface'] ?? call.args['executor'] ?? '')
+      .toLowerCase();
+  if (marker.contains('sandbox')) return CommandSurface.sandbox;
+  if (marker.contains('shell')) return CommandSurface.shell;
+  if (call.tool.toLowerCase().contains('sandbox')) {
+    return CommandSurface.sandbox;
+  }
+  if (call.tool == 'run_shell_command') return CommandSurface.shell;
+  return null;
+}
+
+/// 命令类工具的标题行文案（取代通用 `toolCallLabel` 的「动词+目标」，
+/// 命令全文在卡里，标题行只说在哪执行的）。
+String commandRowTitle(CommandSurface surface, ToolStatus status) {
+  final base = switch (status) {
+    ToolStatus.running => '正在${surface.zhName}执行命令',
+    _ => '在${surface.zhName}执行了命令',
+  };
+  return status == ToolStatus.failure ? '$base（失败）' : base;
+}
+
+/// 退出码（给悬浮 chip 用）；判不出返回 null（不显示 chip）。
+///
+/// · 成功 ⇒ 0；
+/// · 失败 ⇒ 从结果文本里解析后端附的「命令退出码：N」（手机 Shell
+///   的 `DeviceShellCapability` 与后端 `ProcessShellCapability`
+///   都是这个格式）；解析不到就不显示 —— 等后端把退出码给成
+///   结构化字段后，这里换成直读。
+int? commandExitCodeOf(HToolCall call) {
+  if (call.status == ToolStatus.success) return 0;
+  if (call.status != ToolStatus.failure) return null;
+  final r = call.result;
+  if (r == null) return null;
+  final m = RegExp(r'命令退出码：\s*(-?\d+)').firstMatch(r);
+  return m == null ? null : int.tryParse(m.group(1)!);
+}
+
 /// 把改动统计成 `+N −M`（2026-10-21，BUG-4）。
 ///
 /// ## 数据从哪来
@@ -589,6 +682,21 @@ class _ToolCallCardState extends State<ToolCallCard> {
   /// 但**入口必须永远看得见**（"点击查看改动" + `+N −M`）。
   bool _diffExpanded = false;
 
+  // 命令卡两层的滚动控制器（仅命令类工具用，见 `_commandCard`）。
+  final ScrollController _cmdV = ScrollController();
+  final ScrollController _cmdH = ScrollController();
+  final ScrollController _resV = ScrollController();
+  final ScrollController _resH = ScrollController();
+
+  @override
+  void dispose() {
+    _cmdV.dispose();
+    _cmdH.dispose();
+    _resV.dispose();
+    _resH.dispose();
+    super.dispose();
+  }
+
   @override
   Widget build(BuildContext context) {
     final h = Hue.of(context);
@@ -622,6 +730,9 @@ class _ToolCallCardState extends State<ToolCallCard> {
         isFileWritingTool(call.tool) && call.status != ToolStatus.failure
             ? _stat(call)
             : null;
+
+    // 命令类工具（沙箱 / 手机 Shell）走专门的标题行文案与双层卡。
+    final surface = commandSurfaceOf(call);
 
     return Container(
       margin: const EdgeInsets.only(bottom: HSpace.xs),
@@ -660,12 +771,16 @@ class _ToolCallCardState extends State<ToolCallCard> {
                         //   `读取 app/lib/services/local_agent.dart`
                         //   `执行了命令 echo hi > c.txt`
                         //   失败时末尾带「（失败）」—— 不再单列一个"成功"字样占宽。
-                        toolCallLabel(
-                          call.tool,
-                          call.args,
-                          running: call.status == ToolStatus.running,
-                          failed: call.status == ToolStatus.failure,
-                        ),
+                        // ★ 命令类工具（2026-10-28）：命令全文在卡里，
+                        //   标题行只说在哪执行的（见 commandRowTitle）。
+                        surface != null
+                            ? commandRowTitle(surface, call.status)
+                            : toolCallLabel(
+                                call.tool,
+                                call.args,
+                                running: call.status == ToolStatus.running,
+                                failed: call.status == ToolStatus.failure,
+                              ),
                         overflow: TextOverflow.ellipsis,
                         style: TextStyle(
                           // ★ 2026-10-22：工具行字号**小于正文**（12 vs 15），
@@ -679,7 +794,8 @@ class _ToolCallCardState extends State<ToolCallCard> {
                       ),
                     ),
                     // 参数数量退成弱提示（目标已经写进标题了，这里只是"还有几个参数"）
-                    if (call.args.length > 1) ...[
+                    // 命令类工具不画（命令层就是参数本身）。
+                    if (surface == null && call.args.length > 1) ...[
                       const SizedBox(width: HSpace.xs),
                       Text(
                         '+${call.args.length - 1}',
@@ -716,10 +832,20 @@ class _ToolCallCardState extends State<ToolCallCard> {
             Divider(height: 1),
             Padding(
               padding: const EdgeInsets.all(HSpace.md),
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  // ---- 文件改动详情（2026-10-21，BUG-4）----
+              child: surface != null
+                  ? Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        _commandCard(h, call, surface),
+                        // ---- 模型原始输出（仅「完全展开」）----
+                        if (detail.showRawOutput)
+                          _rawOutput(h, call.rawOutput),
+                      ],
+                    )
+                  : Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        // ---- 文件改动详情（2026-10-21，BUG-4）----
                   //
                   // 放在参数**之前**：用户最想看的是"改了什么代码"，
                   // 而不是"调用时传了哪几个参数名"。
@@ -792,6 +918,251 @@ class _ToolCallCardState extends State<ToolCallCard> {
             ),
           ],
         ],
+      ),
+    );
+  }
+
+  // ============================================================
+  // 命令卡（双层）—— 见文件上方 `CommandSurface` 处的定调注释。
+  // ============================================================
+
+  Widget _commandCard(Hue h, HToolCall call, CommandSurface surface) {
+    final running = call.status == ToolStatus.running;
+    final exitCode = commandExitCodeOf(call);
+    final dotColor = switch (call.status) {
+      ToolStatus.success => HColors.successOn(h.dark),
+      ToolStatus.failure => HColors.errorOn(h.dark),
+      ToolStatus.running => HColors.warnOn(h.dark),
+    };
+    return Container(
+      decoration: BoxDecoration(
+        color: h.surface,
+        border: Border.all(color: h.border),
+        borderRadius: BorderRadius.circular(20),
+      ),
+      clipBehavior: Clip.antiAlias,
+      child: Stack(
+        children: [
+          Column(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              _commandLayer(h, call, surface, dotColor),
+              if (running) ...[
+                Divider(height: 1, color: h.border),
+                Padding(
+                  padding:
+                      const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+                  child: Row(
+                    children: [
+                      SizedBox(
+                        width: 13,
+                        height: 13,
+                        child: CircularProgressIndicator(
+                          strokeWidth: 2,
+                          color: h.textDim,
+                        ),
+                      ),
+                      const SizedBox(width: HSpace.sm),
+                      Text(
+                        '执行中… 结果将在完成后出现',
+                        style: TextStyle(fontSize: 12.5, color: h.textDim),
+                      ),
+                    ],
+                  ),
+                ),
+              ] else if (call.result != null) ...[
+                Divider(height: 1, color: h.border),
+                _resultLayer(h, call),
+              ],
+            ],
+          ),
+          // 悬浮工具：退出码 + 复制（不独占一行）
+          Positioned(
+            top: 8,
+            right: 10,
+            child: Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                if (exitCode != null) ...[
+                  _floatPill(
+                    h,
+                    Text(
+                      '退出码 $exitCode',
+                      style: TextStyle(
+                        fontFamily: kMonoFontFamily,
+                        fontFamilyFallback: kMonoFallback,
+                        fontSize: 11.5,
+                        fontWeight: FontWeight.w700,
+                        color: exitCode == 0
+                            ? h.textFaint
+                            : HColors.errorOn(h.dark),
+                      ),
+                    ),
+                  ),
+                  const SizedBox(width: 6),
+                ],
+                GestureDetector(
+                  onTap: () => _copyCommand(call),
+                  behavior: HitTestBehavior.opaque,
+                  child: _floatPill(
+                    h,
+                    Text(
+                      '复制',
+                      style: TextStyle(fontSize: 12, color: h.textDim),
+                    ),
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _floatPill(Hue h, Widget child) {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 9, vertical: 3.5),
+      decoration: BoxDecoration(
+        color: h.surfaceAlt.withValues(alpha: 0.85),
+        border: Border.all(color: h.border),
+        borderRadius: BorderRadius.circular(999),
+      ),
+      child: child,
+    );
+  }
+
+  void _copyCommand(HToolCall call) {
+    final command = call.args['command'] ?? '';
+    final text = call.result == null || call.result!.isEmpty
+        ? command
+        : '$command\n${call.result}';
+    Clipboard.setData(ClipboardData(text: text));
+    showIosToast(context, '已复制');
+  }
+
+  /// 命令层：逐行 = 前缀（首行状态点+执行面名 / 其余行号）+ 命令。
+  /// 纵向限高 168、横向不换行滚动；末尾让位见 [kCommandEndClearance]。
+  Widget _commandLayer(
+      Hue h, HToolCall call, CommandSurface surface, Color dotColor) {
+    final command = (call.args['command'] ?? '').trimRight();
+    final lines = command.isEmpty ? const [''] : command.split('\n');
+    final style = TextStyle(
+      fontFamily: kMonoFontFamily,
+      fontFamilyFallback: kMonoFallback,
+      fontSize: 12.5,
+      height: 1.7,
+      color: h.text,
+    );
+    return ConstrainedBox(
+      constraints: const BoxConstraints(maxHeight: kCommandLayerMaxHeight),
+      child: Scrollbar(
+        controller: _cmdV,
+        thickness: 3,
+        radius: const Radius.circular(2),
+        child: SingleChildScrollView(
+          controller: _cmdV,
+          child: Scrollbar(
+            controller: _cmdH,
+            thickness: 3,
+            radius: const Radius.circular(2),
+            child: SingleChildScrollView(
+              controller: _cmdH,
+              scrollDirection: Axis.horizontal,
+              child: Padding(
+                padding: const EdgeInsets.fromLTRB(
+                    10, 10, kCommandEndClearance, 10),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    for (var i = 0; i < lines.length; i++)
+                      _commandLine(h, i, lines[i], surface, dotColor, style),
+                  ],
+                ),
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _commandLine(Hue h, int index, String line,
+      CommandSurface surface, Color dotColor, TextStyle style) {
+    final prefix = index == 0
+        ? Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Container(
+                width: 8,
+                height: 8,
+                decoration:
+                    BoxDecoration(shape: BoxShape.circle, color: dotColor),
+              ),
+              const SizedBox(width: 6),
+              Text(
+                surface.cardName,
+                style: TextStyle(
+                  fontSize: 12.5,
+                  fontWeight: FontWeight.w600,
+                  color: h.textDim,
+                ),
+              ),
+            ],
+          )
+        : Padding(
+            // 数字进到执行面名开头的位置（点 8 + 间隔 6 = 14）
+            padding: const EdgeInsets.only(left: 14),
+            child: Text(
+              '${index + 1}',
+              style: TextStyle(fontSize: 11, color: h.textFaint),
+            ),
+          );
+    return Row(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        prefix,
+        const SizedBox(width: 8),
+        Text(line.isEmpty ? ' ' : line, style: style),
+      ],
+    );
+  }
+
+  /// 结果层：纵向限高 112、横向不换行滚动，末尾同样让位。
+  Widget _resultLayer(Hue h, HToolCall call) {
+    return ConstrainedBox(
+      constraints: const BoxConstraints(maxHeight: kResultLayerMaxHeight),
+      child: Scrollbar(
+        controller: _resV,
+        thickness: 3,
+        radius: const Radius.circular(2),
+        child: SingleChildScrollView(
+          controller: _resV,
+          child: Scrollbar(
+            controller: _resH,
+            thickness: 3,
+            radius: const Radius.circular(2),
+            child: SingleChildScrollView(
+              controller: _resH,
+              scrollDirection: Axis.horizontal,
+              child: Padding(
+                padding: const EdgeInsets.fromLTRB(
+                    12, 8, kCommandEndClearance, 10),
+                child: Text(
+                  call.result!,
+                  softWrap: false,
+                  style: TextStyle(
+                    fontFamily: kMonoFontFamily,
+                    fontFamilyFallback: kMonoFallback,
+                    fontSize: 12.5,
+                    height: 1.7,
+                    color: h.textDim,
+                  ),
+                ),
+              ),
+            ),
+          ),
+        ),
       ),
     );
   }

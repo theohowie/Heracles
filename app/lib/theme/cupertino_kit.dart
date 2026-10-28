@@ -131,6 +131,7 @@ abstract final class AppIcons {
   static const clock = CupertinoIcons.clock;
   static const bolt = CupertinoIcons.bolt;
   static const terminal = CupertinoIcons.command;
+  static const sandbox = CupertinoIcons.cube_box_fill;
   static const globe = CupertinoIcons.globe;
   static const wifi = CupertinoIcons.wifi;
   static const battery = CupertinoIcons.battery_100;
