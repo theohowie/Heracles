@@ -398,35 +398,56 @@ class _SandboxScreenState extends State<SandboxScreen> {
             if (i > 0) Divider(height: 1, color: h.border),
             Padding(
               padding: const EdgeInsets.symmetric(vertical: 10),
-              child: Row(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                  Expanded(
-                    child: Text(
-                      channels[i].name,
-                      style: TextStyle(fontSize: 13.5, color: h.text),
-                    ),
+                  Row(
+                    children: [
+                      Expanded(
+                        child: Text(
+                          channels[i].name,
+                          style: TextStyle(fontSize: 13.5, color: h.text),
+                        ),
+                      ),
+                      Container(
+                        padding: const EdgeInsets.symmetric(
+                            horizontal: 7, vertical: 2),
+                        decoration: BoxDecoration(
+                          border: Border.all(color: h.border),
+                          borderRadius: BorderRadius.circular(999),
+                        ),
+                        child: Text(
+                          '风险 ${switch (channels[i].risk) { 0 => '低', 1 => '中', _ => '高' }}',
+                          style: TextStyle(fontSize: 11, color: h.textFaint),
+                        ),
+                      ),
+                      const SizedBox(width: HSpace.sm),
+                      Text(
+                        channels[i].available ? '可用' : '不可用',
+                        style: TextStyle(
+                          fontSize: 12.5,
+                          color: channels[i].available
+                              ? h.textDim
+                              : h.textFaint,
+                        ),
+                      ),
+                    ],
                   ),
-                  Container(
-                    padding:
-                        const EdgeInsets.symmetric(horizontal: 7, vertical: 2),
-                    decoration: BoxDecoration(
-                      border: Border.all(color: h.border),
-                      borderRadius: BorderRadius.circular(999),
+                  // 不可用原因是一整句话（如 Shizuku 的授权指引），
+                  // 必须独占一行可换行 —— 2026-10-28 真机实测：与通道名
+                  // 挤在同一行会把名字压成竖排单字并整行溢出。
+                  if (!channels[i].available &&
+                      channels[i].reason.isNotEmpty) ...[
+                    const SizedBox(height: 4),
+                    Text(
+                      channels[i].reason,
+                      style: TextStyle(
+                        fontSize: 12.5,
+                        color: h.textFaint,
+                        height: 1.5,
+                      ),
                     ),
-                    child: Text(
-                      '风险 ${switch (channels[i].risk) { 0 => '低', 1 => '中', _ => '高' }}',
-                      style: TextStyle(fontSize: 11, color: h.textFaint),
-                    ),
-                  ),
-                  const SizedBox(width: HSpace.sm),
-                  Text(
-                    channels[i].available
-                        ? '可用'
-                        : (channels[i].reason.isEmpty
-                            ? '不可用'
-                            : channels[i].reason),
-                    style: TextStyle(fontSize: 12.5, color: h.textFaint),
-                  ),
+                  ],
                 ],
               ),
             ),
