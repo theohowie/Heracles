@@ -10,6 +10,7 @@ import 'package:flutter/rendering.dart' show ScrollDirection;
 import 'package:shared_preferences/shared_preferences.dart';
 
 import '../models/attachment.dart';
+import '../models/jev.dart';
 import '../models/message.dart';
 import '../models/session_usage.dart';
 import '../models/settings.dart';
@@ -17,6 +18,7 @@ import '../models/view_options.dart';
 import '../models/workspace.dart';
 import '../services/agent_bridge.dart';
 import '../services/device_capabilities.dart';
+import '../services/jev_service.dart';
 import '../services/model_context_table.dart';
 import '../services/settings_controller.dart';
 import '../theme/app_theme.dart';
@@ -24,7 +26,9 @@ import '../theme/cupertino_kit.dart';
 import '../theme/pressable.dart';
 import 'settings_screen.dart';
 import 'archived_sessions_screen.dart';
+import 'jev_settings_screen.dart';
 import '../widgets/bw_topbar.dart';
+import '../widgets/decision_panel.dart';
 import '../widgets/bw_usage_sheet.dart';
 import '../widgets/bw_approval.dart';
 import '../widgets/themed_background.dart';
@@ -74,6 +78,16 @@ class _ChatScreenState extends State<ChatScreen> {
   /// **输入框控制器**（2026-10-13，「编辑重发」用）——
   /// 长按用户消息 → 编辑 → 原文写进这里，InputBar 用同一个控制器渲染。
   final TextEditingController _inputCtrl = TextEditingController();
+
+  // ---- JEV 决策模式（2026-10-27 用户定）----
+  //
+  /// 点顶栏 H 图标在工作模式 ⇄ 决策模式间切换（同一主界面变形，
+  /// 不是单独页面）。抽屉改走既有的 200dp 边缘拖动与信息条
+  /// 工作区名点按，不受影响。决策状态由 App 级单例持有，
+  /// 切走切回不丢；会话与决策历史各自独立。
+  final _jev = JevController.shared();
+  final TextEditingController _jevInputCtrl = TextEditingController();
+  bool _decisionMode = false;
 
   /// **用户对每条回答的反馈**（2026-10-13）—— 消息 id → 赞/踩。
   ///
@@ -406,6 +420,55 @@ class _ChatScreenState extends State<ChatScreen> {
     );
   }
 
+  /// **切换工作/决策模式**（顶栏 H 图标，2026-10-27 用户定）。
+  void _toggleDecisionMode() {
+    setState(() => _decisionMode = !_decisionMode);
+    if (_decisionMode) unawaited(_jev.load());
+  }
+
+  /// 打开 JEV 配置页；回来后刷新顶栏状态行（来源/就绪状态可能变了）。
+  Future<void> _openJevSettings() async {
+    await Navigator.of(context).push(MaterialPageRoute(
+      builder: (_) => JevSettingsScreen(jev: _jev),
+    ));
+    if (mounted) setState(() {});
+  }
+
+  /// 决策模式的顶栏右列：引擎来源 + 就绪状态（与 [_topMetrics]
+  /// 同版式）。状态口径：云端填好地址 = 就绪；本地引擎未接入
+  /// 如实写「未接入」，不假装能跑。
+  Widget _jevTopStatus(Hue h) {
+    final source = _jev.config.source;
+    final (statusText, ready) = switch (source) {
+      JevSource.cloud =>
+        _jev.config.cloudReady ? ('就绪', true) : ('未配置', false),
+      JevSource.local08 || JevSource.local2b => ('未接入', false),
+    };
+    return Container(
+      width: 108,
+      padding: const EdgeInsets.only(right: 14),
+      child: Column(
+        mainAxisAlignment: MainAxisAlignment.center,
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          TopMetricLine(
+            label: '引擎',
+            valueText: source.shortLabel,
+            ratio: null,
+            color: h.textFaint,
+          ),
+          const SizedBox(height: 6),
+          TopMetricLine(
+            label: '状态',
+            valueText: statusText,
+            ratio: ready ? 1.0 : null,
+            color: ready ? const Color(0xFF16A34A) : h.textFaint,
+          ),
+        ],
+      ),
+    );
+  }
+
   /// 当前实时订阅归属的运行。`null` = 没有正在收事件的运行。
   _RunOrigin? _liveOrigin;
 
@@ -531,6 +594,7 @@ class _ChatScreenState extends State<ChatScreen> {
     // ★ 通知点击定位会话（2026-10-19）：热启动走广播流，冷启动走 pending 兜底
     _openSessionSub = AgentBridge.openSessionRequests.listen(_onOpenSessionRequest);
     _restoreView();
+    unawaited(_jev.load());
     unawaited(_reload().then((_) => _consumePendingOpenSession()));
   }
 
@@ -4148,6 +4212,7 @@ class _ChatScreenState extends State<ChatScreen> {
     // 顺带把缓冲一起丢掉：里面的字属于已经离开的这个页面。
     _clearStreamState();
     _scroll.dispose();
+    _jevInputCtrl.dispose();
     super.dispose();
   }
 
@@ -4245,16 +4310,55 @@ class _ChatScreenState extends State<ChatScreen> {
           child: Padding(
             padding: const EdgeInsets.only(left: 14),
             child: GestureDetector(
-              onTap: () => _scaffoldKey.currentState?.openDrawer(),
+              // ★ 点图标 = 切换工作/决策模式（2026-10-27 用户定，
+              //   取代原「点图标开抽屉」）。抽屉仍可达：200dp
+              //   边缘拖动 + 输入区信息条点工作区名（既有入口）。
+              onTap: _toggleDecisionMode,
               behavior: HitTestBehavior.opaque,
-              child: ClipRRect(
-                borderRadius: BorderRadius.circular(10),
-                child: Image.asset(
-                  'assets/branding/app_icon_source.png',
-                  width: 37,
-                  height: 37,
-                  fit: BoxFit.cover,
-                ),
+              child: Stack(
+                clipBehavior: Clip.none,
+                children: [
+                  if (_decisionMode)
+                    Container(
+                      width: 37,
+                      height: 37,
+                      decoration: BoxDecoration(
+                        color: h.text,
+                        borderRadius: BorderRadius.circular(10),
+                      ),
+                      child: Icon(Icons.balance, size: 21, color: h.bg),
+                    )
+                  else
+                    ClipRRect(
+                      borderRadius: BorderRadius.circular(10),
+                      child: Image.asset(
+                        'assets/branding/app_icon_source.png',
+                        width: 37,
+                        height: 37,
+                        fit: BoxFit.cover,
+                      ),
+                    ),
+                  // 角标 = 点了会去的模式（工作态显示天平、决策态
+                  // 显示对话），让「这个图标能切换」一眼可发现。
+                  Positioned(
+                    right: -5,
+                    bottom: -5,
+                    child: Container(
+                      width: 17,
+                      height: 17,
+                      decoration: BoxDecoration(
+                        color: h.text,
+                        shape: BoxShape.circle,
+                        border: Border.all(color: h.bg, width: 1.5),
+                      ),
+                      child: Icon(
+                        _decisionMode ? Icons.forum : Icons.balance,
+                        size: 10,
+                        color: h.bg,
+                      ),
+                    ),
+                  ),
+                ],
               ),
             ),
           ),
@@ -4266,7 +4370,9 @@ class _ChatScreenState extends State<ChatScreen> {
             // ★ 标题只有会话名（无会话时回退工作区名）：模型信息在
             //   输入框的模型选择框里已有，标题不重复（2026-10-12）。
             Text(
-              _activeSession?.title ?? _workspaceName,
+              _decisionMode
+                  ? '决策'
+                  : (_activeSession?.title ?? _workspaceName),
               maxLines: 1,
               overflow: TextOverflow.ellipsis,
               textAlign: TextAlign.start,
@@ -4279,7 +4385,8 @@ class _ChatScreenState extends State<ChatScreen> {
             // 灵动岛收起胶囊：标题下层居中。点它展开，面板从顶栏
             // 下方正中垂下（body Stack 悬浮层渲染）；展开时胶囊
             // 让位给面板自己的标题行，避免同屏两颗胶囊。
-            if (_planSteps != null &&
+            if (!_decisionMode &&
+                _planSteps != null &&
                 _planSteps!.isNotEmpty &&
                 _planCollapsed) ...[
               const SizedBox(height: 4),
@@ -4306,14 +4413,15 @@ class _ChatScreenState extends State<ChatScreen> {
             ],
           ],
         ),
-        actions: [_topMetrics(h)],
+        actions: [_decisionMode ? _jevTopStatus(h) : _topMetrics(h)],
       ),
       body: Column(
         children: [
           // ★ 首启引导（2026-10-19）：没配 Key 时**主动**告诉用户下一步做什么，
           //   而不是等发送失败后给一句"还没有可用的模型提供商"。
-          if (!_modelReady) _SetupBanner(h: h, onOpenSettings: _openSettings),
-          if (_error != null)
+          if (!_decisionMode && !_modelReady)
+            _SetupBanner(h: h, onOpenSettings: _openSettings),
+          if (!_decisionMode && _error != null)
             _ErrorBanner(
               message: _error!,
               h: h,
@@ -4347,6 +4455,18 @@ class _ChatScreenState extends State<ChatScreen> {
           //
           // 正解：把列表与按钮放进 **Stack** —— 按钮是**覆盖层**，
           // 不再参与 Column 的高度分配，列表可以铺满整个可视区。
+          // ★ 决策模式（2026-10-27）：正文整块换成决策面板；
+          //   工作模式的消息列表与输入框原样保留，切回即恢复。
+          if (_decisionMode)
+            Expanded(
+              child: DecisionPanel(
+                jev: _jev,
+                settings: widget.settings,
+                inputController: _jevInputCtrl,
+                onOpenConfig: () => unawaited(_openJevSettings()),
+              ),
+            )
+          else ...[
           Expanded(
             child: Column(
               children: [
@@ -4520,6 +4640,7 @@ class _ChatScreenState extends State<ChatScreen> {
                 unawaited(_pickFromCatalog(context, id)),
             onModelTap: () => Navigator.of(context).pushNamed('/settings'),
           ),
+          ],
         ],
       ),
     ),

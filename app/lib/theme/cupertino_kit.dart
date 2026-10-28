@@ -17,8 +17,8 @@
 ///    需要"按下变暗"的地方用 [IosTap]。
 /// 3. **弹层**：确认与文本输入一律底部上拉抽屉（`bw_approval.dart` 的
 ///    `showBwConfirmSheet` / `showBwTextInputSheet`）；居中弹窗已退役。
-/// 4. **消息条**：`SnackBar` ⇒ [showIosToast]（顶部胶囊，2 秒自动消失 ——
-///    iOS 没有底部黑条）。
+/// 4. **消息条**：`SnackBar` ⇒ [showIosToast]（底部毛玻璃悬浮胶囊，
+///    2026-10-28 用户在四案预览中选定 D 案；旧顶部灰胶囊已退役）。
 /// 5. **表单件**：`FilledButton` ⇒ [IosButton.filled]；`Switch` ⇒ `ElasticSwitch`（弹性开关，`elastic_switch.dart`）；
 ///    `CircularProgressIndicator` ⇒ `CupertinoActivityIndicator`；
 ///    `TextField` ⇒ `CupertinoTextField`；`Slider` ⇒ `CupertinoSlider`；
@@ -60,11 +60,13 @@
 /// | 返回 | `arrow_back` | `left_chevron` / `back` |
 library;
 
+import 'dart:ui' show ImageFilter;
+
 import 'package:flutter/cupertino.dart';
 
 import 'pressable.dart';
 import 'package:flutter/material.dart'
-    show NoSplash, SnackBar, ScaffoldMessenger, Widget, BuildContext, Color;
+    show NoSplash, SnackBar, ScaffoldMessenger, Theme, Widget, BuildContext, Color;
 
 // ============================================================================
 // 图标对照（唯一映射源）
@@ -108,6 +110,7 @@ abstract final class AppIcons {
   // ---- 输入区 ----
   static const add = CupertinoIcons.add;
   static const send = CupertinoIcons.arrow_up;
+  static const mic = CupertinoIcons.mic_solid;
   static const stop = CupertinoIcons.stop_fill;
   static const attach = CupertinoIcons.paperclip;
   static const camera = CupertinoIcons.camera;
@@ -193,11 +196,19 @@ class _IosTapState extends State<IosTap> {
 /// 底部上拉抽屉 —— `widgets/bw_approval.dart` 的
 /// `showBwConfirmSheet` / `showBwTextInputSheet`，不要再引入居中弹窗。
 
-/// iOS 风格轻提示（替换 `ScaffoldMessenger.showSnackBar`）。
+/// 轻提示（替换 `ScaffoldMessenger.showSnackBar`）。
 ///
-/// Material 的底部黑条在 iOS 上不存在；这里做成**顶部居中的深灰胶囊**，
-/// 2 秒自动消失，点击立即关闭。不阻塞、不打断输入。
-void showIosToast(BuildContext context, String message) {
+/// **毛玻璃悬浮胶囊**（2026-10-28 用户在四案 HTML 预览里选定
+/// D 案，取代旧的 iOS 风顶部深灰胶囊——用户原话：那样式「很不
+/// 符合现在的设计语言」）：底部居中悬浮，半透填充 + 背景模糊 +
+/// 细描边（深色 rgba(28,28,30,.72)/白描边、浅色 rgba(250,250,252,.78)/
+/// 黑描边，与已定的毛玻璃悬浮层语言一致）；淡入 + 轻微上浮，
+/// 2.2 秒后淡出，点击立即关闭。不阻塞、不打断输入。
+///
+/// 位置：无键盘时距底 = 安全区 + 170（正好让开聊天页输入单元）；
+/// 键盘弹起时贴键盘上方 16，免得被键盘盖住。[icon] 可选
+/// （如麦克风未接入提示带麦克风图标），不传就是纯文字。
+void showIosToast(BuildContext context, String message, {IconData? icon}) {
   final overlay = Overlay.maybeOf(context);
   if (overlay == null) {
     // 没有 Overlay（理论上不会发生）⇒ 退回 SnackBar，**绝不静默丢消息**
@@ -205,36 +216,167 @@ void showIosToast(BuildContext context, String message) {
         ?.showSnackBar(SnackBar(content: Text(message)));
     return;
   }
+  final dark = Theme.of(context).brightness == Brightness.dark;
+  final mq = MediaQuery.of(context);
+  final bottom = mq.viewInsets.bottom > 0
+      ? mq.viewInsets.bottom + 16
+      : mq.viewPadding.bottom + 170;
   late OverlayEntry entry;
   entry = OverlayEntry(
-    builder: (_) => Positioned(
-      top: MediaQuery.of(context).padding.top + 12,
-      left: 24,
-      right: 24,
-      child: GestureDetector(
-        onTap: () => entry.remove(),
-        child: Container(
-          padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
-          decoration: BoxDecoration(
-            color: const Color(0xE63A3A3C),
-            borderRadius: BorderRadius.circular(20),
-          ),
-          child: Text(
-            message,
-            textAlign: TextAlign.center,
-            style: const TextStyle(
-              fontSize: 13.5,
-              color: CupertinoColors.white,
+    builder: (_) => _ToastCapsule(
+      message: message,
+      icon: icon,
+      dark: dark,
+      bottom: bottom,
+      onDismiss: () => entry.remove(),
+    ),
+  );
+  overlay.insert(entry);
+}
+
+/// 毛玻璃轻提示本体：进场（淡入+上浮）→ 停留 → 淡出，全程可点关。
+class _ToastCapsule extends StatefulWidget {
+  const _ToastCapsule({
+    required this.message,
+    required this.icon,
+    required this.dark,
+    required this.bottom,
+    required this.onDismiss,
+  });
+
+  final String message;
+  final IconData? icon;
+  final bool dark;
+  final double bottom;
+  final VoidCallback onDismiss;
+
+  @override
+  State<_ToastCapsule> createState() => _ToastCapsuleState();
+}
+
+class _ToastCapsuleState extends State<_ToastCapsule>
+    with SingleTickerProviderStateMixin {
+  late final AnimationController _ctrl = AnimationController(
+    vsync: this,
+    duration: const Duration(milliseconds: 240),
+    reverseDuration: const Duration(milliseconds: 200),
+  );
+  late final Animation<double> _fade = CurvedAnimation(
+    parent: _ctrl,
+    curve: Curves.easeOut,
+    reverseCurve: Curves.easeIn,
+  );
+  late final Animation<Offset> _slide = Tween<Offset>(
+    begin: const Offset(0, 0.35),
+    end: Offset.zero,
+  ).animate(CurvedAnimation(parent: _ctrl, curve: Curves.easeOut));
+  bool _dismissing = false;
+
+  @override
+  void initState() {
+    super.initState();
+    _ctrl.forward();
+    Future<void>.delayed(const Duration(milliseconds: 2200), _dismiss);
+  }
+
+  void _dismiss() {
+    if (_dismissing || !mounted) return;
+    _dismissing = true;
+    _ctrl.reverse().whenComplete(() {
+      if (mounted) widget.onDismiss();
+    });
+  }
+
+  @override
+  void dispose() {
+    _ctrl.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final dark = widget.dark;
+    final fg = dark ? const Color(0xFFFFFFFF) : const Color(0xFF111214);
+    return Positioned(
+      left: 40,
+      right: 40,
+      bottom: widget.bottom,
+      child: FadeTransition(
+        opacity: _fade,
+        child: SlideTransition(
+          position: _slide,
+          child: GestureDetector(
+            onTap: _dismiss,
+            behavior: HitTestBehavior.opaque,
+            child: Center(
+              child: Container(
+                decoration: BoxDecoration(
+                  borderRadius: BorderRadius.circular(999),
+                  boxShadow: const [
+                    BoxShadow(
+                      color: Color(0x4D000000),
+                      blurRadius: 30,
+                      offset: Offset(0, 12),
+                    ),
+                  ],
+                ),
+                child: ClipRRect(
+                  borderRadius: BorderRadius.circular(999),
+                  child: BackdropFilter(
+                    filter: ImageFilter.blur(sigmaX: 14, sigmaY: 14),
+                    child: Container(
+                      padding: const EdgeInsets.symmetric(
+                        horizontal: 18,
+                        vertical: 11,
+                      ),
+                      decoration: BoxDecoration(
+                        color: dark
+                            ? const Color(0xB81C1C1E)
+                            : const Color(0xC7FAFAFC),
+                        borderRadius: BorderRadius.circular(999),
+                        border: Border.all(
+                          color: dark
+                              ? const Color(0x24FFFFFF)
+                              : const Color(0x12000000),
+                        ),
+                      ),
+                      child: Row(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          if (widget.icon != null) ...[
+                            Icon(widget.icon, size: 16, color: fg),
+                            const SizedBox(width: 8),
+                          ],
+                          Flexible(
+                            child: Text(
+                              widget.message,
+                              textAlign: TextAlign.center,
+                              maxLines: 2,
+                              overflow: TextOverflow.ellipsis,
+                              style: TextStyle(
+                                fontSize: 13.5,
+                                fontWeight: FontWeight.w500,
+                                color: fg,
+                                // ★ 必须显式 none：本提示浮在 Overlay
+                                // 里、没有 Material 祖先，框架的兜底
+                                // 文案样式带黄色双下划线 —— 用户真机
+                                // 实报「下面还有黄色的线」。
+                                decoration: TextDecoration.none,
+                              ),
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                  ),
+                ),
+              ),
             ),
           ),
         ),
       ),
-    ),
-  );
-  overlay.insert(entry);
-  Future<void>.delayed(const Duration(seconds: 2), () {
-    if (entry.mounted) entry.remove();
-  });
+    );
+  }
 }
 
 /// iOS 主按钮（替换 `FilledButton` / `ElevatedButton`）。

@@ -261,6 +261,10 @@ void main() {
 
     expect(find.text('通用设置'), findsOneWidget);
     expect(find.text('模型'), findsOneWidget);
+    // 「外观」在应用组 —— 滚到可见再断言（ListView 惰性构建，
+    // 屏外条目不存在于树里）。
+    await tester.scrollUntilVisible(find.text('外观'), 120);
+    await tester.pumpAndSettle();
     expect(find.text('外观'), findsOneWidget);
   });
 
