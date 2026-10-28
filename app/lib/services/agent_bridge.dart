@@ -7,6 +7,7 @@ import 'package:heracles_backend/heracles_backend.dart' as hb;
 import 'package:shared_preferences/shared_preferences.dart';
 
 import '../models/attachment.dart';
+import '../models/jev.dart';
 import '../models/message.dart';
 import '../models/model_capabilities.dart';
 import '../models/settings.dart';
@@ -1045,6 +1046,41 @@ class AgentBridge {
   /// 相机 → 落盘到缓存目录 → 回路径）。**未实现前恒返回 null**，
   /// 调用方必须按「暂不可用」如实处理，不得假装拍到了。
   Future<String?> takePhoto() async => null;
+
+  /// **本机画像**（2026-10-27，JEV 决策引擎的本机检测用）——
+  /// 宿主 `deviceProfile`（`heracles/command` 通道）：机型、总运行
+  /// 内存、可用存储、App 私有目录。前端据此给本地模型选型推荐
+  /// （见 models/jev.dart 的 recommendJev）。读不到（测试环境、
+  /// 宿主未实现）返回 null，调用方按「检测不可用」如实处理。
+  Future<JevDeviceProfile?> deviceProfile() async {
+    try {
+      final raw =
+          await _channel.invokeMapMethod<dynamic, dynamic>('deviceProfile');
+      if (raw == null || raw['ok'] != true) return null;
+      return JevDeviceProfile.fromMap(raw);
+    } on MissingPluginException {
+      return null;
+    } on PlatformException {
+      return null;
+    }
+  }
+
+  /// **本地 JEV 决策 —— 接口预留**（2026-10-27 用户定）。
+  ///
+  /// 契约：给 [modelDir]（含 GGUF 权重与 BF16 仓库的 tokenizer /
+  /// decision_config.json）与用户问题 [question]，返回「推荐这样
+  /// 做」的概率（0–1，即 systemone 的 `noul`）。
+  ///
+  /// ⚠️ 决策模型**不是**普通聊天模型：权重需要双向注意力读
+  /// prompt、按选项字母 logits＋分类温度读出 —— 必须由专用引擎
+  /// （llama.cpp 打补丁版＋startlux 读出层，或后端自研）承载，
+  /// 宿主/后端接入前**恒返回 null**，调用方按「引擎未接入」
+  /// 如实提示（模型可先下载备好），不得编造概率。
+  Future<double?> jevLocalDecide({
+    required String modelDir,
+    required String question,
+  }) async =>
+      null;
 
   /// **拉取后端的可用模型列表**（2026-10-14，接入第三方 API 服务）。
   /// ## 为什么需要它

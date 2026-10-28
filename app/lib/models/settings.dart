@@ -541,7 +541,7 @@ class AppSettings {
   const AppSettings({
     this.permission = PermissionMode.workspaceAuto,
     this.language = AppLanguage.zh,
-    this.appearance = AppAppearance.light,
+    this.appearance = AppAppearance.system,
     this.themeStyle = AppThemeStyle.bw,
     this.fontSize = 15,
     this.stepDetail = StepDetail.standard,

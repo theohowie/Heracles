@@ -1,6 +1,7 @@
 package com.theohowie.heracles
 
 import android.Manifest
+import android.app.ActivityManager
 import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
@@ -199,6 +200,8 @@ class MainActivity : FlutterActivity() {
             "devicePermissions" -> handleDevicePermissions(result)
             // ★ 2026-10-27：权限页改弹性开关 —— 开关拨动拉起系统授权流程
             "requestPermission" -> handleRequestPermission(call, result)
+            // ★ 2026-10-27：JEV 决策引擎本机检测（机型/内存/存储/私有目录）
+            "deviceProfile" -> handleDeviceProfile(result)
             "shizukuGrant" -> handleShizukuGrant(force = false, result = result)
             "shizukuForceRequest" -> handleShizukuGrant(force = true, result = result)
 
@@ -528,6 +531,35 @@ class MainActivity : FlutterActivity() {
         } catch (e: Throwable) {
             reply(result, mapOf("ok" to false, "error" to "拉起失败：${e.message}"))
         }
+    }
+
+    /**
+     * **本机画像**（2026-10-27，JEV 决策引擎本机检测）——
+     * 只读：机型、总运行内存（ActivityManager.MemoryInfo.totalMem）、
+     * App 私有目录所在分区的可用空间、私有目录路径（本地模型存放锚点）。
+     * 读不到的字段给 0 / 空串，Dart 侧按「检测不可用」如实处理，不编造。
+     */
+    private fun handleDeviceProfile(result: MethodChannel.Result) {
+        val ctx = applicationContext
+        val totalRamMb = runCatching {
+            val am = ctx.getSystemService(android.content.Context.ACTIVITY_SERVICE) as ActivityManager
+            val mi = ActivityManager.MemoryInfo()
+            am.getMemoryInfo(mi)
+            (mi.totalMem / (1024 * 1024)).toInt()
+        }.getOrDefault(0)
+        val freeStorageMb = runCatching {
+            (ctx.filesDir.freeSpace / (1024 * 1024)).toInt()
+        }.getOrDefault(0)
+        reply(
+            result,
+            mapOf(
+                "ok" to true,
+                "model" to (Build.MODEL ?: ""),
+                "totalRamMb" to totalRamMb,
+                "freeStorageMb" to freeStorageMb,
+                "appFilesDir" to ctx.filesDir.absolutePath,
+            ),
+        )
     }
 
     private fun handleDevicePermissions(result: MethodChannel.Result) {

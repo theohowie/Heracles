@@ -111,6 +111,13 @@
 
 - `questions` 结构不变；补充：提问超时 10 分钟（与审批的 5 分钟独立）、超时按"未回答"如实回给模型（绝不编答案）。
 
+### N11 JEV 决策引擎 —— 前端已落地（2026-10-27），本地推理待后端/宿主接入
+
+- **本机画像**：命令通道 `deviceProfile`（`heracles/command`）→ `{ok, model, totalRamMb, freeStorageMb, appFilesDir}`，宿主已实现（`MainActivity.handleDeviceProfile`，只读：ActivityManager 内存 + filesDir 可用空间/路径）；前端 `AgentBridge.deviceProfile()` 据此做本地模型选型推荐（≥6GB 内存推 2B、≥3.5GB 推 0.8B、否则云端）。
+- **云端决策**：前端直连 `/v1/systemone` 兼容接口（Jev 官方 / StartLux 云端 / 自建 startlux-decide），报文：`state={question: 原文}` + 一道 `noul` 题（「推荐用户这样做吗？」）+ `return_thought=true`；概率 ≥0.5 = 推荐。无需后端参与。
+- **本地模型文件**：前端负责下载与管理，落在 `<appFilesDir>/jev_models/{0.8b|2b}/`，含 GGUF 权重（StartLux-Decision v1.1，HF 镜像优先）+ BF16 仓库的 tokenizer/config/decision_config.json，完成标记为目录内 `.complete` 文件。
+- **本地推理（预留契约）**：`AgentBridge.jevLocalDecide({modelDir, question}) -> Future<double?>`（返回「是」的概率；未接入恒 null，前端如实提示「引擎未接入」）。⚠️ 决策模型不是聊天模型：接入方须用带双向注意力补丁的 llama.cpp + StartLux 读出层（选项字母 logits + decision_config 温度），按普通聊天加载会静默劣化。后端接入后前端零改动即可离线决策。
+
 ## 5. 流式与渲染约定 —— ✅ 无异议
 
 后端保持原始粒度不节流；`approval_required`/`context_updated`/`plan_updated` 三类新事件已按 §6.1 登记到本文。
