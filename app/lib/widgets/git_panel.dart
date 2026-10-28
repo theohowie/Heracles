@@ -42,6 +42,7 @@ import '../widgets/bw_approval.dart';
 Future<void> showGitPanel(
   BuildContext context, {
   required String workspacePath,
+  String? repoFullName,
 }) async {
   await showModalBottomSheet<void>(
     context: context,
@@ -53,16 +54,24 @@ Future<void> showGitPanel(
       child: _GitPanel(
         h: Hue.of(context),
         workspacePath: workspacePath,
+        repoFullName: repoFullName,
       ),
     ),
   );
 }
 
 class _GitPanel extends StatefulWidget {
-  const _GitPanel({required this.h, required this.workspacePath});
+  const _GitPanel({
+    required this.h,
+    required this.workspacePath,
+    this.repoFullName,
+  });
 
   final Hue h;
   final String workspacePath;
+
+  /// 选中的 GitHub 仓库全名（`owner/repo`）。非空时，本地没下载也能列出**远端分支**。
+  final String? repoFullName;
 
   @override
   State<_GitPanel> createState() => _GitPanelState();
@@ -74,6 +83,15 @@ class _GitPanelState extends State<_GitPanel> {
 
   bool _loading = true;
   String? _error;
+
+  /// 远端分支名（本地没下载时也能列 —— 见 `_notClonedPrompt`）。
+  List<String> _remoteBranches = const [];
+
+  /// 正在从远端拉分支列表。
+  bool _loadingRemote = false;
+
+  /// 正在下载（克隆）这个仓库。
+  bool _downloading = false;
 
   /// 本地还没有这个仓库（选了一个 GitHub 仓库但没下载）。
   ///
@@ -136,6 +154,9 @@ class _GitPanelState extends State<_GitPanel> {
           _dirty = false;
           _branch = '';
         });
+        // 拉远端分支：让用户在**下载之前**也能看到有哪些分支，
+        // 否则「选择分支」在未下载时是完全没用的（2026-10-28）
+        unawaited(_loadRemoteBranches());
         return;
       }
       final isRepo = await _git.isRepository(widget.workspacePath);
@@ -494,6 +515,44 @@ class _GitPanelState extends State<_GitPanel> {
         ],
       );
 
+  /// 拉远端分支列表（只读，不需要下载仓库）。
+  Future<void> _loadRemoteBranches() async {
+    final full = widget.repoFullName;
+    if (full == null || full.isEmpty) return;
+    setState(() => _loadingRemote = true);
+    final r = await _auth.listRemoteBranches(full);
+    if (!mounted) return;
+    setState(() {
+      _loadingRemote = false;
+      _remoteBranches = r ?? const [];
+    });
+  }
+
+  /// 下载（克隆）这个仓库到本地。
+  ///
+  /// 与「选择仓库」面板里的 ↓ 等价 —— 这里再给一次入口，
+  /// 因为用户是在**想切分支**的时候才发现没下载的，不该让他回去找。
+  Future<void> _download() async {
+    final full = widget.repoFullName;
+    if (full == null || full.isEmpty || _downloading) return;
+    setState(() => _downloading = true);
+    try {
+      final token = await _auth.readToken();
+      final r = await _git.clone(
+        url: 'https://github.com/$full.git',
+        destPath: widget.workspacePath,
+        token: token,
+      );
+      if (!mounted) return;
+      if (r is CapabilityFailure) {
+        showIosToast(context, r.reason);
+      }
+    } finally {
+      if (mounted) setState(() => _downloading = false);
+    }
+    await _refresh();
+  }
+
   /// 选中了 GitHub 仓库但**本地还没下载**时的提示。
   ///
   /// 为什么不能直接给「初始化」按钮：那个目录根本不存在，
@@ -503,15 +562,89 @@ class _GitPanelState extends State<_GitPanel> {
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
           Text(
-            '本地还没有这个仓库。',
+            '这个仓库还没下载到手机',
             style: TextStyle(
                 fontSize: 14, fontWeight: FontWeight.w600, color: h.text),
           ),
           const SizedBox(height: HSpace.xs),
           Text(
-            '回到「选择仓库」，点这个仓库右侧的 ↓ 下载图标即可。'
-            '下载完成后回来这里就能切分支、提交。',
-            style: TextStyle(fontSize: 13, color: h.textDim, height: 1.55),
+            '下面是它在 GitHub 上的分支（只读）。下载到手机之后才能切换、提交、推送。',
+            style: TextStyle(fontSize: 12.5, color: h.textDim, height: 1.5),
+          ),
+          const SizedBox(height: HSpace.sm),
+
+          // ---- 远端分支列表（下载前也能看）----
+          if (_loadingRemote)
+            Row(children: [
+              SizedBox(
+                width: 13,
+                height: 13,
+                child: CircularProgressIndicator(strokeWidth: 2, color: h.accent),
+              ),
+              const SizedBox(width: HSpace.sm),
+              Text('正在读取远端分支…',
+                  style: TextStyle(fontSize: 12.5, color: h.textDim)),
+            ])
+          else if (_remoteBranches.isEmpty)
+            Text(
+              widget.repoFullName == null
+                  ? '（没有仓库信息，无法列出远端分支）'
+                  : '没读到远端分支（可能没有分支，或网络/限流）',
+              style: TextStyle(fontSize: 12.5, color: h.textFaint),
+            )
+          else
+            Container(
+              constraints: const BoxConstraints(maxHeight: 200),
+              decoration: BoxDecoration(
+                color: h.surfaceAlt,
+                borderRadius: BorderRadius.circular(HRadius.md),
+                border: Border.all(color: h.border),
+              ),
+              child: ListView.separated(
+                shrinkWrap: true,
+                padding: EdgeInsets.zero,
+                itemCount: _remoteBranches.length,
+                separatorBuilder: (_, _) =>
+                    Divider(height: 1, thickness: 1, color: h.border),
+                itemBuilder: (_, i) => Padding(
+                  padding: const EdgeInsets.symmetric(
+                      horizontal: HSpace.md, vertical: 9),
+                  child: Row(children: [
+                    Icon(CupertinoIcons.arrow_branch,
+                        size: 14, color: h.textFaint),
+                    const SizedBox(width: HSpace.sm),
+                    Expanded(
+                      child: Text(
+                        _remoteBranches[i],
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: TextStyle(fontSize: 13.5, color: h.text),
+                      ),
+                    ),
+                    Text('远端',
+                        style: TextStyle(fontSize: 10.5, color: h.textFaint)),
+                  ]),
+                ),
+              ),
+            ),
+          const SizedBox(height: HSpace.md),
+
+          // ---- 下载入口（唯一能把上面的"远端"变成可操作的按钮）----
+          FilledButton.icon(
+            onPressed: _downloading ? null : () => unawaited(_download()),
+            icon: _downloading
+                ? const SizedBox(
+                    width: 14,
+                    height: 14,
+                    child: CircularProgressIndicator(strokeWidth: 2),
+                  )
+                : const Icon(CupertinoIcons.arrow_down_circle, size: 17),
+            label: Text(_downloading ? '正在下载…' : '下载到手机'),
+          ),
+          const SizedBox(height: HSpace.xs),
+          Text(
+            'git 必须在手机上的真实文件上操作，所以要先下载一次。',
+            style: TextStyle(fontSize: 11.5, color: h.textFaint),
           ),
         ],
       );

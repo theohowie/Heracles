@@ -7,6 +7,7 @@ import 'package:flutter/material.dart';
 // 判断"用户手势是否在途"用（见 [_ChatScreenState._scrollToBottom]）。
 // material/cupertino 都不导出它，不 import 就是 undefined_identifier。
 import 'package:flutter/rendering.dart' show ScrollDirection;
+import 'package:heracles_backend/heracles_backend.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 import '../models/attachment.dart';
@@ -28,8 +29,10 @@ import '../widgets/bw_topbar.dart';
 import '../widgets/bw_usage_sheet.dart';
 import '../widgets/github_connect_sheet.dart';
 import '../widgets/git_panel.dart';
+import '../widgets/git_branch_sheet.dart';
 import '../widgets/github_repo_sheet.dart';
 import '../services/github_auth.dart';
+import '../services/git_service.dart';
 import '../services/github_config.dart';
 import '../widgets/bw_approval.dart';
 import '../widgets/themed_background.dart';
@@ -95,6 +98,13 @@ class _ChatScreenState extends State<ChatScreen> {
   /// 2026-10-28 用户要求：「选择仓库……然后下面的显示仓库名」。
   /// 选了仓库之后底部第一格显示它，用户才知道自己正在操作哪个仓库。
   String? _githubRepoName;
+
+  /// **当前分支名**（`null` = 未知，底部第三格显示「选择分支」）。
+  ///
+  /// 2026-10-28 用户要求：底部第三格应该显示 `master` 这样的**分支名**，
+  /// 而不是固定文案「选择分支」—— 用户需要一眼看到自己在哪个分支上。
+  String? _gitBranch;
+
 
   /// **当前 git 操作的目标路径**（2026-10-28）。
   ///
@@ -173,6 +183,10 @@ class _ChatScreenState extends State<ChatScreen> {
     });
     // 持久化：否则每次开 App 都得重选一次（2026-10-28）
     unawaited(_saveSelectedRepo(choice.repo.name, choice.localPath));
+    // ⚠️ **不自动下载**（2026-10-28 用户裁定：让用户自己下载克隆）。
+    // 选择是选择，下载是下载 —— 下载入口在仓库列表行尾的 ↓，
+    // 以及「版本控制」面板里的「下载到手机」。
+    unawaited(_refreshGitBranch());
     // ⚠️ **这里刻意不弹 toast**（2026-10-28 用户反馈「上面怎么还有气泡通知」）。
     //
     // 选中仓库的效果**已经直接显示在界面上了**：顶部标题栏和底部信息条
@@ -216,6 +230,129 @@ class _ChatScreenState extends State<ChatScreen> {
       });
     } catch (_) {
       // 读不到就当没选过
+    }
+  }
+
+  /// 点底部第三格：**直接弹「选择分支」面板**（Trae 样式）。
+  ///
+  /// ## 分支来源（按优先级）
+  ///
+  /// 1. 仓库已下载到手机 ⇒ 本地分支（真实可切）
+  /// 2. 仓库没下载 ⇒ 远端分支（只读，点了会先提示下载）
+  ///
+  /// 没选定仓库时用工作区根。
+  Future<void> _onGitTap() async {
+    final ws = await _bridge.ensureAppWorkspace();
+    final wsRoot = (ws?['path'] as String?) ?? '';
+    if (!mounted) return;
+    if (wsRoot.isEmpty) {
+      showIosToast(context, '拿不到工作区路径');
+      return;
+    }
+    final target = _gitRepoPath ?? wsRoot;
+
+    // 有选定仓库就给 owner/repo（未下载时用来拉远端分支）
+    final full = (_githubRepoName != null && _githubAccount != null)
+        ? '$_githubAccount/$_githubRepoName'
+        : null;
+
+    const git = GitService();
+    var branches = <String>[];
+    String? current;
+    var local = false;
+
+    try {
+      local = await git.isRepository(target);
+    } catch (_) {
+      local = false;
+    }
+
+    if (local) {
+      final br = await git.branches(target);
+      if (br is CapabilitySuccess) {
+        for (final line in br.data.split('\n')) {
+          final t = line.trim();
+          if (!t.startsWith('- ')) continue;
+          branches.add(t.substring(2).split('  ').first.trim());
+        }
+      }
+      final st = await git.status(target);
+      if (st is CapabilitySuccess) {
+        final b = st.metadata?['branch'] as String?;
+        if (b != null && b.isNotEmpty) current = b;
+      }
+    } else if (full != null) {
+      // 没下载 ⇒ 列远端分支（只读）。点选后引导下载，不假装能切。
+      final remote = await _githubAuth.listRemoteBranches(full);
+      if (!mounted) return;
+      branches = remote ?? const [];
+      if (branches.isEmpty) {
+        // 远端也拿不到：退回版本控制面板（那里有下载入口）
+        await showGitPanel(context, workspacePath: target, repoFullName: full);
+        if (mounted) unawaited(_refreshGitBranch());
+        return;
+      }
+      // 远端分支只读：提示先下载
+      if (!mounted) return;
+      final picked = await showGitBranchSheet(
+        context,
+        branches: branches,
+        current: null,
+      );
+      if (picked == null || !mounted) return;
+      showIosToast(context, '「$picked」还没下载到手机');
+      await showGitPanel(context, workspacePath: target, repoFullName: full);
+      if (mounted) unawaited(_refreshGitBranch());
+      return;
+    } else {
+      // 没有仓库、工作区也不是 git 仓库 ⇒ 版本控制面板（含初始化）
+      if (!mounted) return;
+      await showGitPanel(context, workspacePath: target, repoFullName: null);
+      if (mounted) unawaited(_refreshGitBranch());
+      return;
+    }
+
+    if (!mounted) return;
+    final picked = await showGitBranchSheet(
+      context,
+      branches: branches,
+      current: current,
+    );
+    if (picked == null || !mounted) return;
+    if (picked == current) return;
+
+    // 真的切换（能力层会拒绝脏工作区，原因如实转达）
+    final r = await git.checkout(target, branch: picked);
+    if (!mounted) return;
+    if (r is CapabilityFailure) {
+      showIosToast(context, r.reason);
+    }
+    unawaited(_refreshGitBranch());
+  }
+
+  /// 读当前分支名（用于底部第三格显示）。
+  ///
+  /// 读不到就保持 null（UI 回退成「选择分支」）—— 不猜一个假分支名。
+  Future<void> _refreshGitBranch() async {
+    final p = _gitRepoPath;
+    if (p == null) {
+      if (mounted && _gitBranch != null) setState(() => _gitBranch = null);
+      return;
+    }
+    try {
+      const git = GitService();
+      if (!await git.isRepository(p)) {
+        if (mounted && _gitBranch != null) setState(() => _gitBranch = null);
+        return;
+      }
+      final r = await git.status(p);
+      if (!mounted) return;
+      final b = r is CapabilitySuccess
+          ? (r.metadata?['branch'] as String?)
+          : null;
+      setState(() => _gitBranch = (b == null || b.isEmpty) ? null : b);
+    } catch (_) {
+      // 读不到就保持原值
     }
   }
 
@@ -716,6 +853,7 @@ class _ChatScreenState extends State<ChatScreen> {
     //   不读的话底部永远显示「连接 Github」，即使已经连上了）
     unawaited(_loadGitHubAccount());
     unawaited(_restoreSelectedRepo());
+    unawaited(_refreshGitBranch());
     _restoreView();
     unawaited(_reload().then((_) => _consumePendingOpenSession()));
   }
@@ -899,13 +1037,14 @@ class _ChatScreenState extends State<ChatScreen> {
 
   /// 顶部标题栏的名字（无会话时显示）。
   ///
-  /// ## 2026-10-28：选中 GitHub 仓库后显示**仓库名**
+  /// ⚠️ **这里只显示工作区名，不显示仓库名**（2026-10-28 用户纠正）。
   ///
-  /// 用户原话：「然后下面的显示仓库名」。底部信息条已经改了，
-  /// 顶部这一处也一起改 —— 两处显示同一个名字，用户才不会疑惑
-  /// "我到底在哪个项目里"。没选仓库时退回工作区名（原行为不变）。
-  String get _workspaceName =>
-      _githubRepoName ?? _activeWorkspace?.name ?? '未选择工作区';
+  /// 我一度让它优先显示 GitHub 仓库名，那是错的：**工作区和 GitHub 仓库
+  /// 是两个独立概念** —— 工作区是本机的一个目录（有自己的名字），
+  /// GitHub 连接是另一个槽位。混在一起用户会以为"工作区被换掉了"。
+  ///
+  /// 仓库名显示在**底部信息条的第二格（GitHub）**，那里才是它的位置。
+  String get _workspaceName => _activeWorkspace?.name ?? '未选择工作区';
 
   // ------------------------------------------------------------ 工作区操作
 
@@ -4676,11 +4815,11 @@ class _ChatScreenState extends State<ChatScreen> {
             onRemoveAttachment: _removeAttachment,
             // 信息条（2026-10-26 TRAE 式输入区）：工作区项开抽屉换区；
             //
-            // ★ 2026-10-28（用户要求「选择仓库……然后下面的显示仓库名」）：
-            //   选了 GitHub 仓库后，第一格显示**仓库名**而不是工作区名 ——
-            //   用户必须一眼看出自己现在操作的是哪个仓库。
-            //   没选仓库时退回工作区名（原行为不变）。
-            workspaceLabel: _githubRepoName ?? _activeWorkspace?.name,
+            // 第一格恒为**工作区**（本机目录，与 GitHub 仓库是两回事）
+            workspaceLabel: _activeWorkspace?.name,
+            // 第二格（GitHub）：连上后显示 @账号，**选了仓库后显示仓库名**
+            githubRepoName: _githubRepoName,
+            gitBranch: _gitBranch,
             onWorkspaceTap: () => _scaffoldKey.currentState?.openDrawer(),
             // ★ 2026-10-27（Step 3）：换成真实的 Device Flow 连接流程。
             //   之前是占位提示（"这个功能还没接入"）—— 用户点了只看到一句道歉。
@@ -4691,25 +4830,11 @@ class _ChatScreenState extends State<ChatScreen> {
             //   不该再弹一次授权码**。判定在 `_onGithubTap` 里。
             onGithubTap: () => unawaited(_onGithubTap()),
             githubAccount: _githubAccount,
-            // ★ 2026-10-27（Step 4）：点「选择分支」打开 git 面板。
-            //   路径必须问原生（Dart 拿不到 getExternalFilesDir）；
-            //   拿不到就**不传回调** ⇒ 按钮置灰而不是点了报错。
-            onGitTap: () => unawaited(() async {
-              final r = await AgentBridge().ensureAppWorkspace();
-              final path = (r?['path'] as String?) ?? '';
-              if (path.isEmpty) {
-                if (mounted && context.mounted) {
-                  showIosToast(context, '拿不到工作区路径');
-                }
-                return;
-              }
-              if (!context.mounted) return;
-              // 有选定仓库就用它，否则用工作区根（见 `_gitRepoPath` 的注释）
-              await showGitPanel(
-                context,
-                workspacePath: _gitRepoPath ?? path,
-              );
-            }()),
+            // ★ 2026-10-28（按 Trae 移动端的交互重做）：
+            //   点第三格**直接弹「选择分支」面板**（搜索 + ○/✓ 列表），
+            //   而不是先开一个「版本控制」大面板再展开。
+            //   实现在 `_onGitTap`。
+            onGitTap: () => unawaited(_onGitTap()),
             // ★ 输入框上方那一行开关（2026-10-12，S4）
             //
             // 权限改的是**设置**（会持久化），不等同于"这一次运行"的参数 ——

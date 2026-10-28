@@ -288,6 +288,44 @@ class GitHubAuth {
       return const [];
     }
   }
+
+  /// 列出**远端分支**（不需要下载仓库）。
+  ///
+  /// ## 为什么需要它（2026-10-28 用户诉求）
+  ///
+  /// 用户选了仓库之后就想「选择分支」。但仓库还没下载到本地时，
+  /// 本地没有任何分支可列 —— 第一版只能提示"先下载"，等于把
+  /// 用户推回上一步，流程断裂。
+  ///
+  /// 远端分支是**只读信息**：`GET /repos/{owner}/{repo}/branches`
+  /// 一条请求就够，不需要 clone，也不消耗存储。
+  ///
+  /// @param fullName `owner/repo`
+  /// @return 分支名列表；`null` = 没连接；空列表 = 请求失败或无分支
+  Future<List<String>?> listRemoteBranches(String fullName) async {
+    final token = await readToken();
+    if (token == null || token.isEmpty) return null;
+    try {
+      final res = await _dio.get<List<dynamic>>(
+        'https://api.github.com/repos/$fullName/branches',
+        queryParameters: {'per_page': 100},
+        options: Options(
+          headers: {
+            'Authorization': 'Bearer $token',
+            'Accept': 'application/vnd.github+json',
+          },
+          validateStatus: (_) => true,
+        ),
+      );
+      if (res.statusCode != 200 || res.data == null) return const [];
+      return [
+        for (final raw in res.data!)
+          if (raw is Map && raw['name'] is String) raw['name'] as String,
+      ];
+    } catch (_) {
+      return const [];
+    }
+  }
 }
 
 /// 一个 GitHub 仓库（选择列表用）。

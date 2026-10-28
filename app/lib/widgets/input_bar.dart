@@ -40,6 +40,8 @@ class InputBar extends StatefulWidget {
     this.onGithubTap,
     this.onGitTap,
     this.githubAccount,
+    this.githubRepoName,
+    this.gitBranch,
     this.attachments = const [],
     this.enabled = true,
     this.busy = false,
@@ -101,6 +103,19 @@ class InputBar extends StatefulWidget {
   ///
   /// 现在：`null` ⇒ 显示「连接 Github」；非空 ⇒ 显示 `@login`。
   final String? githubAccount;
+
+  /// **已选中的 GitHub 仓库名**（`null` = 只连了账号、还没选仓库）。
+  ///
+  /// 2026-10-28 用户纠正：仓库名属于**第二格（GitHub）**，
+  /// 不是第一格（工作区）—— 工作区是本机目录，与 GitHub 仓库是两个概念。
+  final String? githubRepoName;
+
+  /// **当前分支名**（`null` = 未知 ⇒ 第三格显示「选择分支」）。
+  ///
+  /// 2026-10-28 用户要求：第三格显示 `master` 这样的分支名，
+  /// 用户要一眼看到自己在哪个分支，而不是每次点开才知道。
+  final String? gitBranch;
+
 
   final bool enabled;
 
@@ -531,6 +546,8 @@ _PermissionIconButton(
                         onGithubTap: widget.onGithubTap,
       onGitTap: widget.onGitTap,
       githubAccount: widget.githubAccount,
+      githubRepoName: widget.githubRepoName,
+      gitBranch: widget.gitBranch,
                       ),
                     ],
                   ),
@@ -587,6 +604,8 @@ class _EnvStrip extends StatelessWidget {
     this.onGithubTap,
     this.onGitTap,
     this.githubAccount,
+    this.githubRepoName,
+    this.gitBranch,
   });
 
   final Hue h;
@@ -597,6 +616,16 @@ class _EnvStrip extends StatelessWidget {
 
   /// 已连接的 GitHub 账号（`null` = 没连接）。详见 [InputBar.githubAccount]。
   final String? githubAccount;
+
+  /// **已选中的 GitHub 仓库名**（`null` = 只连了账号、还没选仓库）。
+  ///
+  /// 2026-10-28 用户纠正：仓库名属于**第二格（GitHub）**，
+  /// 不是第一格（工作区）—— 工作区是本机目录，与 GitHub 仓库是两个概念。
+  final String? githubRepoName;
+
+  /// 当前分支名（`null` ⇒ 第三格显示「选择分支」）。
+  /// 详见 [InputBar.gitBranch]。
+  final String? gitBranch;
 
   @override
   Widget build(BuildContext context) {
@@ -624,7 +653,13 @@ class _EnvStrip extends StatelessWidget {
                 GitHubIcon(
                     size: 15,
                     color: githubAccount == null ? h.textDim : h.text),
-                githubAccount == null ? '连接 Github' : '@$githubAccount',
+                // 三态：
+                // · 没连 → 「连接 Github」
+                // · 连了没选仓库 → 「@账号」
+                // · 选了仓库 → 「仓库名」（用户要的：这里显示仓库名）
+                githubAccount == null
+                    ? '连接 Github'
+                    : (githubRepoName ?? '@$githubAccount'),
                 onGithubTap,
                 dim: false,
                 align: Alignment.center),
@@ -635,7 +670,8 @@ class _EnvStrip extends StatelessWidget {
                 GitBranchIcon(
                     size: 15,
                     color: onGitTap == null ? h.textFaint : h.textDim),
-                '选择分支',
+                // 已知分支就显示分支名（master），否则回退成「选择分支」
+                gitBranch ?? '选择分支',
                 onGitTap,
                 dim: onGitTap == null,
                 align: Alignment.centerRight),
