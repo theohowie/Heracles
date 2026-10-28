@@ -241,3 +241,57 @@ abstract final class ContractMemory {
   /// 记忆会整段进 system prompt ⇒ 它的大小直接等于每轮固定开销。
   static const int maxBytes = 256 * 1024;
 }
+
+/// **内置 git**（`GitCapability` / `git_tools.dart`，2026-10-27）。
+///
+/// ## 为什么这些数要有契约
+///
+/// git 命令的默认值是**产品行为**（不是实现细节）：`log` 默认给几条、
+/// `diff` 的上下文行数、提交信息多长算超限 —— 这些同时被三个地方消费
+/// （工具描述、实现、测试），散成字面量必然漂移。
+abstract final class ContractGit {
+  /// `log` 默认返回多少条提交。
+  ///
+  /// 20 的依据：模型问"最近改了什么"时，20 条 ≈ 覆盖一两天的工作量；
+  /// 再多会把工具结果撑成噪音（每条 ≈ 100 字符 ⇒ 20 条 ≈ 2K 字符）。
+  static const int defaultLogLimit = 20;
+
+  /// `log` 最多允许取多少条（模型显式要求时的上限）。
+  ///
+  /// 100 是「够做一次历史考察，又不至于把窗口灌满」的折中。
+  /// 真正需要看更多历史的场合应该用 `git log --format` 之类的精查手段，
+  /// 而不是一次拉全量（手机上下文窗口经不起）。
+  static const int maxLogLimit = 100;
+
+  /// 单次 `diff` 输出的字符上限（与 shell 的 overflow 阈值同量级）。
+  ///
+  /// 超过就截断并**明说**（"已截断，完整内容用 file 参数分批看"）——
+  /// 静默截断会让模型以为改完了，那是假信息。
+  static const int maxDiffChars = 100000;
+
+  /// 提交信息长度上限（字符）。
+  ///
+  /// 72 是 git 社区公认的首行长度（`git log --oneline` 不折行）；
+  /// 但**不强制**截断 —— 超了就在工具层提示模型"首行建议 ≤72"，
+  /// 因为强行截断会破坏用户/模型表达的原意。
+  static const int recommendedMessageChars = 72;
+
+  /// 新仓库的默认分支名。
+  ///
+  /// `main` 而不是 `master`：GitHub 2020 起新仓库默认 `main`，
+  /// 对齐它能少一次"推上去发现分支名对不上"的往返。
+  static const String defaultBranch = 'main';
+
+  /// 浅克隆的默认深度（`clone` 不显式给 depth 时）。
+  ///
+  /// `null` = 全量克隆（行为与 git 一致）。手机场景下大仓库全量克隆可能
+  /// 几百 MB，但**默认改浅是有损的**（历史不全）——
+  /// 这是产品决定：默认全量，让调用方（UI/模型）显式要浅克隆。
+  static const int? defaultCloneDepth = null;
+
+  /// 克隆时最多允许多少字节（粗估上限，超过就拒绝并明说）。
+  ///
+  /// 手机存储不是无限的。200 MB 是「常见项目够用、又不至于把用户手机塞满」
+  /// 的折中；真需要更大仓库的用户可以显式放宽（将来若做设置项）。
+  static const int maxCloneBytes = 200 * 1024 * 1024;
+}

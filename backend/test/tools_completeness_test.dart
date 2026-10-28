@@ -1,7 +1,7 @@
 import 'package:heracles_backend/heracles_backend.dart';
 import 'package:test/test.dart';
 
-/// **工具完整性门禁** —— 18 个工具都要在、Schema 都要对。
+/// **工具完整性门禁** —— 32 个工具都要在、Schema 都要对。
 ///
 /// ## 为什么这条测试重要
 ///
@@ -17,6 +17,7 @@ void main() {
     apk: _FakeApk(),
     web: _FakeWeb(),
     memory: _FakeMemory(),
+    git: _FakeGit(),
   );
 
   final factory = ToolFactory(fullCaps);
@@ -28,12 +29,13 @@ void main() {
     ...buildApkTools(factory, fullCaps),
     ...buildInteractionTools(
         factory, askGate: _FakeAskGate(), caps: fullCaps),
+    ...buildGitTools(factory, fullCaps),
   ];
   final byName = {for (final t in allTools) t.name: t};
 
   group('工具数量与覆盖', () {
-    test('★★★ 必须恰好 21 个工具（少一个就是一类任务做不了）', () {
-      expect(allTools.length, 21,
+    test('★★★ 必须恰好 32 个工具（少一个就是一类任务做不了）', () {
+      expect(allTools.length, 32,
           reason: '实际：${allTools.map((t) => t.name).join(", ")}');
     });
 
@@ -52,6 +54,10 @@ void main() {
         'build_apk', 'apk_decompile', 'apk_recompile', 'apk_sign', 'install_apk',
         // 交互
         'ask_user', 'save_memory',
+        // git（2026-10-27）：5 只读 + 4 改本地 + push + init
+        'git_status', 'git_log', 'git_diff', 'git_branches', 'git_show_commit',
+        'git_stage', 'git_unstage', 'git_commit', 'git_checkout',
+        'git_push', 'git_init',
       ];
       for (final name in required) {
         expect(byName.containsKey(name), isTrue, reason: '缺少工具：$name');
@@ -297,6 +303,72 @@ class _FakeMemory implements MemoryCapability {
   @override
   Future<CapabilityResult> append(String note) async =>
       const CapabilitySuccess('saved');
+}
+
+/// 假 git 能力（只为让工具"可用"，不验证行为）。
+///
+/// 行为验证在 `git_tools_test.dart`；这里只关心"工具存在且 schema 合法"。
+class _FakeGit implements GitCapability {
+  @override
+  Future<bool> isRepository(String path) async => true;
+  @override
+  Future<CapabilityResult> status(String path) async =>
+      const CapabilitySuccess('分支：main');
+  @override
+  Future<CapabilityResult> log(String path,
+          {int limit = 20, String? branch}) async =>
+      const CapabilitySuccess('1 条提交');
+  @override
+  Future<CapabilityResult> diff(String path,
+          {bool staged = false, String? file}) async =>
+      const CapabilitySuccess('1 项改动');
+  @override
+  Future<CapabilityResult> branches(String path) async =>
+      const CapabilitySuccess('- main');
+  @override
+  Future<CapabilityResult> showCommit(String path,
+          {required String id}) async =>
+      const CapabilitySuccess('提交');
+  @override
+  Future<CapabilityResult> init(String path,
+          {String defaultBranch = 'main'}) async =>
+      const CapabilitySuccess('已初始化');
+  @override
+  Future<CapabilityResult> stage(String path,
+          {List<String> paths = const []}) async =>
+      const CapabilitySuccess('已暂存');
+  @override
+  Future<CapabilityResult> unstage(String path,
+          {List<String> paths = const []}) async =>
+      const CapabilitySuccess('已取消暂存');
+  @override
+  Future<CapabilityResult> commit(String path,
+          {required String message,
+          String? authorName,
+          String? authorEmail}) async =>
+      CapabilitySuccess('已提交：$message');
+  @override
+  Future<CapabilityResult> checkout(String path,
+          {required String branch, bool create = false}) async =>
+      CapabilitySuccess('已切到 $branch');
+  @override
+  Future<CapabilityResult> clone(
+          {required String url,
+          required String destPath,
+          String? token,
+          int? depth,
+          void Function(String message)? onProgress}) async =>
+      CapabilitySuccess('已克隆到 $destPath');
+  @override
+  Future<CapabilityResult> pull(String path, {String? token}) async =>
+      const CapabilitySuccess('已拉取');
+  @override
+  Future<CapabilityResult> push(String path,
+          {String? token, bool setUpstream = false}) async =>
+      const CapabilitySuccess('已推送');
+  @override
+  Future<CapabilityResult> fetch(String path, {String? token}) async =>
+      const CapabilitySuccess('已 fetch');
 }
 
 class _FakeAskGate implements AskGate {

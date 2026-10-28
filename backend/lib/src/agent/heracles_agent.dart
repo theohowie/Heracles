@@ -49,6 +49,7 @@ import '../prompt/builtin_skills.dart';
 import '../tools/tool_factory.dart';
 import 'multimodal.dart';
 import 'tools/apk_tools.dart';
+import 'tools/git_tools.dart';
 import 'tools/file_manage_tools.dart';
 import 'tools/file_tools.dart';
 import 'tools/info_tools.dart';
@@ -581,16 +582,24 @@ class HeraclesAgent {
     };
   }
 
-  /// 构建全部工具（**21 个**）。
+  /// 构建全部工具（**32 个**）。
   ///
-  /// 21 的来源：**各 builder 实际返回数之和**，不是估的 ——
-  /// 断言见 `test/tools_completeness_test.dart`（"必须恰好 21 个"）：
+  /// 32 的来源：**各 builder 实际返回数之和**，不是估的 ——
+  /// 断言见 `test/tools_completeness_test.dart`（"必须恰好 32 个"）：
   /// `buildFileTools` 8 + `buildShellTools` 1 + `buildFileManageTools` 3 +
-  /// `buildInfoTools` 2 + `buildApkTools` 5 + `buildInteractionTools` 2 = 21。
+  /// `buildInfoTools` 2 + `buildApkTools` 5 + `buildInteractionTools` 2 +
+  /// `buildGitTools` 11 = 32。
   ///
-  /// 旧注释写"18 个"（审计 §3.3 #1：注释没跟上工具面扩张），已更正。
+  /// 旧注释写"18 个"（审计 §3.3 #1：注释没跟上工具面扩张），已更正；
+  /// 2026-10-27 加 git 后从 21 → 32。
   ///
-  /// 分组顺序即日志阅读顺序：**高频基础 → 危险手段 → 长耗时 → 交互**。
+  /// ## git 工具为什么**无条件**列出（不是 caps.git != null 才加）
+  ///
+  /// 与 APK 五件套同一条纪律（见 `tool_factory.dart` 的 "缺能力也让工具可见"）：
+  /// 不列出来 ⇒ 模型从历史里见过这些工具名、会凭记忆乱调 ⇒ 报"未知工具"，
+  /// 比"明确说当前环境不支持"更难排查。
+  ///
+  /// ## 分组顺序即日志阅读顺序：**高频基础 → 危险手段 → 长耗时 → 交互 → 版本控制**
   List<Tool> _buildTools({Future<String> Function()? verify}) {
     final factory = ToolFactory(_caps);
     // ★ H3/K2（2026-10-25）：verifyCommand 配置后，写/编辑成功自动跑
@@ -607,6 +616,7 @@ class HeraclesAgent {
       ...buildApkTools(factory, _caps),         // 5 个：构建/反编译/重打包/签名/安装
       ...buildInteractionTools(factory,         // 2 个：ask_user / save_memory
           askGate: _askGate, caps: _caps),
+      ...buildGitTools(factory, _caps),         // 11 个：5 只读 + 4 改本地 + push + init
     ];
   }
 
@@ -1796,18 +1806,68 @@ class _ApprovalHook extends AgentHook {
     'build_apk', 'apk_decompile', 'apk_recompile', 'apk_sign', 'install_apk',
   };
 
+  /// **只读工具白名单** —— 任何档位都不需要审批（它们不改任何状态）。
+  ///
+  /// ## ★ 这张表的存在方式，与上面四张表是反的（fail-closed 的关键）
+  ///
+  /// 改动之前这里没有白名单，判定是"**工具在不在危险表里**"：
+  ///
+  /// ```dart
+  /// // ❌ 旧实现（fail-open）
+  /// workspaceAuto => _destructive.contains(tool) || _shell.contains(tool) || ...
+  /// ```
+  ///
+  /// 那意味着：**任何没有登记的新工具都默认"不用审批"**。
+  /// 加 git 工具、MCP 工具、将来任何第三方工具时，它会**静默放行** ——
+  /// 而 H1/SEC3 的立身之本是 **fail-closed**。
+  ///
+  /// 现在反过来：默认"要审批"，只有本白名单里的才放行。
+  /// 新增工具时**忘了登记 ⇒ 变成"要审批"**（安全侧的默认），
+  /// 而不是"静默放行"（危险侧的默认）。
+  ///
+  /// ## 三层安全：为什么这些可以免审批
+  ///
+  /// 1. **纯读**（read/list/find/grep/web_fetch/check_device_state）——
+  ///    不写任何东西；`web_fetch` 有 SSRF 闸、结果的 SEC1 包裹在工具层。
+  /// 2. **不改工作区**（ask_user / save_memory / write_todos / skills）——
+  ///    `save_memory` 只往记忆文件追加（且有 SEC4 密钥闸），
+  ///    `write_todos` 只改计划元数据，skills 的 activate/deactivate
+  ///    只改"当前激活列表"。
+  /// 3. **MCP 的只读子集**（list/read）—— `mcp_call_tool` **故意不放进来**：
+  ///    它能调任意外部工具，是本表里最危险的一个，必须逐次审批。
+  static const _readOnly = {
+    // 文件读
+    'read_file', 'list_files', 'find_files', 'grep_files',
+    // 网络 / 设备读
+    'web_fetch', 'check_device_state',
+    // 交互 / 记忆 / 计划（不改工作区）
+    'ask_user', 'save_memory', 'write_todos',
+    'activate_skills', 'deactivate_skills',
+    // MCP 只读
+    'mcp_list_tools', 'mcp_list_resources', 'mcp_list_prompts',
+    'mcp_read_resource', 'mcp_get_prompt',
+    // git 只读（2026-10-27，Step 2）
+    'git_status', 'git_log', 'git_diff', 'git_branches', 'git_show_commit',
+  };
+
   /// 这个工具在当前档位下要不要批准。
+  ///
+  /// ## 三档语义（与 App 设置页文案逐字对应）
+  ///
+  /// | 档位 | 判定 |
+  /// |---|---|
+  /// | [fullAccess] | 全放行（用户的明确选择，含"我知道风险"）|
+  /// | [workspaceAuto] | 白名单里的 + **工作区内修改**（`write_file` 等）放行；其余一律要批 |
+  /// | [manual] | 只有白名单放行；**任何**会改状态的都要批 |
+  ///
+  /// ## 关键：未知工具 ⇒ 要审批（fail-closed）
+  ///
+  /// 见 [_readOnly] 的注释。这条是加 git/第三方工具时的安全网。
   bool needsApproval(String tool) => switch (mode) {
         ApprovalMode.fullAccess => false,
         ApprovalMode.workspaceAuto =>
-          _destructive.contains(tool) ||
-              _shell.contains(tool) ||
-              _apk.contains(tool),
-        ApprovalMode.manual =>
-          _workspaceMutating.contains(tool) ||
-              _destructive.contains(tool) ||
-              _shell.contains(tool) ||
-              _apk.contains(tool),
+          !_readOnly.contains(tool) && !_workspaceMutating.contains(tool),
+        ApprovalMode.manual => !_readOnly.contains(tool),
       };
 
   @override
@@ -1883,6 +1943,15 @@ class _ApprovalHook extends AgentHook {
   String _clip(String s, int n) => s.length <= n ? s : '${s.substring(0, n)}…';
 
   /// 一句话风险说明（INTERFACE.md N1 的 risk 字段；弹窗直接展示）。
+  ///
+  /// ## 为什么 git 要单独分组（2026-10-27，Step 2）
+  ///
+  /// git 的风险分布极不均匀：
+  /// · `git_commit` 只是往本仓库写对象（可 reset 回来）；
+  /// · `git_push` 是**把手机上的代码推到公网**，一次误推可能泄露密钥；
+  /// · `git_checkout` 会**覆盖用户的文件**。
+  ///
+  /// 三者的危险程度差一个数量级，弹窗上必须让人一眼看出来是哪种。
   String _riskOf(String tool) {
     if (_shell.contains(tool)) {
       return '在工作区里执行任意 shell 命令 —— 可能碰到工作区外的文件；'
@@ -1894,6 +1963,26 @@ class _ApprovalHook extends AgentHook {
     if (_apk.contains(tool)) {
       return '构建/逆向/安装 APK —— 写入沙箱外 staging、安装直接动设备。';
     }
+    // ---- git（Step 2）----
+    if (tool == 'git_push') {
+      return '★ 把本地提交**推送到远程仓库** —— 代码会离开这台设备。'
+          '推到公开仓库等于对外发布，推之前确认里面没有密钥。';
+    }
+    if (tool == 'git_clone') {
+      return '从远程仓库克隆到本地 —— 会写入大量文件，占用存储。';
+    }
+    if (tool == 'git_pull' || tool == 'git_fetch') {
+      return '从远程拉取更新 —— `pull` 会覆盖本地文件（只做快进，不自动合并）。';
+    }
+    if (tool == 'git_checkout') {
+      return '切换分支 —— 会**覆盖工作区文件**。有未提交改动时会被拒绝。';
+    }
+    if (tool == 'git_commit' || tool == 'git_stage' || tool == 'git_unstage') {
+      return '修改本地 git 仓库状态（暂存区 / 提交历史）—— 不碰工作区文件。';
+    }
+    if (tool == 'git_init') {
+      return '在工作区里初始化一个 git 仓库（创建 `.git/` 目录）。';
+    }
     return '会修改工作区内的文件（写/编辑/建目录）。';
   }
 
@@ -1901,9 +1990,14 @@ class _ApprovalHook extends AgentHook {
   ///
   /// · 文件工具：路径按契约就是工作区相对路径 ⇒ 恒 true；
   /// · shell：静态判不了命令会碰哪里 ⇒ false（保守，让用户看到命令原文再批）；
-  /// · APK：staging 在工作区外 ⇒ false。
-  bool _workspaceInside(String tool) =>
-      _workspaceMutating.contains(tool) || _destructive.contains(tool);
+  /// · APK：staging 在工作区外 ⇒ false；
+  /// · git：`.git/` 在工作区内、`clone` 目标也在工作区内 ⇒ true；
+  ///   **但推送是外发** ⇒ false（保守）。
+  bool _workspaceInside(String tool) {
+    if (tool == 'git_push') return false; // 外发代码，不在"工作区内"语义
+    if (tool.startsWith('git_')) return true;
+    return _workspaceMutating.contains(tool) || _destructive.contains(tool);
+  }
 }
 
 /// 宽松 JSON 解析 —— 占位（实际用 dart:convert 的 jsonDecode）。

@@ -38,6 +38,8 @@ class InputBar extends StatefulWidget {
     this.workspaceLabel,
     this.onWorkspaceTap,
     this.onGithubTap,
+    this.onGitTap,
+    this.githubAccount,
     this.attachments = const [],
     this.enabled = true,
     this.busy = false,
@@ -76,9 +78,29 @@ class InputBar extends StatefulWidget {
   /// 点信息条的工作区项（外层打开抽屉换区）
   final VoidCallback? onWorkspaceTap;
 
-  /// 点信息条的「连接 Github」—— 功能未接入，先占位前端
-  /// （用户 2026-10-26 定：先把前端做好，后续不做再撤）
+  /// 点信息条的「连接 Github」。
+  ///
+  /// 2026-10-27（Step 3）：已接入真实 Device Flow
+  /// （`widgets/github_connect_sheet.dart`）—— 不再是占位提示。
   final VoidCallback? onGithubTap;
+
+  /// 点信息条的「选择分支」。
+  ///
+  /// 2026-10-27（Step 4）：接入 git 面板（`widgets/git_panel.dart`）。
+  /// **传 null = 置灰**（工作区不是 git 仓库时由上层显式决定，
+  /// 不在 widget 里偷偷探测 —— 探测要碰文件系统，那是上层的事）。
+  final VoidCallback? onGitTap;
+
+  /// 已连接的 GitHub 账号（`null` = 没连接）。
+  ///
+  /// ## 为什么需要这个（2026-10-28 真机发现的缺陷）
+  ///
+  /// 第一版把标签写死成「连接 Github」—— 结果用户**授权成功后**，
+  /// 输入条下方**仍然显示「连接 Github」**，看起来像没连上（用户会再点一次）。
+  /// 那是假信息：状态已经变了，UI 没跟上。
+  ///
+  /// 现在：`null` ⇒ 显示「连接 Github」；非空 ⇒ 显示 `@login`。
+  final String? githubAccount;
 
   final bool enabled;
 
@@ -507,6 +529,8 @@ _PermissionIconButton(
                         workspaceLabel: widget.workspaceLabel,
                         onWorkspaceTap: widget.onWorkspaceTap,
                         onGithubTap: widget.onGithubTap,
+      onGitTap: widget.onGitTap,
+      githubAccount: widget.githubAccount,
                       ),
                     ],
                   ),
@@ -561,12 +585,18 @@ class _EnvStrip extends StatelessWidget {
     this.workspaceLabel,
     this.onWorkspaceTap,
     this.onGithubTap,
+    this.onGitTap,
+    this.githubAccount,
   });
 
   final Hue h;
   final String? workspaceLabel;
   final VoidCallback? onWorkspaceTap;
   final VoidCallback? onGithubTap;
+  final VoidCallback? onGitTap;
+
+  /// 已连接的 GitHub 账号（`null` = 没连接）。详见 [InputBar.githubAccount]。
+  final String? githubAccount;
 
   @override
   Widget build(BuildContext context) {
@@ -590,13 +620,25 @@ class _EnvStrip extends StatelessWidget {
           ),
           Expanded(
             flex: 4,
-            child: _item(GitHubIcon(size: 15, color: h.textDim), '连接 Github',
-                onGithubTap, dim: false, align: Alignment.center),
+            child: _item(
+                GitHubIcon(
+                    size: 15,
+                    color: githubAccount == null ? h.textDim : h.text),
+                githubAccount == null ? '连接 Github' : '@$githubAccount',
+                onGithubTap,
+                dim: false,
+                align: Alignment.center),
           ),
           Expanded(
             flex: 3,
-            child: _item(GitBranchIcon(size: 15, color: h.textFaint), '选择分支',
-                null, dim: true, align: Alignment.centerRight),
+            child: _item(
+                GitBranchIcon(
+                    size: 15,
+                    color: onGitTap == null ? h.textFaint : h.textDim),
+                '选择分支',
+                onGitTap,
+                dim: onGitTap == null,
+                align: Alignment.centerRight),
           ),
         ],
       ),

@@ -189,6 +189,123 @@ void main() {
       expect(finished.first.isError, isTrue);
       expect(finished.first.output, contains('fail-closed'));
     });
+
+    // ==================================================================
+    // ★ 2026-10-27（Step 2）：**未知工具必须默认要审批**（fail-closed）
+    // ==================================================================
+    //
+    // ## 为什么这组测试是加 git 工具的前置条件
+    //
+    // 改动之前，判定逻辑是"工具在不在危险表里"：
+    //
+    // ```dart
+    // // ❌ 旧：未知工具 ⇒ 不在表里 ⇒ 不需要审批 ⇒ 静默放行
+    // workspaceAuto => _destructive.contains(tool) || _shell.contains(tool) || ...
+    // ```
+    //
+    // 后果：新加的任何工具（git_push 推公网、mcp_call_tool 调任意外部工具）
+    // 在 manual/workspaceAuto 档下**一声不响地执行**。
+    //
+    // 现在反过来：默认要审批，只有 `_readOnly` 白名单放行。
+    group('★ 未知工具 ⇒ 默认要审批（fail-closed 白名单模式）', () {
+      /// 用一个**不在任何表里**的工具名验证默认行为。
+      /// 用 `_FakeShell` 的机制：只要 gate 被问了，就说明"要审批"。
+      test('★ manual 档：未知工具必须先问（不是静默放行）', () async {
+        final client = scripted(
+          toolName: 'future_unknown_tool',
+          toolArgs: '{}',
+        );
+        final gate = _FakeGate(approve: false);
+        final agent = agentWith(
+          client,
+          mode: ApprovalMode.manual,
+          gate: gate,
+          caps: const Capabilities(),
+        );
+
+        await for (final _ in agent.run('调个未来才有的工具')) {}
+
+        expect(gate.asks, hasLength(1),
+            reason: '★ 未知工具在 manual 档必须触发审批 —— '
+                '否则将来加 git_push / mcp_call_tool 会静默放行');
+        expect(gate.asks.first, 'future_unknown_tool');
+      });
+
+      test('★ workspaceAuto 档：未知工具也必须先问', () async {
+        final client = scripted(
+          toolName: 'future_unknown_tool',
+          toolArgs: '{}',
+        );
+        final gate = _FakeGate(approve: false);
+        final agent = agentWith(
+          client,
+          mode: ApprovalMode.workspaceAuto,
+          gate: gate,
+          caps: const Capabilities(),
+        );
+
+        await for (final _ in agent.run('调个未来才有的工具')) {}
+
+        expect(gate.asks, hasLength(1),
+            reason: '★ workspaceAuto 只放行"工作区内修改"，未知工具不在其列');
+      });
+
+      test('★ fullAccess 档：未知工具不问（用户的明确选择）', () async {
+        final client = scripted(
+          toolName: 'future_unknown_tool',
+          toolArgs: '{}',
+        );
+        final gate = _FakeGate(approve: false);
+        final agent = agentWith(
+          client,
+          mode: ApprovalMode.fullAccess,
+          gate: gate,
+          caps: const Capabilities(),
+        );
+
+        await for (final _ in agent.run('调个未来才有的工具')) {}
+
+        expect(gate.asks, isEmpty,
+            reason: '完全访问档 = 用户已明确承担风险，不该再问');
+      });
+
+      test('★ 只读白名单：git 只读工具在 manual 档不触发审批', () async {
+        // git_status 在 _readOnly 里 —— 但当前 Capabilities 没有 git 能力，
+        // 所以工具"调用即失败"。**关键断言是 gate 没被问**：
+        // 说明审批发生在"能力缺失"之前，且只读工具走了放行路径。
+        final client = scripted(toolName: 'git_status', toolArgs: '{}');
+        final gate = _FakeGate(approve: false);
+        final agent = agentWith(
+          client,
+          mode: ApprovalMode.manual,
+          gate: gate,
+          caps: const Capabilities(), // 无 git ⇒ 工具不可用
+        );
+
+        await for (final _ in agent.run('看下仓库状态')) {}
+
+        expect(gate.asks, isEmpty,
+            reason: 'git_status 是只读的，任何档位都不该弹审批');
+      });
+
+      test('★ git_push 在 manual 档必须审批（最危险的一个）', () async {
+        final client = scripted(toolName: 'git_push', toolArgs: '{}');
+        final gate = _FakeGate(approve: false);
+        final agent = agentWith(
+          client,
+          mode: ApprovalMode.manual,
+          gate: gate,
+          caps: const Capabilities(),
+        );
+
+        await for (final _ in agent.run('推上去')) {}
+
+        expect(gate.asks, hasLength(1),
+            reason: '★ git_push 把代码推到公网 —— manual 档必须问');
+        expect(gate.risks.first, contains('推送'),
+            reason: '弹窗风险说明要写明"推送到远程"');
+      });
+    });
   });
 
   group('E5 —— 预算提前预警（2026-10-24：止损不该是用户第一次听说预算）', () {
@@ -381,6 +498,13 @@ class _FakeGate implements AskGate {
   final bool approve;
   final List<String> asks = [];
 
+  /// 每次审批请求的 risk 文案（2026-10-27 加）。
+  ///
+  /// 为什么单独记：`asks` 只存工具名，而"弹窗上给人看的风险说明"
+  /// 是另一条契约（INTERFACE.md N1 的 risk 字段）—— git_push 必须
+  /// 写明"推送到远程"，否则用户不知道自己在批准什么。
+  final List<String> risks = [];
+
   @override
   Future<String?> askUser(List<AskQuestion> questions) async => null;
 
@@ -394,6 +518,7 @@ class _FakeGate implements AskGate {
     required bool workspaceInside,
   }) async {
     asks.add(toolName);
+    risks.add(risk);
     return approve;
   }
 }

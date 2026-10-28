@@ -70,6 +70,15 @@ dependencies:
   package_info_plus: ^10.2.2
   flutter_svg: ^2.3.0
 
+  # 内置 git（2026-10-27）：纯 Dart 实现，设备上没有 git 二进制。
+  # Step 0 真机实测：init 17ms / status 16ms / commit 68ms，不需要 isolate。
+  # ⚠️ 只支持 HTTPS 远程（SSH 依赖外部 ssh 命令，Android 上没有）。
+  git_dart: ^0.4.0
+
+  # 打开外部链接（2026-10-27，Step 3）：GitHub Device Flow 要自动打开
+  # 授权页；「断开连接」要能跳撤销页。官方维护的小包，不引第三方服务。
+  url_launcher: ^6.3.1
+
 
 dev_dependencies:
   flutter_test:

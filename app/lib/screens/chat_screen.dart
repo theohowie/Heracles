@@ -26,6 +26,11 @@ import 'settings_screen.dart';
 import 'archived_sessions_screen.dart';
 import '../widgets/bw_topbar.dart';
 import '../widgets/bw_usage_sheet.dart';
+import '../widgets/github_connect_sheet.dart';
+import '../widgets/git_panel.dart';
+import '../widgets/github_repo_sheet.dart';
+import '../services/github_auth.dart';
+import '../services/github_config.dart';
 import '../widgets/bw_approval.dart';
 import '../widgets/themed_background.dart';
 import '../widgets/input_bar.dart';
@@ -66,6 +71,143 @@ class _ChatScreenState extends State<ChatScreen> {
   final _scroll = ScrollController();
   final _scaffoldKey = GlobalKey<ScaffoldState>();
   final _bridge = AgentBridge();
+
+  /// **已连接的 GitHub 账号**（`null` = 没连）。
+  ///
+  /// ## 为什么这个状态必须在这个层（2026-10-28 真机发现的缺陷）
+  ///
+  /// 第一版把「连接 Github」这个标签**写死在 input_bar 里**。真机上
+  /// 授权成功、token 也存进 secure storage 了，**但底部仍然显示
+  /// 「连接 Github」** —— 用户以为没连上，会再点一次。
+  ///
+  /// 那是典型的**假信息**：状态变了，UI 没跟上。
+  ///
+  /// 现在的数据流：
+  /// ```
+  /// 启动时  GitHubAuth.readLogin()  → _githubAccount
+  /// 连接成功 showGitHubConnectSheet 返回 true → fetchUser() → setState
+  /// 断开    signOut() → _githubAccount = null
+  /// ```
+  String? _githubAccount;
+
+  /// **当前选中的 GitHub 仓库名**（`null` = 没选，底部显示"工作区"）。
+  ///
+  /// 2026-10-28 用户要求：「选择仓库……然后下面的显示仓库名」。
+  /// 选了仓库之后底部第一格显示它，用户才知道自己正在操作哪个仓库。
+  String? _githubRepoName;
+
+  /// **当前 git 操作的目标路径**（2026-10-28）。
+  ///
+  /// 默认 null = 用工作区根。选了某个 GitHub 仓库并克隆之后指向
+  /// `<工作区>/<仓库名>` —— 否则「选择分支」「提交」会作用在工作区根上，
+  /// 而用户刚选的是那个仓库，看起来就像"点了没反应"。
+  String? _gitRepoPath;
+
+  /// GitHub 认证门面（**会话级单例**：它只是 secure storage + dio 的薄封装，
+  /// 无状态；每次 new 也没问题，但复用能少建几个 dio 实例）。
+  final _githubAuth = GitHubAuth(clientId: GitHubConfig.clientId);
+
+  /// 点信息条的「连接 Github」/「@用户名」。
+  ///
+  /// ## 为什么是"先判连接状态再决定弹什么"（2026-10-28 用户指出）
+  ///
+  /// > 我现在已经连上了，我点击 github，怎么还要跳授权码？
+  ///
+  /// 第一版只有一个动作：弹连接面板。于是**已连上的用户点它就又看到一个
+  /// 8 位验证码** —— 完全莫名其妙。
+  ///
+  /// 现在两个分支：
+  /// · 未连接 → 连接面板（Device Flow）
+  /// · 已连接 → **选择仓库面板**（搜索框 + 仓库列表 + 点选克隆）
+  ///
+  /// ## 为什么抽成 State 方法而不是内联闭包
+  ///
+  /// 内联闭包里的 `context` 会被分析器当成 build 的局部变量，
+  /// 于是 `mounted` 被判为"unrelated check"（`use_build_context_synchronously`）。
+  /// 抽成方法后 `context` 就是 `State.context`，检查关系成立 —— 这不是
+  /// 为了消 lint，是因为**语义确实更清楚**。
+  Future<void> _onGithubTap() async {
+    final connected = await _githubAuth.isConnected();
+    if (!mounted) return;
+
+    // ---------- 分支 1：还没连 ----------
+    if (!connected) {
+      final ok = await showGitHubConnectSheet(context);
+      if (!ok || !mounted) return;
+      final user = await _githubAuth.fetchUser();
+      if (!mounted) return;
+      final cached = await _githubAuth.readLogin();
+      if (!mounted) return;
+      setState(() {
+        _githubAccount =
+            user?.login ?? (cached.isNotEmpty ? cached : '已连接');
+      });
+      return;
+    }
+
+    // ---------- 分支 2：已连接 ⇒ 选仓库 ----------
+    final ws = await _bridge.ensureAppWorkspace();
+    final path = (ws?['path'] as String?) ?? '';
+    if (!mounted) return;
+    if (path.isEmpty) {
+      showIosToast(context, '拿不到工作区路径');
+      return;
+    }
+    final choice =
+        await showGitHubRepoSheet(context, workspacePath: path);
+    if (choice == null || !mounted) return;
+
+    // 选中即生效 —— **这里不克隆**（2026-10-28 用户纠正）。
+    //
+    // 之前这段的文案是「已克隆 X，已切换到这个仓库」，但代码里根本没有克隆，
+    // 只是在设 `_gitRepoPath` ⇒ **文案撒谎**。用户看到"已克隆"会以为
+    // 文件已经下来了，去文件管理器里找不到。
+    //
+    // 现在：
+    // · `_githubRepoName` ⇒ 底部第一格显示仓库名（用户要求）
+    // · `_gitRepoPath`    ⇒ git 面板作用于这个仓库
+    // · 文案如实说明「还没下载」时该怎么办
+    setState(() {
+      _githubRepoName = choice.repo.name;
+      _gitRepoPath = choice.localPath;
+    });
+    showIosToast(
+      context,
+      choice.isLocal
+          ? '已选择 ${choice.repo.name}'
+          : '已选择 ${choice.repo.name}（本地还没有，点行尾 ↓ 下载）',
+    );
+  }
+
+  /// 读已连接的账号（启动时 / 下拉刷新时调）。
+  /// ## 为什么先读缓存再拉网络
+  ///
+  /// `readLogin()` 是本地 secure storage（微秒级）；`fetchUser()` 要打
+  /// GitHub API（几百毫秒，还可能被限流）。启动时先用缓存把 UI 点亮，
+  /// **不阻塞首帧**；网络那次失败就失败（状态仍然"已连接"，只是没头像）。
+  Future<void> _loadGitHubAccount() async {
+    try {
+      final connected = await _githubAuth.isConnected();
+      if (!connected) {
+        if (mounted && _githubAccount != null) {
+          setState(() => _githubAccount = null);
+        }
+        return;
+      }
+      final cached = await _githubAuth.readLogin();
+      if (mounted && cached.isNotEmpty && cached != _githubAccount) {
+        setState(() => _githubAccount = cached);
+      }
+      // 后台补拉（拿到就更新；失败静默 —— 见上）
+      final user = await _githubAuth.fetchUser();
+      if (mounted && user != null && user.login != _githubAccount) {
+        setState(() => _githubAccount = user.login);
+      }
+    } catch (_) {
+      // 读失败当"没连接"处理？**不** —— 那会让已连接用户看到"未连接"。
+      // 保持现状（null 或旧值），下一次进页面再试。
+    }
+  }
 
   final List<HMessage> _messages = [];
   final Map<String, TurnMetrics> _metrics = {};
@@ -530,6 +672,9 @@ class _ChatScreenState extends State<ChatScreen> {
     _scroll.addListener(_onScroll);
     // ★ 通知点击定位会话（2026-10-19）：热启动走广播流，冷启动走 pending 兜底
     _openSessionSub = AgentBridge.openSessionRequests.listen(_onOpenSessionRequest);
+    // ★ 2026-10-28：读 GitHub 连接状态（见 _githubAccount 的注释 ——
+    //   不读的话底部永远显示「连接 Github」，即使已经连上了）
+    unawaited(_loadGitHubAccount());
     _restoreView();
     unawaited(_reload().then((_) => _consumePendingOpenSession()));
   }
@@ -4481,16 +4626,41 @@ class _ChatScreenState extends State<ChatScreen> {
             onPickAttachment: _pickAttachment,
             onRemoveAttachment: _removeAttachment,
             // 信息条（2026-10-26 TRAE 式输入区）：工作区项开抽屉换区；
-            // Github 未接入，先占位提示（用户定：前端先做好）
-            workspaceLabel: _activeWorkspace?.name,
+            //
+            // ★ 2026-10-28（用户要求「选择仓库……然后下面的显示仓库名」）：
+            //   选了 GitHub 仓库后，第一格显示**仓库名**而不是工作区名 ——
+            //   用户必须一眼看出自己现在操作的是哪个仓库。
+            //   没选仓库时退回工作区名（原行为不变）。
+            workspaceLabel: _githubRepoName ?? _activeWorkspace?.name,
             onWorkspaceTap: () => _scaffoldKey.currentState?.openDrawer(),
-            onGithubTap: () => unawaited(showBwConfirmSheet(
-                  context,
-                  title: '连接 Github',
-                  message: '这个功能还没接入，界面先占位，后续版本再打通。',
-                  confirmLabel: '知道了',
-                  cancelLabel: null,
-                )),
+            // ★ 2026-10-27（Step 3）：换成真实的 Device Flow 连接流程。
+            //   之前是占位提示（"这个功能还没接入"）—— 用户点了只看到一句道歉。
+            //   现在点开是：拿 8 位码 → 自动复制 + 自动开浏览器 → 轮询授权。
+            //   实现：`widgets/github_connect_sheet.dart`
+            //   协议：`backend/lib/src/git/github_device_flow.dart`（17 条单测）
+            // ★ 2026-10-28（用户指出）：**已连接时点它应该是"选仓库"，
+            //   不该再弹一次授权码**。判定在 `_onGithubTap` 里。
+            onGithubTap: () => unawaited(_onGithubTap()),
+            githubAccount: _githubAccount,
+            // ★ 2026-10-27（Step 4）：点「选择分支」打开 git 面板。
+            //   路径必须问原生（Dart 拿不到 getExternalFilesDir）；
+            //   拿不到就**不传回调** ⇒ 按钮置灰而不是点了报错。
+            onGitTap: () => unawaited(() async {
+              final r = await AgentBridge().ensureAppWorkspace();
+              final path = (r?['path'] as String?) ?? '';
+              if (path.isEmpty) {
+                if (mounted && context.mounted) {
+                  showIosToast(context, '拿不到工作区路径');
+                }
+                return;
+              }
+              if (!context.mounted) return;
+              // 有选定仓库就用它，否则用工作区根（见 `_gitRepoPath` 的注释）
+              await showGitPanel(
+                context,
+                workspacePath: _gitRepoPath ?? path,
+              );
+            }()),
             // ★ 输入框上方那一行开关（2026-10-12，S4）
             //
             // 权限改的是**设置**（会持久化），不等同于"这一次运行"的参数 ——

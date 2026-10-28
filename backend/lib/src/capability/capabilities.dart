@@ -25,6 +25,18 @@
 ///    那类 bug（旧实现踩过）。
 library;
 
+// ★ 内置 git 的接口（2026-10-27）：与其余能力同一条纪律 —— 接口在本包，
+//   实现由宿主注入。
+//
+// `import` 与 `export` 都要写，别以为 export 就够了：
+//   · `export` 只让**本库的导入方**看到那些符号；
+//   · 本文件自己（`Capabilities.git` 的字段类型）需要 `import` 才看得见。
+//   （这两个文件互相 import 是**有意为之**：`git_capability.dart` 要用
+//     本文件的 `CapabilityResult`，本文件要用它的 `GitCapability`。
+//     Dart 允许这种循环 —— 两边都只是类型声明，没有初始化顺序问题。）
+import 'git_capability.dart';
+export 'git_capability.dart';
+
 /// 能力调用结果。
 ///
 /// **为什么不用异常**：agent 循环里，工具失败是**常态**（文件不存在、权限不足、
@@ -189,6 +201,7 @@ class Capabilities {
     this.apk,
     this.web,
     this.memory,
+    this.git,
   });
 
   final WorkspaceCapability? workspace;
@@ -197,6 +210,16 @@ class Capabilities {
   final ApkCapability? apk;
   final WebCapability? web;
   final MemoryCapability? memory;
+
+  /// **内置 git**（2026-10-27，Step 1）。
+  ///
+  /// 接口定义在 `git_capability.dart`，实现由宿主注入
+  /// （App 侧是 `app/lib/services/git_service.dart`，基于纯 Dart 的 `git_dart`）。
+  ///
+  /// `null` ⇒ `git_*` 系列工具"一调用就失败并明说当前环境不支持 git"。
+  /// 为什么不是"干脆不列出来"：与其余能力同一条纪律 —— 模型从历史里看到过
+  /// 工具名，不列出来它会凭记忆乱调，报"未知工具"更难排查。
+  final GitCapability? git;
 }
 
 // ============================================================================

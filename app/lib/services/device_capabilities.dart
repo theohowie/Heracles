@@ -6,6 +6,8 @@ import 'package:flutter/services.dart';
 import 'package:heracles_backend/heracles_backend.dart';
 
 import 'global_memory.dart';
+// 内置 git 的实现（2026-10-28）：`buildDeviceCapabilities` 要注入它。
+import 'git_service.dart';
 
 // ============================================================================
 // 能力契约 —— 直接来自 `backend`（不再是镜像）
@@ -2184,6 +2186,7 @@ Capabilities buildDeviceCapabilities({
   bool includeWeb = true,
   bool includeMemory = true,
   bool includeHealth = true,
+  bool includeGit = true,
 }) {
   final ch = channel ?? const DeviceChannelClient();
   return Capabilities(
@@ -2195,6 +2198,23 @@ Capabilities buildDeviceCapabilities({
     web: includeWeb ? const DeviceWebCapability() : null,
     memory:
         includeMemory ? FileMemoryCapability(channel: ch) : null,
+    // ★ 内置 git（2026-10-28 补接线）。
+    //
+    // ## 为什么这一行曾经漏掉、后果是什么
+    //
+    // `Capabilities.git` 是 2026-10-27 加的字段，但**这里忘了传** ⇒
+    // `caps.git == null` ⇒ `git_tools.dart` 里 11 个工具全部走
+    // `unavailableReason` 分支，模型一调就收到
+    // 「当前环境不支持 git（宿主没有注入 git 能力）」——
+    // 工具在列表里看得见，但一次都用不了。
+    //
+    // 单测抓不到：`git_tools_test.dart` 自己造了假 capability，
+    // 它验的是"工具有没有正确调用 capability"，不是"宿主有没有注入"。
+    // 这一类"装配漏接"只能靠**装配层的测试**或真机兜住。
+    //    ⚠️ 必须传 workspaceRoot：git 工具收到的是**工作区相对路径**，
+    //    不传的话会按进程 CWD（Android 上是 /）解析 ⇒ 全部失败。
+    //    （真机证据见 GitService.workspaceRoot 的注释）
+    git: includeGit ? GitService(workspaceRoot: workspaceRoot) : null,
   );
 }
 

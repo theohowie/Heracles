@@ -38,6 +38,8 @@ export 'src/agent/session_history.dart';
 // 多模态输入边界类型（2026-10-23）。宿主演把图片压成 base64，框架类型不出 backend。
 export 'src/agent/multimodal.dart';
 export 'src/capability/capabilities.dart';
+// ★ GitHub Device Flow 协议（2026-10-27，Step 3）。纯协议逻辑，可 dart test。
+export 'src/git/github_device_flow.dart';
 export 'src/context/deterministic_json.dart';
 export 'src/context/window_ratio_compressor.dart';
 export 'src/prompt/system_prompt.dart';
@@ -47,6 +49,7 @@ export 'src/agent/tools/apk_tools.dart';
 export 'src/agent/tools/file_manage_tools.dart';
 export 'src/agent/tools/file_tools.dart';
 export 'src/agent/tools/info_tools.dart';
+export 'src/agent/tools/git_tools.dart';
 export 'src/agent/tools/interaction_tools.dart';
 export 'src/agent/tools/shell_tools.dart';
 export 'src/tools/tool_factory.dart';
