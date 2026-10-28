@@ -40,6 +40,18 @@ import 'package:flutter/material.dart';
 import '../theme/app_theme.dart';
 import '../widgets/bw_approval.dart';
 
+/// 「提交与推送」被点中时，`showGitBranchSheet` 返回这个哨兵值。
+///
+/// ## 为什么用哨兵而不是回调直接开面板（2026-10-28 真机 bug）
+///
+/// 第一版是 `onTap: () { Navigator.pop(); onAdvanced!(); }` ——
+/// **pop 的动画还没结束就弹下一个抽屉**，Flutter 会忽略后一个
+/// `showModalBottomSheet` ⇒ 用户看到"点了没反应"。
+///
+/// 改成弹哨兵：面板彻底关闭、`await` 返回之后，调用方再开版本控制面板，
+/// 顺序确定。同时 `null` 仍然表示"用户取消"，语义不混。
+const String gitBranchSheetAdvanced = '\u0000advanced';
+
 /// 弹出「选择分支」面板。
 ///
 /// @param loader 异步取分支名（本地读仓库 / 远端打 API 都行）
@@ -49,6 +61,11 @@ Future<String?> showGitBranchSheet(
   BuildContext context, {
   required Future<List<String>> Function() loader,
   required String? current,
+  /// 「提交 / 推送」入口（2026-10-28 补）。
+  ///
+  /// 第三格现在直接开这个面板，原来「版本控制」大面板就没有入口了 ——
+  /// 提交/推送必须有个地方去。放在面板底部，符合"选分支时顺手提交"的动线。
+  VoidCallback? onAdvanced,
 }) async {
   return showModalBottomSheet<String>(
     context: context,
@@ -61,6 +78,7 @@ Future<String?> showGitBranchSheet(
         h: Hue.of(context),
         loader: loader,
         current: current,
+        onAdvanced: onAdvanced,
       ),
     ),
   );
@@ -71,11 +89,13 @@ class _GitBranchSheet extends StatefulWidget {
     required this.h,
     required this.loader,
     required this.current,
+    this.onAdvanced,
   });
 
   final Hue h;
   final Future<List<String>> Function() loader;
   final String? current;
+  final VoidCallback? onAdvanced;
 
   @override
   State<_GitBranchSheet> createState() => _GitBranchSheetState();
@@ -240,6 +260,30 @@ class _GitBranchSheetState extends State<_GitBranchSheet> {
                           itemBuilder: (_, i) => _row(h, _visible[i]),
                         ),
             ),
+
+            // ---- 提交 / 推送入口（第三格直接开本面板后必须有的出口）----
+            if (widget.onAdvanced != null) ...[
+              const SizedBox(height: HSpace.xs),
+              Divider(height: 1, thickness: 1, color: h.border),
+              InkWell(
+                onTap: () => Navigator.of(context).pop(gitBranchSheetAdvanced),
+                child: Padding(
+                  padding: const EdgeInsets.symmetric(vertical: 15),
+                  child: Row(
+                    mainAxisAlignment: MainAxisAlignment.center,
+                    children: [
+                      Icon(CupertinoIcons.cloud_upload,
+                          size: 15, color: h.textDim),
+                      const SizedBox(width: HSpace.xs),
+                      Text(
+                        '提交与推送',
+                        style: TextStyle(fontSize: 14, color: h.textDim),
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+            ],
           ],
         ),
       ),

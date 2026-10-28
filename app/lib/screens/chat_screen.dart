@@ -303,6 +303,8 @@ class _ChatScreenState extends State<ChatScreen> {
       context,
       // 当前分支从状态里同步拿：✓ 不用等加载就显示
       current: _gitBranch,
+      // 「提交与推送」出口：面板返回哨兵后由本方法开版本控制面板
+      onAdvanced: () {},
       loader: () async {
         var local = false;
         try {
@@ -341,6 +343,16 @@ class _ChatScreenState extends State<ChatScreen> {
     );
     if (!mounted) return;
     if (picked == null) return;
+    // 「提交与推送」：面板已关闭，现在开版本控制面板（顺序确定）
+    if (picked == gitBranchSheetAdvanced) {
+      await showGitPanel(
+        context,
+        workspacePath: target,
+        repoFullName: full,
+      );
+      if (mounted) unawaited(_refreshGitBranch());
+      return;
+    }
 
     // 本地仓库才真切换；远端分支只提示先下载
     var local = false;

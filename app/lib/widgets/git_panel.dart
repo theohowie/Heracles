@@ -53,11 +53,24 @@ Future<void> showGitPanel(
     shape: const RoundedRectangleBorder(),
     builder: (sheetCtx) => BwSheetShell(
       onDismissRequest: () => Navigator.of(sheetCtx).pop(),
-      child: _GitPanel(
-        h: Hue.of(context),
-        workspacePath: workspacePath,
-        repoFullName: repoFullName,
-        initialNotice: initialNotice,
+      // ★ 避让键盘（2026-10-28 真机 bug）
+      //
+      // 面板里有「提交信息」输入框。点它键盘弹起后，**输入框和
+      // 「提交全部改动」按钮被键盘完全盖住** —— 用户看不到自己打的字，
+      // 也点不到提交按钮（真机实测：内容止于 y≈1490，键盘正好从 1490 开始）。
+      //
+      // 修法与「新建分支」弹层同一套：把键盘高度作为底部内边距，
+      // 整个面板抬到键盘上方。
+      child: Padding(
+        padding: EdgeInsets.only(
+          bottom: MediaQuery.viewInsetsOf(sheetCtx).bottom,
+        ),
+        child: _GitPanel(
+          h: Hue.of(context),
+          workspacePath: workspacePath,
+          repoFullName: repoFullName,
+          initialNotice: initialNotice,
+        ),
       ),
     ),
   );
