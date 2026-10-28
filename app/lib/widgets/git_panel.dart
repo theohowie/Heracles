@@ -33,7 +33,6 @@ import '../services/git_service.dart';
 import '../services/github_auth.dart';
 import '../services/github_config.dart';
 import '../theme/app_theme.dart';
-import '../theme/cupertino_kit.dart';
 import '../widgets/bw_approval.dart';
 
 /// 弹出 git 面板。
@@ -43,6 +42,9 @@ Future<void> showGitPanel(
   BuildContext context, {
   required String workspacePath,
   String? repoFullName,
+  /// 打开时就显示的提示（例如"切分支失败：有未提交改动"）。
+  /// 用内联提示代替气泡弹窗（2026-10-28 用户要求）。
+  String? initialNotice,
 }) async {
   await showModalBottomSheet<void>(
     context: context,
@@ -55,6 +57,7 @@ Future<void> showGitPanel(
         h: Hue.of(context),
         workspacePath: workspacePath,
         repoFullName: repoFullName,
+        initialNotice: initialNotice,
       ),
     ),
   );
@@ -65,6 +68,7 @@ class _GitPanel extends StatefulWidget {
     required this.h,
     required this.workspacePath,
     this.repoFullName,
+    this.initialNotice,
   });
 
   final Hue h;
@@ -72,6 +76,9 @@ class _GitPanel extends StatefulWidget {
 
   /// 选中的 GitHub 仓库全名（`owner/repo`）。非空时，本地没下载也能列出**远端分支**。
   final String? repoFullName;
+
+  /// 打开面板时就显示的提示（内联，不弹气泡）。
+  final String? initialNotice;
 
   @override
   State<_GitPanel> createState() => _GitPanelState();
@@ -114,6 +121,25 @@ class _GitPanelState extends State<_GitPanel> {
 
   bool _busy = false;
 
+  /// **内联提示**（替代顶部气泡弹窗，2026-10-28 用户要求）。
+  ///
+  /// 用户原话：「上面我还是看见了有气泡弹窗……你这个气泡提示很不符合我
+  /// 现在的设计语言，找出来给我删掉」。
+  ///
+  /// 所以本面板不再调 `showIosToast`：成功/失败都在这行文字里显示，
+  /// 与面板其他信息同一套排版。错误用红字，成功用灰字。
+  String? _notice;
+  bool _noticeError = false;
+
+  /// 设置内联提示。
+  void _say(String msg, {bool error = false}) {
+    if (!mounted) return;
+    setState(() {
+      _notice = msg;
+      _noticeError = error;
+    });
+  }
+
   /// 分支列表（2026-10-28 用户要求：选了仓库要能切分支）。
   List<String> _branches = const [];
 
@@ -123,6 +149,11 @@ class _GitPanelState extends State<_GitPanel> {
   @override
   void initState() {
     super.initState();
+    final n = widget.initialNotice;
+    if (n != null && n.isNotEmpty) {
+      _notice = n;
+      _noticeError = true;
+    }
     unawaited(_refresh());
   }
 
@@ -225,10 +256,10 @@ class _GitPanelState extends State<_GitPanel> {
       if (!mounted) return;
       if (r is CapabilitySuccess) {
         if (clearMessage) _msgCtrl.clear();
-        showIosToast(context, successToast ?? '完成');
+        _say(successToast ?? '完成');
       } else if (r is CapabilityFailure) {
         // 失败必须原样告诉用户 —— 不吞、不美化
-        showIosToast(context, r.reason);
+        _say(r.reason, error: true);
       }
     } finally {
       if (mounted) setState(() => _busy = false);
@@ -255,10 +286,10 @@ class _GitPanelState extends State<_GitPanel> {
       final r = await _git.checkout(widget.workspacePath, branch: name);
       if (!mounted) return;
       if (r is CapabilitySuccess) {
-        showIosToast(context, '已切换到 $name');
+        _say('已切换到 $name');
         setState(() => _showBranches = false);
       } else if (r is CapabilityFailure) {
-        showIosToast(context, r.reason);
+        _say(r.reason, error: true);
       }
     } finally {
       if (mounted) setState(() => _busy = false);
@@ -280,10 +311,10 @@ class _GitPanelState extends State<_GitPanel> {
       );
       if (!mounted) return;
       if (r is CapabilitySuccess) {
-        showIosToast(context, '已创建并切到 ${name.trim()}');
+        _say('已创建并切到 ${name.trim()}');
         setState(() => _showBranches = false);
       } else if (r is CapabilityFailure) {
-        showIosToast(context, r.reason);
+        _say(r.reason, error: true);
       }
     } finally {
       if (mounted) setState(() => _busy = false);
@@ -382,7 +413,7 @@ class _GitPanelState extends State<_GitPanel> {
   Future<void> _commit() async {
     final msg = _msgCtrl.text.trim();
     if (msg.isEmpty) {
-      showIosToast(context, '先写一句"这次改了什么"');
+      _say('先写一句提交信息', error: true);
       return;
     }
     // 先全部暂存（手机上用户不想逐个挑文件），再提交。
@@ -392,7 +423,7 @@ class _GitPanelState extends State<_GitPanel> {
     try {
       final st = await _git.stage(widget.workspacePath);
       if (st is CapabilityFailure) {
-        if (mounted) showIosToast(context, st.reason);
+        _say(st.reason, error: true);
         return;
       }
       final r =
@@ -400,9 +431,9 @@ class _GitPanelState extends State<_GitPanel> {
       if (!mounted) return;
       if (r is CapabilitySuccess) {
         _msgCtrl.clear();
-        showIosToast(context, '已提交');
+        _say('已提交');
       } else if (r is CapabilityFailure) {
-        showIosToast(context, r.reason);
+        _say(r.reason, error: true);
       }
     } finally {
       if (mounted) setState(() => _busy = false);
@@ -413,7 +444,7 @@ class _GitPanelState extends State<_GitPanel> {
   Future<void> _push() async {
     final token = await _auth.readToken();
     if (token == null || token.isEmpty) {
-      if (mounted) showIosToast(context, '先连接 Github 才能推送');
+      _say('先连接 Github 才能推送', error: true);
       return;
     }
     await _run(
@@ -468,6 +499,35 @@ class _GitPanelState extends State<_GitPanel> {
                     ),
                 ],
               ),
+              // ---- 内联提示（替代顶部气泡弹窗）----
+              if (_notice != null) ...[
+                const SizedBox(height: HSpace.xs),
+                Row(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Icon(
+                      _noticeError
+                          ? CupertinoIcons.exclamationmark_circle_fill
+                          : CupertinoIcons.checkmark_circle_fill,
+                      size: 14,
+                      color: _noticeError
+                          ? HColors.errorOn(h.dark)
+                          : h.textFaint,
+                    ),
+                    const SizedBox(width: 5),
+                    Expanded(
+                      child: Text(
+                        _notice!,
+                        style: TextStyle(
+                          fontSize: 12.5,
+                          height: 1.4,
+                          color: _noticeError ? h.text : h.textDim,
+                        ),
+                      ),
+                    ),
+                  ],
+                ),
+              ],
               const SizedBox(height: HSpace.md),
               if (_loading)
                 Row(children: [
@@ -545,7 +605,7 @@ class _GitPanelState extends State<_GitPanel> {
       );
       if (!mounted) return;
       if (r is CapabilityFailure) {
-        showIosToast(context, r.reason);
+        _say(r.reason, error: true);
       }
     } finally {
       if (mounted) setState(() => _downloading = false);

@@ -44,7 +44,6 @@ import '../services/git_service.dart';
 import '../services/github_auth.dart';
 import '../services/github_config.dart';
 import '../theme/app_theme.dart';
-import '../theme/cupertino_kit.dart';
 import '../widgets/bw_approval.dart';
 
 /// 选中仓库后返回给调用方的结果。
@@ -231,16 +230,16 @@ class _GitHubRepoSheetState extends State<_GitHubRepoSheet> {
         if (!mounted) return;
         // 克隆成功后**只标记"本地已有"，不关闭面板** ——
         // 用户来这个面板的目的是"选仓库"，克隆是顺手做的事。
+        // 行内会变成「本地已有 ✓」，不需要再弹气泡
         setState(() => _cloned.add(repo.name));
-        showIosToast(context, '已下载 ${repo.name}');
         return;
       }
       if (r is CapabilityFailure) {
         // 落日志 + 留在界面上：toast 会消失，错误不该消失
         debugPrint('GITREPO| clone failed: ${r.reason}');
         if (mounted) {
+          // 错误已经内联显示在列表上方（_cloneError），不再弹气泡
           setState(() => _cloneError = r.reason);
-          showIosToast(context, r.reason);
         }
       }
     } finally {

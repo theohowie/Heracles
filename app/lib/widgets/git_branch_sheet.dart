@@ -1,29 +1,35 @@
 /// **「选择分支」面板**（2026-10-28）—— 对齐 Trae 移动端的交互。
 ///
-/// ## 参照样式（用户给的截图）
+/// ## 布局（标题左对齐，与「选择仓库」统一）
 ///
 /// ```
 /// ┌──────────────────────────────┐
-/// │         选择分支               │
+/// │  选择分支                     │  ← 左对齐
 /// │  ┌────────────────────────┐  │
-/// │  │ 🔍 搜索                 │  │
+/// │  │ 🔍 搜索                 │  │  ← 有边框
 /// │  └────────────────────────┘  │
 /// │  ○ frontend                  │
 /// │  ○ gh-pages                  │
-/// │  ✓ master                    │  ← 当前分支用 ✓
+/// │  ✓ master                    │
 /// └──────────────────────────────┘
 /// ```
 ///
-/// ## 与旧实现的差别（为什么重做）
+/// ## ★ 打开必须"立刻出现"（2026-10-28 用户反馈"弹抽屉有点慢"）
 ///
-/// 旧的在「版本控制」面板里塞了一个「切换分支（N 个）」折叠区 ——
-/// 用户要的是**点第三格直接选分支**，不是先开一个大面板再展开。
+/// 第一版是**先把分支全查完再弹面板**：
 ///
-/// 现在：
-/// · 点底部第三格 → 直接弹这个面板
-/// · 顶上有搜索框（分支多的时候能搜）
-/// · 未选中用空心圆 ○，当前用 ✓ —— 与 Trae 一致
-/// · 点一行就切过去（能力层会拒绝脏工作区，原因如实显示）
+/// ```
+/// 点第三格 → 过通道拿工作区 → 打开仓库读分支 → 打 GitHub API → 才弹面板
+/// ```
+///
+/// 仓库没下载时最后那步是**网络请求**（几百毫秒到一秒），用户看到的是
+/// "点了没反应"。这是典型的**把等待放在交互前面**。
+///
+/// 现在反过来：**面板立刻弹**（骨架已在），分支数据由 [loader] 在面板里
+/// 异步加载 —— 用户马上看见搜索框和标题，列表位置先显示"读取中…"。
+///
+/// 另外 `current` 由调用方**同步传入**（它已经在状态里）⇒ 当前分支的 ✓
+/// 不需要等加载就能显示。
 library;
 
 import 'dart:async';
@@ -36,12 +42,12 @@ import '../widgets/bw_approval.dart';
 
 /// 弹出「选择分支」面板。
 ///
-/// @param current 当前分支名（打 ✓）
-/// @param branches 可选分支名
+/// @param loader 异步取分支名（本地读仓库 / 远端打 API 都行）
+/// @param current 当前分支名（**同步**传入，用于显示 ✓）
 /// @return 用户点选的分支名；`null` = 取消
 Future<String?> showGitBranchSheet(
   BuildContext context, {
-  required List<String> branches,
+  required Future<List<String>> Function() loader,
   required String? current,
 }) async {
   return showModalBottomSheet<String>(
@@ -53,7 +59,7 @@ Future<String?> showGitBranchSheet(
       onDismissRequest: () => Navigator.of(sheetCtx).pop(),
       child: _GitBranchSheet(
         h: Hue.of(context),
-        branches: branches,
+        loader: loader,
         current: current,
       ),
     ),
@@ -63,12 +69,12 @@ Future<String?> showGitBranchSheet(
 class _GitBranchSheet extends StatefulWidget {
   const _GitBranchSheet({
     required this.h,
-    required this.branches,
+    required this.loader,
     required this.current,
   });
 
   final Hue h;
-  final List<String> branches;
+  final Future<List<String>> Function() loader;
   final String? current;
 
   @override
@@ -79,6 +85,9 @@ class _GitBranchSheetState extends State<_GitBranchSheet> {
   final _searchCtrl = TextEditingController();
   String _query = '';
 
+  List<String> _all = const [];
+  bool _loading = true;
+
   @override
   void initState() {
     super.initState();
@@ -86,6 +95,24 @@ class _GitBranchSheetState extends State<_GitBranchSheet> {
       final q = _searchCtrl.text.trim();
       if (q != _query) setState(() => _query = q);
     });
+    unawaited(_load());
+  }
+
+  Future<void> _load() async {
+    try {
+      final r = await widget.loader();
+      if (!mounted) return;
+      setState(() {
+        _all = r;
+        _loading = false;
+      });
+    } catch (_) {
+      if (!mounted) return;
+      setState(() {
+        _all = const [];
+        _loading = false;
+      });
+    }
   }
 
   @override
@@ -95,10 +122,10 @@ class _GitBranchSheetState extends State<_GitBranchSheet> {
   }
 
   List<String> get _visible {
-    if (_query.isEmpty) return widget.branches;
+    if (_query.isEmpty) return _all;
     final k = _query.toLowerCase();
     return [
-      for (final b in widget.branches)
+      for (final b in _all)
         if (b.toLowerCase().contains(k)) b,
     ];
   }
@@ -127,13 +154,12 @@ class _GitBranchSheetState extends State<_GitBranchSheet> {
                 ),
               ),
             ),
-            // 标题居中（与 Trae 一致）
+            // 标题左对齐（与「选择仓库」统一）
             Text(
               '选择分支',
-              textAlign: TextAlign.center,
               style: TextStyle(
-                fontSize: 17,
-                fontWeight: FontWeight.w600,
+                fontSize: 18,
+                fontWeight: FontWeight.w700,
                 color: h.text,
               ),
             ),
@@ -157,8 +183,7 @@ class _GitBranchSheetState extends State<_GitBranchSheet> {
                 filled: true,
                 fillColor: h.surfaceAlt,
                 isDense: true,
-                // 有边框（2026-10-28 用户指出：选择分支的搜索框没边框）
-                // 与「选择仓库」面板的搜索框保持同一套样式。
+                // 有边框（与「选择仓库」同一套样式）
                 border: OutlineInputBorder(
                   borderRadius: BorderRadius.circular(HRadius.pill),
                   borderSide: BorderSide(color: h.border),
@@ -178,26 +203,42 @@ class _GitBranchSheetState extends State<_GitBranchSheet> {
             ),
             const SizedBox(height: HSpace.sm),
 
-            // ---- 分支列表 ----
-            //
-            // 高度恒定：`BwSheetShell` 只在首帧量高度（真机踩过两次），
-            // 列表区固定高度，空态/搜索无结果也不会让面板忽高忽矮。
+            // ---- 分支列表（高度恒定，避免面板忽高忽矮）----
             SizedBox(
               height: 320,
-              child: _visible.isEmpty
+              child: _loading
                   ? Center(
-                      child: Text(
-                        widget.branches.isEmpty
-                            ? '这个仓库还没有分支'
-                            : '没有匹配「$_query」的分支',
-                        style: TextStyle(fontSize: 13.5, color: h.textDim),
+                      child: Row(
+                        mainAxisAlignment: MainAxisAlignment.center,
+                        children: [
+                          SizedBox(
+                            width: 14,
+                            height: 14,
+                            child: CircularProgressIndicator(
+                                strokeWidth: 2, color: h.accent),
+                          ),
+                          const SizedBox(width: HSpace.sm),
+                          Text('读取分支…',
+                              style:
+                                  TextStyle(fontSize: 13, color: h.textDim)),
+                        ],
                       ),
                     )
-                  : ListView.builder(
-                      padding: EdgeInsets.zero,
-                      itemCount: _visible.length,
-                      itemBuilder: (_, i) => _row(h, _visible[i]),
-                    ),
+                  : _visible.isEmpty
+                      ? Center(
+                          child: Text(
+                            _all.isEmpty
+                                ? '这个仓库还没有分支'
+                                : '没有匹配「$_query」的分支',
+                            style:
+                                TextStyle(fontSize: 13.5, color: h.textDim),
+                          ),
+                        )
+                      : ListView.builder(
+                          padding: EdgeInsets.zero,
+                          itemCount: _visible.length,
+                          itemBuilder: (_, i) => _row(h, _visible[i]),
+                        ),
             ),
           ],
         ),
@@ -214,12 +255,10 @@ class _GitBranchSheetState extends State<_GitBranchSheet> {
         padding: const EdgeInsets.symmetric(vertical: 13),
         child: Row(
           children: [
-            // 未选中是空心圆；当前是 ✓（Trae 的样式）
             SizedBox(
               width: 22,
               child: isCurrent
-                  ? Icon(CupertinoIcons.checkmark,
-                      size: 19, color: h.text)
+                  ? Icon(CupertinoIcons.checkmark, size: 19, color: h.text)
                   : Container(
                       width: 17,
                       height: 17,

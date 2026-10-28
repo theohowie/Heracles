@@ -105,6 +105,16 @@ class _ChatScreenState extends State<ChatScreen> {
   /// 而不是固定文案「选择分支」—— 用户需要一眼看到自己在哪个分支上。
   String? _gitBranch;
 
+  /// 缓存的工作区根路径（避免每次点第三格都过通道，2026-10-28 提速）。
+  String? _wsRootCached;
+
+  /// 远端分支缓存（`owner/repo` → 分支名 + 取到的时间）。
+  ///
+  /// 60 秒内重复打开「选择分支」直接用缓存 —— 否则每次都要打一次
+  /// GitHub API，网络一慢面板就像卡住。
+  final Map<String, ({List<String> names, DateTime at})> _remoteBranchCache =
+      {};
+
 
   /// **当前 git 操作的目标路径**（2026-10-28）。
   ///
@@ -160,7 +170,8 @@ class _ChatScreenState extends State<ChatScreen> {
     final path = (ws?['path'] as String?) ?? '';
     if (!mounted) return;
     if (path.isEmpty) {
-      showIosToast(context, '拿不到工作区路径');
+      // 不弹气泡（2026-10-28 用户要求）；极端情况，留日志排查
+      debugPrint('GITHUB| 拿不到工作区路径');
       return;
     }
     final choice =
@@ -242,94 +253,114 @@ class _ChatScreenState extends State<ChatScreen> {
   ///
   /// 没选定仓库时用工作区根。
   Future<void> _onGitTap() async {
+    // ★ 一切为了让面板**立刻出现**（2026-10-28 用户反馈"弹抽屉有点慢"）
+    //
+    // 旧顺序：过通道拿工作区 → 判断是不是仓库 → 读分支 → 打 GitHub API
+    //        → 才弹面板。仓库没下载时中间有网络请求，用户看到"点了没反应"。
+    //
+    // 新顺序：能立刻确定目标路径就直接弹面板，分支数据交给面板里的
+    //        `loader` 异步加载（面板骨架先出来，列表位显示"读取分支…"）。
+    final target = _gitRepoPath ?? _wsRootCached;
+    if (target != null) {
+      await _showBranchPicker(target);
+      return;
+    }
+    // 只有「不知道工作区路径」这一种情况才需要先过通道（且只发生一次）
     final ws = await _bridge.ensureAppWorkspace();
     final wsRoot = (ws?['path'] as String?) ?? '';
     if (!mounted) return;
     if (wsRoot.isEmpty) {
-      showIosToast(context, '拿不到工作区路径');
+      debugPrint('GIT| 拿不到工作区路径');
       return;
     }
-    final target = _gitRepoPath ?? wsRoot;
+    _wsRootCached = wsRoot;
+    await _showBranchPicker(_gitRepoPath ?? wsRoot);
+  }
 
-    // 有选定仓库就给 owner/repo（未下载时用来拉远端分支）
+  /// 弹「选择分支」面板（数据在面板内异步加载）。
+  Future<void> _showBranchPicker(String target) async {
     final full = (_githubRepoName != null && _githubAccount != null)
         ? '$_githubAccount/$_githubRepoName'
         : null;
-
     const git = GitService();
-    var branches = <String>[];
-    String? current;
-    var local = false;
 
+    // 先判"是不是本地仓库"很快（一次 stat），但仍放进 loader —— 保证
+    // 面板先出来。判断结果决定去读本地分支还是远端分支。
+    final picked = await showGitBranchSheet(
+      context,
+      // 当前分支从状态里同步拿：✓ 不用等加载就显示
+      current: _gitBranch,
+      loader: () async {
+        var local = false;
+        try {
+          local = await git.isRepository(target);
+        } catch (_) {
+          local = false;
+        }
+        if (local) {
+          final out = <String>[];
+          final br = await git.branches(target);
+          if (br is CapabilitySuccess) {
+            for (final line in br.data.split('\n')) {
+              final t = line.trim();
+              if (!t.startsWith('- ')) continue;
+              out.add(t.substring(2).split('  ').first.trim());
+            }
+          }
+          return out;
+        }
+        // 本地没有：列远端分支（缓存 60s，重复打开不再等网络）
+        if (full == null) return const <String>[];
+        final cached = _remoteBranchCache[full];
+        if (cached != null &&
+            DateTime.now().difference(cached.at) <
+                const Duration(seconds: 60)) {
+          return cached.names;
+        }
+        final remote = await _githubAuth.listRemoteBranches(full);
+        final names = remote ?? const <String>[];
+        if (names.isNotEmpty) {
+          _remoteBranchCache[full] =
+              (names: names, at: DateTime.now());
+        }
+        return names;
+      },
+    );
+    if (!mounted) return;
+    if (picked == null) return;
+
+    // 本地仓库才真切换；远端分支只提示先下载
+    var local = false;
     try {
       local = await git.isRepository(target);
     } catch (_) {
       local = false;
     }
-
-    if (local) {
-      final br = await git.branches(target);
-      if (br is CapabilitySuccess) {
-        for (final line in br.data.split('\n')) {
-          final t = line.trim();
-          if (!t.startsWith('- ')) continue;
-          branches.add(t.substring(2).split('  ').first.trim());
-        }
-      }
-      final st = await git.status(target);
-      if (st is CapabilitySuccess) {
-        final b = st.metadata?['branch'] as String?;
-        if (b != null && b.isNotEmpty) current = b;
-      }
-    } else if (full != null) {
-      // 没下载 ⇒ 列远端分支（只读）。点选后引导下载，不假装能切。
-      final remote = await _githubAuth.listRemoteBranches(full);
-      if (!mounted) return;
-      branches = remote ?? const [];
-      if (branches.isEmpty) {
-        // 远端也拿不到：退回版本控制面板（那里有下载入口）
+    if (!mounted) return;
+    if (!local) {
+      // 不弹气泡：直接开「版本控制」面板，那里内联写着"还没下载到手机"
+      // 并给出「下载到手机」按钮 —— 比一闪而过的气泡有用
+      if (full != null) {
         await showGitPanel(context, workspacePath: target, repoFullName: full);
         if (mounted) unawaited(_refreshGitBranch());
-        return;
       }
-      // 远端分支只读：提示先下载
-      if (!mounted) return;
-      final picked = await showGitBranchSheet(
-        context,
-        branches: branches,
-        current: null,
-      );
-      if (picked == null || !mounted) return;
-      showIosToast(context, '「$picked」还没下载到手机');
-      await showGitPanel(context, workspacePath: target, repoFullName: full);
-      if (mounted) unawaited(_refreshGitBranch());
-      return;
-    } else {
-      // 没有仓库、工作区也不是 git 仓库 ⇒ 版本控制面板（含初始化）
-      if (!mounted) return;
-      await showGitPanel(context, workspacePath: target, repoFullName: null);
-      if (mounted) unawaited(_refreshGitBranch());
       return;
     }
-
-    if (!mounted) return;
-    final picked = await showGitBranchSheet(
-      context,
-      branches: branches,
-      current: current,
-    );
-    if (picked == null || !mounted) return;
-    if (picked == current) return;
-
-    // 真的切换（能力层会拒绝脏工作区，原因如实转达）
+    if (picked == _gitBranch) return;
     final r = await git.checkout(target, branch: picked);
     if (!mounted) return;
     if (r is CapabilityFailure) {
-      showIosToast(context, r.reason);
+      // 不弹气泡：打开版本控制面板，把原因内联显示在那里
+      // （切分支失败通常是"有未提交改动"，面板里正好能看到脏状态）
+      await showGitPanel(
+        context,
+        workspacePath: target,
+        repoFullName: full,
+        initialNotice: r.reason,
+      );
     }
-    unawaited(_refreshGitBranch());
+    if (mounted) unawaited(_refreshGitBranch());
   }
-
   /// 读当前分支名（用于底部第三格显示）。
   ///
   /// 读不到就保持 null（UI 回退成「选择分支」）—— 不猜一个假分支名。

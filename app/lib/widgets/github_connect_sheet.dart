@@ -53,7 +53,6 @@ import 'package:url_launcher/url_launcher.dart';
 import '../services/github_auth.dart';
 import '../services/github_config.dart';
 import '../theme/app_theme.dart';
-import '../theme/cupertino_kit.dart';
 import '../widgets/bw_approval.dart';
 
 /// 弹出「连接 Github」抽屉。
@@ -94,6 +93,9 @@ class _GitHubConnectSheetState extends State<_GitHubConnectSheet> {
 
   /// 码是否已复制（决定提示文案，不弹 toast —— 见 `_start`）。
   bool _copied = false;
+
+  /// 内联提示（替代气泡弹窗，2026-10-28 用户要求）。
+  String? _hint;
 
   final _auth = GitHubAuth(
     clientId: GitHubConfig.clientId,
@@ -182,7 +184,8 @@ class _GitHubConnectSheetState extends State<_GitHubConnectSheet> {
     final ok = await _auth.openVerificationPage(info);
     if (!mounted) return;
     if (!ok) {
-      showIosToast(context, '打不开浏览器，请手动访问 ${info.verificationUri}');
+      // 不弹气泡：在按钮下方内联显示（面板其他信息同一套排版）
+      setState(() => _hint = '打不开浏览器，请手动访问 ${info.verificationUri}');
     }
   }
 
@@ -318,7 +321,8 @@ class _GitHubConnectSheetState extends State<_GitHubConnectSheet> {
                 : () async {
                     await Clipboard.setData(
                         ClipboardData(text: info.userCode));
-                    if (mounted) showIosToast(context, '已复制验证码');
+                    // 静默：码下方那行本来就写着「已自动复制 · 点码可再复制」
+                    if (mounted) setState(() => _copied = true);
                   },
             child: Container(
               padding: const EdgeInsets.symmetric(vertical: 14),
@@ -371,6 +375,16 @@ class _GitHubConnectSheetState extends State<_GitHubConnectSheet> {
             onPressed: info == null ? null : () => unawaited(_openBrowser()),
             child: const Text('打开 GitHub 授权页'),
           ),
+          // 内联提示（替代气泡弹窗，2026-10-28 用户要求）
+          if (_hint != null) ...[
+            const SizedBox(height: HSpace.xs),
+            Text(
+              _hint!,
+              textAlign: TextAlign.center,
+              style:
+                  TextStyle(fontSize: 11.5, color: h.textDim, height: 1.4),
+            ),
+          ],
           const SizedBox(height: HSpace.sm),
 
           // ---- 等待 + 倒计时 ----
@@ -409,10 +423,7 @@ class _GitHubConnectSheetState extends State<_GitHubConnectSheet> {
                 await launchUrl(Uri.parse(GitHubConfig.revokeUri),
                     mode: LaunchMode.externalApplication);
               } catch (_) {
-                if (mounted) {
-                  showIosToast(
-                      context, '撤销地址：${GitHubConfig.revokeUri}');
-                }
+                // 静默：打不开浏览器时，链接文案本身已经说明了去哪撤销
               }
             },
             child: Text(
