@@ -305,10 +305,27 @@ class GitService implements GitCapability {
     try {
       repo = _open(path, writable: false);
       final current = _branchOf(repo);
+      // 本地分支
       // `refs.list()` 返回 `List<Ref>`（字段是 `.path`），不是字符串列表；
       // `refs.branches` 已经是 `refs/heads/` 前缀过滤好的。
-      final locals = repo.refs.branches.map((r) => r.shortName).toList()
-        ..sort();
+      final names = <String>{...repo.refs.branches.map((r) => r.shortName)};
+      // ★ 远端跟踪分支也列进来（2026-10-28 真机发现）
+      //
+      // `git clone` 只给**默认分支**建本地分支，其它分支（比如 dev）只存在于
+      // `refs/remotes/origin/dev`。第一版只列 `refs/heads/` ⇒ 用户在
+      // 「选择分支」里**看不到 dev**，以为仓库只有 main。
+      //
+      // 现在把远端跟踪分支也列出来（去掉 `origin/` 前缀、跳过 `HEAD`），
+      // 选中它们时 `checkout` 会自动从远端建本地分支。
+      for (final r in repo.refs.remoteBranches) {
+        final short = r.shortName; // "origin/dev"
+        final slash = short.indexOf('/');
+        if (slash < 0) continue;
+        final name = short.substring(slash + 1);
+        if (name == 'HEAD' || name.isEmpty) continue;
+        names.add(name);
+      }
+      final locals = names.toList()..sort();
       if (locals.isEmpty) {
         return const CapabilitySuccess('这个仓库还没有任何分支（还没有提交）。');
       }
@@ -503,6 +520,14 @@ class GitService implements GitCapability {
             '先提交或取消这些改动，再切分支。',
             isRetryable: true,
           );
+        }
+        // ★ 本地没有这个分支、但远端有 ⇒ 从远端跟踪分支建一个本地分支
+        //   （`git checkout dev` 的语义：自动建立跟踪）
+        if (repo.resolve('refs/heads/$branch') == null) {
+          final remoteRef = repo.resolve('refs/remotes/origin/$branch');
+          if (remoteRef != null) {
+            repo.createBranch(branch, at: remoteRef);
+          }
         }
       }
       final problem = git.Repository.branchNameProblem(branch);

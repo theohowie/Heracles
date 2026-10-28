@@ -239,6 +239,15 @@ class _ChatScreenState extends State<ChatScreen> {
         _githubRepoName = name;
         _gitRepoPath = path;
       });
+      // ★ 必须**等 setState 铺开之后**再读分支（2026-10-28 真机 bug）
+      //
+      // 之前在 initState 里并发调 `_restoreSelectedRepo()` 和
+      // `_refreshGitBranch()` —— 两个 async 函数没有先后保证，刷新先跑时
+      // `_gitRepoPath` 还是 null ⇒ 第三格永远显示「选择分支」，
+      // 即使仓库已经下载好了（真机现象：磁盘上 HEAD 已经是 main）。
+      //
+      // 现在把刷新挂在恢复**之后**，顺序确定。
+      await _refreshGitBranch();
     } catch (_) {
       // 读不到就当没选过
     }
