@@ -1,15 +1,22 @@
 import 'dart:async';
 
+import 'package:flutter/cupertino.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
-import 'package:heracles/services/agent_bridge.dart';
+import 'package:heracles/models/attachment.dart';
+import 'package:heracles/models/settings.dart';
+import 'package:heracles/services/agent_bridge.dart'
+    show AgentBridge, AgentEvent, AgentRunResult, AgentTurn;
 import 'package:heracles/screens/chat_screen.dart';
+import 'package:heracles/services/local_agent.dart';
 import 'package:heracles/services/settings_controller.dart';
 import 'package:heracles/theme/app_theme.dart';
 import 'package:heracles/widgets/stream_step.dart';
+
+import 'support/secure_storage_mock.dart';
 
 /// **逐字渲染（S3）的测试** —— 思考与正文两条轨 + buffer/16ms flush。
 ///
@@ -21,8 +28,8 @@ import 'package:heracles/widgets/stream_step.dart';
 ///
 /// 最怕的回归有三条，每一条都不会报错、不会崩，只是用户又开始不满意：
 ///
-/// 1. **未知事件类型把 App 搞崩** —— Kotlin 侧（S2）已经在发 4 类 token 级
-///    事件，Dart 侧若没有降级分支，用户一发消息就是闪退。
+/// 1. **未知事件类型把 App 搞崩** —— 事件词表里有 20+ 种事件，Dart 侧若没有
+///    降级分支，用户一发消息就是闪退。
 /// 2. **思考与正文粘成一条** —— 粘了就再也分不开，用户分不清哪句是结论。
 /// 3. **每个 token 都 setState** —— 满载时每秒 250 次重建，逐字变卡顿。
 ///
@@ -35,11 +42,34 @@ import 'package:heracles/widgets/stream_step.dart';
 ///
 /// ⚠️ 同理不用 `pumpAndSettle`：16ms 周期定时器让 settle 条件永不成立，
 /// 它会一直转到超时。
+///
+/// ## ★★ mock 基建重接（2026-10-25，mock 回家第二批）
+///
+/// 旧夹具 mock 的是**已删除的传输**：`heracles/command` 的
+/// `runAgent` / `listSessions` / `loadMessages` / `createSession` +
+/// `EventChannel('heracles/events')` 的 `sink.success`。内核迁到进程内 Dart 后
+/// 那条传输在 `app/lib` 里**零构造** ⇒ mock 永不触发、事件永远不出现
+/// ⇒ 本文件**第 4 条用例起挂死**（实测：10 分钟 `TimeoutException`，
+/// 根因是没装 secure-storage mock，`SettingsController.load()` 永不完成）。
+///
+/// 现在：
+/// · 事件由假执行器的事件流注入 —— `handle.events → AgentBridge.emitLocalEvent
+///   → UI`（生产同一条路径）；
+/// · 会话/消息走 `heracles/device` 的 `fs.*`（`SessionStore` 的真通道）；
+/// · 工作区登记表仍在 `heracles/command`。
+///
+/// **断言与测试体零改动**（除 finder 随 UI 改版换过：输入框 =
+/// `CupertinoTextField`、抽屉入口 = 品牌图标、「有新内容」按钮 =
+/// `CupertinoIcons.arrow_down`）。
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
 
+  // ★ 安全存储通道 mock（坑 36）—— 没有它本文件第 4 条用例起就挂死。
+  setUp(installSecureStorageMock);
+  tearDown(removeSecureStorageMock);
+
   const commandChannel = MethodChannel('heracles/command');
-  const eventChannel = EventChannel('heracles/events');
+  const deviceChannel = MethodChannel('heracles/device');
 
   const workspaceMap = <String, dynamic>{
     'path': '/storage/emulated/0/proj',
@@ -48,69 +78,90 @@ void main() {
     'writable': true,
   };
 
-  MockStreamHandlerEventSink? sink;
   Completer<void>? gate;
 
-  /// **发送**一帧事件到平台端（不等待它到达 Dart）。
+  /// **发送**一帧事件到 UI（不等待它到达 —— 与旧 `sink.success` 同形）。
   ///
   /// ⚠️ 刻意**不** `await Future.delayed(Duration.zero)`：
   /// 那是真实异步，而 `tester.pump` 只推进虚拟时钟 —— 混用会让测试
   /// 在 `await` 上挂死（`pump` 不会让真实 timer 前进）。
   /// 事件到达由随后的 `tester.pump()` 驱动。
-  void push(Map<String, dynamic> e) => sink!.success(e);
+  void Function(Map<String, dynamic>)? pushRef;
+
+  void push(Map<String, dynamic> e) => pushRef!(e);
 
   void installMocks() {
     final messenger =
         TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger;
 
+    // ---- 工作区登记表（heracles/command —— 这条至今是 Kotlin 的）----
     messenger.setMockMethodCallHandler(commandChannel, (call) async {
+      if (call.method == 'listWorkspaces') return [workspaceMap];
+      return null;
+    });
+
+    // ---- 会话存储（heracles/device 的 fs.* —— SessionStore 的真通道）----
+    messenger.setMockMethodCallHandler(deviceChannel, (call) async {
+      final args = call.arguments is Map ? call.arguments as Map : const {};
+      final path = args['path'] as String? ?? '';
       switch (call.method) {
-        case 'listWorkspaces':
-          return [workspaceMap];
-        case 'listSessions':
-          return <Map<String, dynamic>>[];
-        case 'loadMessages':
-          return <Map<String, dynamic>>[];
-        case 'createSession':
-          return 'sess-new';
-        case 'runAgent':
-          final g = gate;
-          if (g != null) await g.future;
+        case 'fs.stat':
+          return <String, dynamic>{'ok': true, 'exists': false};
+        case 'fs.readText':
           return <String, dynamic>{
-            'stopReason': '已给出最终回答',
-            'finalText': '',
-            'totalCachedTokens': 0,
-            'totalPromptTokens': 0,
-            'totalOutputTokens': 0,
-            'steadyHitRate': null,
-            'turns': <Map<String, dynamic>>[],
+            'ok': true,
+            'text': path.endsWith('sessions.json') ? '[]' : '',
+            'truncated': false,
           };
+        case 'fs.readTailLines':
+          return <String, dynamic>{'ok': true, 'lines': <String>[]};
+        case 'fs.appendText':
+        case 'fs.writeText':
+        case 'fs.mkdir':
+        case 'fs.delete':
+          return <String, dynamic>{'ok': true};
         default:
-          return null;
+          return <String, dynamic>{
+            'ok': false,
+            'error': '测试 mock：未知方法 ${call.method}',
+          };
       }
     });
 
-    messenger.setMockStreamHandler(
-      eventChannel,
-      MockStreamHandler.inline(
-        onListen: (arguments, events) {
-          // ⚠️ **按字段逐个拷一份 `Map<String, dynamic>`** ——
-          // 直接把闭包参数 `events` 存进顶层变量会让它被**提升为泛型**
-          // （`MockStreamHandlerEventSink<dynamic>`），于是编码器
-          // 认不出它、抛 "Invalid argument: Instance of ..."。
-          // 局部变量 + 赋值给 `late` 字段则保留具体实例类型。
-          late MockStreamHandlerEventSink s;
-          s = events;
-          sink = s;
+    // ---- run 注入（executorFactoryForTest —— 生产同路）----
+    //
+    // 本文件只考察"事件到达 → 界面变化"，run 本身由 [gate] 卡住
+    // （旧 mock 是在 `runAgent` 里 await gate）。
+    AgentBridge.executorFactoryForTest =
+        ({required workspacePath, required settings, required sessionStore, askGate}) {
+      return _FakeExecutor(
+        workspacePath: workspacePath,
+        settings: settings,
+        sessionStore: sessionStore,
+        askGate: askGate,
+        onScript: () async {
+          final g = gate;
+          if (g != null) await g.future;
         },
-        onCancel: (arguments) => sink = null,
-      ),
-    );
+        onReady: (push) => pushRef = push,
+      );
+    };
   }
 
+  /// 造一个**已配置**的设置控制器 —— 不配 provider 时 `AgentBridge.run()`
+  /// 会**就地抛错**（ADR-035 S4 有意为之），根本走不到假执行器。
   Future<SettingsController> freshController() async {
     SharedPreferences.setMockInitialValues({});
-    return SettingsController.load();
+    final c = await SettingsController.load();
+    await c.updateProvider(const ModelProviderConfig(
+      id: 'deepseek-account',
+      name: 'DeepSeek 账号',
+      baseUrl: 'https://api.deepseek.com/v1',
+      model: 'deepseek-chat',
+      apiKey: 'sk-test',
+    ));
+    await c.setActiveProvider('deepseek-account');
+    return c;
   }
 
   Widget wrapScreen(SettingsController c) => MaterialApp(
@@ -135,8 +186,26 @@ void main() {
 
   /// 起一个被 gate 卡住的运行（`run()` 不返回，事件照收）。
   Future<void> startRun(WidgetTester tester) async {
-    await tester.enterText(find.byType(TextField).first, '做个任务');
+    await tester.enterText(find.byType(CupertinoTextField).first, '做个任务');
     await tester.testTextInput.receiveAction(TextInputAction.done);
+    await settle(tester);
+  }
+
+  /// **打开抽屉**（原型 01 起顶栏左侧是品牌图标）→ 点「新会话」。
+  Future<void> tapNewSession(WidgetTester tester) async {
+    final opener = find.byWidgetPredicate(
+      (w) =>
+          w is Image &&
+          w.image is AssetImage &&
+          (w.image as AssetImage).assetName.contains('app_icon_source'),
+      description: '顶栏左侧品牌图标（打开抽屉）',
+    );
+    expect(opener, findsOneWidget,
+        reason: '顶栏左侧必须有品牌图标（点它开抽屉）—— 找不到说明顶栏又改了');
+    await tester.tap(opener);
+    await settle(tester);
+    expect(find.text('新会话'), findsOneWidget, reason: '抽屉里必须有「新会话」入口');
+    await tester.tap(find.text('新会话'));
     await settle(tester);
   }
 
@@ -161,8 +230,9 @@ void main() {
     final messenger =
         TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger;
     messenger.setMockMethodCallHandler(commandChannel, null);
-    messenger.setMockStreamHandler(eventChannel, null);
-    sink = null;
+    messenger.setMockMethodCallHandler(deviceChannel, null);
+    AgentBridge.executorFactoryForTest = null;
+    pushRef = null;
     gate = null;
   });
 
@@ -174,9 +244,9 @@ void main() {
   }
 
   // ==================================================================
-  // 0. ★★ 最高优先级：未知事件类型**不能崩**（S2 交接的第一条要求）
+  // 0. ★★ 最高优先级：未知事件类型**不能崩**
   //
-  // 为什么它排在渲染之前：Kotlin 侧已经在发 4 类新事件。
+  // 为什么它排在渲染之前：事件词表里有 20+ 种事件类型。
   // 若解析路径会抛，用户一发消息直接闪退 —— 那比"看不到逐字"严重得多。
   // ==================================================================
 
@@ -194,7 +264,6 @@ void main() {
     });
 
     test('★ token 级字段缺失时全是 null —— 不伪造空串', () {
-      // 老 Kotlin 不发这些字段：空串会被 UI 当成"真的吐了个空字"
       final e = AgentEvent.fromMap({'type': 'step_delta', 'ts': 1});
       expect(e.stepId, isNull);
       expect(e.delta, isNull);
@@ -544,14 +613,16 @@ void main() {
       // ★ 2026-10-13：按钮改成**只有图标的小圆圈**（用户要求
       //   「有新内容占的空间太大了，应该变成一个小圆圈按钮」）——
       //   所以按 icon 找，不再按文字找。
-      final newContent = find.byIcon(Icons.arrow_downward_rounded);
+      // ★ 2026-10-25：图标随 Cupertino 化换过（旧 Material
+      //   `Icons.arrow_downward_rounded`）—— **只换 finder，断言未动**。
+      final newContent = find.byIcon(CupertinoIcons.arrow_down);
       expect(newContent, findsOneWidget,
           reason: '用户上滑后仍源源不断来字，没有提示他会以为内容丢了');
 
       // 点它 → 回到跟随状态，提示消失
       await tester.tap(newContent);
       await settle(tester);
-      expect(find.byIcon(Icons.arrow_downward_rounded), findsNothing,
+      expect(find.byIcon(CupertinoIcons.arrow_down), findsNothing,
           reason: '回到底部后提示必须消失 —— 否则用户以为又漏看了什么');
 
       await release(tester);
@@ -659,10 +730,7 @@ void main() {
       });
 
       // 换上下文（新建会话路径 —— 它会调 _switchContext）
-      await tester.tap(find.byIcon(Icons.menu_rounded));
-      await settle(tester);
-      await tester.tap(find.text('新会话').first);
-      await settle(tester);
+      await tapNewSession(tester);
 
       // 现在再推进时钟：残留的缓冲若没被清，会被 flush 出来
       await settle(tester);
@@ -672,4 +740,67 @@ void main() {
       await release(tester);
     });
   });
+}
+
+// ============================================================================
+// 假执行器（2026-10-25 mock 基建重接）：走 AgentBridge.executorFactoryForTest
+// —— 事件经 handle.events → emitLocalEvent → UI（生产同一条路径）。
+// ============================================================================
+
+/// 脚本化执行器：`run()` 立即返回句柄；事件由测试经 [onReady] 给的推送函数
+/// **同步**注入（旧夹具是同步的 `sink.success`，本文件的缓冲/时序断言依赖
+/// "推完立刻返回"这个性质）；结果在脚本（[onScript]）完成后收尾。
+class _FakeExecutor extends LocalAgentExecutor {
+  _FakeExecutor({
+    required super.workspacePath,
+    required super.settings,
+    required super.sessionStore,
+    super.askGate,
+    required this.onScript,
+    required this.onReady,
+  });
+
+  final Future<void> Function() onScript;
+  final void Function(void Function(Map<String, dynamic>) push) onReady;
+
+  @override
+  Future<LocalRunHandle> run({
+    required String request,
+    String? sessionId,
+    List<HAttachment> attachments = const [],
+  }) async {
+    final controller = StreamController<AgentEvent>.broadcast();
+    final done = Completer<AgentRunResult>();
+    // ★ 同步推：`controller.add` 调用即返回（投递在微任务里，由 pump 带过去）
+    //   —— 与旧 `sink.success` 同形，本文件的"缓冲未 flush"断言靠这个。
+    onReady((m) {
+      if (!controller.isClosed) controller.add(AgentEvent.fromMap(m));
+    });
+
+    // 脚本在句柄返回后的一拍再跑 —— 保证 AgentBridge 已挂上订阅
+    //（广播流不缓冲，早推会丢）。
+    unawaited(Future<void>(() async {
+      await onScript();
+      // 与生产同形：result 完成**之前**关流（见 local_agent.dart 的注释）。
+      if (!controller.isClosed) unawaited(controller.close());
+      if (!done.isCompleted) done.complete(_cannedResult());
+    }));
+
+    return LocalRunHandle(
+      events: controller.stream,
+      result: done.future,
+      cancel: () async => true,
+    );
+  }
+
+  /// 旧 Kotlin mock 的罐头返回值（形状对齐 AgentRunResult）。
+  static AgentRunResult _cannedResult() => const AgentRunResult(
+        stopReason: '已给出最终回答',
+        finalText: '',
+        sessionId: 'sess-new',
+        totalCachedTokens: 0,
+        totalPromptTokens: 0,
+        totalOutputTokens: 0,
+        turns: <AgentTurn>[],
+      );
 }

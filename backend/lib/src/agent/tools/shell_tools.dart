@@ -47,23 +47,36 @@ String? checkCommandSafety(String command) {
 }
 
 /// 构建 shell 工具。
+///
+/// ## 执行面路由（2026-10-28，产品定调）
+///
+/// **一条命令在哪跑，由后端按固定规则决定，模型无从选择：**
+/// - 默认 → 沙箱（PRoot rootfs）
+/// - 命中「需要动 Android 本身」的规则 → 手机 shell
+///
+/// 规则表在 [decideSurface]（`sandbox_capability.dart`），
+/// 工具**不暴露** `surface` 参数 —— 让模型自己选就等于让它自由发挥。
 List<Tool> buildShellTools(ToolFactory f, Capabilities caps) {
   final shell = caps.shell;
   final ws = caps.workspace;
+  final sandbox = caps.sandbox;
   return [
     f.build(
       name: 'run_shell_command',
-      description: '在工作区里执行一条 shell 命令，返回标准输出与错误输出。'
+      description: '执行一条 shell 命令，返回标准输出与错误输出。'
           '返回：合并的 stdout/stderr 文本 + 退出码；超时附超时说明。'
           '适合跑构建、测试、git、文件操作等。'
-          '⚠️ 命令是非交互的：不要用需要输入的命令（如 vim、交互式 git rebase）。'
-          '⚠️ 输出较长时会被完整返回，注意不要打印超大文件。',
+          '⚠️ 命令默认在**项目沙箱**里执行（不碰真实手机文件系统）；'
+          '涉及 Android 本身的命令（pm/am/dumpsys/截图/改系统设置/装包等）会自动改在手机 shell 上执行，'
+          '**你不要也没有办法自己指定在哪执行**。'
+          '⚠️ 命令是非交互的：不要用需要输入的命令（如 vim、交互式 git rebase）。',
       parameters: {
         'type': 'object',
         'properties': {
           'command': {
             'type': 'string',
-            'description': '要执行的命令。相对路径以工作区为基准。',
+            'description': '要执行的命令。相对路径以工作区为基准；'
+                '沙箱内可用 `@name/...` 引用命名挂载点（如 @workspace/dist）。',
           },
           'timeout_seconds': {
             'type': 'integer',
@@ -75,27 +88,55 @@ List<Tool> buildShellTools(ToolFactory f, Capabilities caps) {
         },
         'required': ['command'],
       },
-      isAvailable: () => shell != null,
-      unavailableReason: '当前环境不支持 shell 执行',
+      // 手机 shell 和沙箱至少要有一个 —— 两个都没有才算不可用
+      isAvailable: () => shell != null || sandbox != null,
+      unavailableReason: '当前环境既没有手机 shell 也没有沙箱执行面',
       run: (args) async {
         final command = requireString(args, 'command');
 
-        // ★ 安全闸：先查，再执行
+        // ★ 安全闸：先查，再执行（不管在哪个执行面，这条都不变）
         final violation = checkCommandSafety(command);
         if (violation != null) {
           return CapabilityFailure(violation, isRetryable: false);
         }
 
         final timeoutSec = optionalInt(args, 'timeout_seconds') ?? 300;
-        final r = await shell!.run(
-          command,
-          timeout: Duration(seconds: timeoutSec),
-        );
-        if (r is! CapabilitySuccess) return r;
+        final timeout = Duration(seconds: timeoutSec);
+
+        // ---- 决定执行面（**唯一入口**，规则见 decideSurface 的 KDoc）----
+        final sandboxReady = sandbox != null
+            ? await _safeIsReady(sandbox)
+            : false;
+        final decision = decideSurface(command, sandboxReady: sandboxReady);
+
+        final startedAt = DateTime.now();
+        final CapabilityResult r;
+        if (decision.surface == ExecutionSurface.sandbox) {
+          r = await sandbox!.run(command, timeout: timeout);
+        } else {
+          if (shell == null) {
+            return CapabilityFailure(
+              '这条命令需要手机 shell（原因：${decision.reason}），'
+              '但当前环境没有手机 shell 能力 —— 换个方式，或让用户在手机上处理。',
+              isRetryable: false,
+            );
+          }
+          r = await shell.run(command, timeout: timeout);
+        }
+        final elapsedMs = DateTime.now().difference(startedAt).inMilliseconds;
+
+        if (r is! CapabilitySuccess) {
+          // 失败也带上执行面，前端才知道卡片该写「在沙箱/在手机」
+          return CapabilityFailure(
+            '（执行面：${decision.surface.wire}）${(r as CapabilityFailure).reason}',
+            isRetryable: r.isRetryable,
+          );
+        }
 
         // ★ C4（2026-10-24）：超长输出**落盘引用** —— 截断防窗口爆、
         //   完整内容存工作区可取回（read_file 分段读），两头都顾。
         var data = r.data;
+        var truncated = (r.metadata?['truncated'] as bool?) ?? false;
         if (data.length > ContractShell.overflowChars && ws != null) {
           final rel = '${ContractShell.overflowDir}/'
               'shell-${DateTime.now().millisecondsSinceEpoch}.txt';
@@ -104,15 +145,35 @@ List<Tool> buildShellTools(ToolFactory f, Capabilities caps) {
           data = '${data.substring(0, ContractShell.overflowChars)}'
               '\n\n⚠️ 输出共 ${data.length} 字符，已截断。'
               '完整输出已存到工作区 `$rel`，需要后续段用 read_file 读。';
+          truncated = true;
         }
 
         // ★ SEC1（2026-10-24）：命令输出是"外部内容" —— 无条件包裹。
         //   工作区里 cat 到的不可信文件、curl 到的网页都可能夹带指令。
         return CapabilitySuccess(
           '【命令输出开始】\n$data\n【命令输出结束】',
-          metadata: r.metadata,
+          // ★ 结构化元数据 ⇒ 经 ToolFactory.onExecMeta 送到 UI。
+          //   手机 shell 与沙箱**字段一致**，前端用同一套渲染（前端 2026-10-28 要求）。
+          metadata: {
+            'surface': decision.surface.wire,
+            'surfaceReason': decision.reason,
+            'command': command,
+            'exitCode': (r.metadata?['exitCode'] as int?) ?? 0,
+            'durationMs': elapsedMs,
+            'truncated': truncated,
+            'timedOut': (r.metadata?['timedOut'] as bool?) ?? false,
+          },
         );
       },
     ),
   ];
+}
+
+/// 问沙箱是否就绪；**任何异常都当"未就绪"**（不能因为探测失败就崩掉工具）。
+Future<bool> _safeIsReady(SandboxCapability sandbox) async {
+  try {
+    return await sandbox.isReady();
+  } catch (_) {
+    return false;
+  }
 }

@@ -1,4 +1,4 @@
-// Copyright (C) 2026 The Heracles Authors
+﻿// Copyright (C) 2026 The Heracles Authors
 // SPDX-License-Identifier: GPL-3.0
 //
 // ============================================================================
@@ -346,18 +346,46 @@ class SandboxService {
     return _statusFrom(raw);
   }
 
-  /// 重置沙箱：**整块回滚** —— 清掉 rootfs 回到未激活态（前端
-  /// 2026-10-28 补的薄封装：§8 把「整块回滚」写成沙箱的核心卖点，
-  /// 但客户端一直没有这个方法，设置页的「重置沙箱」落不了地）。
+  // -------------------------------------------------------------- 重置 / 快照
+
+  /// **重置沙箱**（破坏性）—— 整块回滚：`snapshot` 为空 = 清空 rootfs 回到
+  /// 未激活态；给了名字 = 回滚到该快照。
+  ///
+  /// 由来：前端 2026-10-28 补的薄封装（§8 把「整块回滚」写成沙箱的核心卖点，
+  /// 但客户端一直没有这个方法，设置页的「重置沙箱」落不了地）；后端侧随后
+  /// 补了快照能力 ⇒ 签名带可选 `snapshot`，**不传参时行为与前端原版一致**。
+  ///
+  /// ⚠️ 会丢掉 rootfs 里的一切（未提交的构建产物、装的包、`@workspace` 里的文件
+  /// 若在 rootfs 内也会没）。**UI 必须二次确认**，并说清会丢什么。
   ///
   /// ⚠️ 宿主侧若尚未实现 `reset`，通道调用会被收敛成失败形状，
   /// 返回的状态仍是重置前状态 —— 调用方**必须**核对返回的
   /// `installed` 是否真的变回 false，不要盲目报成功。
-  Future<SandboxStatus> reset() async {
-    final raw = await _client.call('reset');
+  ///
+  /// 重置后挂载点会由后端自动补注册；前端调完重查一次 `status()` 即可。
+  Future<SandboxStatus> reset({String snapshot = ''}) async {
+    final raw = await _client.call('reset', <String, Object?>{'snapshot': snapshot});
     return _statusFrom(raw);
   }
 
+  /// 给当前 rootfs 打快照（用于「构建前打点，失败回滚」）。
+  ///
+  /// 返回 `null` 表示失败（`error` 里有人话原因）。
+  Future<SandboxSnapshotResult?> snapshot(String name) async {
+    final raw = await _client.call('snapshot', <String, Object?>{'name': name});
+    if (raw['ok'] != true) {
+      return SandboxSnapshotResult(
+        name: name,
+        count: 0,
+        error: (raw['error'] as String?) ?? '创建快照失败',
+      );
+    }
+    return SandboxSnapshotResult(
+      name: (raw['snapshotName'] as String?) ?? name,
+      count: (raw['snapshotCount'] as num?)?.toInt() ?? 0,
+      error: null,
+    );
+  }
   // -------------------------------------------------------------- 执行
 
   /// 在沙箱 rootfs 内执行命令。
@@ -574,4 +602,22 @@ class SandboxFileResult {
         errorCode: (m['errorCode'] as num?)?.toInt() ?? 0,
         error: (m['error'] as String?) ?? '',
       );
+}
+
+/// 快照结果。`error == null` 表示成功。
+class SandboxSnapshotResult {
+  const SandboxSnapshotResult({
+    required this.name,
+    required this.count,
+    required this.error,
+  });
+
+  final String name;
+
+  /// 当前快照总数（后端给的）。
+  final int count;
+
+  final String? error;
+
+  bool get ok => error == null;
 }

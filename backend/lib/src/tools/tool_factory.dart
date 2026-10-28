@@ -23,9 +23,22 @@ import '../capability/capabilities.dart';
 
 /// 工具构建器 —— 统一处理"能力缺失"和"结果翻译"。
 class ToolFactory {
-  const ToolFactory(this.caps);
+  const ToolFactory(this.caps, {this.onExecMeta});
 
   final Capabilities caps;
+
+  /// **带外元数据回调**（2026-10-28）。
+  ///
+  /// ## 为什么需要它
+  ///
+  /// `dart_agent_core` 的 `Tool.executable` 只把**字符串**交给框架，
+  /// 而 `CapabilitySuccess.metadata`（退出码 / 耗时 / 是否截断 / 执行面）
+  /// **到不了 UI**。前端要求工具卡显示「在沙箱 / 在手机执行了命令」、
+  /// 结构化退出码与耗时 —— 只能从这条带外通道送出去。
+  ///
+  /// 约定：**只在 `CapabilitySuccess` 带 metadata 时回调**，
+  /// 失败路径不回调（失败信息已经在给人看的那句话里）。
+  final void Function(String toolName, Map<String, dynamic> meta)? onExecMeta;
 
   /// 造一个工具。
   ///
@@ -87,6 +100,10 @@ class ToolFactory {
         }
         try {
           final result = await run(args);
+          // ★ 带外元数据（退出码/耗时/执行面/截断）—— 框架只收字符串，这里单独送出
+          if (result is CapabilitySuccess && result.metadata != null) {
+            onExecMeta?.call(name, result.metadata!);
+          }
           return _translate(result);
         } catch (e) {
           // 能力实现抛了异常 ⇒ 变成模型能读的失败，不让它看到堆栈

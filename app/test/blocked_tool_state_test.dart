@@ -1,15 +1,25 @@
+import 'dart:async';
+import 'dart:convert';
+
+import 'package:flutter/cupertino.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
+import 'package:heracles/models/attachment.dart';
 import 'package:heracles/models/message.dart';
+import 'package:heracles/models/settings.dart';
 import 'package:heracles/screens/chat_screen.dart';
-import 'package:heracles/services/agent_bridge.dart';
+import 'package:heracles/services/agent_bridge.dart'
+    show AgentBridge, AgentEvent, AgentRunResult, AgentTurn, ToolState;
+import 'package:heracles/services/local_agent.dart';
 import 'package:heracles/services/settings_controller.dart';
 import 'package:heracles/theme/app_theme.dart';
+import 'package:heracles/widgets/bw_topbar.dart' show PlainToolLine;
 import 'package:heracles/widgets/message_row.dart';
-import 'package:heracles/widgets/tool_call_card.dart';
+
+import 'support/secure_storage_mock.dart';
 
 /// **H-1 回归测试**（2026-10-10，t8）—— 被拦截的调用不得被画成「成功」。
 ///
@@ -38,11 +48,35 @@ import 'package:heracles/widgets/tool_call_card.dart';
 /// 2. 落盘再读回，被拦截轮次**仍**是「被拦截」而不是成功
 /// 3. 正常的成功/失败轮次**照旧**正确（守卫不能误伤）
 /// 4. 旧数据（没有 `state` 字段）按 `ok` 回落 —— 不追溯、但不误报
+///
+/// ## ★★ mock 基建重接（2026-10-25，mock 回家第二批）
+///
+/// 旧夹具 mock 的是**已删除的传输**（`heracles/command` 的
+/// `runAgent` / `listSessions` / `loadMessages` + `EventChannel`）。
+/// 本文件是**空跑变绿风险最高**的一个：多数断言是 `findsNothing`
+/// （"不得出现绿卡"），mock 死掉后它们**照样绿** —— 变的只是"什么都没测"。
+/// 现在按真通道重接：
+///
+/// | 旧 shape | 今天 |
+/// |---|---|
+/// | `runAgent` + `sink.success` | `AgentBridge.executorFactoryForTest` 注入
+///   [_FakeExecutor]；事件走 `handle.events → emitLocalEvent → UI`（生产同路） |
+/// | `listSessions` / `loadMessages`（command 通道） | `heracles/device` 的
+///   `fs.*`（`SessionStore` 的真通道：`sessions.json` + `<sid>.jsonl`） |
+/// | `EventChannel` | 已删除，零构造（不再 mock） |
+///
+/// **断言与测试体零改动**（除 finder 随 UI 改版换过：抽屉入口改成品牌图标、
+/// 输入框改成 `CupertinoTextField`）。
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
 
+  // ★ 安全存储通道 mock（坑 36）：没有它，任何 `SettingsController.load()`
+  //   的用例都会**永久挂死**（原始状态实测：本文件第 7 条用例 10 分钟超时）。
+  setUp(installSecureStorageMock);
+  tearDown(removeSecureStorageMock);
+
   const commandChannel = MethodChannel('heracles/command');
-  const eventChannel = EventChannel('heracles/events');
+  const deviceChannel = MethodChannel('heracles/device');
 
   const workspaceMap = <String, dynamic>{
     'path': '/storage/emulated/0/proj',
@@ -156,9 +190,15 @@ void main() {
 
       expect(find.text('已拦截，未执行'), findsOneWidget);
       expect(find.textContaining('重复调用已拦截'), findsOneWidget);
-      // ★ 不得出现工具卡片的"成功"状态词（那是绿色卡的标志）
-      expect(find.text('成功'), findsNothing);
-      expect(find.byType(ToolCallCard), findsNothing);
+      // ★ 口径变更（2026-10-25）：工具调用**不再用 `ToolCallCard` 渲染**
+      //   —— 2026-10-24 黑白改版起是**纯文字行** `PlainToolLine`
+      //   （见 `message_row._toolLine`）。H-1 要钉的语义**一个字没变**：
+      //   被拦截 ≠ 一次成功的工具调用。今天的"成功"可见标志是那行
+      //   **完成态动词**摘要（`写入了 …`）—— 被拦截必须两样都没有。
+      expect(find.byType(PlainToolLine), findsNothing,
+          reason: '被拦截不该画成工具行');
+      expect(find.textContaining('写入了'), findsNothing,
+          reason: 'H-1 的"绿卡"今天 = 完成态动词的工具行；被拦截绝不能有');
     });
   });
 
@@ -180,71 +220,105 @@ void main() {
         'toolState': 'blocked',
       };
 
-  List<Map<String, dynamic>> loadMessagesResult = [];
-
-  /// 实时事件 sink —— `installMocks` 的 `pushDuringRun` 用它推事件
-  MockStreamHandlerEventSink? sink;
-
-  /// 侧边栏里要显示的会话（见各测试的设置）
+  /// `sessions.json` 的内容（侧边栏要显示的会话，见各测试的设置）
   List<Map<String, dynamic>> sessionsOverride = [];
 
-  /// `listSessions` 是否带 treeUri 之类都不影响 —— 只回这个列表
+  /// `<sid>.jsonl` 的内容（"磁盘上有什么"）—— 与旧 `loadMessages` 的返回值同形状，
+  /// 只是**换到真通道**上（`heracles/device` 的 `fs.readText`）。
+  List<Map<String, dynamic>> diskMessages = [];
+
+  /// 推一条事件到 UI（等价旧 `pushRef`；事件形状仍按 Map 描述）。
+  Future<void> Function(Map<String, dynamic>)? pushRef;
+
   void installMocks({
     required List<Map<String, dynamic>> turns,
-    /// 在 `runAgent` **返回之前**推送的事件（模拟实时流）
+
+    /// 在假执行器收尾**之前**推送的事件（模拟实时流）
     List<Map<String, dynamic>> pushDuringRun = const [],
   }) {
     final messenger =
         TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger;
 
+    // ---- 工作区登记表（heracles/command —— 这条至今是 Kotlin 的）----
     messenger.setMockMethodCallHandler(commandChannel, (call) async {
+      if (call.method == 'listWorkspaces') return [workspaceMap];
+      return null;
+    });
+
+    // ---- 会话存储（heracles/device 的 fs.* —— SessionStore 的真通道）----
+    messenger.setMockMethodCallHandler(deviceChannel, (call) async {
+      final args = call.arguments is Map ? call.arguments as Map : const {};
+      final path = args['path'] as String? ?? '';
       switch (call.method) {
-        case 'listWorkspaces':
-          return [workspaceMap];
-        case 'listSessions':
-          return sessionsOverride;
-        case 'loadMessages':
-          return loadMessagesResult;
-        case 'runAgent':
-          // 先把事件推完（此时订阅还活着），再返回结果 ——
-          // 这正是"实时路径先画、兜底路径后到"的次序
-          for (final e in pushDuringRun) {
-            sink?.success(e);
-            await Future<void>.delayed(Duration.zero);
+        case 'fs.stat':
+          // 新会话 id 探测：永不撞
+          return <String, dynamic>{'ok': true, 'exists': false};
+        case 'fs.readText':
+          if (path.endsWith('sessions.json')) {
+            return <String, dynamic>{
+              'ok': true,
+              'text': jsonEncode(sessionsOverride),
+              'truncated': false,
+            };
           }
           return <String, dynamic>{
-            'stopReason': '检测到循环，已停止',
-            'finalText': '',
-            'sessionId': 'sess-A',
-            'totalCachedTokens': 0,
-            'totalPromptTokens': 0,
-            'totalOutputTokens': 0,
-            'steadyHitRate': null,
-            'turns': turns,
+            'ok': true,
+            'text': diskMessages.map((r) => jsonEncode(r)).join('\n'),
+            'truncated': false,
           };
+        case 'fs.readTailLines':
+          return <String, dynamic>{
+            'ok': true,
+            'lines': [for (final r in diskMessages) jsonEncode(r)],
+          };
+        case 'fs.appendText':
+        case 'fs.writeText':
+        case 'fs.mkdir':
+        case 'fs.delete':
+          return <String, dynamic>{'ok': true};
         default:
-          return null;
+          return <String, dynamic>{
+            'ok': false,
+            'error': '测试 mock：未知方法 ${call.method}',
+          };
       }
     });
 
-    messenger.setMockStreamHandler(
-      eventChannel,
-      // ⚠️ 必须用块体：箭头体会把赋值结果当返回值，
-      //    Flutter 会试图序列化它并抛 PlatformException。
-      MockStreamHandler.inline(
-        onListen: (arguments, events) {
-          sink = events;
+    // ---- run 注入（executorFactoryForTest —— 生产同路）----
+    AgentBridge.executorFactoryForTest =
+        ({required workspacePath, required settings, required sessionStore, askGate}) {
+      return _FakeExecutor(
+        workspacePath: workspacePath,
+        settings: settings,
+        sessionStore: sessionStore,
+        askGate: askGate,
+        turns: turns,
+        onReady: (push) => pushRef = push,
+        onScript: () async {
+          // 先把事件推完（此时订阅还活着），再返回结果 ——
+          // 这正是"实时路径先画、兜底路径后到"的次序
+          for (final e in pushDuringRun) {
+            await pushRef!(e);
+          }
         },
-        onCancel: (arguments) {
-          sink = null;
-        },
-      ),
-    );
+      );
+    };
   }
 
+  /// 造一个**已配置**的设置控制器 —— 不配 provider 时 `AgentBridge.run()`
+  /// 会**就地抛错**（ADR-035 S4 有意为之），根本走不到假执行器。
   Future<SettingsController> freshController() async {
     SharedPreferences.setMockInitialValues({});
-    return SettingsController.load();
+    final c = await SettingsController.load();
+    await c.updateProvider(const ModelProviderConfig(
+      id: 'deepseek-account',
+      name: 'DeepSeek 账号',
+      baseUrl: 'https://api.deepseek.com/v1',
+      model: 'deepseek-chat',
+      apiKey: 'sk-test',
+    ));
+    await c.setActiveProvider('deepseek-account');
+    return c;
   }
 
   Widget wrapScreen(SettingsController c) => MaterialApp(
@@ -262,14 +336,42 @@ void main() {
     }
   }
 
+  /// **打开抽屉**：原型 01（2026-10-25）之后顶栏左侧是**品牌图标**
+  /// （点它开抽屉），按 **asset 名**定位 —— 见 `session_guard_test.dart`。
+  Future<void> openDrawer(WidgetTester tester) async {
+    final opener = find.byWidgetPredicate(
+      (w) =>
+          w is Image &&
+          w.image is AssetImage &&
+          (w.image as AssetImage).assetName.contains('app_icon_source'),
+      description: '顶栏左侧品牌图标（打开抽屉）',
+    );
+    expect(opener, findsOneWidget,
+        reason: '顶栏左侧必须有品牌图标（点它开抽屉）—— 找不到说明顶栏又改了');
+    await tester.tap(opener);
+    await settle(tester);
+  }
+
+  /// 开抽屉 → 点会话（限定在 Drawer 内，避开顶栏同名的 ActiveSession 标题）。
+  Future<void> openSession(WidgetTester tester, String title) async {
+    await openDrawer(tester);
+    final inDrawer =
+        find.descendant(of: find.byType(Drawer), matching: find.text(title));
+    expect(inDrawer, findsOneWidget,
+        reason: '侧边栏应当列出「$title」—— 否则这步没真正走到读盘路径');
+    await tester.tap(inDrawer);
+    await settle(tester);
+  }
+
   tearDown(() {
     final messenger =
         TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger;
     messenger.setMockMethodCallHandler(commandChannel, null);
-    messenger.setMockStreamHandler(eventChannel, null);
-    loadMessagesResult = [];
+    messenger.setMockMethodCallHandler(deviceChannel, null);
+    AgentBridge.executorFactoryForTest = null;
     sessionsOverride = [];
-    sink = null;
+    diskMessages = [];
+    pushRef = null;
   });
 
   testWidgets('★★ H-1：被拦截轮次在兜底路径下**不得**出现绿色成功卡',
@@ -281,19 +383,21 @@ void main() {
     await tester.pumpWidget(wrapScreen(c));
     await settle(tester);
 
-    await tester.enterText(find.byType(TextField).first, '写文件');
+    await tester.enterText(find.byType(CupertinoTextField).first, '写文件');
     await tester.testTextInput.receiveAction(TextInputAction.done);
     await settle(tester);
     await tester.pump(const Duration(milliseconds: 400));
 
-    // ★★ 核心断言 1：**没有**绿色成功卡
-    final cards = tester.widgetList<ToolCallCard>(find.byType(ToolCallCard));
-    expect(cards.where((x) => x.call.status == ToolStatus.success), isEmpty,
-        reason: 'H-1：被拦截（从未执行）却被画成了成功卡');
-
-    // ★★ 核心断言 2：**也没有**失败卡（它不是失败，是"没执行"）
-    expect(cards, isEmpty,
-        reason: 'H-1：被拦截不该画成工具卡片，应当是 HBlocked');
+    // ★★ 核心断言 1+2（口径变更 2026-10-25，见上）：被拦截轮次
+    //   **一条工具行都不该有** —— 既不是成功（`写入了 …`）也不是失败
+    //   （`…（失败）`），而应当是一条 HBlocked。
+    //   旧版本这里查的是 `ToolCallCard` 的 `call.status`；今天工具行是
+    //   `PlainToolLine`，状态只能从**摘要动词**读（且它是公开字段，可直接断言）。
+    final lines = tester.widgetList<PlainToolLine>(find.byType(PlainToolLine));
+    expect(lines, isEmpty,
+        reason: 'H-1：被拦截不该画成工具行（更不该画成成功行），应当是 HBlocked');
+    expect(find.textContaining('写入了'), findsNothing,
+        reason: 'H-1：被拦截（从未执行）却被画成了成功态工具行');
 
     // ★★ 核心断言 3：应该显示为「已拦截，未执行」
     expect(find.text('已拦截，未执行'), findsOneWidget);
@@ -320,14 +424,17 @@ void main() {
     await tester.pumpWidget(wrapScreen(c));
     await settle(tester);
 
-    await tester.enterText(find.byType(TextField).first, '写文件');
+    await tester.enterText(find.byType(CupertinoTextField).first, '写文件');
     await tester.testTextInput.receiveAction(TextInputAction.done);
     await settle(tester);
     await tester.pump(const Duration(milliseconds: 400));
 
-    final cards = tester.widgetList<ToolCallCard>(find.byType(ToolCallCard));
-    expect(cards.length, 1);
-    expect(cards.first.call.status, ToolStatus.success);
+    final lines =
+        tester.widgetList<PlainToolLine>(find.byType(PlainToolLine)).toList();
+    expect(lines.length, 1);
+    expect(lines.single.summary, '写入了 a.txt',
+        reason: '成功轮次 = 完成态动词（今天"成功"的可见标志）');
+    expect(lines.single.summary, isNot(contains('失败')));
     expect(find.text('已拦截，未执行'), findsNothing);
   });
 
@@ -351,14 +458,16 @@ void main() {
     await tester.pumpWidget(wrapScreen(c));
     await settle(tester);
 
-    await tester.enterText(find.byType(TextField).first, '写文件');
+    await tester.enterText(find.byType(CupertinoTextField).first, '写文件');
     await tester.testTextInput.receiveAction(TextInputAction.done);
     await settle(tester);
     await tester.pump(const Duration(milliseconds: 400));
 
-    final cards = tester.widgetList<ToolCallCard>(find.byType(ToolCallCard));
-    expect(cards.length, 1);
-    expect(cards.first.call.status, ToolStatus.failure);
+    final lines =
+        tester.widgetList<PlainToolLine>(find.byType(PlainToolLine)).toList();
+    expect(lines.length, 1);
+    expect(lines.single.summary, '写入了 a.txt（失败）',
+        reason: '失败轮次必须带「（失败）」—— 不能被画成成功态');
     // 失败**不该**被画成"已拦截"
     expect(find.text('已拦截，未执行'), findsNothing);
   });
@@ -373,11 +482,16 @@ void main() {
     //   然后走真实的 UI 路径（切会话 → loadMessages → _toMessages → 渲染），
     //   而不是直接把 HBlocked 塞进去（那样什么都没验证）。
     //
-    // 磁盘形状 = SessionStore.jsonToMessage 的输出：
+    // ★ 2026-10-25：这条路径的判据从"command 通道的 loadMessages"换成
+    //   **设备通道上 `<sid>.jsonl` 的真实内容**（`SessionStore` 走 `fs.readText`）
+    //   —— 比旧夹具更接近事实（旧夹具 mock 的通道已删除，永远返回空）。
+    //
+    // 磁盘形状 = SessionStore 的输出：
     //   · 新记录带 state=blocked
-    //   · 兼容字段 ok=false（MainActivity 按 `ok = (state=="succeeded")` 写）
+    //   · 兼容字段 ok=false
     //   · result 为空（工具没执行，自然没有结果）
-    loadMessagesResult = [
+    //   · 拦截原因落盘（写 verdict）
+    diskMessages = [
       {'role': 'user', 'text': '写文件', 'ts': 1},
       {
         'role': 'tool',
@@ -386,7 +500,6 @@ void main() {
         'result': '',
         'state': 'blocked',
         'ok': false,
-        // ★ 拦截原因也落盘（MainActivity 写 verdict）
         'reason': '重复调用已拦截（第 2 次）',
         'ts': 2,
       },
@@ -402,12 +515,7 @@ void main() {
     await settle(tester);
 
     // 开抽屉 → 点会话 A → 触发 loadMessages → _toMessages → 渲染
-    await tester.tap(find.byIcon(Icons.menu_rounded));
-    await settle(tester);
-    expect(find.text('会话 A'), findsOneWidget,
-        reason: '侧边栏应当列出会话 A —— 否则这步没真正走到读盘路径');
-    await tester.tap(find.text('会话 A'));
-    await settle(tester);
+    await openSession(tester, '会话 A');
 
     // ★★ 读回后必须仍是「被拦截」，不能变成绿色成功卡
     expect(find.text('已拦截，未执行'), findsOneWidget,
@@ -415,10 +523,10 @@ void main() {
     // ★ 原因也要还原 —— 否则用户看到"被拦截"却不知为何
     expect(find.textContaining('重复调用已拦截'), findsOneWidget,
         reason: '拦截原因未落盘/未读回');
-    final cards = tester.widgetList<ToolCallCard>(find.byType(ToolCallCard));
-    expect(cards.where((x) => x.call.status == ToolStatus.success), isEmpty,
-        reason: 'H-1：切会话/重启后又被画成了成功卡');
-    expect(find.byType(ToolCallCard), findsNothing);
+    expect(find.byType(PlainToolLine), findsNothing,
+        reason: 'H-1：切会话/重启后又被画成了工具行（= 成功态）');
+    expect(find.textContaining('写入了'), findsNothing,
+        reason: 'H-1：落盘的 blocked 状态被读成了成功态');
   });
 
   testWidgets('★★ N-1：同一会话连续两次运行、两次都被拦截 → 必须有 2 张拦截卡',
@@ -431,7 +539,7 @@ void main() {
     await settle(tester);
 
     // ---- 第一次运行 ----
-    await tester.enterText(find.byType(TextField).first, '第一次');
+    await tester.enterText(find.byType(CupertinoTextField).first, '第一次');
     await tester.testTextInput.receiveAction(TextInputAction.done);
     await settle(tester);
     await tester.pump(const Duration(milliseconds: 400));
@@ -440,7 +548,7 @@ void main() {
         reason: '第一次运行的拦截卡应当出现');
 
     // ---- 第二次运行（**同一会话**，`_messages` 不会被清空）----
-    await tester.enterText(find.byType(TextField).first, '第二次');
+    await tester.enterText(find.byType(CupertinoTextField).first, '第二次');
     await tester.testTextInput.receiveAction(TextInputAction.done);
     await settle(tester);
     await tester.pump(const Duration(milliseconds: 400));
@@ -470,7 +578,7 @@ void main() {
     await tester.pumpWidget(wrapScreen(c));
     await settle(tester);
 
-    await tester.enterText(find.byType(TextField).first, '写两个文件');
+    await tester.enterText(find.byType(CupertinoTextField).first, '写两个文件');
     await tester.testTextInput.receiveAction(TextInputAction.done);
     await settle(tester);
     await tester.pump(const Duration(milliseconds: 400));
@@ -505,7 +613,7 @@ void main() {
     await tester.pumpWidget(wrapScreen(c));
     await settle(tester);
 
-    await tester.enterText(find.byType(TextField).first, '写文件');
+    await tester.enterText(find.byType(CupertinoTextField).first, '写文件');
     await tester.testTextInput.receiveAction(TextInputAction.done);
     await settle(tester);
     await tester.pump(const Duration(milliseconds: 400));
@@ -519,7 +627,7 @@ void main() {
     final c = await freshController();
 
     // 旧记录：只有 ok，没有 state
-    loadMessagesResult = [
+    diskMessages = [
       {
         'role': 'tool',
         'tool': 'write_file',
@@ -536,15 +644,81 @@ void main() {
 
     await tester.pumpWidget(wrapScreen(c));
     await settle(tester);
-    await tester.tap(find.byIcon(Icons.menu_rounded));
-    await settle(tester);
-    await tester.tap(find.text('会话 A'));
-    await settle(tester);
+    await openSession(tester, '会话 A');
 
     // 旧数据的 ok:true 仍是成功（我们**刻意不追溯**）
-    final cards = tester.widgetList<ToolCallCard>(find.byType(ToolCallCard));
-    expect(cards.length, 1);
-    expect(cards.first.call.status, ToolStatus.success);
+    // ★ 口径变更：同上 —— 成功今天的可见标志是完成态动词的 `PlainToolLine`。
+    final lines =
+        tester.widgetList<PlainToolLine>(find.byType(PlainToolLine)).toList();
+    expect(lines.length, 1);
+    expect(lines.single.summary, '写入了 a.txt',
+        reason: '旧数据 ok:true ⇒ 完成态（成功）');
     expect(find.text('已拦截，未执行'), findsNothing);
   });
+}
+
+// ============================================================================
+// 假执行器（2026-10-25 mock 基建重接）：走 AgentBridge.executorFactoryForTest
+// —— 事件经 handle.events → emitLocalEvent → UI（生产同一条路径）。
+// ============================================================================
+
+/// 脚本化执行器：`run()` 立即返回句柄；事件由测试经 [onReady] 给的推送函数
+/// 注入；结果在脚本（[onScript]）完成后以旧 mock 的同一份罐头数据收尾。
+class _FakeExecutor extends LocalAgentExecutor {
+  _FakeExecutor({
+    required super.workspacePath,
+    required super.settings,
+    required super.sessionStore,
+    super.askGate,
+    required this.turns,
+    required this.onScript,
+    required this.onReady,
+  });
+
+  /// run 返回的轮次（**Map 形状 = 旧 Kotlin `toMap` 的输出**，
+  /// 经 `AgentTurn.fromMap` 解析 —— 顺带把解析路径也真的用上）。
+  final List<Map<String, dynamic>> turns;
+
+  final Future<void> Function() onScript;
+  final void Function(Future<void> Function(Map<String, dynamic>) push) onReady;
+
+  @override
+  Future<LocalRunHandle> run({
+    required String request,
+    String? sessionId,
+    List<HAttachment> attachments = const [],
+  }) async {
+    final controller = StreamController<AgentEvent>.broadcast();
+    final done = Completer<AgentRunResult>();
+    onReady((m) async {
+      if (!controller.isClosed) controller.add(AgentEvent.fromMap(m));
+      await Future<void>.delayed(Duration.zero);
+    });
+
+    // 脚本在句柄返回后的一拍再跑 —— 保证 AgentBridge 已挂上订阅
+    //（广播流不缓冲，早推会丢）。
+    unawaited(Future<void>(() async {
+      await onScript();
+      // 与生产同形：`LocalAgentExecutor` 在 result 完成**之前**关流。
+      if (!controller.isClosed) unawaited(controller.close());
+      if (!done.isCompleted) done.complete(_cannedResult());
+    }));
+
+    return LocalRunHandle(
+      events: controller.stream,
+      result: done.future,
+      cancel: () async => true,
+    );
+  }
+
+  /// 旧 Kotlin mock 的罐头返回值（形状对齐 AgentRunResult）。
+  AgentRunResult _cannedResult() => AgentRunResult(
+        stopReason: '检测到循环，已停止',
+        finalText: '',
+        sessionId: 'sess-A',
+        totalCachedTokens: 0,
+        totalPromptTokens: 0,
+        totalOutputTokens: 0,
+        turns: [for (final t in turns) AgentTurn.fromMap(t)],
+      );
 }

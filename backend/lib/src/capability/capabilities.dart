@@ -36,6 +36,8 @@ library;
 //     Dart 允许这种循环 —— 两边都只是类型声明，没有初始化顺序问题。）
 import 'git_capability.dart';
 export 'git_capability.dart';
+import 'sandbox_capability.dart';
+export 'sandbox_capability.dart';
 
 /// 能力调用结果。
 ///
@@ -202,6 +204,7 @@ class Capabilities {
     this.web,
     this.memory,
     this.git,
+    this.sandbox,
   });
 
   final WorkspaceCapability? workspace;
@@ -220,6 +223,15 @@ class Capabilities {
   /// 为什么不是"干脆不列出来"：与其余能力同一条纪律 —— 模型从历史里看到过
   /// 工具名，不列出来它会凭记忆乱调，报"未知工具"更难排查。
   final GitCapability? git;
+
+  /// **沙箱执行面**（内联 PRoot rootfs）。
+  ///
+  /// 产品定调（2026-10-28）：**agent 的命令默认走沙箱**，只有「需要动 Android
+  /// 本身」的才落手机 shell —— 路由规则见 `sandbox_capability.dart` 的
+  /// `decideSurface`，**不由模型决定**（`run_shell_command` 不暴露 surface 参数）。
+  ///
+  /// `null` ⇒ 没接沙箱：一切回落手机 shell（路由会自动这么做）。
+  final SandboxCapability? sandbox;
 }
 
 // ============================================================================

@@ -1,8 +1,11 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
 import 'models/settings.dart';
 import 'screens/chat_screen.dart';
+import 'services/sandbox_service.dart';
 import 'services/settings_controller.dart';
 import 'theme/app_theme.dart';
 import 'theme/theme_reveal.dart';
@@ -23,6 +26,11 @@ import 'theme/theme_reveal.dart';
 /// **核心逻辑不得用 Dart 重写** —— 它们是已验证的资产，
 /// 且缓存纪律（铁律 1）在 Kotlin 层由**类型**保障（`Session` 只暴露 `append`）。
 Future<void> main() async {
+  // ★ 仅当用 --dart-define=SANDBOX_SELFTEST=true 构建时执行：
+  //   走完整的 Dart → MethodChannel → Kotlin SandboxBridge → PRoot 链路，
+  //   结果打到 logcat（flutter 标签）。用来取「真的通了」的证据。
+  //   release 默认构建不带这个 define，用户路径零影响。
+  const bool runSelfTest = bool.fromEnvironment("SANDBOX_SELFTEST");
   WidgetsFlutterBinding.ensureInitialized();
 
   // 设置必须在 runApp 之前加载 —— 否则首帧会用默认主题再闪一下
@@ -34,6 +42,11 @@ Future<void> main() async {
     systemNavigationBarColor: HColors.bg,
     systemNavigationBarIconBrightness: Brightness.light,
   ));
+
+  // ★ 仅 --dart-define=SANDBOX_SELFTEST=true 时跑（release 默认不带，零影响）
+  if (runSelfTest) {
+    unawaited(_sandboxSelfTest());
+  }
 
   runApp(HeraclesApp(settings: settings));
 }
@@ -95,5 +108,75 @@ class HeraclesApp extends StatelessWidget {
         );
       },
     );
+  }
+}
+
+/// **仅 debug 自检用**：走 Dart → Kotlin → PRoot 全链路，结果打 logcat。
+///
+/// 存在的理由：沙箱能力暂时还没有 UI 入口（UI 归前端线），
+/// 但没有真机证据就不能说「打通了」。这是最小侵入的取证方式。
+Future<void> _sandboxSelfTest() async {
+  final sandbox = SandboxService();
+  void log(String m) => debugPrint('SANDBOX_SELFTEST $m');
+
+  try {
+    log('=== 开始 ===');
+    final st0 = await sandbox.status();
+    log('status: installed=${st0.installed} prootReady=${st0.prootReady} '
+        'rootfs="${st0.rootfsSummary}"');
+
+    final st1 = st0.installed ? st0 : await sandbox.activate();
+    log('activate: installed=${st1.installed} rootfs="${st1.rootfsSummary}"');
+
+    // 流式输出：拿到什么打什么
+    final done = Completer<SandboxExecResult>();
+    final subOut = sandbox.outputStream.listen((c) {
+      if (c.chunk.trim().isNotEmpty) log('out> ${c.chunk.trimRight()}');
+    });
+    final subDone = sandbox.doneStream.listen((d) {
+      if (!done.isCompleted) done.complete(d.result);
+    });
+    final subErr = sandbox.errorStream.listen((e) {
+      if (!done.isCompleted) {
+        log('error: code=${e.code} msg=${e.message}');
+        done.completeError(StateError(e.message));
+      }
+    });
+
+    final submit = await sandbox.execute(
+      'echo dart-to-kotlin-ok; pwd; id -u; cat /etc/alpine-release 2>/dev/null',
+      workdir: '/',
+      timeoutMs: 60000,
+    );
+    log('submit: ok=${submit.ok} id=${submit.id}');
+
+    if (submit.ok) {
+      final r = await done.future.timeout(const Duration(seconds: 90));
+      log('done: exit=${r.exitCode} ${r.durationMs}ms success=${r.success}');
+      log('stdout="${r.stdout.trim()}" stderr="${r.stderr.trim()}"');
+    }
+
+    // 命名挂载：Dart 侧只给 @name
+    final w = await sandbox.writeFile('@workspace/dart_selftest.txt', 'dart-mount-ok');
+    log('write @workspace/dart_selftest.txt: ok=${w.ok} err=${w.error}');
+
+    // 四条通道的**真实原因**（写进验证手册用）
+    final chans = await sandbox.queryChannels();
+    for (final c in chans) {
+      log('channel ${c.name}: available=${c.available} risk=${c.risk} '
+          'reason="${c.reason}"');
+    }
+
+    final mounts = await sandbox.listMounts();
+    log('mounts: ${mounts.map((m) => "${m.prefix}${m.readOnly ? "(只读)" : ""}").join(", ")}');
+
+    await subOut.cancel();
+    await subDone.cancel();
+    await subErr.cancel();
+    log('=== 结束 ===');
+  } catch (e) {
+    log('!! 自检异常: $e');
+  } finally {
+    sandbox.dispose();
   }
 }

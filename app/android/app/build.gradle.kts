@@ -33,6 +33,26 @@ repositories {
 android {
     namespace = "com.theohowie.heracles"
 
+    // 沙箱自检入口需要 BuildConfig.DEBUG 判断（AGP 8+ 默认关闭 buildConfig）
+    buildFeatures {
+        buildConfig = true
+    }
+
+    // ========================================================================
+    // ★ 沙箱需要把 native 库**解压**到 nativeLibraryDir
+    // ========================================================================
+    // Android 10+ 的 W^X 只允许从 nativeLibraryDir exec 程序，而沙箱要 exec
+    // `libproot.so`。AGP 对 targetSdk>=23 默认 `extractNativeLibs=false`
+    // —— .so 留在 APK 里由 System.loadLibrary 直接 mmap，**不会解压**，
+    // 于是 nativeLibraryDir 是空的，沙箱会报「PRoot 二进制不可用」。
+    //
+    // 代价：这些 .so 在 APK 里改为未压缩存储（体积略增）。
+    packaging {
+        jniLibs {
+            useLegacyPackaging = true
+        }
+    }
+
     // ★ 显式钉死 37，不跟随 flutter.compileSdkVersion（36）。
     //
     // 原因：file_picker 传递依赖的 `flutter_plugin_android_lifecycle`
@@ -123,6 +143,20 @@ dependencies {
     //      只加 api 会在 Manifest 合并时报 "StellarProvider not found"。
     implementation("com.github.roro2239.Stellar-API:api:1.0.3")
     implementation("com.github.roro2239.Stellar-API:provider:1.0.3")
+
+    // ========================================================================
+    // ★ 内置沙箱（Heracles-taixu-sandbox）—— 内联，不是第二个 App
+    // ========================================================================
+    // 用**预编译 AAR** 而不是 include 模块，原因：
+    //   沙箱是独立 Gradle 工程，用 AGP 8.13 / Kotlin 2.2.20；
+    //   本工程是 AGP 9.0.1 / Kotlin 2.3.20（built-in）。
+    //   直接 include 会让两套 AGP 在同一构建里打架。
+    //   AAR 解耦后：沙箱仍可 `cd sandbox && ./gradlew build` 独立构建，
+    //   本工程只依赖产物。**改了沙箱要重新出 AAR**（见 sandbox/README）。
+    implementation(files("libs/sandbox-api-release.aar"))
+    implementation(files("libs/sandbox-runtime-release.aar"))
+    implementation(files("libs/sandbox-channel-release.aar"))
+    implementation(files("libs/sandbox-file-release.aar"))
 }
 
 flutter {

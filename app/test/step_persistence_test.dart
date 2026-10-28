@@ -1,3 +1,5 @@
+import 'dart:convert';
+
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -8,6 +10,8 @@ import 'package:heracles/screens/chat_screen.dart';
 import 'package:heracles/services/settings_controller.dart';
 import 'package:heracles/theme/app_theme.dart';
 import 'package:heracles/widgets/stream_step.dart';
+
+import 'support/secure_storage_mock.dart';
 
 /// **「切会话后已生成的工作步骤消失」回归测试**（2026-10-12，S5）。
 ///
@@ -32,11 +36,30 @@ import 'package:heracles/widgets/stream_step.dart';
 ///    （见文件末尾 `_toMessages` 的行为说明与 README 的变异步骤）。
 /// 3. **旧读取方**：不认识的 role 必须被忽略，不能让整条会话读不出来。
 /// 4. **不静默丢信息**：截断过的步骤必须**如实显示**被截断。
+///
+/// ## ★★ mock 基建重接（2026-10-25，mock 回家第二批）
+///
+/// 旧夹具在 `heracles/command` 上 mock `loadMessages` / `listSessions`
+/// （**内核迁移后已删除**：`AgentBridge.loadMessages` 现在走 Dart
+/// `SessionStore` ⇒ `heracles/device` 的 `fs.*`）+ 一条 `EventChannel`
+/// （已删除）。⇒ 旧夹具下"读回"**永远拿到空数组**：本文件的核心断言
+/// （步骤卡片必须还原）会红，而"未知 role 被忽略"那类反而**空跑变绿**。
+///
+/// 现在按真通道给数据：`<ws>/.heracles/sessions.json`（索引）与
+/// `<ws>/.heracles/sessions/<sid>.jsonl`（消息行）—— 形状与真机逐字节同源
+/// （`SessionStore` 就是往这两个路径 `fs.readText` / `fs.writeText` 的）。
+///
+/// **断言与测试体零改动**（除抽屉入口 finder：☰ 已换成品牌图标，按 asset 名定位）。
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
 
+  // ★ 安全存储通道 mock（坑 36）：没有它，第一条用例（`freshController()`）
+  //   的 `SettingsController.load()` 会**永久挂死**（原始状态实测：10 分钟超时）。
+  setUp(installSecureStorageMock);
+  tearDown(removeSecureStorageMock);
+
   const commandChannel = MethodChannel('heracles/command');
-  const eventChannel = EventChannel('heracles/events');
+  const deviceChannel = MethodChannel('heracles/device');
 
   const workspaceMap = <String, dynamic>{
     'path': '/storage/emulated/0/proj',
@@ -57,40 +80,56 @@ void main() {
     final messenger =
         TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger;
 
+    // ---- 工作区登记表（heracles/command —— 这条至今是 Kotlin 的）----
     messenger.setMockMethodCallHandler(commandChannel, (call) async {
+      if (call.method == 'listWorkspaces') return [workspaceMap];
+      return null;
+    });
+
+    // ---- 会话存储（heracles/device 的 fs.* —— SessionStore 的真通道）----
+    messenger.setMockMethodCallHandler(deviceChannel, (call) async {
+      final args = call.arguments is Map ? call.arguments as Map : const {};
+      final path = args['path'] as String? ?? '';
       switch (call.method) {
-        case 'listWorkspaces':
-          return [workspaceMap];
-        case 'listSessions':
-          return sessions;
-        case 'loadMessages':
-          final sid = (call.arguments as Map)['sessionId'] as String?;
-          return disk[sid] ?? <Map<String, dynamic>>[];
-        case 'runAgent':
-          // 本文件只考察**读回**，不考察运行路径
+        case 'fs.stat':
+          return <String, dynamic>{'ok': true, 'exists': false};
+        case 'fs.readText':
+          if (path.endsWith('sessions.json')) {
+            return <String, dynamic>{
+              'ok': true,
+              'text': jsonEncode(sessions),
+              'truncated': false,
+            };
+          }
+          final sid = path.split('/').last.replaceAll('.jsonl', '');
+          final rows = disk[sid] ?? const <Map<String, dynamic>>[];
           return <String, dynamic>{
-            'stopReason': '已给出最终回答',
-            'finalText': '',
-            'sessionId': 'sess-A',
-            'totalCachedTokens': 0,
-            'totalPromptTokens': 0,
-            'totalOutputTokens': 0,
-            'steadyHitRate': null,
-            'turns': <Map<String, dynamic>>[],
+            'ok': true,
+            'text': rows.map((r) => jsonEncode(r)).join('\n'),
+            'truncated': false,
           };
+        case 'fs.readTailLines':
+          final sid = path.split('/').last.replaceAll('.jsonl', '');
+          final rows = disk[sid] ?? const <Map<String, dynamic>>[];
+          return <String, dynamic>{
+            'ok': true,
+            'lines': [for (final r in rows) jsonEncode(r)],
+          };
+        case 'fs.appendText':
+        case 'fs.writeText':
+        case 'fs.mkdir':
+        case 'fs.delete':
+          return <String, dynamic>{'ok': true};
         default:
-          return null;
+          return <String, dynamic>{
+            'ok': false,
+            'error': '测试 mock：未知方法 ${call.method}',
+          };
       }
     });
 
-    messenger.setMockStreamHandler(
-      eventChannel,
-      // 不推事件：本文件考察的是"从磁盘读回"，与实时流无关
-      MockStreamHandler.inline(
-        onListen: (arguments, events) {},
-        onCancel: (arguments) {},
-      ),
-    );
+    // 事件通道 mock 已随内核迁移退场（`heracles/events` 在 app/lib 里
+    // **零构造**）—— 留着反而误导后来人。
   }
 
   Future<SettingsController> freshController() async {
@@ -113,9 +152,19 @@ void main() {
     }
   }
 
-  /// 开抽屉 → 点会话 A → 触发 `loadMessages` → `_toMessages` → 渲染
+  /// 开抽屉（顶栏左侧**品牌图标**，原型 01）→ 点会话 A →
+  /// 触发 `loadMessages` → `_toMessages` → 渲染
   Future<void> openSessionA(WidgetTester tester) async {
-    await tester.tap(find.byIcon(Icons.menu_rounded));
+    final opener = find.byWidgetPredicate(
+      (w) =>
+          w is Image &&
+          w.image is AssetImage &&
+          (w.image as AssetImage).assetName.contains('app_icon_source'),
+      description: '顶栏左侧品牌图标（打开抽屉）',
+    );
+    expect(opener, findsOneWidget,
+        reason: '顶栏左侧必须有品牌图标（点它开抽屉）—— 找不到说明顶栏又改了');
+    await tester.tap(opener);
     await settle(tester);
     final inDrawer = find.descendant(
         of: find.byType(Drawer), matching: find.text('会话 A'));
@@ -143,15 +192,15 @@ void main() {
     final messenger =
         TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger;
     messenger.setMockMethodCallHandler(commandChannel, null);
-    messenger.setMockStreamHandler(eventChannel, null);
+    messenger.setMockMethodCallHandler(deviceChannel, null);
   });
 
   // ==================================================================
   // ★★ 核心：写一个含过程态的会话 → 读回 → 断言步骤完整还原
   // ==================================================================
 
-  /// 磁盘上一条 `step` 行 —— 形状必须与 Kotlin 侧
-  /// `SessionStore.appendStep` / `jsonToMessage` 的 `"step"` 分支**逐字段一致**。
+  /// 磁盘上一条 `step` 行 —— 形状必须与 `SessionStore` 的
+  /// `"step"` 分支 / `chat_screen._toMessages` 的 `case 'step'` **逐字段一致**。
   Map<String, dynamic> stepRow({
     int index = 1,
     String stepId = 'turn-1',
@@ -178,7 +227,7 @@ void main() {
       (tester) async {
     final c = await freshController();
 
-    // ---- 磁盘：真实的一轮过程（思考 + 正文），形状与 Kotlin 落盘一致 ----
+    // ---- 磁盘：真实的一轮过程（思考 + 正文），形状与落盘一致 ----
     const think =
         '用户想让我创建一个文件。我应该先看看目录里有什么，再动手写。';
     const body = '{"tool":"write_file","args":{"path":"a.txt"}}';
