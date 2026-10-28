@@ -138,3 +138,118 @@
 2. **N2 由 compressor 估算器拆分** ✅（同一套系数，口径稳定）；reasoning/summary 恒 0 的原因见 N2 回复。
 3. **kind 词表后端定** ✅：`preference / background / habit / other`（随 N7 实现交付）。
 4. **「始终允许」粒度**：v1 维持**按工具名**（已实现并持久化）。细化到"工具+参数模式"需要通配匹配设计与审计（白名单变宽即是攻击面），建议作为 N7 之后的独立条目再议；前端弹窗文案可先按"始终允许此工具"表述。
+
+---
+
+## 8. 沙箱（内联执行面）—— 给前端的接口（2026-10-28）
+
+> **一句话**：沙箱是**内联在本 APK 里的执行面**（PRoot + Alpine rootfs），不是第二个 App，
+> 也不是「更高权限的 shell」。它解决的是**文件系统污染与崩溃恢复** ——
+> 命令在 rootfs 里跑，产物/缓存/半成品都留在 rootfs，随时可整块回滚。
+>
+> ⚠️ **PRoot 不提供 namespace / cgroup / seccomp，不是敌对代码隔离。**
+> 界面上**不要**把它描述成"安全沙箱"。
+
+### 8.1 与设备 shell 的区别（别在 UI 上混为一谈）
+
+| | 在哪跑 | 身份 | 用途 |
+|---|---|---|---|
+| `AgentBridge`/`DeviceShell` 的 `exec.run` | 真实手机 | App / Shizuku / Root | 操作**真实系统**（装包、读系统文件…） |
+| **沙箱 `SandboxService.execute`** | PRoot rootfs 内 | 沙箱内假 root | 跑**项目构建 / 脚本**，不碰真实系统 |
+
+两条路**刻意不合并**。UI 上如果同时暴露，建议分两个入口并标注清楚（"在手机上" vs "在沙箱里"）。
+
+### 8.2 Dart API（已实现，`app/lib/services/sandbox_service.dart`）
+
+```dart
+import 'package:heracles/services/sandbox_service.dart';
+
+final sandbox = SandboxService();          // 构造零副作用
+```
+
+| 方法 | 返回 | 说明 |
+|---|---|---|
+| `status()` | `SandboxStatus` | 查状态，**无副作用**。`installed` = 沙箱已激活 |
+| `activate({String? ociRef})` | `SandboxStatus` | **激活 = 装 rootfs**。内置优先（离线），OCI 兜底（要网） |
+| `execute(command, {workdir, timeoutMs, usePty})` | `SandboxSubmit` | **提交即返回**（带 `id`），输出走下面三条流 |
+| `outputStream` / `doneStream` / `errorStream` | `Stream<…>` | 流式 stdout/stderr、完成、错误 |
+| `readFile(path)` / `writeFile(path, text)` | `SandboxFileResult` | `path` 支持 `@name/...` |
+| `registerMount({...})` | `SandboxFileResult` | 注册命名挂载点（见 8.4） |
+| `listMounts()` | `List<SandboxMount>` | 给用户展示挂载点与**只读徽标** |
+| `queryChannels()` | `List<SandboxChannelInfo>` | 四条通道的可用性与风险（**不含 allow/deny**） |
+| `dispose()` | — | 页面销毁时调 |
+
+**`execute` 是流式的**，典型用法：
+
+```dart
+final done = Completer<SandboxExecResult>();
+final subOut = sandbox.outputStream.listen((c) => appendToView(c.chunk));
+final subSub = sandbox.doneStream.listen((d) { if (!done.isCompleted) done.complete(d.result); });
+final subErr = sandbox.errorStream.listen((e) { /* 见 8.3 */ });
+
+final submit = await sandbox.execute('echo hi', workdir: '/');
+if (!submit.ok) { /* submit.error 是人话 */ }
+final result = await done.future;     // result.exitCode / stdout / stderr / durationMs
+```
+
+> `execute` 会**自动挂上流式通道**，前端不用手工接线；但页面销毁时请 `dispose()`。
+
+### 8.3 错误码（可直接据此给用户明确提示，不要笼统说"失败了"）
+
+| 常量 | 值 | 含义 | UI 建议 |
+|---|---|---|---|
+| `kSandboxCodeRootfsNotReady` | 2 | rootfs 还没装 | 引导点「激活沙箱」 |
+| `kSandboxCodeMountUnknown` | 12 | 引用了未注册的 `@name` | 提示"挂载点不存在"，并列出可用挂载点 |
+| `kSandboxCodeMountReadOnly` | 13 | 往**只读挂载点**写入 | 明确说 `@libs 是只读挂载`，不要显示"权限不足" |
+
+`SandboxFileResult` 上有便利判断：`isReadOnly` / `isUnknownMount`；
+`SandboxExecError` 上有 `isReadOnlyMount` / `isUnknownMount` / `isRootfsNotReady`。
+
+### 8.4 命名挂载：**模型和 UI 都只出现 `@name`**
+
+模型永远只写 `@workspace/out/app.apk` 这种**逻辑路径**，物理路径由后端解析。
+
+- ✅ 界面上显示：`@workspace`、`@libs（只读）`、`@pc_shared`
+- ❌ **绝对不要**在 UI、提示词、few-shot、历史对话里显示物理路径
+  （如 `/data/user/0/com.theohowie.heracles/files/sandbox/rootfs/opt/ws/...`）——
+  一旦出现，换设备或改共享目录后这些路径全失效
+
+`SandboxMount` 字段：`name` / `prefix`（= `@name`）/ `backend` / `readOnly` / `bindTo` / `description`。
+
+三种 `backend`（`SandboxMountBackend`）：`rootfsRelative`(0) / `hostPrivateDir`(1) / `safTree`(2)。
+一般 UI 不需要区分，只要**如实显示 `readOnly`**。
+
+### 8.5 建议的 UI（最小可用）
+
+1. **沙箱卡片**：`已激活 / 未激活` + `rootfsSummary` 一行 + `激活` 按钮（调 `activate()`）
+   - 激活会解包 ~9 MB、耗时几秒，**要有进度态**（按钮转圈即可）
+   - 失败如实显示（内置失败时会尝试 OCI，没网就失败）
+2. **挂载点列表**：`@name` + `只读/读写` 徽标 + `description`
+3. **执行输出**：流式追加，`stdout`/`stderr` 可用颜色区分；结束显示退出码与耗时
+
+### 8.6 权限决策不在沙箱
+
+`queryChannels()` 只回答「有哪些通道、可用吗、风险几级」，**没有 allow/deny**。
+放不放行由门禁（`PermissionMode` / `approval_required`）决定 —— 前端**不要**拿通道可用性当授权依据。
+
+### 8.7 当前边界（如实，别在 UI 上过度承诺）
+
+| 能力 | 状态 |
+|---|---|
+| 激活（内置 rootfs，离线） | ✅ 真机验证 |
+| 沙箱内执行命令 + 流式输出 | ✅ 真机验证 |
+| 命名挂载读写（`@workspace`） | ✅ 真机验证 |
+| 只读挂载拒绝写入 | ✅ 单测 + 设备验证 |
+| SAF 目录（`@pc_shared`） | ⚠️ 代码已实现，**真实授权流程未真机验证** |
+| Shizuku / Root / 无线 ADB 通道 | ⚠️ 代码与单测有，**真机未验证**（Shizuku 未运行 / 设备无 root / 需 `adb pair`） |
+| 沙箱内跑 `aapt2`/`javac`/`gradle` | ✅ 已验证（含签出 APK）；**AGP 完整构建未验证** |
+
+### 8.8 验收方式（前端自测）
+
+```powershell
+cd app
+flutter test test\sandbox_service_test.dart      # 14 条，覆盖通道缺失/解码/流式/错误码
+flutter analyze                                   # 期望 No issues found!
+```
+
+真机侧由后端负责（`--dart-define=SANDBOX_SELFTEST=true` 的守卫自检，release 不带）。
