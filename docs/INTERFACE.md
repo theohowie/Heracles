@@ -126,7 +126,7 @@
 
 - 新事件类型已登记（approval_required / context_updated / plan_updated；approval_request 与 plan_created 保留在 knownTypes 供旧读者，后端不再发送）；
 - 事件字段只增（callId/workspaceInside/breakdown/limit/limitSource/planStepsDetailed）；`.jsonl` 只增行类型与字段（tool_call/plan/compact 行 + tool 行的 id 字段）；
-- 契约常量以 `contract.dart` 为唯一来源 ✅（本仓库根另有 `接口.md` 记录后端→前端的实现面，与本文互补：本文是**前端提出的契约**，`接口.md` 是**后端的实现清单**）。
+- 契约常量以 `contract.dart` 为唯一来源 ✅（同目录另有 `接口.md` 记录后端→前端的实现面，与本文互补：本文是**前端提出的契约**，`接口.md` 是**后端的实现清单**）。
 
 ## 7. 待确认 —— 已关账（前端 2026-10-25 全部接受）
 
