@@ -111,6 +111,27 @@ class CameraBridge(private val activity: Activity) {
         lastStartError = null
 
         val name = "IMG_${System.currentTimeMillis()}.jpg"
+
+        // ★★ 2026-10-29 真机实测后的**路径顺序翻转** ★★
+        //
+        // 本机（Redmi K60 / HyperOS）的系统相机对 `EXTRA_OUTPUT` 完全不理：
+        //   · 我们插入的 MediaStore 待定条目在返回后被丢弃（8494/8495/8497/8498 全没了）
+        //   · 重试 4×350ms 读不到一个字节
+        //   · 相册里也没有新照片 ⇒ **照片压根没产生**
+        // 而**不带 EXTRA_OUTPUT 的裸 intent** 是真机上唯一带回数据的方式：
+        //     18:01:51  onActivityResult req=18499 res=0 **data=true**  ← Bitmap 在 extras 里
+        //
+        // 所以：**优先走裸 intent（缩略图模式）**，拿 data 里的 Bitmap 存成文件。
+        // 代价是分辨率低（相机给的缩略图级别）；要高清得改 CameraX 应用内拍照，
+        // 那是后续独立任务 —— 先让"拍照能进输入框"这件事真的可用。
+        if (tryStart(Intent(MediaStore.ACTION_IMAGE_CAPTURE))) {
+            pendingThumbnail = true
+            pendingUri = null
+            pendingName = name
+            Log.i("CameraBridge", "走裸 intent（缩略图模式）—— 本机唯一可靠路径")
+            return
+        }
+
         val uri = insertPendingImage(name)
 
         if (uri != null) {
@@ -196,6 +217,30 @@ class CameraBridge(private val activity: Activity) {
 
         if (result == null) return
 
+        // ★★ 2026-10-29 真机结论：本机（MIUI）相机**完全不写 EXTRA_OUTPUT**。
+        //
+        // 证据链：
+        //   · 我插入的 pending 条目（media/8494/8495/8497）在返回后**全部消失**
+        //   · 相册里最新照片是旧的 Download/MiShare 文件，不是这次拍的
+        //   · 重试 4 次 × 350ms 读取都拿不到一个字节
+        //   ⇒ 不是"写了读不到"，是**照片压根没产生**。
+        //
+        // 唯一真正"带数据回来"的是**缩略图模式**（无 EXTRA_OUTPUT）：
+        //     18:01:51  onActivityResult req=18499 res=0 data=true
+        //
+        // 所以：**只要返回的 Intent 里带 Bitmap 就直接用它** —— 不管 resultCode，
+        // 也不管当初走的是哪条启动路径。
+        val bmpAny = runCatching {
+            @Suppress("DEPRECATION")
+            data?.extras?.get("data") as? Bitmap
+        }.getOrNull()
+        if (bmpAny != null) {
+            Log.i("CameraBridge", "回调里带 Bitmap（缩略图模式）: ${bmpAny.width}x${bmpAny.height}")
+            val saved = saveThumbnail(bmpAny, name)
+            if (saved == null) error?.invoke("拍到的照片保存失败") else result(saved)
+            return
+        }
+
         if (thumbnail) {
             // 裸 intent 的图在返回 intent 的 "data" extra 里（Bitmap）
             val bmp = runCatching {
@@ -229,24 +274,44 @@ class CameraBridge(private val activity: Activity) {
             //
             // 判定同时做一次 IS_PENDING 归零：否则照片只在 App 里能看，
             // 相册里永远"还在处理中"。
-            val size = runCatching {
-                activity.contentResolver.openAssetFileDescriptor(uri, "r")?.use { it.length }
-            }.getOrNull() ?: -1L
-            Log.i("CameraBridge", "结果 URI 内容长度=$size (uri=$uri)")
-
-            if (size <= 0L) {
-                // 真的没拍到（用户按了 ✗ / 相机没写文件）—— 静默取消，不报错
-                Log.i("CameraBridge", "按取消处理：URI 无内容")
-                runCatching { activity.contentResolver.delete(uri, null, null) }
+            // ★★ 2026-10-29 第二次纠错：**判据必须"真去读字节"** ★★
+            //
+            // 上一版我用 `openAssetFileDescriptor(uri,"r").length` 判空，结果真机日志是：
+            //     结果 URI 内容长度=-1
+            //     按取消处理：URI 无内容
+            // 而 -1 在 Android 里是 `AssetFileDescriptor.UNKNOWN_LENGTH` ——
+            // **不是"空"，是"长度未知"**（content URI 常见）。照片明明拍到了
+            // （media id 8494），却被我判成取消、还**把媒体库条目删了**（数据丢失，我的错）。
+            //
+            // 现在的判据只有一条：`copyToCache` 能不能把字节真的读出来。
+            //   · 读到 ⇒ 拍到了，交付
+            //   · 读不到 ⇒ 按取消处理，**绝不删除**用户媒体库里的任何条目
+            //
+            // ★ 2026-10-29 真机第三次纠错：**相机返回那一刻文件可能还没落完**。
+            //
+            // 实测（点完 ✓ 之后）：
+            //     HeraclesAct: onActivityResult req=18499 res=0
+            //     CameraBridge: 读不到 URI 内容，按取消处理: media/8495
+            // 照片确实在 MediaStore 里（有 id），但立刻读会拿到 0 字节 ——
+            // MIUI 是先回包、后 flush。所以**重试几次**再判取消。
+            var copied: Map<String, Any?>? = null
+            for (attempt in 1..4) {
+                copied = copyToCache(uri, name)
+                if (copied != null) {
+                    if (attempt > 1) {
+                        Log.i("CameraBridge", "第 $attempt 次读取成功（前面是文件没落完）")
+                    }
+                    break
+                }
+                Log.w("CameraBridge", "第 $attempt 次读不到 URI 内容: $uri")
+                if (attempt < 4) Thread.sleep(350)
+            }
+            if (copied == null) {
+                Log.w("CameraBridge", "重试 4 次仍读不到，按取消处理（不删媒体库条目）: $uri")
                 result(null)
                 return
             }
-
-            val copied = copyToCache(uri, name)
-            if (copied == null) {
-                error?.invoke("拍到了照片，但读取失败（大小 $size 字节）")
-                return
-            }
+            Log.i("CameraBridge", "拍照成功: ${copied["path"]}")
             result(copied)
         } catch (e: Throwable) {
             error?.invoke(e.message ?: e.javaClass.simpleName)
