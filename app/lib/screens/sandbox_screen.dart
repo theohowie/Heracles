@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 
 import '../services/sandbox_service.dart';
@@ -36,16 +38,40 @@ class _SandboxScreenState extends State<SandboxScreen> {
   bool _activating = false;
   bool _resetting = false;
 
+  // ---- T2 编译环境（2026-10-29）----
+  SandboxBuildSuiteStatus? _suite;
+  bool _activatingSuite = false;
+  int _suitePercent = -1;
+  String _suiteStage = '';
+  StreamSubscription<SandboxOutputChunk>? _suiteProgressSub;
+
   @override
   void initState() {
     super.initState();
     _refresh();
+    _refreshSuite();
+    // T2 下载动辄几分钟，进度从流式通道来（`isProgress` 帧）
+    _suiteProgressSub = _service.outputStream.listen((c) {
+      if (!c.isProgress || !_activatingSuite) return;
+      if (!mounted) return;
+      setState(() {
+        _suitePercent = c.progressPercent;
+        if (c.progressMessage.isNotEmpty) _suiteStage = c.progressMessage;
+      });
+    });
   }
 
   @override
   void dispose() {
+    _suiteProgressSub?.cancel();
     _service.dispose();
     super.dispose();
+  }
+
+  Future<void> _refreshSuite() async {
+    final s = await _service.buildSuiteStatus();
+    if (!mounted) return;
+    setState(() => _suite = s);
   }
 
   Future<void> _refresh() async {
@@ -135,6 +161,9 @@ class _SandboxScreenState extends State<SandboxScreen> {
             ),
           ),
           if (st != null && st.installed) ...[
+            const SizedBox(height: HSpace.lg),
+            _sectionLabel(h, '编译环境'),
+            _buildSuiteCard(h),
             const SizedBox(height: HSpace.lg),
             _sectionLabel(h, '管理'),
             _resetCard(h),
@@ -455,6 +484,119 @@ class _SandboxScreenState extends State<SandboxScreen> {
         ],
       ),
     );
+  }
+
+  // ---------------------------------------------------------------- T2 编译环境
+
+  /// 「编译环境」卡片：显示 T2（JDK+Gradle+android.jar）状态，提供激活入口。
+  ///
+  /// 为什么单独一张卡而不是塞进「管理」：它不是"危险操作"，是**功能开关** ——
+  /// 激活后沙箱才具备「从源码编 APK」的能力，用户需要看到体积与收益再决定。
+  Widget _buildSuiteCard(Hue h) {
+    final s = _suite;
+    final ready = s?.ready ?? false;
+    final missing = s?.missing ?? const <String>[];
+    final labels = <String, String>{
+      'jdk': 'JDK 17',
+      'gradle': 'Gradle',
+      'androidJar': 'android.jar',
+    };
+    final missingText = missing.map((k) => labels[k] ?? k).join('、');
+
+    return GestureDetector(
+      onTap: (ready || _activatingSuite) ? null : _activateSuite,
+      behavior: HitTestBehavior.opaque,
+      child: Container(
+        decoration: BoxDecoration(
+          color: h.surfaceAlt,
+          borderRadius: BorderRadius.circular(HRadius.xl),
+        ),
+        padding: const EdgeInsets.symmetric(horizontal: 18, vertical: 15),
+        child: Row(
+          children: [
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    ready ? '编译环境 · 已就绪' : '编译环境 · 未安装',
+                    style: TextStyle(
+                      fontSize: 16,
+                      fontWeight: FontWeight.w500,
+                      color: h.text,
+                    ),
+                  ),
+                  const SizedBox(height: 3),
+                  Text(
+                    ready
+                        ? '可以在沙箱里编译 APK'
+                        : (_activatingSuite
+                            ? (_suiteStage.isEmpty
+                                ? '正在准备…'
+                                : _suiteStage)
+                            : '约 415 MB · 需要联网下载${missingText.isEmpty ? '' : '（缺 $missingText）'}'),
+                    style: TextStyle(fontSize: 13, color: h.textFaint),
+                    maxLines: 2,
+                    overflow: TextOverflow.ellipsis,
+                  ),
+                  if (_activatingSuite) ...[
+                    const SizedBox(height: 8),
+                    ClipRRect(
+                      borderRadius: BorderRadius.circular(2),
+                      child: LinearProgressIndicator(
+                        // percent < 0 = 不确定进度（不画假百分比）
+                        value: _suitePercent >= 0 ? _suitePercent / 100 : null,
+                        minHeight: 3,
+                        backgroundColor: h.border,
+                      ),
+                    ),
+                  ],
+                ],
+              ),
+            ),
+            if (!ready)
+              _activatingSuite
+                  ? SizedBox(
+                      width: 16,
+                      height: 16,
+                      child: CircularProgressIndicator(
+                        strokeWidth: 2,
+                        color: h.textFaint,
+                      ),
+                    )
+                  : Icon(AppIcons.back,
+                      size: 18, color: h.textFaint),
+          ],
+        ),
+      ),
+    );
+  }
+
+  /// 激活 T2。**先确认**（415 MB 不能默默花用户流量），再下载。
+  Future<void> _activateSuite() async {
+    final ok = await showBwConfirmSheet(
+      context,
+      title: '下载编译环境？',
+      message: '需要下载约 415 MB（JDK 17 + Gradle + android.jar）。'
+          '建议在 Wi-Fi 下进行；中断后可以续传。',
+      confirmLabel: '下载',
+    );
+    if (ok != true) return;
+
+    setState(() {
+      _activatingSuite = true;
+      _suitePercent = -1;
+      _suiteStage = '正在准备…';
+    });
+    final r = await _service.activateBuildSuite();
+    await _refreshSuite();
+    if (!mounted) return;
+    setState(() {
+      _activatingSuite = false;
+      _suitePercent = -1;
+      _suiteStage = '';
+    });
+    showIosToast(context, r.ok ? (r.alreadyReady ? '编译环境已就绪' : '编译环境已装好') : '失败：${r.message}');
   }
 
   Widget _resetCard(Hue h) {

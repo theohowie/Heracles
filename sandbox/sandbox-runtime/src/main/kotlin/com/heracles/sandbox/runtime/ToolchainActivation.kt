@@ -118,15 +118,25 @@ class ToolchainActivation(
 
         try {
             // ---- 步骤 1/3：JDK（走 Alpine 官方源，签名由 apk 自己保证）----
+            onProgress(0, -1, "准备网络（DNS）")
+            // ★ 必须先修 DNS（2026-10-29 真机抓到）：Alpine minirootfs **不带**
+            //   /etc/resolv.conf，`apk add` 会立刻失败（"temporary error"）。
+            //   这是沙箱内所有联网操作的前提，不只 T2。
+            val net = runInSandbox(PREPARE_NETWORK, 30_000)
             onProgress(0, -1, "安装 JDK 17（约 284 MB）")
-            val jdk = runInSandbox("$APK_INSTALL_JDK", JDK_TIMEOUT_MS)
+            val jdk = runInSandbox(APK_INSTALL_JDK, JDK_TIMEOUT_MS)
             // ⚠️ 真机已知：`apk add` 在 PRoot 里常常**退出码非 0 但实际装好了**
             //   （`usr/bin/.apk.xxx: No such file or directory`）。所以判据是**装出来没有**，
             //   不是退出码。这一点 sandbox 的实测记录里有（见 porting-log）。
             val jdkBin = File(rootfsHostRoot, "usr/lib/jvm/java-17-openjdk/bin/javac")
             if (!jdkBin.exists()) {
                 return@withLock ActivationResult.failed(
-                    "JDK 安装失败：javac 不存在。apk 输出：${jdk.tail()}",
+                    "JDK 安装失败：javac 不存在。\n" +
+                        "  查过的路径：${jdkBin.absolutePath}（exists=${jdkBin.exists()}）\n" +
+                        "  rootfs 根：${rootfsHostRoot.absolutePath}\n" +
+                        "  usr/lib/jvm 内容：${File(rootfsHostRoot, "usr/lib/jvm").list()?.joinToString() ?: "读不到"}\n" +
+                        "  DNS 准备输出：${net.tail(200)}\n" +
+                        "  apk add 输出（exit=${jdk.exitCode}）：${jdk.tail(900)}",
                 ).also { lastResult = it }
             }
             onProgress(0, -1, "JDK 就绪")
@@ -227,8 +237,8 @@ class ToolchainActivation(
         }
     }
 
-    private fun CommandOutcome.tail(): String =
-        (stderr.ifBlank { stdout }).trim().takeLast(300)
+    private fun CommandOutcome.tail(max: Int = 300): String =
+        (stderr.ifBlank { stdout }).trim().takeLast(max)
 
     /** 一次沙箱内命令的结果。 */
     data class CommandOutcome(
@@ -288,6 +298,22 @@ class ToolchainActivation(
         const val VERSION = "t2-2026-10-29"
 
         private const val JDK_TIMEOUT_MS = 15 * 60 * 1000L
+
+        /**
+         * **准备网络**：Alpine minirootfs 不带 `/etc/resolv.conf`，任何联网操作
+         * （`apk add`、`wget`）都会立刻失败。这里只在**缺失/为空**时写入，
+         * 不覆盖用户已改过的配置。
+         *
+         * DNS 用的是国内公共 DNS（阿里 223.5.5.5 / 114DNS）—— 沙箱里的解析
+         * 不能指望宿主 VPN 的 DNS（PRoot 里走的是真实网络栈）。
+         */
+        private const val PREPARE_NETWORK =
+            "mkdir -p /etc 2>/dev/null; " +
+                "if [ ! -s /etc/resolv.conf ]; then " +
+                "printf 'nameserver 223.5.5.5\\nnameserver 114.114.114.114\\n" +
+                "nameserver 119.29.29.29\\n' > /etc/resolv.conf; " +
+                "echo wrote; else echo exists; fi; " +
+                "echo ---; cat /etc/resolv.conf"
 
         /** Alpine 官方源（JDK 用 musl 版，必须 `apk add` —— Temurin 是 glibc，跑不起来）。 */
         private const val APK_INSTALL_JDK =

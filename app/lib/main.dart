@@ -31,6 +31,9 @@ Future<void> main() async {
   //   结果打到 logcat（flutter 标签）。用来取「真的通了」的证据。
   //   release 默认构建不带这个 define，用户路径零影响。
   const bool runSelfTest = bool.fromEnvironment("SANDBOX_SELFTEST");
+  // ★ T2 激活真机验证（2026-10-29）：会**真的下载约 415 MB**。
+  //   只在显式 --dart-define=SANDBOX_T2_TEST=true 时触发，默认零影响。
+  const bool runT2Test = bool.fromEnvironment("SANDBOX_T2_TEST");
   WidgetsFlutterBinding.ensureInitialized();
 
   // 设置必须在 runApp 之前加载 —— 否则首帧会用默认主题再闪一下
@@ -46,6 +49,9 @@ Future<void> main() async {
   // ★ 仅 --dart-define=SANDBOX_SELFTEST=true 时跑（release 默认不带，零影响）
   if (runSelfTest) {
     unawaited(_sandboxSelfTest());
+  }
+  if (runT2Test) {
+    unawaited(_sandboxT2ActivationTest());
   }
 
   runApp(HeraclesApp(settings: settings));
@@ -252,3 +258,57 @@ Future<String> _sandboxRunOnce(
   if (r.exitCode != 0) out.write(' [exit=${r.exitCode}]');
   return out.toString();
 }
+
+/// **仅真机验证用**：T2 编译环境激活（≈415 MB 下载）。
+///
+/// 会真的联网下载 JDK 17 / Gradle / android.jar —— 只在显式
+/// `--dart-define=SANDBOX_T2_TEST=true` 时跑。进度打到 logcat。
+Future<void> _sandboxT2ActivationTest() async {
+  final sandbox = SandboxService();
+  void log(String m) => debugPrint('SANDBOX_T2 $m');
+
+  StreamSubscription<SandboxOutputChunk>? subOut;
+  try {
+    log('=== 开始 ===');
+    final before = await sandbox.buildSuiteStatus();
+    log('激活前: ready=${before.ready} missing=${before.missing.join(",")}');
+
+    subOut = sandbox.outputStream.listen((c) {
+      if (c.isProgress && c.progressMessage.isNotEmpty) {
+        log('progress ${c.progressPercent}% ${c.progressMessage}');
+      }
+    });
+
+    final sw = Stopwatch()..start();
+    final r = await sandbox.activateBuildSuite();
+    sw.stop();
+
+    log('结果: ok=${r.ok} alreadyReady=${r.alreadyReady} '
+        'ready=${r.ready} 耗时=${sw.elapsed.inSeconds}s');
+    log('message: ${r.message}');
+
+    final after = await sandbox.buildSuiteStatus();
+    log('激活后: ready=${after.ready} version="${after.version}" '
+        'parts=${after.parts}');
+
+    // 「装好了」不能只看文件在不在 —— 真跑一次 javac / gradle，证明能执行
+    if (after.ready) {
+      final probe = await _sandboxRunOnce(
+        sandbox,
+        'export JAVA_HOME=/usr/lib/jvm/java-17-openjdk; '
+        r'$JAVA_HOME/bin/javac -version 2>&1; '
+        'echo ---; /opt/t2/gradle/bin/gradle --version 2>&1 | head -6; '
+        'echo ---; ls -l /opt/t2/platform/android.jar 2>&1',
+        log,
+      );
+      log('探针: ${probe.trim().replaceAll("\n", " | ")}');
+    }
+    log('=== 结束 ===');
+  } catch (e) {
+    log('!! 异常: $e');
+  } finally {
+    await subOut?.cancel();
+    sandbox.dispose();
+  }
+}
+

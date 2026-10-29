@@ -97,7 +97,7 @@ if (-not $VerifyOnly) {
     Write-Info ("gradlew " + ($tasks -join ' '))
 
     $log = Join-Path ([System.IO.Path]::GetTempPath()) ("sync-aar-" + [System.Guid]::NewGuid().ToString('N') + ".log")
-    & cmd /c "`"$gradlew`" $($args -join ' ') > `"$log`" 2>&1"
+    & cmd /c "`"$gradlew`" -p `"$SandboxRoot`" $($args -join ' ') > `"$log`" 2>&1"
     $exit = $LASTEXITCODE
     $raw = Get-Content $log -Raw -ErrorAction SilentlyContinue
 
@@ -106,7 +106,7 @@ if (-not $VerifyOnly) {
     } elseif ($raw -match "BindException|Could not start your build|Kotlin compile daemon") {
         # 本机 loopback 间歇性拒绝（errno 10013）—— 已知环境坑，重试一次
         Write-Info "构建被本机 loopback 问题打断，重试一次…"
-        & cmd /c "`"$gradlew`" $($args -join ' ') > `"$log`" 2>&1"
+        & cmd /c "`"$gradlew`" -p `"$SandboxRoot`" $($args -join ' ') > `"$log`" 2>&1"
         $raw = Get-Content $log -Raw -ErrorAction SilentlyContinue
         if ($raw -match "BUILD SUCCESSFUL") { Write-Ok "重试后构建成功" }
         else {
