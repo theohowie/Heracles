@@ -30,6 +30,7 @@ const ICONS = {
   terminal: <><rect x="2.5" y="4" width="19" height="16" rx="2.5" /><path d="M6.5 9l3.5 3-3.5 3" /><path d="M12.5 15h5" /></>,
   eye: <><path d="M2.5 12S6 5.8 12 5.8 21.5 12 21.5 12 18 18.2 12 18.2 2.5 12 2.5 12z" /><circle cx="12" cy="12" r="2.8" /></>,
   mic: <><rect x="9" y="3" width="6" height="11" rx="3" /><path d="M5.5 11.5a6.5 6.5 0 0 0 13 0" /><path d="M12 18v3" /></>,
+  compass: <><circle cx="12" cy="12" r="9" /><path d="M15.5 8.5l-2 5-5 2 2-5z" /></>,
 }
 
 const FEATURES = [
@@ -41,6 +42,7 @@ const FEATURES = [
   { icon: 'link', title: '会话严格 append-only', desc: '从不改写历史消息，只往后追加。长会话的代价随轮次几乎不变，云端前缀缓存更稳，上下文压缩也更可预测。' },
   { icon: 'key', title: 'BYOK，Key 不出手机', desc: 'API Key 只存本地安全存储、只出现在请求头里，不进日志。任务随时可中断，也可以排队后再发。' },
   { icon: 'mic', title: '语音与相机输入', desc: 'SenseVoice 本地识别，点一下把字填进输入框；拍照直接进附件，发出去的图片成图留存、可看大图——识别与成像都在手机上完成。' },
+  { icon: 'compass', title: 'JEV 决策模式', desc: '纠结「该不该」时问一句：专用决策模型只管是非与置信度，理由由你当前的对话模型像朋友一样补写。云端开箱即用，本地小模型档位可下载；答不上来就直说，绝不编一个答案。' },
   { icon: 'code', title: '纯 Dart 内核 + Flutter 前端', desc: 'backend/ 是纯 Dart 包，379 项单测不依赖 Flutter 与 Android；设备能力由 Kotlin 桥提供，界面层是 Flutter。' },
 ]
 
@@ -81,8 +83,8 @@ const GALLERY = [
 const WORKS = ['会话与守卫（在途结果不串台）', '审批门禁（允许 / 需确认 / 拒绝）', '待办 / 提问 / 审批 / 切档四面板（真机实测）',
   '沙箱执行链路（真机端到端）', '本地语音识别、拍照即附', '取消、排队发送、上下文压缩',
   '设备权限六项总览', '长任务缓存命中 90–96%（真机实测）', '内核 379 项 Dart 单测']
-const LIMITS = ['线上字段的真 Key 验证', 'Anthropic / Responses 两条协议轨', '模型读图（附件已就绪，读图未验）',
-  '在 SAF 工作区内构建', '多机型覆盖', '正式发布签名', '三作用域记忆（重构进行中）']
+const LIMITS = ['线上字段的真 Key 验证（含 JEV 决策）', 'Anthropic / Responses 两条协议轨', '模型读图（附件已就绪，读图未验）',
+  'JEV 本地推理引擎（档位可下载，接入中）', '在 SAF 工作区内构建', '多机型覆盖', '正式发布签名', '三作用域记忆（重构进行中）']
 
 function Reveal({ children, delay = 0, y = 22, className = '' }) {
   const reduce = useReducedMotion()
