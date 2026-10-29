@@ -41,7 +41,14 @@ export 'src/capability/capabilities.dart';
 // ★ GitHub Device Flow 协议（2026-10-27，Step 3）。纯协议逻辑，可 dart test。
 export 'src/git/github_device_flow.dart';
 export 'src/context/deterministic_json.dart';
+// ★ 记忆系统的三作用域数据模型（2026-10-29）：MemoryScope / MemoryRecord /
+//   MemoryContext / MemoryAddress / MemoryAddressError。纯数据无 IO —— 宿主读好
+//   三段传进 RunOptions.memory，backend 负责选择/预算/渲染。
+export 'src/context/memory_context.dart';
 export 'src/context/window_ratio_compressor.dart';
+// ★ 记忆注入的渲染与选择（2026-10-29）：renderMemoryContext / selectForInjection /
+//   injectBudgetChars 等。这是"记忆怎么进 prompt"的唯一真相（旧 renderMemory 转调它）。
+export 'src/prompt/memory_prompt.dart';
 export 'src/prompt/system_prompt.dart';
 // 内置技能（S1/S2/S3 的 Skill 层，2026-10-24）。宿主开 RunOptions.enableSkills 后进目录。
 export 'src/prompt/builtin_skills.dart';

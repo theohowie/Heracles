@@ -47,7 +47,13 @@
 library;
 
 import 'dart:convert';
+
+import 'package:flutter/foundation.dart' show debugPrint, visibleForTesting;
+import 'package:heracles_backend/heracles_backend.dart'
+    show ContractMemory, MemoryAddress, MemoryScope;
+
 import 'device_capabilities.dart';
+import 'memory_service.dart';
 
 /// 一次记忆读取的结果。
 ///
@@ -78,7 +84,12 @@ class MemoryReadResult {
   bool get isEmpty => text.trim().isEmpty;
 
   /// 是否已经接近上限（≥ 90%）。设置页据此提示用户清理。
-  bool get nearlyFull => bytes >= (GlobalMemory.maxBytes * 0.9);
+  ///
+  /// 2026-10-29：上限从"256 KB 硬写闸"改为 **global 存储软预算**
+  /// （`ContractMemory.storageGlobalSoftMaxBytes`，8 MB）。"接近上限"只用于
+  /// 建议清理，**不再意味着到顶会拒写**（超软预算由 Kotlin 侧按
+  /// 过期→最旧 agent→最旧 user 淘汰）。
+  bool get nearlyFull => bytes >= (GlobalMemory.storageSoftMaxBytes * 0.9);
 }
 
 /// 一次记忆写入的结果。
@@ -99,22 +110,232 @@ class MemoryWriteResult {
   final String? error;
 }
 
+/// **某作用域的记忆统计**（存储侧；INTERFACE §N12.6 的 `MemoryStats`）。
+///
+/// 注入侧数字（每轮最多多少字符）由 backend `ContractMemory` 给，
+/// 不在这个对象里 —— 两组预算互不推导（N12.8）。
+class MemoryStats {
+  const MemoryStats({
+    required this.scope,
+    required this.entries,
+    required this.bytes,
+    required this.storageSoftMaxBytes,
+    required this.entriesSoftMax,
+  });
+
+  factory MemoryStats.of(ScopedMemoryStats s) => MemoryStats(
+        scope: s.scope.wireName,
+        entries: s.entries,
+        bytes: s.bytes,
+        storageSoftMaxBytes: s.storageSoftMaxBytes,
+        entriesSoftMax: s.entriesSoftMax,
+      );
+
+  /// `global / workspace / session`。
+  final String scope;
+
+  /// 存活条目数。
+  final int entries;
+
+  /// 存活条目的正文总字节（不含墓碑）。
+  final int bytes;
+
+  /// 该作用域的存储**软预算**（字节；超限淘汰，不拒写）。
+  final int storageSoftMaxBytes;
+
+  /// 该作用域的条目软上限。
+  final int entriesSoftMax;
+}
+
+/// **一条待确认的全局记忆提议**（agent 写 global 的唯一通道）。
+class MemoryProposal {
+  const MemoryProposal({
+    required this.id,
+    required this.text,
+    required this.kind,
+    required this.status,
+    required this.createdAt,
+  });
+
+  factory MemoryProposal.of(ScopedMemoryProposal p) => MemoryProposal(
+        id: p.id,
+        text: p.text,
+        kind: p.kind,
+        status: p.status,
+        createdAt: p.createdAt,
+      );
+
+  final String id;
+  final String text;
+  final String kind;
+
+  /// `pending / promoted / rejected`。
+  final String status;
+  final int createdAt;
+}
+
+// ============================================================================
+// 旧 memory.md → global.jsonl 迁移（设计稿 §3.7；触发点 §3.7.2 步骤 0）
+// ============================================================================
+
+/// 迁移结果（`memory.migrate` 通道的 App 侧形状）。
+///
+/// 正常态有三种，**都不是错误**：
+/// · `migrated:true` —— 真的迁移了（备份已写、旧文件留档）；
+/// · `alreadyMigrated:true` —— 之前迁移过（幂等，字节不变）；
+/// · `noLegacyFile` —— 从来没有旧 `memory.md`（新用户）。
+class MemoryMigrationResult {
+  const MemoryMigrationResult({
+    required this.ok,
+    this.migrated = false,
+    this.alreadyMigrated = false,
+    this.noLegacyFile = false,
+    this.entries = 0,
+    this.backup,
+    this.error,
+  });
+
+  /// 通道返回形状 → 结果。**不抛**（迁移失败要能让主链路继续）。
+  factory MemoryMigrationResult.fromChannel(Map<String, Object?> raw) {
+    final ok = raw['ok'] == true;
+    if (!ok) {
+      final e = raw['error'];
+      return MemoryMigrationResult(
+        ok: false,
+        error: e is String && e.trim().isNotEmpty ? e : '记忆迁移失败（未给出原因）',
+      );
+    }
+    final reason = '${raw['reason'] ?? ''}';
+    return MemoryMigrationResult(
+      ok: true,
+      migrated: raw['migrated'] == true,
+      alreadyMigrated: raw['alreadyMigrated'] == true,
+      noLegacyFile: reason == 'no-legacy-file',
+      entries: (raw['entries'] is num)
+          ? (raw['entries'] as num).toInt()
+          : 0,
+      backup: raw['backup'] is String ? raw['backup'] as String : null,
+    );
+  }
+
+  /// `false` = 迁移过程失败（旧文件应原样保留，可重跑）。
+  final bool ok;
+  final bool migrated;
+  final bool alreadyMigrated;
+  final bool noLegacyFile;
+
+  /// 迁移了多少条（0 = 没迁移）。
+  final int entries;
+
+  /// 迁移前备份路径（旧 `memory.md` 的留档）。
+  final String? backup;
+
+  /// `ok == false` 时的人话原因（**不含记忆正文**）。
+  final String? error;
+}
+
+/// 进程内"是否已尝试过迁移"（一次性；设计稿 §3.7.2 步骤 0）。
+bool _memoryMigrationAttempted = false;
+
+/// **首轮记忆读取之前 best-effort 迁移一次**（幂等 + 不阻断）。
+///
+/// 调用点：`LocalAgentExecutor.run()` 首次读三作用域之前。
+/// 之后的轮次直接短路（进程内 bool）—— 迁移是启动级动作，不该每轮都打通道。
+///
+/// 失败只 `debugPrint`（**不打印记忆正文**，只打印错误码/原因），
+/// 绝不让记忆迁移把主链路搞崩（不变量 I7）。
+Future<MemoryMigrationResult> runMemoryMigrationOnce({
+  DeviceChannelClient? channel,
+}) async {
+  if (_memoryMigrationAttempted) {
+    return const MemoryMigrationResult(ok: true, alreadyMigrated: true);
+  }
+  _memoryMigrationAttempted = true;
+  final result = await migrateLegacyMemory(channel: channel);
+  if (!result.ok) {
+    // 仅排障：错误码/人话原因，绝不含正文。
+    debugPrint('[heracles][memory] 迁移失败（不阻断运行）：${result.error}');
+  } else if (result.migrated) {
+    debugPrint('[heracles][memory] 旧记忆已迁移：${result.entries} 条，'
+        '备份=${result.backup ?? "(无)"}');
+  }
+  return result;
+}
+
+/// 显式执行一次 `memory.migrate`（记忆页「重新迁移」按钮 / 排障用）。
+///
+/// 与 [runMemoryMigrationOnce] 不同：**没有一次性标记**，调用即执行
+/// （Kotlin 侧幂等：`alreadyMigrated` / `no-legacy-file` 都是正常返回）。
+Future<MemoryMigrationResult> migrateLegacyMemory({
+  DeviceChannelClient? channel,
+}) async {
+  final ch = channel ?? const DeviceChannelClient();
+  try {
+    final raw = await ch.call('memory.migrate');
+    return MemoryMigrationResult.fromChannel(raw);
+  } catch (e) {
+    return MemoryMigrationResult(ok: false, error: '调用记忆迁移失败：$e');
+  }
+}
+
+/// 测试缝：清掉"已尝试迁移"标记（让一次性行为可重复验证）。
+@visibleForTesting
+void resetMemoryMigrationForTest() => _memoryMigrationAttempted = false;
+
+
 /// App 全局长期记忆的客户端。
+///
+/// ## 2026-10-29：降级为**兼容层**
+///
+/// 记忆系统改为三作用域（session / workspace / global，见
+/// `docs/INTERFACE.md` §N12），真正的读写/寻址/淘汰在
+/// [ScopedMemoryService]。本类保留是为了：
+///
+/// · **旧设置页**仍直接 `const GlobalMemory()` 读列表/容量；
+/// · `MemoryEntry` / [parseEntries] / [composeRetrieval] 仍被旧 UI 与既有测试用；
+/// · `memory.read`（global.jsonl 原文）是兼容通道方法。
+///
+/// ⚠️ **关键红线（2026-10-29）**：旧实现的新增/编辑/删除走
+/// `clear()` + 逐条 `append()`，而 Kotlin 的 `memory.append` 现在是
+/// **永久只读**（`E_SCOPE_READONLY`）⇒ 那条路径会"先清空 global 再回写失败"，
+/// 等于**丢掉整份全局记忆**。所以 [addEntry] / [updateEntry] / [deleteEntry] /
+/// [clear] 已全部改走 [ScopedMemoryService] 的**用户路径**
+/// （global ⇒ 通道 `memory.userEdit`，追加墓碑/原子重写，不再 clear+append）。
+/// `_rewrite` 已删除。
 class GlobalMemory {
-  /// [channel] 可注入（测试用 mock handler）。
+  /// [channel] / [service] 均可注入（测试用 mock handler / 假服务）。
   ///
-  /// `const` 构造 + 无可变字段 ⇒ 可以到处用 `const GlobalMemory()`，
-  /// 且**不存在"上一次操作的原因"这种跨调用隐式状态**（见文件头）。
-  const GlobalMemory({DeviceChannelClient? channel})
-      : _ch = channel ?? const DeviceChannelClient();
+  /// `const` 构造 ⇒ 可以到处用 `const GlobalMemory()`；两者都不传时，
+  /// 按需构造默认实现（无跨调用隐式状态）。
+  const GlobalMemory({DeviceChannelClient? channel, ScopedMemoryService? service})
+      : _ch = channel, // ignore: prefer_initializing_formals
+        _service = service; // ignore: prefer_initializing_formals
 
-  final DeviceChannelClient _ch;
+  final DeviceChannelClient? _ch;
+  final ScopedMemoryService? _service;
 
-  /// 记忆文件大小上限：**256 KB**。
+  DeviceChannelClient get _channel => _ch ?? const DeviceChannelClient();
+
+  /// 用户路径的记忆服务（global 写走 `memory.userEdit`）。
+  ScopedMemoryService get _svc => _service ?? ScopedMemoryService(channel: _ch);
+
+  /// global 寻址（全局无需 session/workspace）。
+  static const MemoryAddress globalAddress =
+      MemoryAddress(scope: MemoryScope.global);
+
+  /// **global 存储软预算**（8 MB，来自 backend `ContractMemory`）。
   ///
-  /// 与 Kotlin `MemoryStore.MAX_BYTES`、backend `Contract.Memory.maxBytes`
-  /// **必须同一个数**。真正的闸在 Kotlin（它是写入口），这里给 UI 显示用。
-  static const int maxBytes = 256 * 1024;
+  /// 语义：软预算 ⇒ 超限**淘汰**（过期 → 最旧 agent → 最旧 user），
+  /// **不是"到顶拒写"**。数值唯一来源仍是 `ContractMemory`（INTERFACE §N12.8）。
+  static const int storageSoftMaxBytes =
+      ContractMemory.storageGlobalSoftMaxBytes;
+
+  /// 旧名（256 KB 写闸时代）：**已废弃**，保留只为旧设置页/旧测试能编译。
+  ///
+  /// ⚠️ 它现在的值等于 [storageSoftMaxBytes]（8 MB），**不再是 256KB**，
+  /// 也**不再有任何"到顶拒写"语义** —— 别拿它当硬上限。
+  @Deprecated('用 storageSoftMaxBytes；256KB 写闸已随记忆三作用域重设计废除')
+  static const int maxBytes = storageSoftMaxBytes;
 
   /// 读全部记忆。
   ///
@@ -124,7 +345,7 @@ class GlobalMemory {
 
   /// 读全部记忆，**带字节数与失败原因**（设置页 / 排障用）。
   Future<MemoryReadResult> readResult() async {
-    final raw = await _ch.call('memory.read');
+    final raw = await _channel.call('memory.read');
     final err = errorOf(raw);
     if (err != null) return MemoryReadResult.error(err);
 
@@ -141,15 +362,18 @@ class GlobalMemory {
   /// ⚠️ **超限时是"拒绝"而不是"截断"**：写半条会让用户以为记住了。
   Future<bool> append(String note) async => (await appendResult(note)).ok;
 
-  /// 追加并拿到**失败原因**。
+  /// 追加并拿到**失败原因**（**旧通道原语，过渡期兼容**）。
   ///
-  /// 最常见的失败是"已达 256 KB 上限"，那句话是 Kotlin 写的（含当前大小
-  /// 与上限），**原样透传**，不在这里改写。
+  /// ⚠️ 2026-10-29 起 `memory.append` 在 Kotlin 侧**永久只读**
+  /// （返回 `E_SCOPE_READONLY`）—— 全局记忆只能由用户动作经
+  /// `memory.userEdit` 写入。本方法保留只为"忘记升级的调用方拿到明确错误"，
+  /// 新代码请用 [addEntry] 或 `ScopedMemoryService.userAdd`。
+  @Deprecated('memory.append 已永久只读；用 addEntry / ScopedMemoryService.userAdd')
   Future<MemoryWriteResult> appendResult(String note) async {
     if (note.trim().isEmpty) {
       return const MemoryWriteResult.failure('要记住的内容是空的');
     }
-    final raw = await _ch.call('memory.append', <String, Object?>{
+    final raw = await _channel.call('memory.append', <String, Object?>{
       'note': note,
     });
     final err = errorOf(raw);
@@ -167,21 +391,21 @@ class GlobalMemory {
   //
   // ## 格式
   //
-  // memory.md 每行一条 **JSON 条目**（Kotlin 侧追加时行首会带 ISO 时间戳
-  // 前缀 —— 解析时取行内第一个 '{' 起 decode，前缀当噪声忽略）：
-  //   {"id":"m169...","kind":"preference","text":"...","source":"user","createdAt":169...}
+  // global.jsonl 每行一条 **JSON 条目**（与 session/workspace 同形状，
+  // 见 INTERFACE §N12.3）；`memory.read` 返回原文，解析时取行内第一个 `{`
+  // 起 decode（Kotlin 旧格式行首的 ISO 时间戳前缀当噪声忽略）。
   //
   // ## 旧格式迁移
   //
   // 非 JSON 行（历史纯文本）读出来按 kind='other'、source='legacy' 的条目
-  // 对待 —— 不丢内容，只是没有结构字段。**写入永远用新格式**。
+  // 对待 —— 不丢内容，只是没有结构字段。
   //
-  // ## 为什么增删改走"读全文→改→clear→逐条 append"而不动 Kotlin
+  // ## 增删改：**不再 clear + 逐条 append**（2026-10-29 红线修复）
   //
-  // 通道只有 read/append/clear 三个原语，而记忆文件在 App 私有目录
-  // （Dart 够不到文件系统）—— 用三个原语合成改写是唯一不扩 Kotlin 的路。
-  // 代价：改写期间若进程被杀，clear 已生效而 append 未完成 ⇒ 丢尾部条目。
-  // 概率极低、后果是"少一条记忆"而非损坏 —— 如实接受。
+  // 旧实现用 `read/append/clear` 三个原语合成改写，并在 `memory.append`
+  // 永久只读之后变成"先清空再失败 = 丢整份记忆"。现在全部走
+  // `ScopedMemoryService` 的用户路径（通道 `memory.userEdit`，Kotlin 侧
+  // 追加墓碑/原子重写，成功或明确失败，**不存在半清空状态**）。
   // ==========================================================================
 
   /// 解析记忆文件全文为条目列表（含旧格式迁移）。
@@ -223,15 +447,11 @@ class GlobalMemory {
   }
 
   /// 条目 → 存储行（JSON）。
-  static String _entryLine(MemoryEntry e) => jsonEncode({
-        'id': e.id,
-        'kind': e.kind,
-        'text': e.text,
-        'source': e.source,
-        'createdAt': e.createdAt,
-        if (e.expiresAt != null) 'expiresAt': e.expiresAt,
-      });
-
+  ///
+  /// ⚠️ 2026-10-29 起**不再由 App 拼存储行**（写入走 `memory.userEdit`，
+  /// 行形状由 Kotlin 权威生成，见 INTERFACE §N12.3）。保留为测试/排障用的
+  /// 形状参考不合适 —— 已删除，避免第二份真相。
+  ///
   /// **检索式注入**（M4，2026-10-25）：按当前任务给条目打相关性分，
   /// 相关条目全文在前、其余压成一行摘要 —— 不再无差别全量塞入。
   ///
@@ -304,7 +524,25 @@ class GlobalMemory {
   Future<List<MemoryEntry>> listEntries() async =>
       parseEntries(await read()).where((e) => e.isAlive()).toList();
 
-  /// 追加一条（SEC4：疑似密钥拒收 —— 与 backend save_memory 同一闸）。
+  /// 三作用域条目 → 旧 UI 模型（只增 `scope`/`sid`，字段一一对应）。
+  static MemoryEntry entryOf(ScopedMemoryEntry e) => MemoryEntry(
+        id: e.id,
+        kind: e.kind,
+        text: e.text,
+        source: e.source,
+        createdAt: e.createdAt,
+        expiresAt: e.expiresAt,
+        scope: e.scope.wireName,
+        sid: e.sid,
+      );
+
+  /// 追加一条（用户路径；global ⇒ 通道 `memory.userEdit{action:"add"}`）。
+  ///
+  /// SEC4 由 [ScopedMemoryService] 统一执行（与本类旧的正则同一套口径），
+  /// 这里先做一次是为了保留旧的**同文案**失败提示。
+  ///
+  /// [source] 只为兼容旧调用点保留：用户路径写入的 `source` 恒为 `user`
+  /// （`promoted` 由提议晋升产生，不经过这里）。
   Future<MemoryWriteResult> addEntry(String text,
       {String kind = 'other', String source = 'user'}) async {
     final t = text.trim();
@@ -313,75 +551,66 @@ class GlobalMemory {
       return const MemoryWriteResult.failure(
           '内容疑似包含密钥/令牌，拒绝写入长期记忆（明文存储，泄露风险）');
     }
-    return appendResult(_entryLine(MemoryEntry(
-      id: 'm${DateTime.now().microsecondsSinceEpoch}',
-      kind: kind,
-      text: t,
-      source: source,
-      createdAt: DateTime.now().millisecondsSinceEpoch,
-    )));
+    return _runUser(
+      () => _svc.userAdd(globalAddress, t, kind: kind),
+    );
   }
 
-  /// 更新一条（读全文→改→clear→逐条重写）。
+  /// **更新一条**（用户路径；global ⇒ `memory.userEdit{action:"update"}`）。
+  ///
+  /// ★ 2026-10-29 红线修复：不再"读全文→clear→逐条 append"。
+  /// 那条路径在 `memory.append` 永久只读之后会**丢掉整份全局记忆**。
   Future<MemoryWriteResult> updateEntry(String id, String text) async {
-    final entries = await listEntries();
-    final idx = entries.indexWhere((e) => e.id == id);
-    if (idx < 0) return MemoryWriteResult.failure('条目不存在：$id');
     final t = text.trim();
     if (t.isEmpty) return const MemoryWriteResult.failure('内容为空');
     if (_secretPattern.hasMatch(t)) {
       return const MemoryWriteResult.failure('内容疑似包含密钥/令牌，拒绝写入');
     }
-    entries[idx] = MemoryEntry(
-      id: entries[idx].id,
-      kind: entries[idx].kind,
-      text: t,
-      source: entries[idx].source,
-      createdAt: entries[idx].createdAt,
-    );
-    return _rewrite(entries);
+    return _runUser(() => _svc.userUpdate(globalAddress, id, t));
   }
 
-  /// 删除一条。
-  Future<MemoryWriteResult> deleteEntry(String id) async {
-    final entries = await listEntries();
-    final n = entries.length;
-    entries.removeWhere((e) => e.id == id);
-    if (entries.length == n) {
-      return MemoryWriteResult.failure('条目不存在：$id');
+  /// **删除一条**（用户路径；global ⇒ `memory.userEdit{action:"delete"}`）。
+  ///
+  /// ★ 同 [updateEntry]：绝不走 clear+append。
+  Future<MemoryWriteResult> deleteEntry(String id) =>
+      _runUser(() => _svc.userDelete(globalAddress, <String>[id]));
+
+  /// 用户路径写操作的统一翻译：`MemoryWriteOutcome` → 旧 `MemoryWriteResult`。
+  ///
+  /// 失败**不抛**（本类的铁律"失败不抛"），把人话原因放进返回值。
+  Future<MemoryWriteResult> _runUser(
+    Future<MemoryWriteOutcome> Function() op,
+  ) async {
+    try {
+      final out = await op();
+      return MemoryWriteResult(ok: true, bytes: out.bytes);
+    } on MemoryServiceError catch (e) {
+      return MemoryWriteResult.failure(e.message);
+    } catch (e) {
+      return MemoryWriteResult.failure('记忆写入失败：$e');
     }
-    return _rewrite(entries);
   }
 
-  Future<MemoryWriteResult> _rewrite(List<MemoryEntry> entries) async {
-    final ok = await clear();
-    if (!ok) return const MemoryWriteResult.failure('重写失败：清空原文件出错');
-    for (final e in entries) {
-      final r = await append(_entryLine(e));
-      if (!r) {
-        return const MemoryWriteResult.failure('重写失败：写入条目时超限');
-      }
-    }
-    return MemoryWriteResult(ok: true, bytes: entries.length);
-  }
-
-  /// 容量（N7 的 memoryCapacity）：usedBytes / maxBytes。
+  /// 容量（N7 的 memoryCapacity）：usedBytes / 软预算。
+  ///
+  /// `maxBytes` 现在 = **global 存储软预算**（8 MB），不是 256KB 硬上限；
+  /// 超软预算只会触发淘汰，不拒写。
   Future<({int usedBytes, int maxBytes})> capacity() async {
     final r = await readResult();
-    return (usedBytes: r.bytes, maxBytes: maxBytes);
+    return (usedBytes: r.bytes, maxBytes: storageSoftMaxBytes);
   }
 
-  /// 清空记忆（把文件截断成 0 字节）。
+  /// 清空全局记忆（用户路径；`memory.userEdit{action:"clear"}`）。
   ///
-  /// 为什么是"清空文件"而不是"删文件"：删了之后与"从没用过"无法区分，
-  /// 而用户要的是"我把它清空了"。Kotlin 侧按这个语义实现（幂等）。
+  /// Kotlin 侧落到 `memory.clear` 等价的**用户确认后清空**语义（追加 clear
+  /// 墓碑/原子重写），不再是裸截断。
   ///
-  /// @return `false` 时原因需要另取（本方法没有 detailed 版本 ——
-  ///         清空只有"成功/失败"两种，UI 提示一句"清空失败"即可）。
-  Future<bool> clear() async {
-    final raw = await _ch.call('memory.clear');
-    return errorOf(raw) == null;
-  }
+  /// @return `false` = 清空失败（原因见 [clearResult]）。
+  Future<bool> clear() async => (await clearResult()).ok;
+
+  /// 清空并拿到失败原因（设置页用）。
+  Future<MemoryWriteResult> clearResult() =>
+      _runUser(() => _svc.userClear(globalAddress));
 }
 
 /// 疑似密钥/令牌特征（SEC4；与 backend save_memory 同一闸）。
@@ -401,6 +630,8 @@ class MemoryEntry {
     required this.source,
     required this.createdAt,
     this.expiresAt,
+    this.scope,
+    this.sid,
   });
 
   final String id;
@@ -414,6 +645,15 @@ class MemoryEntry {
   /// **有效期**（M6，2026-10-25）：到期时间戳；null = 永不过期。
   /// 读取时（[parseEntries] 之后的 [isAlive]）过滤过期条目。
   final int? expiresAt;
+
+  /// 所属作用域（wire 名 `global/workspace/session`）。
+  ///
+  /// 2026-10-29 只增字段：旧数据/旧构造为 `null`（没有分层概念）。
+  /// UI 据此分组展示；不参与旧 [MemoryEntry] 的解析规则。
+  final String? scope;
+
+  /// session 作用域时的会话 id（其它作用域恒 `null`）。
+  final String? sid;
 
   bool isAlive([int? nowMs]) =>
       expiresAt == null || expiresAt! > (nowMs ?? DateTime.now().millisecondsSinceEpoch);

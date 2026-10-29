@@ -56,14 +56,130 @@ import 'package:heracles_backend/heracles_backend.dart';
 
 import '../models/attachment.dart';
 import '../models/settings.dart';
-import '../widgets/tool_call_card.dart'
-    show diffStatOf, estimatedDiffStatOf, changedFilesOf;
 import 'agent_bridge.dart'
     show AgentEvent, AgentRunResult, AgentTurn, ToolState;
 import 'device_capabilities.dart';
-import 'global_memory.dart';
+import 'diff_stats.dart';
+import 'global_memory.dart' show runMemoryMigrationOnce;
 import 'image_input.dart';
+import 'memory_service.dart';
 import 'session_store.dart';
+
+/// **执行面 → 历史命令卡口径**（D6，2026-10-29）。**纯函数**，便于单测。
+///
+/// backend 的 wire 是 `sandbox` / `device`（`HeraclesToolRequested.surface`、
+/// shell 工具 metadata 的 `surface`）；落盘契约（`docs/接口.md` §7.2 D6）用
+/// `sandbox` / `mobileShell` / `unknown`。映射规则只此一处：
+///
+/// · `sandbox` ⇒ `sandbox`（沙箱里跑）
+/// · `device` ⇒ `mobileShell`（手机 shell 里跑）
+/// · 其它/缺失 ⇒ `unknown`（**不猜** —— 猜错会让用户以为命令没碰手机）
+///
+/// [finishedWire]（完成时能力层回报的真实执行面）优先于
+/// [requestedWire]（请求时 `decideSurface` 的预判）——两者不一致时听真实的。
+String toolRowSurfaceOf({String? finishedWire, String? requestedWire}) {
+  final wire = finishedWire ?? requestedWire;
+  return switch (wire) {
+    'sandbox' => 'sandbox',
+    'device' => 'mobileShell',
+    // 已按落盘口径的情况下原样接住（幂等）
+    'mobileShell' => 'mobileShell',
+    _ => 'unknown',
+  };
+}
+
+/// **构造落盘的 `step` 行**（2026-10-29 JSONL 记账）—— **纯函数**。
+///
+/// ## usage 三字段的规则（`docs/接口.md` §7.2）
+///
+/// · `prompt` / `out`：仅当**本轮真的见到 usage**（`usageSeen`）时写；
+/// · `cached`：**null 不写键** —— 不写假 0。
+///
+/// 为什么"没上报"必须区别于 0：provider 不上报缓存字段时，UI 的命中率
+/// 要显示"不可用"而不是 0%（`cache_accounting` 的口径纪律）。落盘同理：
+/// 写成 0 会让历史回放把"没数据"画成"一次都没命中"。
+///
+/// 其它字段与旧 `step` 行**逐字一致**（只增 usage 三键）。
+Map<String, dynamic> buildStepRow({
+  required String stepId,
+  required String title,
+  required int turn,
+  required String think,
+  required String text,
+  required String stage,
+  required int ms,
+  required int ts,
+  required bool usageSeen,
+  required int prompt,
+  int? cached,
+  required int output,
+}) =>
+    <String, dynamic>{
+      'role': 'step',
+      'stepId': stepId,
+      'title': title,
+      'i': turn,
+      'think': think,
+      'text': text,
+      'stage': stage,
+      'ms': ms,
+      if (usageSeen) 'prompt': prompt,
+      if (usageSeen && cached != null) 'cached': cached,
+      if (usageSeen) 'out': output,
+      'ts': ts,
+    };
+
+/// **构造落盘的 `tool` 行**（D6，2026-10-29）—— **纯函数**，落盘与单测共用。
+///
+/// ## 只增三字段（旧形状一个都不改）
+///
+/// | 字段 | 规则 |
+/// |---|---|
+/// | `surface` | `sandbox` / `mobileShell` / `unknown`；优先完成时 metadata，回落请求时预判，都取不到 ⇒ `unknown`（不猜） |
+/// | `exitCode` | **只有真实拿到退出码才写键**；缺失不写（不写假 0），负数哨兵（-1=未知/超时）不写 |
+/// | `command` | 实际执行的命令（请求时 `callArgs['command']`，与实时链路同一字符串）；非 shell 工具没有就省略 |
+///
+/// ## 为什么 `exitCode` 宁缺勿假
+///
+/// 历史卡片用退出码判断"成功/失败"。缺失写成 0 会把"没拿到"伪装成"成功"
+/// —— 那正是审计里记过的"假信息比失败更糟"。所以取不到就不写键，读方按
+/// `containsKey` 区分"未知"与"真实 0"。
+Map<String, dynamic> buildToolRow({
+  required String tool,
+  required Map<String, dynamic> args,
+  required String result,
+  required bool isError,
+  String? id,
+  Map<String, dynamic>? metadata,
+  String? requestedSurface,
+  String? requestedCommand,
+  required int ts,
+}) {
+  final exitCode = metadata?['exitCode'];
+  final rawCommand = requestedCommand ??
+      (args['command'] is String ? args['command'] as String : null);
+  return <String, dynamic>{
+    'role': 'tool',
+    // ★ 调用 id（2026-10-24）：与发起时的 `tool_call` 行配对，
+    //   历史回填才能重建工具往返（无 id 时省略，回填跳过该行）。
+    if (id != null && id.isNotEmpty) 'id': id,
+    'tool': tool,
+    'args': args,
+    'result': result,
+    'state': isError ? 'failed' : 'succeeded',
+    'ok': !isError,
+    // ★ D6：执行面（真实优先，取不到 unknown，不猜）
+    'surface': toolRowSurfaceOf(
+      finishedWire: metadata?['surface'] as String?,
+      requestedWire: requestedSurface,
+    ),
+    // ★ D6：退出码只在真实拿到时写（负数 = "未知/超时"哨兵，不写）
+    if (exitCode is num && exitCode >= 0) 'exitCode': exitCode.toInt(),
+    // ★ D6：实际命令（非 shell 工具没有该字段）
+    if (rawCommand != null && rawCommand.trim().isNotEmpty) 'command': rawCommand,
+    'ts': ts,
+  };
+}
 
 /// 一次 run 的句柄。
 class LocalRunHandle {
@@ -104,6 +220,15 @@ class LocalRunHandle {
 /// `interaction_tools.dart` 的 A 方案）。发完事件就返回等于**编造答案**；
 /// 返回 null 才是"用户没答"，backend 会如实告诉模型并让它自行决策。
 class LocalAskGate implements AskGate {
+  /// [approvalTimeout] / [answerTimeout] 可注入（默认 = 契约值）。
+  ///
+  /// 为什么做成实例字段：JSONL 记账的"审批超时/提问超时"分支必须被测试覆盖，
+  /// 而等 5/10 分钟不是测试该付的代价（生产仍用默认值，行为不变）。
+  LocalAskGate({
+    this.approvalTimeout = defaultApprovalTimeout,
+    this.answerTimeout = defaultAnswerTimeout,
+  });
+
   /// 本 run 的事件出口 —— 由 [LocalAgentExecutor] 在 run 开始时用
   /// `controller.add` 接上（事件流在那边才创建得出）。
   void Function(AgentEvent)? _emit;
@@ -124,7 +249,60 @@ class LocalAskGate implements AskGate {
 
   /// 审批等待上限（N1 契约：5 分钟；超时按 deny 处理并发 blocked）。
   /// 提问（ask_user）仍用 [answerTimeout] 10 分钟 —— 两个超时各自独立。
-  static const approvalTimeout = Duration(minutes: 5);
+  static const defaultApprovalTimeout = Duration(minutes: 5);
+  Duration approvalTimeout = defaultApprovalTimeout;
+
+  /// ==========================================================================
+  /// **决策日志缓冲**（2026-10-29，`role:"approval"` / `role:"ask"` 落盘）
+  /// ==========================================================================
+  ///
+  /// ## 纪律：**gate 只 push，不写盘**
+  ///
+  /// 写盘（`sessionStore.appendMessage`）是异步 IO，而 gate 正处在
+  /// "审批/提问挂起"的链路上 —— 在 gate 里 await append 会：
+  /// · 把审批决定拖到写盘之后（用户点了允许，工具却迟迟不跑）；
+  /// · 与 `_drive` 的写操作并发 ⇒ 撞上 `appendMessage` 的并发闸（被拒绝）；
+  /// · 写失败还会污染"决定是否已生效"的语义（决定已生效，只是没记上）。
+  ///
+  /// ⇒ gate 只把"决策已发生"push 进这里，**`_drive` 是唯一写者**：
+  /// 每个事件处理**之前** drain 一次 + `finally` 兜底（见 `_drive`）。
+  final List<Map<String, dynamic>> _journal = <Map<String, dynamic>>[];
+
+  /// 取走并清空决策日志（`_drive` 专用）。返回顺序 = 决策发生顺序。
+  List<Map<String, dynamic>> takeJournal() {
+    if (_journal.isEmpty) return const <Map<String, dynamic>>[];
+    final out = List<Map<String, dynamic>>.from(_journal);
+    _journal.clear();
+    return out;
+  }
+
+  /// 只供排障/测试：当前缓冲条数。
+  int get journalLength => _journal.length;
+
+  /// 是否有提问/审批正挂着（测试轮询用；生产不需要）。
+  bool get hasPendingAsk => _pending != null && !_pending!.isCompleted;
+  bool get hasPendingApproval =>
+      _pendingApproval != null && !_pendingApproval!.isCompleted;
+  String? get pendingApprovalCallId => _pendingApprovalCallId;
+
+  /// push 一条 approval 决策（**每条决定只 push 一次**；调用点各自唯一）。
+  void _pushApproval({
+    required String callId,
+    required String tool,
+    required String decision,
+    required String outcome,
+  }) {
+    _journal.add(<String, dynamic>{
+      'role': 'approval',
+      'callId': callId,
+      'tool': tool,
+      // 落盘口径统一为 once/always/deny（旧值 allow/allow_always 已在
+      // [replyApproval] 归一化）。
+      'decision': decision,
+      'outcome': outcome,
+      'ts': DateTime.now().millisecondsSinceEpoch,
+    });
+  }
 
   /// **「始终允许」名单** —— 本 run 内生效的累计集合。
   ///
@@ -140,11 +318,12 @@ class LocalAskGate implements AskGate {
   /// 用户**点停止**后置位：之后到达的提问/审批一律按"没答案/拒绝"处理。
   bool _aborted = false;
 
-  /// 等用户回答的**上限**。
+  /// 等用户回答的**上限**（默认 10 分钟；测试可注入更短值）。
   ///
   /// 10 分钟：用户可能在处理别的事、切走了、或锁屏。不能永远挂住整个 run ——
   /// 超时后按"未回答"返回 null，由 backend 如实告诉模型并继续（绝不编答案）。
-  static const answerTimeout = Duration(minutes: 10);
+  static const defaultAnswerTimeout = Duration(minutes: 10);
+  Duration answerTimeout;
 
   /// 把本 run 的事件出口接上（每个 run 一个 gate 实例，只接一次）。
   void attach(void Function(AgentEvent) emit) => _emit = emit;
@@ -162,6 +341,14 @@ class LocalAskGate implements AskGate {
     }
     final a = _pendingApproval;
     if (a != null && !a.isCompleted) {
+      // 取消也是一次"审批决定"（deny / cancelled）—— 记账一次，供历史回放
+      // 解释"为什么这次工具没跑"。
+      _pushApproval(
+        callId: _pendingApprovalCallId ?? '',
+        tool: _pendingApprovalTool ?? '',
+        decision: 'deny',
+        outcome: 'cancelled',
+      );
       _pendingApproval = null;
       a.complete(false);
     }
@@ -224,6 +411,27 @@ class LocalAskGate implements AskGate {
     } finally {
       if (identical(_pending, c)) _pending = null;
     }
+    // ★ 2026-10-29（JSONL 记账）：提问结果也落一行（answered / timeout /
+    //   cancelled 三态）。gate 只 push，`_drive` 是唯一写者。
+    _journal.add(<String, dynamic>{
+      'role': 'ask',
+      'questions': [
+        for (final q in questions)
+          <String, dynamic>{
+            'id': q.id,
+            'question': q.question,
+            'multi': q.multi,
+            'options': [for (final o in q.options) o.label],
+          },
+      ],
+      // 未答时写空对象（不写 null：`_normalizeEntry` 会去掉 null 键，
+      // 读方还得再判断"键缺了"和"没答案"两种状态）。
+      'answers': answers ?? const <String, List<String>>{},
+      'outcome': answers != null
+          ? 'answered'
+          : (_aborted ? 'cancelled' : 'timeout'),
+      'ts': DateTime.now().millisecondsSinceEpoch,
+    });
     if (answers == null) return null;
     return _formatAnswers(questions, answers);
   }
@@ -298,13 +506,49 @@ class LocalAskGate implements AskGate {
     required String detail,
     required bool workspaceInside,
   }) async {
-    if (_allowed.contains(toolName)) return true;
-    if (_emit == null || _aborted) return false;
+    // 白名单命中 ⇒ 自动放行（不是用户这次点的，但确实是一次决策）：
+    // 落盘记 `always` / `auto_allowed`，历史回放能解释"为什么没弹窗"。
+    if (_allowed.contains(toolName)) {
+      _pushApproval(
+        callId: callId,
+        tool: toolName,
+        decision: 'always',
+        outcome: 'auto_allowed',
+      );
+      return true;
+    }
+    if (_emit == null) {
+      // 没有 UI 出口 ⇒ fail-closed 拒绝；这也是一次决策，记账。
+      _pushApproval(
+        callId: callId,
+        tool: toolName,
+        decision: 'deny',
+        outcome: 'denied',
+      );
+      return false;
+    }
+    if (_aborted) {
+      _pushApproval(
+        callId: callId,
+        tool: toolName,
+        decision: 'deny',
+        outcome: 'cancelled',
+      );
+      return false;
+    }
 
     // 等待已在挂起的审批结束（并行批次串行化）。
     while (_pendingApproval != null) {
       await _pendingApproval!.future;
-      if (_aborted) return false;
+      if (_aborted) {
+        _pushApproval(
+          callId: callId,
+          tool: toolName,
+          decision: 'deny',
+          outcome: 'cancelled',
+        );
+        return false;
+      }
     }
 
     final c = Completer<bool>();
@@ -330,6 +574,12 @@ class LocalAskGate implements AskGate {
         onTimeout: () {
           // N1：超时按 deny 处理，**并发 blocked 事件**（用户要知道
           // 弹窗为什么"自己没了"）—— fail-closed，绝不默认放行。
+          _pushApproval(
+            callId: callId,
+            tool: toolName,
+            decision: 'deny',
+            outcome: 'timeout',
+          );
           _emit!(AgentEvent(
             type: AgentEvent.kBlocked,
             ts: DateTime.now().millisecondsSinceEpoch,
@@ -370,7 +620,22 @@ class LocalAskGate implements AskGate {
     final tool = _pendingApprovalTool;
     _pendingApprovalTool = null;
     _pendingApprovalCallId = null;
-    switch (decision) {
+    // 兼容旧口径：`allow`/`allow_always` 仍接受，**落盘统一 once/always/deny**
+    // （INTERFACE §6：旧值接受但落盘归一）。
+    final normalized = (decision == 'allow' || decision == 'once')
+        ? 'once'
+        : (decision == 'allow_always' || decision == 'always')
+            ? 'always'
+            : 'deny';
+    // 每条决定**只 push 一次**（本方法在 completer 完成前就清空了挂起字段，
+    // 重复调用会在上面 `c == null` 处提前返回）。
+    _pushApproval(
+      callId: callId,
+      tool: tool ?? '',
+      decision: normalized,
+      outcome: normalized == 'deny' ? 'denied' : 'allowed',
+    );
+    switch (normalized) {
       case 'once':
         c.complete(true);
       case 'always':
@@ -398,6 +663,8 @@ class LocalAgentExecutor {
     required this.settings,
     required this.sessionStore,
     this.askGate,
+    this.clientForTest,
+    this.capabilitiesForTest,
   });
 
   final String workspacePath;
@@ -406,6 +673,17 @@ class LocalAgentExecutor {
 
   /// 提问/审批门禁（UI 注入）。`null` = 当前环境不能问用户。
   final AskGate? askGate;
+
+  /// **测试缝：假 LLM client**（类型 `dynamic` ⇒ app 不直接依赖
+  /// `dart_agent_core`；生产为 `null`，走真实 provider 配置）。
+  ///
+  /// 存在的理由：JSONL 记账（step usage / approval / ask / 单写者 drain）
+  /// 是 `_drive` 内部行为，只有真跑一次 run 才能端到端断言顺序与数值。
+  final dynamic clientForTest;
+
+  /// **测试缝：整套能力**（`null` ⇒ 按 `buildDeviceCapabilities` 组装）。
+  /// 让 `_drive` 的端到端测试不必 mock MethodChannel。
+  final Capabilities? capabilitiesForTest;
 
   /// 当前在跑的取消令牌（`null` = 没有 run 在跑）。
   ///
@@ -456,6 +734,29 @@ class LocalAgentExecutor {
     final gate = askGate;
     if (gate is LocalAskGate) gate.attach(controller.add);
 
+    // ---- 会话 id **先解析**（2026-10-29：三作用域记忆的前置条件）----
+    //
+    // 设计稿 §3.5.3 第 1 步：sid 必须在 `HeraclesAgent` 构造**之前**拿到。
+    // 会话私有记忆按 `(workspacePath, sid)` 寻址；旧顺序是反的（agent 构造在前、
+    // sid 在 `_drive` 里才解析）⇒ 构造时根本拿不到会话作用域。
+    //
+    // 语义与旧 `_drive` 内联逻辑一致：没有 sid ⇒ 新建；有 sid ⇒ touch。
+    final sid = await _resolveSessionId(sessionId, request);
+
+    // ---- 三作用域记忆服务（唯一的寻址/墓碑/淘汰/写队列实现）----
+    //
+    // 只注入「会话是否存在」这一个回调（第 3 步强校验用）：服务层不 import
+    // SessionStore（避免与 App 服务层互相依赖），而这里本来就持有 sessionStore。
+    final memoryService = ScopedMemoryService(
+      hasSession: (ws, sid) {
+        final sameWorkspace = ScopedMemoryService.normalizeWorkspacePath(ws) ==
+            ScopedMemoryService.normalizeWorkspacePath(workspacePath);
+        final store =
+            sameWorkspace ? sessionStore : SessionStore(workspaceRoot: ws);
+        return store.hasSession(sid);
+      },
+    );
+
     // ---- 能力组装（设备侧）----
     // ★ 沙箱执行面（2026-10-29）：**只有 App 内才注入**。
     //
@@ -465,10 +766,16 @@ class LocalAgentExecutor {
     //
     // App 内 Kotlin 桥已注册，所以注入；纯 Dart 测试 / CLI 走默认的 `false`。
     // 基础 rootfs 是内置的（离线、首次约 0.3 秒解包），不需要用户操作。
-    final caps = buildDeviceCapabilities(
-      workspaceRoot: workspacePath,
-      includeSandbox: true,
-    );
+    //
+    // ★ 记忆能力带**寻址**（2026-10-29）：workspace + 已解析的 sid。
+    //   没有这个上下文，save_memory 就不知道写哪个作用域（旧实现写全局）。
+    final caps = capabilitiesForTest ??
+        buildDeviceCapabilities(
+          workspaceRoot: workspacePath,
+          includeSandbox: true,
+          memorySessionId: sid,
+          memoryService: memoryService,
+        );
 
     // ---- 模型配置 ----
     final provider = settings.effectiveProvider!; // 调用方已校验非 null
@@ -506,56 +813,47 @@ class LocalAgentExecutor {
     // `settings.maxTurns == 0` 的语义是"按后端自动"（UI 的 `kMaxTurnsOptions`）。
     final maxTurns = settings.maxTurns > 0 ? settings.maxTurns : ContractAgent.maxTurns;
 
-    // ---- 长期记忆（2026-10-23 接通）----
+    // ---- 长期记忆（三作用域，2026-10-29 重写）----
     //
-    // ## 修之前为什么"换会话必失忆"
+    // ## 旧实现的两个问题
     //
-    // 记忆原来只有写、没有读：
-    //   · 写：`save_memory` 工具 → `MemoryCapability.append` → 通道 `memory.append` ✅
-    //   · 读：`renderMemory()` **全仓 0 处调用** ❌
+    // 1. 只读一份 App 全局 `memory.md`（没有作用域概念 ⇒ 别的项目的记忆会串进来）；
+    // 2. 读失败只能当"没有记忆"（`read() → ''`，"空"与"错"同形）。
     //
-    // ⇒ 模型能把约定记进去，但**任何一次 run 都不会把记忆读进上下文**。
-    // 用户感知就是"它明明记住过，换个会话又忘了"。
+    // ## 现在的读取（设计稿 §3.5.3 第 2 步）
     //
-    // ## 必须在 `HeraclesAgent` 构造**之前**读
+    // **并发读三处**（global / workspace / session），各自 900 ms 超时：
+    // 失败 ⇒ 该段为空，**不阻断运行**（记忆是锦上添花，不是主链路）；
+    // 但 global 段受设置开关 `memoryGlobalEnabled` 控制（关掉不读也不注入，
+    // 数据保留）。
     //
-    // 因为记忆是通过 `RunOptions.memoryNote` 传进去的，而 `RunOptions` 是
-    // 构造参数 —— 构造完再读就来不及了（要重建 agent，白做一遍工作）。
+    // 读到的三段原样交给 backend（`RunOptions.memory`）—— 排序/预算/渲染
+    // 全在 backend 纯 Dart（`memory_prompt.dart`，有 `dart test` 覆盖），
+    // 宿主只负责"读好数据"，不拼字符串（那会让预算与冲突裁决无从实现）。
     //
-    // ## 读失败 / 没有记忆 ⇒ null（不阻断运行）
+    // ## 为什么必须在 `HeraclesAgent` 构造之前
     //
-    // 记忆是锦上添花，不是主链路。读不到就当"没有记忆"继续跑 ——
-    // 最差退化成"这轮没有记忆"，而不是让用户看到"运行失败"。
-    // `GlobalMemory.read()` 本身永不抛（通道契约：失败是 `{ok:false,error}`），
-    // 这里再兜一层是防"意料之外的异常"。
+    // `RunOptions.memory` 是构造参数；构造完再读就来不及了（要重建 agent）。
+    // ---- 迁移触发点（设计稿 §3.7.2 步骤 0，2026-10-29）----
     //
-    // 用 `readResult()` 而不是 `read()`：需要区分"没有记忆"（正常）与
-    // "读不出来"（异常）。前者注入空段毫无意义，后者应该让排障能看见。
-    String? memoryNote;
+    // App 启动后、**首轮记忆读取之前** best-effort 调一次 `memory.migrate`：
+    // 旧单文件 `<externalFilesDir>/heracles/memory.md` → `memory/global.jsonl`
+    // （备份 + 幂等 + 不丢条目，全在 Kotlin 侧）。
+    //
+    // 三条纪律：
+    // 1. **一次性**（`runMemoryMigrationOnce` 内有进程内 bool）—— 不该每轮打通道；
+    // 2. **不阻断**：超时 3 秒即放弃（失败只 debugPrint，绝不让迁移冻住首轮）；
+    // 3. 失败 ⇒ 旧文件原样保留，读取仍走旧格式兼容解析（`memory.read` 兼容）。
     try {
-      // ★ 2026-10-23 真机回归修复：**这条 await 必须带超时**。
-      //
-      // 真机实测（09:50 复测）：这条通道调用**不返回**（不是抛错，是永远挂着），
-      // 而它挡在 `HeraclesAgent` 构造之前 ⇒ 整个 run 一个事件都发不出来：
-      // 界面上只剩用户气泡、顶栏用量 `— 0%`、没有分析行也没有工具行 ——
-      // 看起来就是"卡死不动"。
-      //
-      // 记忆是锦上添花，**绝不能让它把主链路冻住**：
-      // 超时 ⇒ TimeoutException ⇒ 走下面 catch ⇒ memoryNote = null ⇒ 正常运行。
-      // 900ms 是本地文件读取的宽容上限（正常是微秒级）。
-      final mem = await const GlobalMemory()
-          .readResult()
-          .timeout(const Duration(milliseconds: 900));
-      if (mem.error == null && !mem.isEmpty) {
-        // ★ M4（2026-10-25）：检索式注入 —— 相关条目全文在前，其余摘要。
-        memoryNote = GlobalMemory.composeRetrieval(
-          GlobalMemory.parseEntries(mem.text),
-          request,
-        );
-      }
+      await runMemoryMigrationOnce().timeout(const Duration(seconds: 3));
     } catch (_) {
-      // 保持 null（当作没有记忆）。
+      // 迁移是增强：失败/超时都不该影响本轮对话。
     }
+
+    final memoryContext = await _readMemoryContext(
+      service: memoryService,
+      sessionId: sid,
+    );
 
     // ---- 工作区宪法（H4，2026-10-24 接通）----
     //
@@ -725,7 +1023,9 @@ class LocalAgentExecutor {
       options: RunOptions(
         maxTurns: maxTurns,
         maxToolCalls: ContractAgent.maxToolCalls,
-        memoryNote: memoryNote,
+        // ★ 三作用域记忆（2026-10-29）：结构化传入，排序/预算/渲染在 backend。
+        //   非空即优先（即使三段都空也不回落旧 memoryNote —— 旧字段已 @Deprecated）。
+        memory: memoryContext,
         // ★ 工作区宪法（H4，2026-10-24）：注入 system prompt
         //  （默认提示之后、长期记忆之前 —— 两段稳定字节之间的新段，
         //   只有宪法内容本身变化时才动前缀）。
@@ -751,6 +1051,7 @@ class LocalAgentExecutor {
         },
       ),
       askGate: gate,
+      client: clientForTest, // 测试缝（生产 null ⇒ 用 config 建真实 client）
     );
 
     final tr = _Translator(controller.add);
@@ -760,7 +1061,7 @@ class LocalAgentExecutor {
       agent,
       tr,
       request,
-      sessionId,
+      sid, // 2026-10-29：sid 已在构造前解析（记忆寻址的前置条件）
       controller,
       images: images,
       imageNotes: imageNotes,
@@ -799,6 +1100,131 @@ class LocalAgentExecutor {
   /// 所以：**模型看到的是"原话 + 提示"，会话里存的是原话**。
   /// 提示用方括号独立成段，并明确写出"不要复述这段元信息"，
   /// 避免模型把它当成用户问题的一部分来回答。
+  /// 解析/创建本轮会话 id（2026-10-29：**必须在 agent 构造之前**调用）。
+  ///
+  /// 以前这段逻辑在 `_drive` 里（agent 构造之后）—— 会话私有记忆按
+  /// `(workspacePath, sid)` 寻址，构造后再解析就来不及了。
+  ///
+  /// 语义与旧内联逻辑一致：无 sid ⇒ 新建（标题取本轮请求）；有 sid ⇒ touch
+  /// （刷新 `updatedAt`，让会话列表按"最后活动时间"排序）。
+  Future<String> _resolveSessionId(String? sessionId, String request) async {
+    final existing = sessionId?.trim() ?? '';
+    if (existing.isEmpty) {
+      return sessionStore.createSession(_titleOf(request));
+    }
+    await sessionStore.touchSession(existing);
+    return existing;
+  }
+
+  /// **并发读三作用域记忆**（设计稿 §3.5.3 第 2 步）。
+  ///
+  /// ## 三条纪律
+  ///
+  /// 1. **并发**：三段互不依赖，串行会让首字延迟翻三倍；
+  /// 2. **各自 900 ms 超时**：真机实测过通道调用"永不返回"会导致整个 run
+  ///    一个事件都发不出来（旧 `memoryNote` 注释记的冻死事故）—— 记忆是
+  ///    锦上添花，**绝不能冻住主链路**；超时/失败 ⇒ 该段为空；
+  /// 3. **global 受设置开关控制**：`memoryGlobalEnabled == false` ⇒ 不读也不
+  ///    注入（数据保留；存储与注入解耦）。
+  ///
+  /// 读到的是结构化三段（[ScopedMemoryEntry] → backend [MemoryRecord]）：
+  /// 排序/预算/冲突裁决全在 backend，宿主编排层**不拼字符串**。
+  ///
+  /// ⚠️ `settings.memoryPooling` 当前只持久化、**未接线**（默认 false，
+  /// 开启不改变行为；池化需要按 `(scope,scopeId)` 的强校验缓存，留给后续）。
+  Future<MemoryContext> _readMemoryContext({
+    required ScopedMemoryService service,
+    required String sessionId,
+    int timeoutMs = 900,
+  }) {
+    final ws = ScopedMemoryService.normalizeWorkspacePath(workspacePath) ??
+        workspacePath;
+    return _buildMemoryContext(
+      (scope, sid) async {
+        final r = await service.read(MemoryAddress(
+          scope: scope,
+          sessionId: scope == MemoryScope.session ? sid : null,
+          workspacePath: scope == MemoryScope.global ? null : ws,
+        ));
+        return r.entries;
+      },
+      sessionId: sessionId,
+      timeoutMs: timeoutMs,
+    );
+  }
+
+  /// **测试缝**：不碰通道地构造三作用域记忆上下文（端到端探针用）。
+  ///
+  /// 生产路径 [run] 用 [_readMemoryContext]（读真的 service）；探针用这个
+  /// 注入假读取函数，验证的正是本类的编排逻辑：三 scope 并发、各自超时、
+  /// global 开关、`ScopedMemoryEntry → MemoryRecord` 转换。**不复制任何
+  /// 业务规则**（排序/预算/渲染仍在 backend）。
+  Future<MemoryContext> memoryContextForTest({
+    required Future<List<ScopedMemoryEntry>> Function(
+            MemoryScope scope, String? sid)
+        read,
+    required String sessionId,
+    int timeoutMs = 900,
+  }) =>
+      _buildMemoryContext(read, sessionId: sessionId, timeoutMs: timeoutMs);
+
+  Future<MemoryContext> _buildMemoryContext(
+    Future<List<ScopedMemoryEntry>> Function(MemoryScope scope, String? sid) read, {
+    required String sessionId,
+    int timeoutMs = 900,
+  }) async {
+    final globalEnabled = settings.memoryGlobalEnabled;
+
+    Future<List<ScopedMemoryEntry>> readOne(
+      MemoryScope scope, {
+      String? sid,
+    }) async {
+      try {
+        return await read(scope, sid).timeout(Duration(milliseconds: timeoutMs));
+      } catch (_) {
+        // 该段为空，不阻断（错误排障靠 service 自己的日志；不打印正文）。
+        return const <ScopedMemoryEntry>[];
+      }
+    }
+
+    final results = await Future.wait(<Future<List<ScopedMemoryEntry>>>[
+      if (globalEnabled)
+        readOne(MemoryScope.global)
+      else
+        Future<List<ScopedMemoryEntry>>.value(const <ScopedMemoryEntry>[]),
+      readOne(MemoryScope.workspace),
+      readOne(MemoryScope.session, sid: sessionId),
+    ]);
+
+    List<MemoryRecord> recordsOf(List<ScopedMemoryEntry> list) =>
+        list.map((e) => e.toRecord()).toList(growable: false);
+
+    return MemoryContext(
+      global: recordsOf(results[0]),
+      workspace: recordsOf(results[1]),
+      session: recordsOf(results[2]),
+      globalEnabled: globalEnabled,
+      nowMs: DateTime.now().millisecondsSinceEpoch,
+    );
+  }
+
+  /// **把 gate 缓冲的决策日志落盘**（2026-10-29；`_drive` 是唯一写者）。
+  ///
+  /// 只在 [gate] 是 [LocalAskGate] 时生效（其它 `AskGate` 实现没有缓冲协议）。
+  /// 每条单独 try/catch：一条写失败不能拖垮后面的决策记账，更不能让 run 失败
+  /// —— 决定已经生效（工具已放行/已拒绝），记账是**事后事实**，不是前置条件。
+  Future<void> _drainDecisionJournal(AskGate? gate, String sid) async {
+    if (gate is! LocalAskGate) return;
+    final rows = gate.takeJournal();
+    for (final row in rows) {
+      try {
+        await sessionStore.appendMessage(sid, row);
+      } catch (_) {
+        // 静默：见方法注释。
+      }
+    }
+  }
+
   String _requestForModel(String request, List<String> imageNotes) {
     if (imageNotes.isEmpty) return request;
     final buf = StringBuffer()
@@ -816,7 +1242,7 @@ class LocalAgentExecutor {
     HeraclesAgent agent,
     _Translator tr,
     String request,
-    String? sessionId,
+    String sid,
     StreamController<AgentEvent> controller, {
     List<ImageInput>? images,
     List<String> imageNotes = const [],
@@ -825,13 +1251,8 @@ class LocalAgentExecutor {
   }) async {
     final sw = Stopwatch()..start();
 
-    // ---- 会话：没有就新建（"在工作区里直接发消息"的行为）----
-    var sid = sessionId;
-    if (sid == null || sid.isEmpty) {
-      sid = await sessionStore.createSession(_titleOf(request));
-    } else {
-      await sessionStore.touchSession(sid);
-    }
+    // 会话 id 已在 `run()` 里解析（2026-10-29：记忆寻址的前置条件）——
+    // 这里不再创建/touch，避免"构造前解析一次、这里又建一次"的双写。
 
     // ---- 跨轮记忆：读会话历史（2026-10-23 修）----
     //
@@ -921,8 +1342,19 @@ class LocalAgentExecutor {
     ///
     /// 框架可能 `Future.wait` **并行**跑同名工具（例如同时读两个文件），
     /// 按名字存单个值会互相覆盖（旧实现"耗时按名字配对"就是这个形状的 bug）。
-    final pendingArgs =
-        <String, List<({Map<String, dynamic> args, String id, int turn})>>{};
+    /// 2026-10-29（D6）：桶里额外记 `surface`/`command`（工具**请求时**的
+    /// 执行面预判与实际命令）—— 完成事件只带 metadata，命令要从发起时留存，
+    /// 否则历史命令卡只能拿到 args（回放时还得再猜一次）。
+    final pendingArgs = <
+        String,
+        List<
+            ({
+              Map<String, dynamic> args,
+              String id,
+              int turn,
+              String? surface,
+              String? command,
+            })>>{};
 
     var failed = false;
     var cancelled = false;
@@ -952,6 +1384,14 @@ class LocalAgentExecutor {
         images: images,
         cancelToken: cancelToken,
       )) {
+        // ★ 2026-10-29（JSONL 记账）：**每个事件处理之前** drain 一次。
+        //
+        // `LocalAskGate` 只把审批/提问决策 push 进缓冲（gate 内绝不 await
+        // append —— 那会拖慢决定生效、还会撞 appendMessage 的并发闸）；
+        // `_drive` 是**唯一写者**：在这里落盘，能保证
+        // · approval 行排在它对应的 tool 行**之前**（决策先于执行结果）；
+        // · ask 行与工具行/步骤行保持事件到达顺序。
+        await _drainDecisionJournal(askGate, sid);
         switch (ev) {
           case HeraclesThoughtDelta(:final delta):
             tr.thought(delta);
@@ -989,9 +1429,21 @@ class LocalAgentExecutor {
               :final command,
             ):
             tr.toolRequested(toolName, arguments, surface: surface, command: command);
-            (pendingArgs[toolName] ??=
-                    <({Map<String, dynamic> args, int turn, String id})>[])
-                .add((args: arguments, turn: tr.currentTurn, id: id));
+            (pendingArgs[toolName] ??= <
+                ({
+                  Map<String, dynamic> args,
+                  String id,
+                  int turn,
+                  String? surface,
+                  String? command,
+                })>[])
+                .add((
+              args: arguments,
+              turn: tr.currentTurn,
+              id: id,
+              surface: surface,
+              command: command,
+            ));
             // ★ 工具调用行落盘（2026-10-24）：发起时写 `tool_call` 行、
             //   带框架调用 id —— 历史回填靠它与结果行配对，重建
             //   ModelMessage(functionCalls) + FunctionExecutionResultMessage
@@ -1048,18 +1500,22 @@ class LocalAgentExecutor {
                 );
               }
             }
-            await sessionStore.appendMessage(sid, {
-              'role': 'tool',
-              // ★ 调用 id（2026-10-24）：与发起时的 `tool_call` 行配对，
-              //   历史回填才能重建工具往返（无 id 时省略，回填跳过该行）。
-              if (id.isNotEmpty) 'id': id,
-              'tool': toolName,
-              'args': args,
-              'result': output,
-              'state': isError ? 'failed' : 'succeeded',
-              'ok': !isError,
-              'ts': DateTime.now().millisecondsSinceEpoch,
-            });
+            // ★ D6（2026-10-29，用户拍板）：历史命令卡要**真实**执行面/退出码/
+            //   命令。只增字段、不写假数据 —— 具体规则见 [buildToolRow]。
+            await sessionStore.appendMessage(
+              sid,
+              buildToolRow(
+                tool: toolName,
+                args: args,
+                result: output,
+                isError: isError,
+                id: id,
+                metadata: metadata,
+                requestedSurface: pending?.surface,
+                requestedCommand: pending?.command,
+                ts: DateTime.now().millisecondsSinceEpoch,
+              ),
+            );
           case HeraclesFallback(:final from, :final to, :final reason):
             tr.fallbackNotice(from, to, reason);
           case HeraclesBudgetWarning(:final used, :final limit):
@@ -1123,8 +1579,18 @@ class LocalAgentExecutor {
       if (stepRec != null) {
         await sessionStore.appendMessage(sid, stepRec);
       }
+      // finally 兜底之前先记一次：异常路径也可能有排队未写的决策
+      await _drainDecisionJournal(askGate, sid);
     } finally {
       sw.stop();
+      // ★ 2026-10-29（JSONL 记账）：**finally 兜底 drain** ——
+      //   正常路径每个事件前已经写过；这里保证"最后一条决策"不会因为
+      //   run 提前结束（异常/取消/最后一个事件就是决策）而丢。
+      try {
+        await _drainDecisionJournal(askGate, sid);
+      } catch (_) {
+        // 收尾记账失败不该把一次已经成功的 run 变成失败。
+      }
       if (_cancelled && !failed) {
         cancelled = true;
         tr.failed('任务已取消。');
@@ -1759,17 +2225,24 @@ class _Translator {
     //
     // 交给驱动器 `takeStepRecord()` 取走并按顺序 append
     // —— 不在这里直接写，是因为翻译器不做 IO。
-    _stepRecord = <String, dynamic>{
-      'role': 'step',
-      'stepId': _stepId,
-      'title': _title,
-      'i': _turn,
-      'think': _reasoning.toString(),
-      'text': _text.toString(),
-      'stage': status,
-      'ms': _clock.elapsedMilliseconds,
-      'ts': _now,
-    };
+    //
+    // ★ 2026-10-29（JSONL 记账）：补本轮 usage（`prompt/cached/out`）。
+    //   规则见 [buildStepRow]：仅本轮真的见到 usage 才写；`cached` 为 null
+    //   **不写键**（不写假 0 —— "没上报"与"命中 0"是两件事）。
+    _stepRecord = buildStepRow(
+      stepId: _stepId,
+      title: _title,
+      turn: _turn,
+      think: _reasoning.toString(),
+      text: _text.toString(),
+      stage: status,
+      ms: _clock.elapsedMilliseconds,
+      ts: _now,
+      usageSeen: _curUsageSeen,
+      prompt: _curPrompt,
+      cached: _curCached,
+      output: _curOutput,
+    );
   }
 
   /// 待落盘的步骤记录（由驱动器取走后 append）。取走即清空。

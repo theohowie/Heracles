@@ -63,20 +63,35 @@ List<Tool> buildShellTools(ToolFactory f, Capabilities caps) {
   return [
     f.build(
       name: 'run_shell_command',
+      // ★ 2026-10-29 P1-③：description 只说**事实**，不许说反话。
+      //
+      // 旧文案「你可以在工作区里执行 shell 命令」「相对路径以工作区为基准」是错的：
+      // guest cwd 恒为沙箱 `/workspace`（ProotEngine.kt:931 / SandboxBridge.kt:366），
+      // 模型信了旧文案就用 pwd/ls/find 探测用户工作区，必然扑空（实测白烧 3 轮）。
+      // 这里只改文案；执行逻辑/路由/审批一行不动。
       description: '执行一条 shell 命令，返回标准输出与错误输出。'
           '返回：合并的 stdout/stderr 文本 + 退出码；超时附超时说明。'
           '适合跑构建、测试、git、文件操作等。'
-          '⚠️ 命令默认在**项目沙箱**里执行（不碰真实手机文件系统）；'
-          '涉及 Android 本身的命令（pm/am/dumpsys/截图/改系统设置/装包等）会自动改在手机 shell 上执行，'
-          '**你不要也没有办法自己指定在哪执行**。'
+          '⚠️ shell **不在用户工作区里跑**：默认在**沙箱**（Alpine Linux / ash）里执行，'
+          '沙箱里的 `/workspace` 是沙箱自己的目录，**沙箱与用户工作区是两套文件系统**'
+          '（一边写的文件，另一边看不到）。'
+          '涉及 Android 本身的命令（pm/am/dumpsys/截图/改系统设置/装包等）会自动改在'
+          '**手机 shell**（Android mksh）上执行 —— **命令实际在哪跑由系统决定，'
+          '你不要也没有办法自己指定**。'
+          '可用 `@name/...` 引用沙箱内的命名挂载点（如 @workspace/dist）—— '
+          '注意 `@workspace` 是沙箱内的挂载名，**不是用户工作区**。'
+          '⚠️ 要读写/查找/统计**用户工作区**的文件，用 read_file / list_files / find_files / '
+          'grep_files 这些文件工具；**不要用 shell 的 pwd/ls/find/wc 去探测用户工作区**（会扑空）。'
           '⚠️ 命令是非交互的：不要用需要输入的命令（如 vim、交互式 git rebase）。',
       parameters: {
         'type': 'object',
         'properties': {
           'command': {
             'type': 'string',
-            'description': '要执行的命令。相对路径以工作区为基准；'
-                '沙箱内可用 `@name/...` 引用命名挂载点（如 @workspace/dist）。',
+            'description': '要执行的命令。路径是**执行面自己的**文件系统路径，不是用户工作区路径：'
+                '沙箱内的相对路径以沙箱的 `/workspace` 为基准（那是沙箱目录，**不是用户工作区**）；'
+                '可用 `@name/...` 引用沙箱里的命名挂载点（如 @workspace/dist）—— '
+                '`@workspace` 是沙箱内的挂载名，**不是用户工作区**。',
           },
           'timeout_seconds': {
             'type': 'integer',
@@ -186,7 +201,12 @@ List<Tool> buildShellTools(ToolFactory f, Capabilities caps) {
             'surface': decision.surface.wire,
             'surfaceReason': decision.reason,
             'command': command,
-            'exitCode': (r.metadata?['exitCode'] as int?) ?? 0,
+            // ★ D6（2026-10-29）：**只在能力层真的返回退出码时写这个键**。
+            //   旧实现 `(...) ?? 0` 会把"没拿到"伪装成"成功退出" ——
+            //   历史命令卡据此显示成功，是假信息（审计记过的那一类）。
+            //   取不到就不带该键，读方按"未知"处理。
+            if (r.metadata?['exitCode'] is int)
+              'exitCode': r.metadata!['exitCode'] as int,
             'durationMs': elapsedMs,
             'truncated': truncated,
             'timedOut': (r.metadata?['timedOut'] as bool?) ?? false,

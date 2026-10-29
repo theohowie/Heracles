@@ -160,6 +160,119 @@ void main() {
     });
   });
 
+  // ---------------------------------------------------------------------------
+  // 2026-10-29：结构化三作用域（RunOptions.memory）—— 新路径的端到端门禁
+  // ---------------------------------------------------------------------------
+  MemoryRecord mem(String text, MemoryScope scope) => MemoryRecord(
+        id: 'm-${scope.wireName}',
+        scope: scope,
+        kind: 'other',
+        text: text,
+        source: MemoryRecord.sourceAgent,
+        createdAt: 1,
+      );
+
+  HeraclesAgent agentWithMemory(
+    LLMClient client, {
+    required MemoryContext memory,
+    String? memoryNote,
+  }) =>
+      HeraclesAgent(
+        config: const BackendConfig(apiKey: 'k', modelName: 'm'),
+        capabilities: const Capabilities(),
+        client: client,
+        options: RunOptions(memory: memory, memoryNote: memoryNote),
+      );
+
+  group('RunOptions.memory（三作用域）⇒ system prompt', () {
+    test('★★★ 非空 ⇒ 三段记忆按 global→workspace→session 进 system', () async {
+      final client = _ScriptedClient(reply: '好');
+      final memory = MemoryContext(
+        global: [mem('全局：这个项目用 Flutter', MemoryScope.global)],
+        workspace: [mem('工作区：构建走 flutter build apk', MemoryScope.workspace)],
+        session: [mem('会话：本轮先跑测试再改代码', MemoryScope.session)],
+      );
+
+      await runToEnd(agentWithMemory(client, memory: memory), '帮我构建');
+
+      final sys = systemTextOf(client);
+      expect(sys, contains(globalMemorySectionTitle),
+          reason: '★ 新路径必须真的接到 _buildSystemPrompts（否则记忆仍然"只写不读"）');
+      expect(sys, contains(workspaceMemorySectionTitle));
+      expect(sys, contains(sessionMemorySectionTitle));
+      expect(sys, contains('这个项目用 Flutter'));
+      expect(sys, contains('构建走 flutter build apk'));
+      expect(sys, contains('本轮先跑测试再改代码'));
+
+      final iGlobal = sys.indexOf(globalMemorySectionTitle);
+      final iWorkspace = sys.indexOf(workspaceMemorySectionTitle);
+      final iSession = sys.indexOf(sessionMemorySectionTitle);
+      final iDefault = sys.indexOf('你是 Heracles');
+      expect(iDefault, greaterThanOrEqualTo(0));
+      expect(iGlobal, greaterThan(iDefault), reason: '记忆必须在默认人设之后（缓存尾部）');
+      expect(iWorkspace, greaterThan(iGlobal));
+      expect(iSession, greaterThan(iWorkspace), reason: '★ session 最后 = 最易变段在尾部');
+    });
+
+    test('★★★ memory 非空 ⇒ memoryNote 被忽略（字段非空优先，不回落旧格式）', () async {
+      final client = _ScriptedClient(reply: '好');
+      final memory = MemoryContext(
+        global: [mem('新的全局条目', MemoryScope.global)],
+      );
+
+      await runToEnd(
+        agentWithMemory(
+          client,
+          memory: memory,
+          memoryNote: '- 旧的一整段记忆（不该出现）',
+        ),
+        '问',
+      );
+
+      final sys = systemTextOf(client);
+      expect(sys, contains('新的全局条目'));
+      expect(sys, isNot(contains('## 长期记忆')),
+          reason: '★ memory 非空时旧单段渲染必须完全让位，否则同一轮出现两份记忆格式');
+      expect(sys, isNot(contains('旧的一整段记忆')));
+    });
+
+    test('★★ 两者都不传 ⇒ 无任何记忆段（行为与加字段之前一致）', () async {
+      final client = _ScriptedClient(reply: '好');
+      await runToEnd(agentWith(client, memoryNote: null), '帮我构建');
+
+      final sys = systemTextOf(client);
+      for (final title in [
+        globalMemorySectionTitle,
+        workspaceMemorySectionTitle,
+        sessionMemorySectionTitle,
+        '## 长期记忆',
+      ]) {
+        expect(sys, isNot(contains(title)), reason: '不传记忆不该凭空冒出「$title」');
+      }
+      expect(sys, contains('你是 Heracles'));
+    });
+
+    test('★★★ contextBreakdown 的 system 自动包含新记忆段', () async {
+      final memory = MemoryContext(
+        global: [mem('全局记忆：${'很长的约定' * 40}', MemoryScope.global)],
+      );
+      final withMemory = _ScriptedClient(reply: '好');
+      final without = _ScriptedClient(reply: '好');
+
+      final agentA = agentWithMemory(withMemory, memory: memory);
+      await runToEnd(agentA, '问');
+      final sysWith = agentA.contextBreakdown()['system']!;
+
+      final agentB = agentWith(without, memoryNote: null);
+      await runToEnd(agentB, '问');
+      final sysWithout = agentB.contextBreakdown()['system']!;
+
+      expect(sysWith, greaterThan(sysWithout),
+          reason: '★ 记忆段是从 _buildSystemPrompts 产出的同一批片段 —— '
+              'system 估算必须自动把它算进去（不许漏账）');
+    });
+  });
+
   group('renderMemory —— 渲染格式本身', () {
     test('★★ 空串 / 空白 ⇒ 空串（调用方据此判断"不用注入"）', () {
       expect(renderMemory(''), '');
@@ -176,17 +289,37 @@ void main() {
     });
   });
 
-  group('常量一致性（三处必须是同一个数）', () {
-    test('★★★ 记忆上限：backend 契约 = 256 KB', () {
-      // Kotlin 侧 `MemoryStore.MAX_BYTES` 也是 256*1024。
-      // App 侧 `GlobalMemory.maxBytes` 同样是 256*1024。
-      // 三处必须一致：不一致会导致"App 以为能写、Kotlin 拒绝"（或反过来）。
-      //
-      // ⚠️ 这条测试只能钉住 backend 这一处（它跑在 backend 包里，
-      //    看不到 App 与 Kotlin）。另两处的一致性靠代码注释 + 人工核对，
-      //    这是如实的局限，不是遗漏。
-      expect(ContractMemory.maxBytes, 256 * 1024);
-      expect(ContractMemory.maxBytes, 262144);
+  group('常量一致性（2026-10-29 重设计后：不再有 256 KB 写闸）', () {
+    // ⚠️ **旧断言为什么不再成立**：
+    //
+    // 旧断言 `ContractMemory.maxBytes == 256*1024` 钉的是"三处同一个写闸数"
+    // （backend 契约 / Kotlin `MAX_BYTES` / App `GlobalMemory.maxBytes`）。
+    // 重设计**删除了 maxBytes**：存储上限变成"按作用域的软预算 + 超限淘汰"，
+    // 且存储与注入预算彻底分家（设计稿 §3.4）。那个数已无对象，断言它只会
+    // 挡住正确结构 —— 所以改为断言**新契约的对外承诺**：存在分 scope 的软预算、
+    // 且存在可被 min 截住的注入预算常量。
+    //
+    // ⚠️ 局限（如实记录）：这条仍只能钉 backend 这一处；Kotlin/App 两侧的
+    //    同源一致性靠 INTERFACE.md §N12 + 人工核对。
+
+    test('★★★ 存储软预算按作用域存在，且合计 = 三者之和', () {
+      expect(ContractMemory.storageGlobalSoftMaxBytes, 8 * 1024 * 1024);
+      expect(ContractMemory.storageWorkspaceSoftMaxBytes, 16 * 1024 * 1024);
+      expect(ContractMemory.storageSessionSoftMaxBytes, 512 * 1024);
+      expect(
+        ContractMemory.storageSoftMaxBytes,
+        ContractMemory.storageGlobalSoftMaxBytes +
+            ContractMemory.storageWorkspaceSoftMaxBytes +
+            ContractMemory.storageSessionSoftMaxBytes,
+      );
+    });
+
+    test('★★★ 注入预算两段：session 独立且小于 global+workspace', () {
+      expect(ContractMemory.globalWorkspaceInjectMaxChars, 6000);
+      expect(ContractMemory.sessionInjectMaxChars, 4000);
+      expect(ContractMemory.sessionInjectMaxChars,
+          lessThan(ContractMemory.globalWorkspaceInjectMaxChars));
+      expect(ContractMemory.windowRatioCap, 0.05);
     });
   });
 }

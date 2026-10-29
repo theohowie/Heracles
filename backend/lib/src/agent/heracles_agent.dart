@@ -43,7 +43,9 @@ import 'package:dio/dio.dart';
 
 import '../capability/capabilities.dart';
 import '../contract/contract.dart';
+import '../context/memory_context.dart';
 import '../context/window_ratio_compressor.dart';
+import '../prompt/memory_prompt.dart';
 import '../prompt/system_prompt.dart';
 import '../prompt/builtin_skills.dart';
 import '../tools/tool_factory.dart';
@@ -137,6 +139,7 @@ class RunOptions {
     this.maxToolCalls = ContractAgent.maxToolCalls,
     this.enablePlan = true,
     this.systemPrompts = const [],
+    this.memory,
     this.memoryNote,
     this.approvalMode = ApprovalMode.fullAccess,
     this.enableSubAgents = false,
@@ -177,10 +180,40 @@ class RunOptions {
   /// 额外系统提示（追加在默认提示之后）。
   final List<String> systemPrompts;
 
+  /// **结构化三作用域记忆**（2026-10-29 三作用域重设计；**非空时优先**）。
+  ///
+  /// 由宿主在每次 run 之前读好三处（global / workspace / session）并解析成
+  /// [MemoryContext] 传进来（App 侧是 `ScopedMemoryService` + `LocalAgentExecutor`）。
+  ///
+  /// ## 为什么从 `memoryNote`（一段字符串）改成结构化
+  ///
+  /// 字符串拼接 = backend 无法做预算、排序与冲突裁决，只能信任宿主；
+  /// 而宿主是 Flutter 层，验证强度只有 `flutter test`。结构化之后
+  /// 选择/预算/渲染都在 backend 纯 Dart（`memory_prompt.dart`），
+  /// 可以被 `dart test` 覆盖 —— 抗幻觉要由架构保证，不靠提示词。
+  ///
+  /// ## 注入规则（见 `_buildSystemPrompts`）
+  ///
+  /// · **本字段非空（含全段为空的对象）⇒ 走新渲染器，[memoryNote] 被忽略**；
+  /// · 本字段为 `null` ⇒ 回落 `memoryNote`（旧行为，兼容）；
+  /// · 两者都不传 ⇒ 行为与加记忆字段之前**完全一致**。
+  ///
+  /// ## 注入顺序与预算
+  ///
+  /// global → workspace → session（session 最后 = 最容易变，缓存损失最小），
+  /// global+workspace 共享 `ContractMemory.globalWorkspaceInjectMaxChars`、
+  /// session 独立 `sessionInjectMaxChars`，两者再按
+  /// `min(常量, modelWindowTokens × windowRatioCap)` 自适应。
+  /// 详见 `memory_prompt.dart`。
+  final MemoryContext? memory;
+
   /// **长期记忆原文**（跨会话沉淀的项目知识与用户偏好）。
   ///
-  /// 由宿主（App 的 `GlobalMemory`）在每次 run 之前读好传进来；`null` 或
-  /// trim 后为空 ⇒ 不注入任何内容（行为与加这个字段之前**完全一致**）。
+  /// ⚠️ `@Deprecated`（2026-10-29）：新宿主请用 [memory]（结构化三作用域）。
+  /// 本字段**不删**（CLI / 既有测试 / 未升级的宿主仍在用），行为与旧版一致：
+  /// `null` 或 trim 后为空 ⇒ 不注入。
+  ///
+  /// 由宿主（App 的 `GlobalMemory`）在每次 run 之前读好传进来。
   ///
   /// ## 为什么它是 `RunOptions` 的字段，而不是走 `systemPrompts`
   ///
@@ -192,16 +225,11 @@ class RunOptions {
   ///    `_buildSystemPrompts`）—— 这样默认提示那一段字节不变，缓存前缀
   ///    只在记忆真的变化时才失效。
   ///
-  /// ## ⚠️ 缓存代价（必须知道，别以为免费）
+  /// ## 缓存代价（必须知道，别以为免费）
   ///
-  /// 记忆是**进 system 消息**的 ⇒ 它一变，请求前缀就变，那一轮的**整条前缀
-  /// 缓存作废**。因为记忆是 append-only（`save_memory` 只往后加），所以：
-  /// - 同一会话里没调用 `save_memory` ⇒ 记忆不变 ⇒ 缓存正常命中；
-  /// - 调用过 `save_memory` ⇒ **下一轮前缀会重建一次**，之后又稳定。
-  ///
-  /// 这个代价是"换会话不失忆"必须付的，不是 bug。要彻底消除得把记忆做成
-  /// 独立的消息（会击穿更后面的前缀）或检索式注入（另一套机制），
-  /// **当前不做**，如实记在这里。
+  /// 记忆是**进 system 消息**的 ⇒ 它一变，请求前缀就变。新路径下
+  /// 只有 session 段是易变的，global/workspace 稳定段在前，缓存损失更小。
+  @Deprecated('用 memory（MemoryContext）替代；本字段仅为兼容保留，不删')
   final String? memoryNote;
 
   /// **审批档位**（2026-10-24 接线）—— 决定哪些工具执行前要过用户批准。
@@ -589,16 +617,17 @@ class HeraclesAgent {
     };
   }
 
-  /// 构建全部工具（**32 个**）。
+  /// 构建全部工具（**33 个**）。
   ///
-  /// 32 的来源：**各 builder 实际返回数之和**，不是估的 ——
-  /// 断言见 `test/tools_completeness_test.dart`（"必须恰好 32 个"）：
+  /// 33 的来源：**各 builder 实际返回数之和**，不是估的 ——
+  /// 断言见 `test/tools_completeness_test.dart`（"必须恰好 33 个"）：
   /// `buildFileTools` 8 + `buildShellTools` 1 + `buildFileManageTools` 3 +
-  /// `buildInfoTools` 2 + `buildApkTools` 5 + `buildInteractionTools` 2 +
-  /// `buildGitTools` 11 = 32。
+  /// `buildInfoTools` 2 + `buildApkTools` 5 + `buildInteractionTools` 3 +
+  /// `buildGitTools` 11 = 33。
   ///
-  /// 旧注释写"18 个"（审计 §3.3 #1：注释没跟上工具面扩张），已更正；
-  /// 2026-10-27 加 git 后从 21 → 32。
+  /// 历史：旧注释写"18 个"（审计 §3.3 #1）；2026-10-27 加 git 后 21 → 32；
+  /// **2026-10-29 记忆三作用域重设计**加 `propose_global_memory` 后 32 → 33
+  /// （`save_memory` 新增可选 `scope`，工具数不变）。
   ///
   /// ## git 工具为什么**无条件**列出（不是 caps.git != null 才加）
   ///
@@ -621,19 +650,22 @@ class HeraclesAgent {
       ...buildFileManageTools(factory, _caps, tracker: tracker),  // 3 个：删除/移动/复制（有破坏性）
       ...buildInfoTools(factory, _caps),        // 2 个：web_fetch / check_device_state
       ...buildApkTools(factory, _caps),         // 5 个：构建/反编译/重打包/签名/安装
-      ...buildInteractionTools(factory,         // 2 个：ask_user / save_memory
+      ...buildInteractionTools(factory,         // 3 个：ask_user / save_memory / propose_global_memory
           askGate: _askGate, caps: _caps),
       ...buildGitTools(factory, _caps),         // 11 个：5 只读 + 4 改本地 + push + init
     ];
   }
 
-  /// **组装 system prompts** —— 默认提示 → 宿主追加 → 长期记忆。
+  /// **组装 system prompts** —— 默认提示 → 宿主追加 → 长期记忆（三段记忆）。
   ///
-  /// ## 三段，顺序不能乱
+  /// ## 顺序不能乱
   ///
   /// 1. `defaultSystemPrompt(_caps)` —— 人设与环境（**字节稳定**，除非能力变了）
   /// 2. `_options.systemPrompts` —— 宿主追加的固定提示
-  /// 3. 长期记忆（若 [RunOptions.memoryNote] 非空）—— **放在最后，见下**
+  /// 3. 长期记忆（**放在最后**）：
+  ///    · [RunOptions.memory] 非空 ⇒ `renderMemoryContext`（global → workspace →
+  ///      session，session 最后 = 最易变）；段内已含来源标注与冲突尾注；
+  ///    · 否则回落 [RunOptions.memoryNote]（旧单段渲染，行为不变）。
   ///
   /// ## 为什么记忆必须放最后而不是最前
   ///
@@ -648,12 +680,13 @@ class HeraclesAgent {
   /// 唯一能少付代价的做法。这也解释了为什么 `memoryNote` 没被塞进
   /// `defaultSystemPrompt()` 里。
   ///
-  /// ## 为什么用 `renderMemory()`
+  /// ## [task] 为什么是参数
   ///
-  /// `interaction_tools.dart` 里早就有 `renderMemory()`，但它**从来没被调用过**
-  /// （记忆只写不读 ⇒ 换会话必失忆）。这里把它接上，而不是另写一份格式化 ——
-  /// 两处各写一份就是第二份真相，将来改标题必然只改一处。
-  List<String> _buildSystemPrompts() {
+  /// 记忆是**检索式注入**：按当前任务的关键词排序（见 `memory_prompt.dart`）。
+  /// 同一份 [RunOptions.memory] 在不同任务下渲染结果可能不同（这是检索式注入
+  /// 的固有代价：随任务变化的那一轮前缀缓存会重建）。`contextBreakdown()`
+  /// 没有任务上下文 ⇒ 传空串（纯 `createdAt` 排序），只用于估算。
+  List<String> _buildSystemPrompts({String task = ''}) {
     final prompts = <String>[
       defaultSystemPrompt(_caps),
       ..._options.systemPrompts,
@@ -661,9 +694,23 @@ class HeraclesAgent {
 
     // trim 后再判空：模型/存储可能塞进纯空白，那种情况不该注入一个空段落
     // （空段落会白白改变前缀字节，却不带任何信息）。
-    final note = _options.memoryNote;
-    if (note != null && note.trim().isNotEmpty) {
-      prompts.add(renderMemory(note));
+    final memory = _options.memory;
+    if (memory != null) {
+      // ★ 2026-10-29 新路径：结构化三作用域。
+      //   注意"非空优先"是**字段非空**优先 —— 即使三段都空也不回落 memoryNote，
+      //   否则"宿主已升级、本轮恰好没记忆"会突然冒出旧格式的全局原文。
+      final rendered = renderMemoryContext(
+        memory,
+        task: task,
+        windowTokens: _config.modelWindowTokens,
+      );
+      if (rendered.trim().isNotEmpty) prompts.add(rendered);
+    } else {
+      // ignore: deprecated_member_use_from_same_package
+      final note = _options.memoryNote;
+      if (note != null && note.trim().isNotEmpty) {
+        prompts.add(renderMemory(note));
+      }
     }
     return prompts;
   }
@@ -1268,7 +1315,13 @@ class HeraclesAgent {
               client: _injectedClient,
             );
             for (final f in facts) {
-              await _caps.memory!.append('[auto] $f');
+              // 2026-10-29：走作用域化写入 —— 默认作用域由宿主能力决定
+              // （新宿主 = session；老宿主 appendScoped 退化成 append，行为不变）。
+              // **不再直写全局**：agent 自动写全局会污染所有会话。
+              await _caps.memory!.appendScoped(
+                _caps.memory!.defaultWriteScope,
+                '[auto] $f',
+              );
             }
           }
         } catch (_) {
@@ -1309,7 +1362,7 @@ class HeraclesAgent {
           modelConfig: _modelConfig(
               model: _options.fallbackModelNames[usedFallbackIdx]),
           state: _state!,
-          systemPrompts: _buildSystemPrompts(),
+          systemPrompts: _buildSystemPrompts(task: userRequest),
           tools: _buildTools(verify: verify),
           controller: controller,
           compressor: compressor,
@@ -1356,7 +1409,7 @@ class HeraclesAgent {
           modelConfig: _modelConfig(
               model: _options.fallbackModelNames[usedFallbackIdx]),
           state: _state!,
-          systemPrompts: _buildSystemPrompts(),
+          systemPrompts: _buildSystemPrompts(task: userRequest),
           tools: _buildTools(verify: verify),
           controller: controller,
           compressor: compressor,
@@ -2011,7 +2064,12 @@ class _ApprovalHook extends AgentHook {
   /// 三者的危险程度差一个数量级，弹窗上必须让人一眼看出来是哪种。
   String _riskOf(String tool) {
     if (_shell.contains(tool)) {
-      return '在工作区里执行任意 shell 命令 —— 可能碰到工作区外的文件；'
+      // 2026-10-29 事实句修正（Lead 反馈，与 system_prompt 的「两个执行面」对齐）：
+      // 旧文案「在工作区里执行任意 shell 命令 —— 可能碰到工作区外的文件」是
+      // **用户可见的错误事实**：agent 的命令默认在**沙箱**里跑（需要动 Android
+      // 本身时才落手机 shell），沙箱与用户工作区是两套文件系统。
+      return '在沙箱中执行任意 shell 命令 —— 沙箱与用户工作区是两套文件系统，'
+          '命令读写的是沙箱内文件（需要动 Android 本身的命令会落到手机 shell）；'
           'kill/force-stop 类已被硬禁令拦截。';
     }
     if (_destructive.contains(tool)) {

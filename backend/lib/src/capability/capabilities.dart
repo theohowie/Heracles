@@ -39,6 +39,10 @@ export 'git_capability.dart';
 import 'sandbox_capability.dart';
 export 'sandbox_capability.dart';
 
+// 记忆作用域枚举（`MemoryScope`）—— 接口签名要用。
+// 对外导出统一走 `heracles_backend.dart`（一处入口，别在这里再开一个）。
+import '../context/memory_context.dart';
+
 /// 能力调用结果。
 ///
 /// **为什么不用异常**：agent 循环里，工具失败是**常态**（文件不存在、权限不足、
@@ -161,7 +165,7 @@ abstract class WorkspaceCapability {
 
 /// **进程执行能力**。
 abstract class ShellCapability {
-  /// 在工作区里跑一条命令。
+  /// 在沙箱中跑一条命令（Android 上由宿主的 mksh 执行；命令在哪跑由系统决定）。
   ///
   /// ⚠️ **实现必须流式转发输出**，不得 `readAllBytes()` ——
   /// 长命令（构建）可能输出几 MB，全读进内存会 OOM。
@@ -224,10 +228,79 @@ abstract class WebCapability {
   Future<CapabilityResult> fetch(String url, {int maxChars = 50000});
 }
 
-/// **长期记忆能力**（跨会话保留的项目知识与用户偏好）。
+/// **长期记忆能力**（三作用域，2026-10-29 重设计）。
+///
+/// ## 兼容纪律：**只增方法，且全部给默认实现**
+///
+/// [read] / [append] 是老宿主（App `FileMemoryCapability`、CLI、测试替身）唯一的
+/// 实现面，**不许删**。新增的四个方法都带默认实现，老宿主不改也能编译 ——
+/// 这是"契约只增"（INTERFACE.md N7/N12）在 Dart 类型层面的落地。
+///
+/// ## 默认实现为什么是"退化"而不是"抛异常"
+///
+/// 老宿主没有作用域概念（只有一份全局文件）。默认实现退化成旧行为，
+/// 是为了让"没升级的宿主"仍然能跑；**但全局写入例外**：默认的
+/// [appendScoped] 对 `global` 一律失败 —— 这是不变量 I4
+/// （全局对 agent 只读）的纵深防御，即使工具层漏判也写不进去。
 abstract class MemoryCapability {
+  /// 读全局记忆原文（老接口，兼容保留）。
   Future<String> read();
+
+  /// 追加一条到默认作用域（老接口，兼容保留）。
+  ///
+  /// ⚠️ 新宿主请实现 [appendScoped]；本方法只作为退化路径。
   Future<CapabilityResult> append(String note);
+
+  /// 模型写记忆的默认作用域（**默认为会话私有** —— 写错作用域的影响最小）。
+  ///
+  /// 宿主可覆盖（例如只支持全局的老实现返回 `global`，此时 `save_memory`
+  /// 会拒绝并指路 `propose_global_memory`，不静默回落）。
+  MemoryScope get defaultWriteScope => MemoryScope.session;
+
+  /// 按作用域追加一条。
+  ///
+  /// 默认实现：
+  /// · `global` ⇒ **失败**（全局只读，agent 只能 [proposeGlobal]）；
+  /// · `session` / `workspace` ⇒ 退化成老 [append]（老宿主只有一份存储，
+  ///   行为与升级前一致）。
+  ///
+  /// [kind] 沿用词表 `preference / background / habit / other`。
+  Future<CapabilityResult> appendScoped(
+    MemoryScope scope,
+    String note, {
+    String kind = 'other',
+  }) async {
+    if (scope == MemoryScope.global) {
+      return const CapabilityFailure(
+        '全局记忆只读：模型不能直接写入。若要建议用户长期记住，'
+        '请调用 propose_global_memory（进入待用户确认的候选列表）。',
+        isRetryable: false,
+      );
+    }
+    return append(note);
+  }
+
+  /// 读某作用域的原文（默认退化成老 [read]：老宿主只有全局一份）。
+  ///
+  /// [sessionId] 只在 `scope == session` 时有意义；校验（格式/存在性/路径）
+  /// 由宿主在实现里做（设计稿 §3.3.2），**失败必须 fail-closed**。
+  Future<String> readScope(MemoryScope scope, {String? sessionId}) async =>
+      read();
+
+  /// **提议**一条全局记忆（agent 写 global 的唯一通道）。
+  ///
+  /// 默认实现 = 明确失败并说清原因：老宿主没有提议存储。
+  /// 新宿主实现后，提议进入 `proposals.jsonl`，由用户在记忆页晋升/忽略
+  /// —— **晋升动作不在能力对象里暴露**（agent 无法自己确认自己的提议）。
+  Future<CapabilityResult> proposeGlobal(
+    String note, {
+    String kind = 'other',
+  }) async =>
+      const CapabilityFailure(
+        '当前环境不支持全局记忆提议（该宿主的记忆能力未升级到三作用域）。'
+        '请改用 save_memory 写入本会话或本工作区。',
+        isRetryable: false,
+      );
 }
 
 /// **全部能力的注入点**。

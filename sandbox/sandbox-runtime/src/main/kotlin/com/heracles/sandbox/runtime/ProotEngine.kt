@@ -83,6 +83,7 @@ import java.io.File
 import java.io.IOException
 import java.nio.file.Path
 import java.nio.file.Paths
+import java.util.TimeZone
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -225,6 +226,38 @@ class ProotEngine(
         put("TMP", tmp)
         put("TEMP", tmp)
         put("PROOT_TMP_DIR", tmp)
+
+        // ====================================================================
+        // ★ TZ —— 必须放在**宿主进程环境**里，而不是 guestEnvironment()
+        // ====================================================================
+        // 为什么放这里就够：PRoot 默认把**自己的 environ 原样透传**给被 trace 的
+        // guest 子进程，而两条执行路径都以本函数为**唯一**环境来源：
+        //   - [executePiped]：`environment().clear()` + `putAll(hostEnvironment())`
+        //   - [executePty]  ：`PtySession.open(envp = hostEnvironment())`（整体替换）
+        // ⇒ 在这里设一次，管道与 PTY 两条路都继承到 guest。
+        //
+        // ★ 值 = **POSIX TZ 串**（如 `CST-8`），不是 IANA 命名时区。
+        //   （D5 = A，ADR-039；证据见 .docs/实测-19-沙箱时区.md）
+        //
+        //   为什么换掉命名时区：内置 Alpine rootfs **没有 zoneinfo 数据库**
+        //   （实测：`tar -tzf rootfs-bundle.bin` 518 条目里 zoneinfo/localtime/tzdata
+        //    匹配 0 条；设备上 `ls /usr/share/zoneinfo` = No such file or directory）。
+        //   于是命名时区（`Asia/Shanghai`）虽然透传成功，但 guest 的 libc 查不到
+        //   该 id 只能回退 UTC —— 真机实测 `date` 恒为 UTC（TZPROBE 证据在实测-19 §5）。
+        //   而 POSIX 固定偏移串**不依赖 zoneinfo**：同一 rootfs / 同一 proot 命令下
+        //   实测 `TZ=CST-8 date` = 21:11:05 CST（实测-19 §7），这是选它的全部理由。
+        //
+        //   取舍（已写进 ADR-039，不要在这里偷偷放宽）：
+        //   - 偏移在**每次执行**时按设备当前偏移重算 ⇒ 设备切时区后沙箱自然跟随；
+        //   - POSIX 串里没有 DST 规则 ⇒ 若沙箱内进程跨过设备夏令时切换点会差 1 小时。
+        //     中国无 DST ⇒ 恒正确；有 DST 的地区按"注入时刻的真实偏移 + 对应缩写"
+        //     生成（见 [posixTzFor]），切换点之前的读数是对的。
+        //   - rootfs 内**不做** shell 探测（探不探测结论都是"无 zoneinfo"，白花一次
+        //     exec 与 PTY 开销，且会让纯函数无法单测）。
+        val tz: String = posixTzFor(System.currentTimeMillis(), TimeZone.getDefault().id)
+        if (tz.isNotBlank()) {
+            put("TZ", tz)
+        }
 
         // ====================================================================
         // ★ LD_LIBRARY_PATH —— 真机上踩过的坑，别删
@@ -978,7 +1011,12 @@ class ProotEngine(
         ).joinToString(":")
 
         /** 调用方**不允许**覆盖的 guest 环境键（覆盖会让沙箱直接跑不起来）。 */
-        private val PROTECTED_GUEST_KEYS = setOf("PATH", "HOME", "TMPDIR", "PROOT_LOADER", "PROOT_L2S_DIR")
+        // 注：TZ 也在这里 —— 时区由宿主按设备当前偏移算出的 POSIX 串决定
+        //（见 hostEnvironment / posixTzFor），不允许调用方通过 overlay 把它改成
+        // 沙箱内自说自话的值。
+        // `internal` 仅为单测可断言（同模块 friend path），生产调用方无法触及。
+        internal val PROTECTED_GUEST_KEYS =
+            setOf("PATH", "HOME", "TMPDIR", "PROOT_LOADER", "PROOT_L2S_DIR", "TZ")
 
         private val ENVIRONMENT_KEY = Regex("[A-Za-z_][A-Za-z0-9_]*")
 
@@ -1163,4 +1201,183 @@ class ProotPathResolver(
 fun ProotPathResolver.resolveFor(path: String, pathView: PathView): String = when (pathView) {
     PathView.SANDBOX -> sandboxToHost(path)
     PathView.HOST -> path
+}
+
+// ============================================================================
+// 时区：POSIX TZ 串（D5 = A，ADR-039）
+// ============================================================================
+// 为什么是 POSIX 固定偏移而不是 IANA 命名时区（实测结论，别在这里翻案）：
+//   内置 Alpine rootfs **没有 zoneinfo 数据库**（518 条目 0 匹配；设备上
+//   `/usr/share/zoneinfo` 不存在）⇒ 命名时区透传成功但 guest 的 libc 查不到，
+//   只能回退 UTC（真机 `date` 恒 UTC）。POSIX 串（`CST-8`）不查 zoneinfo，
+//   同一 rootfs 实测有效（21:11:05 CST）。证据：.docs/实测-19-沙箱时区.md。
+//
+// 取舍（保守，不擅自发明）：
+//   - 只对 [TZ_ABBREVIATIONS] 里**可信收录**的时区生成 POSIX 串；
+//   - 未收录的时区**退回命名 id**（即改动前的行为）。此时 guest 会显示 UTC ——
+//     这是已知且已报告的降级，不编造缩写（比如把没收录的时区硬凑成 CET）；
+//   - 名字必须能过 POSIX 解析：只收 3–4 个纯字母的缩写，且**绝不**用
+//     `UTC` / `GMT` 打头再挂非零偏移 —— 实测 `TZ=UTC-8` 两次表现不一致
+//     （一次 0 偏移、一次 +8），属命名歧义。
+// ============================================================================
+
+/** 一条时区缩写：标准时缩写 + 夏令时缩写（null = 该时区不实行夏令时或未收录）。 */
+internal data class TzAbbreviation(
+    val standard: String,
+    val daylight: String? = null,
+)
+
+/**
+ * 按**注入时刻**的设备偏移生成 POSIX TZ 串。
+ *
+ * 例：`Asia/Shanghai` → `CST-8`；`America/New_York` 冬季 → `EST+5`、
+ * 夏季（DST 生效）→ `EDT+4`；`Asia/Kolkata` → `IST-5:30`；`UTC` → `UTC+0`。
+ *
+ * 语义要点：
+ * - 符号按 POSIX 约定**取反**：POSIX 的 `±hh[:mm]` 是「本地时间在 UTC 之**西**多少」，
+ *   所以东八区（UTC+8）写成 `CST-8`，西五区（UTC-5）写成 `EST+5`。
+ * - 偏移取 `TimeZone.getOffset(nowUtcMs)`（**带夏令时**的实际偏移），不是
+ *   `getRawOffset()`（只有标准时，夏季会差 1 小时）。
+ * - 缩写只影响 `date` 打印的名字，不影响时间；映射表缺夏令时缩写时退回标准时
+ *   缩写（时间仍正确，只有名字在 DST 期间不贴合）。
+ * - `zoneId` 为空 ⇒ 返回空串（调用方据此不注入 TZ）；未知 id ⇒ 返回原 id
+ *   （降级为命名时区，见本节头部取舍）。
+ *
+ * @param nowUtcMs 用来求偏移的 UTC 时刻（毫秒）；测试注入固定值即可锁死夏/冬季
+ * @param zoneId IANA 时区 id（Android 上是 `TimeZone.getDefault().id`）
+ */
+internal fun posixTzFor(nowUtcMs: Long, zoneId: String): String {
+    val id = zoneId.trim()
+    if (id.isEmpty()) return ""
+    val zone = TimeZone.getTimeZone(id)
+    // 未知 id 时 Java 静默返回 GMT 兜底（返回对象的 id 变成 "GMT"，与请求串不同），
+    // 用它区分「认得的 id」与「不认得的 id」，避免把未知时区当成 UTC 处理。
+    if (zone.id != id) return id
+    val label = TZ_ABBREVIATIONS[id] ?: return id
+    val offsetMillis = zone.getOffset(nowUtcMs)
+    // 夏令时判定：偏移与标准时偏移不同 ⇒ 当前处于夏令时。
+    // 只在该时区收录了夏令时缩写时才换名字，否则沿用标准时缩写（时间不受影响）。
+    val daylightActive = label.daylight != null && offsetMillis != zone.rawOffset
+    val name = if (daylightActive) label.daylight ?: label.standard else label.standard
+    return name + formatPosixOffset(offsetMillis)
+}
+
+/**
+ * 把毫秒偏移格式化成 POSIX 的 `±hh[:mm]` 片段（**符号取反**，见 [posixTzFor]）。
+ *
+ * `+05:30` → `-5:30`（因为 POSIX 说「西为正」）；`0` → `+0`；`-5h` → `+5`。
+ */
+private fun formatPosixOffset(offsetMillis: Int): String {
+    val totalMinutes = offsetMillis / MILLIS_PER_MINUTE
+    val sign = if (totalMinutes > 0) "-" else "+"
+    val absolute = kotlin.math.abs(totalMinutes)
+    val hours = absolute / 60
+    val minutes = absolute % 60
+    return if (minutes == 0) "$sign$hours" else "$sign$hours:$minutes"
+}
+
+private const val MILLIS_PER_MINUTE = 60_000
+
+/**
+ * 时区 id → 可信缩写（POSIX 名字）。
+ *
+ * 收录原则：
+ * - 只用**3–4 个纯字母**的缩写（POSIX 名字部分的合法形态）；
+ * - 缩写按 tzdata 口径（与设备 `date` 的传统缩写一致），中国 = `CST`；
+ * - 有夏令时的地区同时给 `daylight`；已废除夏令时的地区只给 `standard`
+ *   （如 `America/Mexico_City`、`America/Sao_Paulo`）；
+ * - 只收录常见时区。**没收录不是漏了**，是刻意退回命名 id 的保守取舍。
+ *
+ * 注意：缩写与偏移是两件事 —— 时间由偏移决定、永远按设备当前偏移算；
+ * 缩写只决定 `date` 打印出来的名字。所以某个名字写得不够贴切不会让时间错。
+ */
+internal val TZ_ABBREVIATIONS: Map<String, TzAbbreviation> = buildMap {
+    // ---- 东亚 / 东南亚（UTC+8、+9；1991 年后中国大陆无夏令时）----
+    listOf(
+        "Asia/Shanghai", "Asia/Chongqing", "Asia/Harbin", "Asia/Macau",
+        "Asia/Taipei", "PRC", "Hongkong",
+    ).forEach { put(it, TzAbbreviation("CST")) }
+    put("Asia/Hong_Kong", TzAbbreviation("HKT"))
+    put("Asia/Singapore", TzAbbreviation("SGT"))
+    put("Asia/Tokyo", TzAbbreviation("JST"))
+    put("Asia/Seoul", TzAbbreviation("KST"))
+    put("Asia/Pyongyang", TzAbbreviation("KST"))
+    put("Asia/Bangkok", TzAbbreviation("ICT"))
+    put("Asia/Ho_Chi_Minh", TzAbbreviation("ICT"))
+    put("Asia/Saigon", TzAbbreviation("ICT"))
+    put("Asia/Jakarta", TzAbbreviation("WIB"))
+
+    // ---- 南亚 / 中东 ----
+    put("Asia/Kolkata", TzAbbreviation("IST"))
+    put("Asia/Calcutta", TzAbbreviation("IST"))
+    put("Asia/Karachi", TzAbbreviation("PKT"))
+    put("Asia/Kathmandu", TzAbbreviation("NPT"))
+    put("Asia/Katmandu", TzAbbreviation("NPT"))
+    put("Asia/Dubai", TzAbbreviation("GST"))
+    put("Asia/Baghdad", TzAbbreviation("AST"))
+    put("Asia/Jerusalem", TzAbbreviation("IST", "IDT"))
+
+    // ---- 欧洲 ----
+    put("Europe/London", TzAbbreviation("GMT", "BST"))
+    put("Europe/Dublin", TzAbbreviation("GMT", "IST"))
+    put("Europe/Lisbon", TzAbbreviation("WET", "WEST"))
+    listOf(
+        "Europe/Paris", "Europe/Berlin", "Europe/Rome", "Europe/Madrid",
+        "Europe/Amsterdam", "Europe/Brussels", "Europe/Vienna", "Europe/Zurich",
+        "Europe/Stockholm", "Europe/Oslo", "Europe/Copenhagen", "Europe/Prague",
+        "Europe/Warsaw", "Europe/Budapest", "Europe/Belgrade",
+    ).forEach { put(it, TzAbbreviation("CET", "CEST")) }
+    put("Europe/Moscow", TzAbbreviation("MSK"))
+    put("Europe/Istanbul", TzAbbreviation("TRT"))
+    listOf(
+        "Europe/Athens", "Europe/Helsinki", "Europe/Bucharest",
+        "Europe/Kyiv", "Europe/Kiev",
+    ).forEach { put(it, TzAbbreviation("EET", "EEST")) }
+
+    // ---- 北美（US 前缀是历史别名，Android 上仍可能被当成默认时区）----
+    put("America/New_York", TzAbbreviation("EST", "EDT"))
+    put("US/Eastern", TzAbbreviation("EST", "EDT"))
+    put("America/Toronto", TzAbbreviation("EST", "EDT"))
+    put("America/Chicago", TzAbbreviation("CST", "CDT"))
+    put("US/Central", TzAbbreviation("CST", "CDT"))
+    put("America/Winnipeg", TzAbbreviation("CST", "CDT"))
+    put("America/Denver", TzAbbreviation("MST", "MDT"))
+    put("US/Mountain", TzAbbreviation("MST", "MDT"))
+    put("America/Edmonton", TzAbbreviation("MST", "MDT"))
+    put("America/Phoenix", TzAbbreviation("MST"))
+    put("America/Los_Angeles", TzAbbreviation("PST", "PDT"))
+    put("US/Pacific", TzAbbreviation("PST", "PDT"))
+    put("America/Vancouver", TzAbbreviation("PST", "PDT"))
+    put("America/Anchorage", TzAbbreviation("AKST", "AKDT"))
+    put("US/Alaska", TzAbbreviation("AKST", "AKDT"))
+    put("Pacific/Honolulu", TzAbbreviation("HST"))
+    put("US/Hawaii", TzAbbreviation("HST"))
+    put("America/Halifax", TzAbbreviation("AST", "ADT"))
+
+    // ---- 拉美（墨西哥 2022、巴西 2019 起废除夏令时）----
+    put("America/Mexico_City", TzAbbreviation("CST"))
+    put("America/Sao_Paulo", TzAbbreviation("BRT"))
+    put("America/Argentina/Buenos_Aires", TzAbbreviation("ART"))
+    put("America/Buenos_Aires", TzAbbreviation("ART"))
+    put("America/Bogota", TzAbbreviation("COT"))
+    put("America/Lima", TzAbbreviation("PET"))
+    put("America/Santiago", TzAbbreviation("CLT", "CLST"))
+
+    // ---- 大洋洲（南半球：夏令时在 10 月—次年 4 月）----
+    listOf("Australia/Sydney", "Australia/Melbourne", "Australia/Canberra", "Australia/Hobart")
+        .forEach { put(it, TzAbbreviation("AEST", "AEDT")) }
+    put("Australia/Brisbane", TzAbbreviation("AEST"))
+    put("Australia/Adelaide", TzAbbreviation("ACST", "ACDT"))
+    put("Australia/Perth", TzAbbreviation("AWST"))
+    put("Pacific/Auckland", TzAbbreviation("NZST", "NZDT"))
+
+    // ---- 非洲 ----
+    put("Africa/Cairo", TzAbbreviation("EET", "EEST"))
+    put("Africa/Johannesburg", TzAbbreviation("SAST"))
+    put("Africa/Lagos", TzAbbreviation("WAT"))
+    put("Africa/Nairobi", TzAbbreviation("EAT"))
+
+    // ---- UTC 家族（零偏移；`UTC+0` 在 POSIX 与「UTC 特殊名」两种解释下都等于 UTC）----
+    listOf("UTC", "Etc/UTC", "Etc/GMT", "GMT", "Universal", "Zulu")
+        .forEach { put(it, TzAbbreviation("UTC")) }
 }

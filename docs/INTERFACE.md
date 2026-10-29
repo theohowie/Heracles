@@ -82,6 +82,10 @@
 
 ### N7 记忆结构化 —— ✅ 已落地（2026-10-25 确认形状定稿，前端可开工）
 
+> ⚠️ **2026-10-29 扩展**：N7 已被 **§N12（记忆分层，三作用域）** 扩展 —— 形状只增；
+> 旧五方法继续可用但**默认 `global`**，且**全局写入口已关闭**（`memory.append` 永久返回 `E_SCOPE_READONLY`；
+> 旧记忆页新增/编辑会收到明确人话错误，这是有意的过渡态）。前端改造按 §N12 + 设计稿 §4.4。
+
 > **给前端的确认**：形状已定稿并入库（`agent_bridge.dart` 的 API 全部可用），
 > 全局记忆页可以从整页文本改成结构化卡片了。
 
@@ -114,9 +118,263 @@
 ### N11 JEV 决策引擎 —— 前端已落地（2026-10-27），本地推理待后端/宿主接入
 
 - **本机画像**：命令通道 `deviceProfile`（`heracles/command`）→ `{ok, model, totalRamMb, freeStorageMb, appFilesDir}`，宿主已实现（`MainActivity.handleDeviceProfile`，只读：ActivityManager 内存 + filesDir 可用空间/路径）；前端 `AgentBridge.deviceProfile()` 据此做本地模型选型推荐（≥6GB 内存推 2B、≥3.5GB 推 0.8B、否则云端）。
-- **云端决策**：前端直连 `/v1/systemone` 兼容接口（Jev 官方 / StartLux 云端 / 自建 startlux-decide），报文：`state={question: 原文}` + 一道 `noul` 题（「推荐用户这样做吗？」）+ `return_thought=true`；概率 ≥0.5 = 推荐。无需后端参与。
+- **云端决策（2026-10-29 修订 · 后端服务层已落码）**：POST `https://tokenrhythm.studio/v1/decision`（兼容旧 `/v1/systemone`），`Authorization: Bearer sk_…`，模型**固定 `NeoHorse-Jev-4B`**（任何非精确值——含大小写/空格差异——都被强制纠正并标 `modelCorrected`），**非流式**，1-16 题、请求体 ≤1MiB；**不再发送 `return_thought`**。报文保留一道 `recommend` 题（「推荐用户这样做吗？」）；解析**写死 `answers['recommend']`** —— 若照抄平台文档用别的键名（如 `stop`），200 响应也会被误判「没给 noul」（已踩过的坑）。
+  - **端点归一化（五分支，2026-10-29 定稿）**：① 完整 `/decision` → 原样；② `/decisions`、`/systemone` 兼容端点 → 原样（hint 提示平台推荐 `/v1`）；③ 到 `/v1`（含 `/api/v1` 前缀）→ 补 `/decision`（**用户实测可用的填法**，hint 说明）；④ **裸域名 → 请求 `<host>/v1/decision`（不再静默 `/systemone`）** + hint 建议填到 `/v1`；⑤ 其它路径前缀 → 保留前缀补 `/decision` + hint。地址里的 **query/fragment 一律丢弃**（密钥不许进 URL）。`modelsUrlFor` 先归一化再去末段拼 `/models` ⇒ 裸域名 / `/v1` / `/decision` 都得 `<host>/v1/models`。
+  - 语义：`422` = 参数/上游限制（**仅首次 422 重试一次**；重试题键**仍是 `recommend`**、只去 `instructions`，**绝不改用文档示例 `stop`**）；`401/403/413/429/5xx/传输错误一律不重试**，按状态码给人话；**无 Key 时三发全 401 ⇒ 鉴权先于参数校验**。
+  - 服务层 `decide` 返回 `JevDecisionResult{yesProb, thought, model, diagnostics}`（旧三元组 getter 保留）；失败抛 `JevException(message, diagnostics:)`；`JevController.lastDiagnostics` 供设置页取 hint。`diagnostics` = `{resolvedEndpoint(scheme+host+port+path), httpStatus, serverCode, serverMessage(≤1000 字), traceId, rawBody(≤2048 字节, 脱敏), elapsedMs, modelCorrected, hint, attempts, retriedAfter422, modelsCatalogReadable, transportError, ok, toJson()}`；「取模型目录成功但 decide 422」的 hint = 「鉴权通过、模型目录可读，422 多半是模型权限/参数/上游限制」。
+  - 错误体解析：`body.code`/`serverCode`、`body.serverMessage`/`message`、`traceId`（兼容 JSON 字符串 body）；传输错误只用 `DioExceptionType.name`（**不用 `DioException.message`**，防 URL/Key 泄漏）。
+  - ⚠️ **真 Key 状态（如实）**：**用户 2026-10-29 在 App 内实测通过（口述证据：模型填 `NeoHorse-Jev-4B`、地址填到 `/v1`）**；**我方无独立真调用证据**（本机未拿 Key 做独立决策），mock 覆盖 5 类错误码 + 归一化 + 422 重试。API Key 只进请求头，日志/异常栈/`rawBody`/`resolvedEndpoint`/`hint` 全部脱敏（有测试锁住）。
 - **本地模型文件**：前端负责下载与管理，落在 `<appFilesDir>/jev_models/{0.8b|2b}/`，含 GGUF 权重（StartLux-Decision v1.1，HF 镜像优先）+ BF16 仓库的 tokenizer/config/decision_config.json，完成标记为目录内 `.complete` 文件。
 - **本地推理（预留契约）**：`AgentBridge.jevLocalDecide({modelDir, question}) -> Future<double?>`（返回「是」的概率；未接入恒 null，前端如实提示「引擎未接入」）。⚠️ 决策模型不是聊天模型：接入方须用带双向注意力补丁的 llama.cpp + StartLux 读出层（选项字母 logits + decision_config 温度），按普通聊天加载会静默劣化。后端接入后前端零改动即可离线决策。
+
+### N12 记忆分层（三作用域）—— 契约冻结 · 后端落码中（2026-10-29）
+
+> **与 N7 的关系**：本节**扩展** N7，形状只增不改。N7 的五个 API 继续可用，默认作用域 = `global`。
+> **状态**：契约已冻结（前端可据此改造记忆页）；**真机验收尚未完成**，验收记录见 `.docs/实测-18-记忆分层.md`
+> （未完成前一律标"未验证"，不得宣称已完成）。
+> **产品决策依据**：`.docs/记忆系统重设计-2026-10-29.md` §三（设计）与 §六（拍板项）。
+
+#### N12.1 三作用域语义
+
+| 作用域 | 绑定键 | 谁能写 | 注入范围 | 默认开关 |
+|---|---|---|---|---|
+| `session`（会话私有） | `(workspacePath, sessionId)` | **agent**（`save_memory` 默认）+ 用户 | 只在该会话 | 恒开 |
+| `workspace` | `workspacePath` | agent + 用户 | 该工作区所有会话 | 恒开（可关） |
+| `global`（全局只读） | 无（App 级） | **仅用户**；agent 只能**提议**，用户确认后晋升 | 所有会话 | 用户开关 `memoryGlobalEnabled`，默认开 |
+
+- 会话私有**不跨会话可见**；全局**只读**：agent 没有直写全局的通道（能力对象层面就没有该方法）。
+- 晋升链：agent `propose_global_memory` → `proposals.jsonl` → 用户「晋升/忽略」→ 晋升后 `source='promoted'`。
+
+#### N12.2 存储位置（与旧单文件 `memory.md` 的差异）
+
+```
+<工作区>/.heracles/memory/           ← workspace + session 两作用域（Dart 经 fs.*）
+  ├── index.json                     ← 派生索引（可重建，绝不当真源）
+  ├── workspace.jsonl
+  └── session/<sid>.jsonl            ← 每会话一个文件（放工作区，不放 App 私有，防复制工作区串台）
+
+<externalFilesDir>/heracles/memory/  ← global 作用域（只有 Kotlin 能到；走 heracles/device 通道）
+  ├── global.jsonl
+  ├── proposals.jsonl
+  ├── index.json
+  ├── migrate.json                   ← 迁移标记（幂等）
+  └── legacy/memory.md.<ts>.bak      ← 旧文件备份留档
+```
+
+- ★ **会话正文 `.jsonl` 仍严格 append-only，绝不写入任何记忆行**（记忆单独成文件，才能安全 compact）。
+- 旧 `<externalFilesDir>/heracles/memory.md` 由 `memory.migrate` 一次性迁入 `global.jsonl`：**先备份、幂等、不丢条目**（JSON 行逐字段保留；legacy 纯文本行原文保留）；迁移失败原文件不动。
+
+#### N12.3 条目行与墓碑（三 scope 同一形状，一行一条 JSON）
+
+```json
+{"v":1,"id":"m1791612000000123","scope":"session","sid":"s1791611845161",
+ "kind":"preference","text":"…","source":"agent",
+ "createdAt":1791612000000,"expiresAt":null}
+```
+
+| 字段 | 必填 | 说明 |
+|---|---|---|
+| `v` | 是 | 格式版本，当前 `1`；未知字段原样保留 |
+| `id` | 是 | `m<epochMicros>`；同 id 后写者胜（last-wins） |
+| `scope` | 是 | `session` / `workspace` / `global`；读时校验，不符 ⇒ 丢弃并计数 |
+| `sid` | session 必填 | 强校验锚点：与寻址 `sessionId` 不符的条目一律丢弃（防文件被复制后串台） |
+| `kind` | 是 | `preference` / `background` / `habit` / `other`（N7 词表不变） |
+| `text` | 是 | 正文；**单条 ≤ 8000 字符**，超限 `E_ENTRY_TOO_LONG` |
+| `source` | 是 | `user` / `agent` / `legacy` / `promoted`（淘汰顺序与优先级依赖它） |
+| `createdAt` | 是 | 毫秒时间戳 |
+| `expiresAt` | 否 | 毫秒；null/缺省 = 永不过期；过期不返回、不注入 |
+
+墓碑（改写一律追加，绝不"清空文件 + 逐条重写"）：
+
+```json
+{"v":1,"tomb":"del","ids":["m179…"],"at":1791612100000}
+{"v":1,"tomb":"clear","at":1791612200000}
+```
+
+`compact`：墓碑/同 id 旧版本占比 ≥ 50%，或文件超该 scope 软预算 80% 时，整体重写为存活条目（写 `.tmp` → `fs.rename` 覆盖）；失败保留原文件并报错，不丢数据。
+
+#### N12.4 寻址与强校验（fail-closed，绝不回落）
+
+```dart
+enum MemoryScope { global, workspace, session }
+class MemoryAddress { MemoryScope scope; String? sessionId; String? workspacePath; }
+```
+
+8 步校验（第 1 步失败即返回，**任何一步失败都不许回落 global/workspace/默认实例**）：
+
+| 步 | 规则 | 失败码 |
+|---|---|---|
+| 1 | `scope` 与 `sessionId`/`workspacePath` 的必填关系（session⇒sid 必填；workspace⇒path 必填；global⇒二者必须为 null） | `E_SCOPE_MISMATCH` |
+| 2 | `sessionId` 匹配 `^s[0-9]{10,16}$`（同时禁止路径分隔符与 `..`） | `E_SID_FORMAT` |
+| 3 | `sessionId` 存在于 `sessions.json` | `E_SID_UNKNOWN` |
+| 4 | `workspacePath` 非空绝对路径且在工作区登记表里 | `E_WORKSPACE_UNKNOWN` |
+| 5 | 解析出的目标文件路径**逐字等于** `(workspacePath, sessionId)` 拼出的规范路径 | `E_PATH_MISMATCH` |
+| 6 | 对 `global` 的 agent 写操作 | `E_SCOPE_READONLY`（只有 UI 用户路径可写） |
+| 7 | 单条 `text` > 8000 字符 | `E_ENTRY_TOO_LONG` |
+| 8 | 读取时条目 `scope`/`sid` 与寻址不符 ⇒ 丢弃 + 计数（`skippedForeign`） | 不报错 |
+
+统一返回形状：成功但为空 = `{"ok":true,"entries":[],"total":0}`；**"空"与"错"绝不同形**。错误 = `{"ok":false,"code":…,"error":人话,"address":{…}}`。
+
+#### N12.5 通道方法（`heracles/device`，Kotlin 侧只负责 global + 提议 + 迁移）
+
+| 方法 | 入参 | 返回 | 说明 |
+|---|---|---|---|
+| `memory.read` | `{}` | `{ok,text,bytes}` | 兼容保留：返回 `global.jsonl` 原文（供旧 `parseEntries` 直接吃） |
+| `memory.append` | `{note}` | `{ok:false,code:"E_SCOPE_READONLY",error:…}` | **语义永久改为拒绝**（全局只读）；保留方法名，让旧调用方拿到明确错误而不是"未知方法" |
+| `memory.clear` | `{}` | `{ok}` | 兼容：等价 `userEdit{action:"clear"}`（UI 用户确认后调用） |
+| `memory.list` | `{includeExpired?:false, limit?:0}` | `{ok,entries[],total,bytes}` | global 条目 |
+| `memory.search` | `{query, limit?:20}` | `{ok,entries[]}` | global 关键词检索（与注入同一分词/打分口径；不注入） |
+| `memory.delete` | `{ids:[…]}` 或 `{all:true}` | `{ok,removed,bytes}` | 用户删除 global 条目（等价 userEdit delete） |
+| `memory.userEdit` | `{action:"add"\|"update"\|"delete"\|"clear", id?, text?, kind?}` | `{ok,id?,bytes,evicted?}` | **只有用户路径调用**（能力对象不暴露） |
+| `memory.propose` | `{note,kind?}` | `{ok,id}` | agent 提议（写 `proposals.jsonl`） |
+| `memory.proposals` | `{status?:"pending"}` | `{ok,entries[]}` | UI 待确认列表 |
+| `memory.resolveProposal` | `{id,action:"promote"\|"reject"}` | `{ok,entryId?}` | 晋升/忽略（用户动作，agent 不可触发） |
+| `memory.stats` | `{}` | `{ok,entries,bytes,limits{…}}` | 存储/注入两组数字 |
+| `memory.migrate` | `{}` | `{ok,migrated,alreadyMigrated?,backup?,entries}` | 幂等迁移（先备份、不丢条目、失败原文件不动） |
+
+错误码全集：`E_SCOPE_MISMATCH / E_SCOPE_READONLY / E_SID_FORMAT / E_SID_UNKNOWN / E_WORKSPACE_UNKNOWN / E_PATH_MISMATCH / E_ENTRY_TOO_LONG / E_STORE_IO / E_MIGRATE_FAILED`。**没有"静默成功"分支。**
+
+**实现面核对（2026-10-29 Kotlin 落地后，按真实返回修正/补充）**：
+
+- 新增 4 个**实现面**错误码（不跨层语义，但调用方会看到）：`E_BAD_ARG`（缺参/未知 action/未知 kind/空正文）/ `E_NOT_FOUND`（条目或提议不存在）/ `E_SECRET`（SEC4 拒收）/ `E_UNKNOWN_METHOD`（DeviceChannel 未知方法）。
+- `memory.append` 入参放宽为 `{note?}`：**不强制 note**，恒返回 `{ok:false,code:"E_SCOPE_READONLY"}`（任何调用方都拿到同一 code）。
+- 返回形状是表内形状的**超集**（旧读者按表内键读不受影响）：`userEdit` 另带 `entries`（`evicted` 恒为数组，空=没淘汰；delete action 也回 `id`）；`delete` 回 `{ok,removed,bytes,entries}`；`resolveProposal` 回 `{ok,id,promoted,entryId?,bytes,entries,evicted}`。
+- `memory.stats.limits` 实际键名：存储组 `storageSoftMaxBytes / entriesSoftMax / entryMaxChars`；注入组 `globalWorkspaceInjectMaxChars(6000) / sessionInjectMaxChars(4000) / injectMaxEntriesPerScope(40) / injectCandidateMaxBytes(65536) / retrievalMaxCandidates(200) / summaryMaxChars(40) / windowRatioCap(0.05)`；另带 `scope / expired / fileBytes / pendingProposals / path`。`bytes` = 存活条目序列化字节（≈compact 后大小），`fileBytes` = 磁盘实际字节。
+- `memory.migrate` 有**第三态**（设计稿未定义、实现兜底）：`global.jsonl` 非空但 `migrate.json` 缺失 ⇒ `{ok:true,migrated:false,alreadyMigrated:true,reason:"global-jsonl-exists"}`（**不覆盖**、补标记）；无旧文件时回 `{migrated:false,alreadyMigrated:false,reason:"no-legacy-file"}`；`backup` 为相对 `memory/` 的路径（`legacy/memory.md.<epochMillis>.bak`），另有 `legacyMoved`。
+- 淘汰顺序实现已被修正为：过期 → 最旧 `agent` → 最旧 `promoted/legacy` → **最旧 `user` 最后动** → 仍放不下 `E_ENTRY_TOO_LONG`（与 §N12.8 一致，KDoc 已改）。
+- 单条 8000 字符口径 = **UTF-16 code unit**（Kotlin `String.length` == Dart `String.length`）；含 emoji 时与 Unicode 码点数不同。
+- SEC4：旧 Kotlin `MemoryStore` **原本没有密钥闸**，本轮按 backend/App 同源正则**新增**到全部写路径（`userEdit add/update`、`propose`、`resolveProposal(promote)`）。
+- `list(limit=0)` 表示不限；`search(limit<=0)` 回落 20。
+
+#### N12.6 AgentBridge（App 侧，统一三作用域）
+
+```dart
+Future<List<MemoryEntry>> listMemory({MemoryScope scope = MemoryScope.global,
+    String? sessionId, String? workspacePath, bool includeExpired = false});
+Future<MemoryWriteResult> addMemory(String text, {MemoryScope scope = MemoryScope.global,
+    String? sessionId, String? workspacePath, String kind = 'other'});
+Future<MemoryWriteResult> updateMemory(String id, String text, {…同上});
+Future<MemoryWriteResult> deleteMemory(String id, {…同上});
+Future<MemoryWriteResult> clearMemory({…同上});
+Future<List<MemoryEntry>> searchMemory(String query, {MemoryScope scope = …, int limit = 20});
+Future<MemoryStats> memoryStats({MemoryScope scope = …, …});          // 存储/注入两组数字
+Future<MemoryWriteResult> proposeGlobalMemory(String note, {String kind = 'other'}); // agent 用
+Future<List<MemoryProposal>> listMemoryProposals();
+Future<MemoryWriteResult> resolveMemoryProposal(String id, {required bool promote});
+```
+
+- 旧 `listMemory()/addMemory()/updateMemory()/deleteMemory()/memoryCapacity()` **签名保留、默认 `global`** ⇒ 前端零改动可编译。
+- `memoryCapacity()` 形状不变（`usedBytes/maxBytes`），**语义改为"存储软预算"**（`maxBytes` = 该 scope 软预算，不再"到顶拒写"）。
+- `MemoryEntry` 只增 `scope`/`sid`（可空，读旧数据为 null）。
+
+#### N12.7 backend 契约（`RunOptions` / 能力 / 工具）
+
+- `RunOptions.memory: MemoryContext?`（新增；非空时优先渲染）；`memoryNote` **保留并标 `@Deprecated`**（CLI/测试仍在用；两者都不传 = 旧行为）。
+- `_buildSystemPrompts()` 顺序：默认提示 → 宿主追加（宪法/快照/RAG）→ **global 段 → workspace 段 → session 段 → 冲突尾注**；session 最后（最易变，保前缀缓存）；空段不输出。
+- `MemoryCapability` 只增默认实现方法：`defaultWriteScope`（默认 `session`）/`appendScoped(scope,note,{kind})`（默认退化 `append`）/`readScope(scope,{sessionId})`（默认退化 `read`）/`proposeGlobal(note,{kind})`（默认返回"不支持"）；老宿主不改也能编译。
+- 工具：`save_memory(note, scope?)`，`scope ∈ {session, workspace}`，默认 `session`；传 `global` **明确拒绝并指路 `propose_global_memory`**（不静默纠正）；新增 `propose_global_memory({note,kind?})`；**工具面 32 → 33**。
+
+#### N12.8 预算：存储 ≠ 注入（两个独立常量族，互不推导）
+
+**存储预算**（软预算；超限**淘汰**，不是拒写）：
+
+| scope | 软预算 | 条目软上限 | 单条上限 |
+|---|---|---|---|
+| global | 8 MB | 5000 | 8000 字符 |
+| workspace | 16 MB | 5000 | 8000 字符 |
+| session（每会话） | 512 KB | 300 | 8000 字符 |
+
+淘汰顺序（确定性，禁止随机）：① 过期 → ② 最旧 `source=agent` → ③ 最旧 `user/promoted/legacy`（user 最后动）→ ④ 仍放不下才拒写 `E_ENTRY_TOO_LONG`（绝不写半条）。回报 `evicted:[id…]`（**不静默丢条目**）。**不做 LRU**（读变写、抖缓存；KDoc 注明是有意取舍）。
+
+**注入预算**（每轮 token 花销，与存储量无关）：
+
+| 项 | 默认值 |
+|---|---|
+| global + workspace 注入上限 | 6000 字符合计（global 先占） |
+| session 注入上限 | 4000 字符 |
+| 每 scope 最多条数 | 40 |
+| 检索候选窗 | 64 KB / scope（或 200 条）；超出只存不注，可用 `searchMemory` 显式查 |
+| 窗口自适应 | `min(常量, modelWindowTokens × 5%)`（必须真实现） |
+| 单条摘要长度 | 40 字符（无关键词命中时压缩；**不再"无命中就全量返回"**） |
+
+注入段渲染规则：按 `source=user/promoted` 优先 → 关键词得分降序 → `createdAt` 降序排序；得分 >0 给全文，=0 压 40 字摘要；**整条取舍、绝不从中间截断**；超预算尾注「（另有 N 条未注入，可在记忆页查看）」；跨层冲突规则**只在最末出现一次**（会话私有 > 工作区 > 全局；与当前对话冲突以对话为准）。
+
+#### N12.9 设置项（新增，需登记到 §3 映射表）
+
+| 键 | 默认 | 说明 |
+|---|---|---|
+| `memoryGlobalEnabled` | `true` | 关掉后宿主不读 global（也不注入），**数据保留** |
+| `memoryPooling` | `false` | 池化解析结果（默认关；开时必须 key=(scope,scopeId) 强校验） |
+
+#### N12.10 兼容与过渡态（如实）
+
+- `memory.append` 永久 `E_SCOPE_READONLY` 是**有意的过渡态**：旧记忆页在改造前新增/编辑会收到明确人话错误，这不是 bug；前端按设计稿 §4.4 改造后自然消失。
+- ★ **过渡期数据风险（必须在真机验收前消除）**：旧记忆页的"编辑/删除"仍走 `GlobalMemory.updateEntry/deleteEntry` = `clear` + 逐条 `append`；而 `append` 已永久只读 ⇒ 会**先清空 global 再回写失败 = 丢整份全局记忆**。因此 **App 侧 AgentBridge 必须先切到 `memory.userEdit`（task-8b）再装包做真机记忆验收**；在此之前，真机测试**禁止**在记忆页编辑/删除全局条目（只读展示/提议晋升可以）。
+- `memory.read`/`memory.clear` 行为保持（global）。
+- ⚠️ **技术原因（为什么旧记忆页在 wiring 落地前不许动）**：迁移后 `memory.read().text` 是 **JSONL + 墓碑行**；旧 `parseEntries`（只认 `- <ISO> — text` 行）会读出 0 条 ⇒ 旧 UI 显示空、而旧"编辑/删除"走 clear+append 会清空文件。Task-8b 在 AgentBridge 切 `memory.userEdit` 后此问题消失。
+- 旧数据：`memory.md` 迁移后保备份；读取代码对 JSON 行与 legacy 纯文本行都容忍。
+- 验收状态：Kotlin 通道与 backend 渲染落码中；**真机迁移/会话隔离/全局只读/提议晋升四项均未验证**，完成前不得对外宣称"已完成"。
+
+### N13 流式语音（方案 A）—— D2 已拍板 · 实现中（2026-10-29）
+
+> **决策**：用户 2026-10-29 拍板**方案 A**（新增流式识别模型 + 边说边出字），旧整段识别保留兼容与回退。
+> **现状（已核实）**：`VoiceRecorder.kt` 只写 PCM 文件、通道仅 `voice.start/stop/cancel`；`voice_asr.dart` 用 sherpa `OfflineRecognizer` + SenseVoiceSmall 整段识别；`sherpa_onnx 2.0.1` 自带 `OnlineRecognizer`（无需加依赖）；`VoiceModelController` 已有「下载 + 字节校验 + `.complete`」的模型管理。
+> **状态**：契约冻结；**落码中，真机未验证**（真机验收见 `.docs/实测-19-流式语音.md`，完成前标"未验证"）。
+
+#### N13.1 数据流与边界（谁负责什么）
+
+```
+[Kotlin] AudioRecord（16kHz/16bit/mono，~100ms 分片）
+   → EventChannel('heracles/voice')  {type:'chunk', sessionId, seq, pcm(Uint8List)}
+   → [Dart 主 isolate] 只做转发/节流/取消，不解码
+   → [Dart 独立 isolate] OnlineRecognizer：acceptWaveform → isReady → decode → getResult
+   → [Dart 主 isolate] 节流 200–300ms 发 VoicePartial{sessionId, text, isFinal}
+   → [UI 前端线] 展示累积草稿（本侧不写界面）
+```
+
+- **音频绝不上第三方云**；解码只在设备本机 isolate 内。
+- **主 isolate 不做解码/IO**；`OnlineRecognizer` 的绑定在 isolate 内初始化（与现有 `voice_asr.dart` 的 isolate 纪律一致）。
+- **60 秒上限与 `RECORD_AUDIO` 权限语义不变**（超时/无权限走现有路径）。
+
+#### N13.2 通道增量（只增不改）
+
+| 名称 | 方向 | 形状 | 说明 |
+|---|---|---|---|
+| `EventChannel('heracles/voice')` | Kotlin → Dart | `{type:"chunk", sessionId, seq:int, pcm:Uint8List, sampleRate:16000}` | 边录边发；`seq` 单调递增（从 0），Dart 据此丢弃乱序/重复片；`type:"end"` 表示录音正常结束 |
+| `voice.start/stop/cancel` | Dart → Kotlin | **不变**（旧三方法保留） | 旧包没有 `heracles/voice` 事件流 ⇒ Dart 检测不到流时**回退整段识别** |
+
+错误语义：`voice.start` 在无权限时仍返回既有 `{ok:false,...}`；EventChannel 建立失败/旧包 ⇒ 触发回退，**不报运行失败**。
+
+#### N13.3 `VoicePartial`（进程内事件，AgentBridge）
+
+```dart
+class VoicePartial {
+  final String sessionId;
+  final String text;      // ★ 累积整段草稿（不是增量片段）
+  final bool isFinal;     // true = 本轮识别定稿（静音断句/停止/结束时）
+  final int seq;          // 该会话内的序号（从 0 递增）
+  final int tsMs;
+}
+```
+
+- **节流**：同一 session 两次 `VoicePartial` 间隔 ≥200ms 且 ≤300ms（尾部必须尽快 flush）；`isFinal=true` 立即发、不节流。
+- 语义：`text` 只增不减（定稿后新一句从空白或续接由 VAD 决定）；**绝不每 100ms 重发整段录音**（那不是流式，是把旧结果刷新一遍）。
+- 取消：`voice.cancel` 后立即停发 partial；已发出的 partial 保留（UI 决定是否清除）。
+
+#### N13.4 模型与回退
+
+| 项 | 规则 |
+|---|---|
+| 流式模型 | streaming zipformer **中英双语 int8**（约 100–300MB），放 `VoiceModelController` 管理的独立子目录（`.../streaming/`），完成标记 `.complete`（与 SenseVoice 模型**互不覆盖**） |
+| 下载 | 复用 `VoiceModelController` 的下载 + 字节校验 + `.complete` 流程；**下载失败/未完成 ⇒ 回退整段识别**，并给用户如实提示（"流式不可用，用整段识别"） |
+| 加载失败 | 回退整段识别（不阻断语音输入） |
+| 旧包 | 无 `heracles/voice` 事件流 ⇒ 回退 |
+| 识别质量 | 流式结果与离线结果可能不一致（流式模型更小）；**不承诺逐字一致**，以"边说边出草稿、结束后以最终结果为准"为语义 |
+
+#### N13.5 验收（真机，未完成前标"未验证"）
+
+1) 边说边出字（partial 间隔 200–300ms，文本单调增长）；2) 静音 ~800ms 断句出 `isFinal`；3) 取消后不再收 partial；
+4) 60 秒上限仍生效；5) 无权限时降级正确；6) 流式模型未下载/加载失败 ⇒ 回退整段识别且提示如实；7) 模型下载复用 `.complete` 不被破坏。
 
 ## 5. 流式与渲染约定 —— ✅ 无异议
 
@@ -125,7 +383,7 @@
 ## 6. 兼容与变更规矩 —— ✅ 遵守
 
 - 新事件类型已登记（approval_required / context_updated / plan_updated；approval_request 与 plan_created 保留在 knownTypes 供旧读者，后端不再发送）；
-- 事件字段只增（callId/workspaceInside/breakdown/limit/limitSource/planStepsDetailed）；`.jsonl` 只增行类型与字段（tool_call/plan/compact 行 + tool 行的 id 字段）；
+- 事件字段只增（callId/workspaceInside/breakdown/limit/limitSource/planStepsDetailed）；`.jsonl` 只增行类型与字段（tool_call/plan/compact 行 + tool 行的 id 字段；**2026-10-29 新增**：step 行可带 prompt/cached/out（cached 为 null 不写键），新增 `role:"approval"` 与 `role:"ask"` 结果行，字段见 §N12.10 与 `接口.md` §7.2；旧值 `'allow'|'allow_always'` 仍接受但落盘统一 `once/always/deny`；**D6 已拍板**：tool 行只增 `surface`/`exitCode`/`command`（取不到就不写键，回放由前端接））；
 - 契约常量以 `contract.dart` 为唯一来源 ✅（同目录另有 `接口.md` 记录后端→前端的实现面，与本文互补：本文是**前端提出的契约**，`接口.md` 是**后端的实现清单**）。
 
 ## 7. 待确认 —— 已关账（前端 2026-10-25 全部接受）

@@ -105,6 +105,12 @@ class SettingsController extends ValueNotifier<AppSettings> {
   static const _kMaxTurns = 'maxTurns';
   static const _kProviders = 'providers';
 
+  /// **全局记忆开关**（2026-10-29，INTERFACE §N12.9；默认 true）。
+  static const _kMemoryGlobalEnabled = 'memoryGlobalEnabled';
+
+  /// **记忆解析池化**（2026-10-29，§N12.9；默认 false）。
+  static const _kMemoryPooling = 'memoryPooling';
+
   static late SharedPreferences _prefs;
 
   /// **API Key 的安全存储**（FR-11.7）—— 实例在 [load] 前即可用
@@ -256,6 +262,10 @@ class SettingsController extends ValueNotifier<AppSettings> {
       //   而用户看到的只是"怎么停不下来"。所以认不出的值必须**收窄**
       //   到合法档位，而不是原样透传。
       maxTurns: _maxTurnsOf(_prefs.getInt(_kMaxTurns)),
+      // 记忆两组开关（2026-10-29，INTERFACE §N12.9）。
+      // 未写过 ⇒ global 开（保住旧行为：换会话不失忆）、池化关（默认安全）。
+      memoryGlobalEnabled: _prefs.getBool(_kMemoryGlobalEnabled) ?? true,
+      memoryPooling: _prefs.getBool(_kMemoryPooling) ?? false,
       providers: providers,
       // 用户选定的后端 id（null = 没选过 → effectiveProvider 走自动顺序）。
       // 空串 = 曾选后清除 → 同样当 null 处理。
@@ -389,6 +399,20 @@ class SettingsController extends ValueNotifier<AppSettings> {
     final safe = _maxTurnsOf(v);
     return _apply(value.copyWith(maxTurns: safe), _kMaxTurns, safe);
   }
+
+  /// **全局记忆开关**（2026-10-29，INTERFACE §N12.9）。
+  ///
+  /// 关掉 ⇒ 宿主本轮不读 global（也不注入），**数据保留**（Kotlin 侧不受影响：
+  /// 存储与注入解耦）。默认 `true` = 与旧行为一致。
+  Future<void> setMemoryGlobalEnabled(bool v) =>
+      _apply(value.copyWith(memoryGlobalEnabled: v), _kMemoryGlobalEnabled, v);
+
+  /// **记忆解析池化开关**（2026-10-29，§N12.9；默认 `false`）。
+  ///
+  /// ⚠️ 如实：P1-①c-2 只落设置项与持久化，池化本体（按 `(scope,scopeId)`
+  /// 缓存 + 每次校验）尚未接线 —— **开启当前不改变行为**，不会串台。
+  Future<void> setMemoryPooling(bool v) =>
+      _apply(value.copyWith(memoryPooling: v), _kMemoryPooling, v);
 
   /// 更新某个提供商的配置（填 Key、改模型名等）
   Future<void> updateProvider(ModelProviderConfig p) async {

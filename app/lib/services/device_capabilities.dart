@@ -5,7 +5,7 @@ import 'dart:io';
 import 'package:flutter/services.dart';
 import 'package:heracles_backend/heracles_backend.dart';
 
-import 'global_memory.dart';
+import 'memory_service.dart';
 // 内置 git 的实现（2026-10-28）：`buildDeviceCapabilities` 要注入它。
 import 'git_service.dart';
 import 'sandbox_service.dart';
@@ -2284,74 +2284,108 @@ class _FetchedPage {
 }
 
 // ============================================================================
-// 6. 长期记忆
+// 6. 长期记忆（三作用域，2026-10-29）
 // ============================================================================
 
-/// **记忆能力 → App 全局 `memory.md`**（2026-10-23 从"工作区"搬到"App"）。
+/// **记忆能力 → 三作用域记忆（session / workspace / global 只读）**。
 ///
-/// ## 为什么改了存储位置（用户报的两个缺陷）
+/// 由旧的 `FileMemoryCapability`（单文件全局 + 256KB 写闸）改造而来。
 ///
-/// 原来写 `<工作区>/.heracles/memory.md`，带来两个**功能性**问题：
+/// ## 与旧实现的关键差异（对照 `docs/INTERFACE.md` §N12）
 ///
-/// | 缺陷 | 后果 |
-/// |---|---|
-/// | 存工作区里 | 换个工作区 ⇒ 记忆全没了 |
-/// | 只写不读 | `renderMemory()` 全仓 0 处调用 ⇒ 记了也用不上，换会话必失忆 |
+/// | 维度 | 旧 | 新 |
+/// |---|---|---|
+/// | 作用域 | 只有一份 App 全局 | session / workspace / global 三层 |
+/// | 写谁 | agent 直写全局（一次误写污染所有会话） | agent 写 session（默认）/workspace；**global 只读**，只能 [proposeGlobal] |
+/// | 存储 | `<externalFilesDir>/heracles/memory.md` | `<工作区>/.heracles/memory/*.jsonl` + Kotlin 的 global.jsonl |
+/// | 上限 | 256 KB 硬写闸（到顶拒写） | 按作用域的**软预算**（超限淘汰，不拒写） |
+/// | 寻址 | 无 | 构造时绑定 `(workspacePath, sessionId)`，服务层 8 步强校验 |
 ///
-/// 现在统一走 [GlobalMemory]（`<getExternalFilesDir>/heracles/memory.md`）：
-/// **与工作区无关、跨会话共享**，也正是用户在设置页能看到的同一份数据
-/// （一份真相，不是两处各存一份）。
+/// ## 为什么必需 `extends`（不能 `implements`）
 ///
-/// ## 为什么构造参数还留着 `workspaceRoot`
+/// [MemoryCapability] 新增的四个方法（`defaultWriteScope`/`appendScoped`/
+/// `readScope`/`proposeGlobal`）都带默认实现；Dart 里只有 `extends` 能继承
+/// 它们 —— `implements` 必须把每个成员都手写一遍。
 ///
-/// **不用了，但保留**（标了 `@Deprecated` 意图）。理由：
+/// ## 没有会话 id 时
 ///
-/// - 调用点（`buildDeviceCapabilities`）一直在传它；
-/// - 位置决策从"每个工作区一份"变成"App 一份"之后，`workspaceRoot`
-///   对记忆已无意义 —— 但**删参数会让所有调用点编译失败**，
-///   而记忆不是本轮唯一在动的地方（并行改动的文件多），少一个回归面更划算。
-///
-/// 传什么都不会影响行为。**新代码请用无参构造**。
-///
-/// ## 256 KB 上限在哪挡
-///
-/// 在 **Kotlin**（`MemoryStore.MAX_BYTES`，它是唯一写入口）——
-/// 那才是不可绕过的地方。这里只负责把 Kotlin 的 `error` 原文透传：
-/// 那句话已含"当前多大 / 加完多大 / 上限多少 / 该怎么办"，
-/// 在这里重写一遍只会丢信息。
-class FileMemoryCapability implements MemoryCapability {
-  /// [workspaceRoot] **已不参与记忆路径**（保留仅为兼容旧调用点，见类注释）。
-  FileMemoryCapability({
-    @Deprecated('记忆已改为 App 全局，workspaceRoot 不再影响存储位置')
-    String? workspaceRoot,
-    GlobalMemory? memory,
-    DeviceChannelClient? channel,
-  }) : _memory = memory ?? GlobalMemory(channel: channel);
+/// `sessionId == null` ⇒ `appendScoped(session)` 会**明确失败**（fail-closed），
+/// 而不是偷偷写进全局/工作区。save_memory 的 `scope=workspace` 仍可用；
+/// `read()` 会退到 workspace（读不到就空串）。
+class ScopedMemoryCapability extends MemoryCapability {
+  ScopedMemoryCapability({
+    required this.workspacePath,
+    required this.service,
+    this.sessionId,
+  });
 
-  final GlobalMemory _memory;
+  /// 本能力绑定的工作区（绝对路径；记忆文件在它下面的 `.heracles/memory/`）。
+  final String workspacePath;
 
-  /// 记忆客户端（设置页用的是同一个实现，只是一次性构造）。
-  GlobalMemory get client => _memory;
+  /// 三作用域记忆服务（App 侧单一实现：寻址校验 / 墓碑 / 淘汰 / 写队列）。
+  final ScopedMemoryService service;
 
-  /// 记忆文件的概念位置（**由 Kotlin 决定**，这里给排障用）。
-  ///
-  /// ⚠️ 这是**展示用**的示意路径，Dart 侧拿不到 `getExternalFilesDir` 的
-  /// 真实值。要精确路径请看 `memory.read` 的返回或 logcat。
-  String get memoryPath => '<externalFilesDir>/heracles/memory.md';
+  /// 当前会话 id（`s<毫秒>`）；`null` = 不在会话上下文里。
+  final String? sessionId;
 
-  /// 读记忆。
-  ///
-  /// ⚠️ 接口签名是 `Future<String>`（**没有失败通道**）—— 读不到只能返回空串，
-  /// 而"空串"与"读失败"在调用方看起来一样。想在界面上区分就用 [readResult]。
-  /// 这是 [MemoryCapability.read] 的签名缺陷，本轮不改（已报告）。
+  /// 模型写记忆的默认作用域 = **会话私有**（契约默认值，影响最小）。
   @override
-  Future<String> read() => _memory.read();
+  MemoryScope get defaultWriteScope => MemoryScope.session;
 
-  /// 带失败信息的读（设置页 / 排障用）。
-  Future<MemoryReadResult> readResult() => _memory.readResult();
+  /// 按作用域组装寻址（session 才带 sid；global 两者都不带）。
+  MemoryAddress _addressOf(MemoryScope scope, {String? sessionId}) =>
+      MemoryAddress(
+        scope: scope,
+        sessionId: scope == MemoryScope.session ? (sessionId ?? this.sessionId) : null,
+        workspacePath: scope == MemoryScope.global ? null : workspacePath,
+      );
+
+  /// 作用域中文名（结果文案用）。
+  static String _scopeLabel(MemoryScope scope) => switch (scope) {
+        MemoryScope.session => '本会话私有',
+        MemoryScope.workspace => '本工作区共享',
+        MemoryScope.global => '全局',
+      };
+
+  /// 概念路径（排障用；路径规则唯一来源是 [ScopedMemoryService]）。
+  String get memoryPath {
+    final sid = sessionId;
+    if (sid != null) {
+      return ScopedMemoryService.sessionMemoryFile(workspacePath, sid);
+    }
+    return ScopedMemoryService.workspaceMemoryFile(workspacePath);
+  }
+
+  /// 读某作用域原文（多条用 `\n` 连接；读失败返回空串 —— 接口没有失败通道）。
+  @override
+  Future<String> readScope(MemoryScope scope, {String? sessionId}) async {
+    try {
+      final r = await service.read(_addressOf(scope, sessionId: sessionId));
+      return r.entries.map((e) => e.text).join('\n');
+    } on MemoryServiceError {
+      return '';
+    } catch (_) {
+      return '';
+    }
+  }
+
+  /// 老接口：读默认作用域（没会话 id 时退到 workspace）。
+  @override
+  Future<String> read() => readScope(
+        sessionId == null ? MemoryScope.workspace : defaultWriteScope,
+      );
+
+  /// 老接口：追加到默认作用域（= [appendScoped]）。
+  @override
+  Future<CapabilityResult> append(String note) =>
+      appendScoped(defaultWriteScope, note);
 
   @override
-  Future<CapabilityResult> append(String note) async {
+  Future<CapabilityResult> appendScoped(
+    MemoryScope scope,
+    String note, {
+    String kind = 'other',
+  }) async {
     final n = note.trim();
     if (n.isEmpty) {
       return const CapabilityFailure(
@@ -2359,32 +2393,81 @@ class FileMemoryCapability implements MemoryCapability {
         isRetryable: true,
       );
     }
-
-    final r = await _memory.appendResult(n);
-    if (!r.ok) {
-      // ★ Kotlin 写的人话**原样透传**（含"当前多大 / 上限多少 / 怎么办"）。
-      //   超限属"这条路暂时走不通"而非"参数错"⇒ isRetryable: false，
-      //   否则模型会换个说法反复重试同一件注定失败的事。
-      return CapabilityFailure(
-        r.error ?? '写入长期记忆失败（原因未知）',
+    // 不变量 I4：全局对 agent 只读（能力层再挡一次，纵深防御）。
+    if (scope == MemoryScope.global) {
+      return const CapabilityFailure(
+        '全局记忆只读：模型不能直接写入。若要建议用户长期记住（跨工作区），'
+        '请调用 propose_global_memory（进入待用户确认的候选列表）。',
         isRetryable: false,
       );
     }
-
-    final bytes = r.bytes ?? 0;
-    return CapabilitySuccess(
-      '已记入长期记忆（App 全局，现在 ${_formatSize(bytes)}）。'
-      '这条记忆**跨会话、跨工作区**都有效。',
-      metadata: <String, dynamic>{
-        'bytes': bytes,
-        'addedChars': n.length,
-        'limitBytes': GlobalMemory.maxBytes,
-      },
-    );
+    if (scope == MemoryScope.session && sessionId == null) {
+      return const CapabilityFailure(
+        '当前上下文没有会话 id，无法写会话私有记忆。'
+        '可改用 scope=workspace（本工作区所有会话共享），或先进入一个会话。',
+        isRetryable: false,
+      );
+    }
+    try {
+      final out = await service.append(_addressOf(scope), n, kind: kind);
+      final evicted = out.evicted.length;
+      return CapabilitySuccess(
+        '已记入${_scopeLabel(scope)}记忆（现在 ${out.entries} 条 / ${out.bytes} 字节）。'
+        '${scope == MemoryScope.session ? "只在当前会话可见。" : "本工作区所有会话共享。"}'
+        '${evicted > 0 ? "（为腾出空间淘汰了 $evicted 条旧记忆）" : ""}',
+        metadata: <String, dynamic>{
+          'scope': scope.wireName,
+          'bytes': out.bytes,
+          'entries': out.entries,
+          if (evicted > 0) 'evicted': out.evicted,
+        },
+      );
+    } on MemoryServiceError catch (e) {
+      // 超长/空/密钥/寻址失败都属"这条路不通"，别让模型换说法重试
+      // （entryTooLong 明确不可重试；其余给可重试以便模型改内容）。
+      return CapabilityFailure(
+        e.message,
+        isRetryable: e.code != MemoryErrorCode.entryTooLong &&
+            e.code != MemoryErrorCode.secretRejected,
+      );
+    } catch (e) {
+      return CapabilityFailure('写入长期记忆失败：$e', isRetryable: true);
+    }
   }
 
-  /// 清空全部记忆（**设置页用**，不在 backend 的 `MemoryCapability` 里）。
-  Future<bool> clear() => _memory.clear();
+  /// **提议**一条全局记忆（agent 写 global 的唯一通道）。
+  @override
+  Future<CapabilityResult> proposeGlobal(
+    String note, {
+    String kind = 'other',
+  }) async {
+    final n = note.trim();
+    if (n.isEmpty) {
+      return const CapabilityFailure('要提议的内容是空的。', isRetryable: true);
+    }
+    try {
+      final out = await service.proposeGlobal(n, kind: kind);
+      return CapabilitySuccess(
+        '已记录为候选（${out.id ?? "待确认"}），'
+        '等待用户在记忆页确认后才会成为全局记忆。',
+        metadata: <String, dynamic>{'id': out.id, 'scope': 'global'},
+      );
+    } on MemoryServiceError catch (e) {
+      return CapabilityFailure(e.message, isRetryable: true);
+    } catch (e) {
+      return CapabilityFailure('提议全局记忆失败：$e', isRetryable: true);
+    }
+  }
+
+  /// 清空某作用域的用户动作（设置页用；不在 backend 的 `MemoryCapability` 里）。
+  Future<CapabilityResult> clearScope(MemoryScope scope) async {
+    try {
+      final out = await service.userClear(_addressOf(scope));
+      return CapabilitySuccess('已清空（现在 ${out.entries} 条）。');
+    } on MemoryServiceError catch (e) {
+      return CapabilityFailure(e.message, isRetryable: false);
+    }
+  }
 }
 
 // ============================================================================
@@ -2429,6 +2512,14 @@ Capabilities buildDeviceCapabilities({
   /// 真机上由 `local_agent` 显式传 `true`。
   bool includeSandbox = false,
   SandboxService? sandboxService,
+  /// **当前会话 id**（2026-10-29）：会话私有记忆的寻址锚点。
+  ///
+  /// `null` ⇒ 记忆能力只能读/写 workspace 作用域（`save_memory` 默认的
+  /// session 会**明确失败**，而不是偷偷落到全局/工作区）。
+  /// 跑 agent 时由 `LocalAgentExecutor` 传入已解析的 sid。
+  String? memorySessionId,
+  /// 三作用域记忆服务（测试可注入假实现；默认按通道构造）。
+  ScopedMemoryService? memoryService,
 }) {
   final ch = channel ?? const DeviceChannelClient();
   return Capabilities(
@@ -2438,8 +2529,13 @@ Capabilities buildDeviceCapabilities({
         includeHealth ? ChannelHealthCapability(channel: ch) : null,
     apk: includeApk ? const DeviceApkCapability() : null,
     web: includeWeb ? const DeviceWebCapability() : null,
-    memory:
-        includeMemory ? FileMemoryCapability(channel: ch) : null,
+    memory: includeMemory
+        ? ScopedMemoryCapability(
+            workspacePath: workspaceRoot,
+            service: memoryService ?? ScopedMemoryService(channel: ch),
+            sessionId: memorySessionId,
+          )
+        : null,
     // ★ 内置 git（2026-10-28 补接线）。
     //
     // ## 为什么这一行曾经漏掉、后果是什么
