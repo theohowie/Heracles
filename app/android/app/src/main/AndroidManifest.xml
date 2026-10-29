@@ -56,6 +56,8 @@
          自动化用）/ 媒体（图片与视频附件）/ 安装未知应用（装构建出的
          APK 时在安装流程里申请，本声明先行登记） -->
     <uses-permission android:name="android.permission.CAMERA" />
+    <!-- 语音识别（2026-10-29）：录音转文字，权限页「麦克风」行申请 -->
+    <uses-permission android:name="android.permission.RECORD_AUDIO" />
     <uses-permission android:name="android.permission.READ_CALENDAR" />
     <uses-permission android:name="android.permission.WRITE_CALENDAR" />
     <uses-permission android:name="android.permission.READ_MEDIA_IMAGES" />
@@ -199,6 +201,13 @@
         <intent>
             <action android:name="android.intent.action.PROCESS_TEXT"/>
             <data android:mimeType="text/plain"/>
+        </intent>
+        <!-- ★ 拍照（2026-10-29）：CameraBridge 的显式组件兜底要靠
+             queryIntentActivities 枚举系统相机 —— Android 11+ 包
+             可见性下不声明就枚举不到（隐式启动在部分 ROM 上也会
+             直接失败，这是真机报「没有可用的相机应用」的嫌疑之一）。 -->
+        <intent>
+            <action android:name="android.media.action.IMAGE_CAPTURE"/>
         </intent>
     </queries>
 </manifest>

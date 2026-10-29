@@ -5,6 +5,7 @@ import 'package:flutter/material.dart';
 
 import '../models/jev.dart';
 import '../services/jev_service.dart';
+import '../services/voice_input.dart';
 import '../services/settings_controller.dart';
 import '../theme/app_theme.dart';
 import '../theme/cupertino_kit.dart';
@@ -386,38 +387,67 @@ class _DecisionPanelState extends State<DecisionPanel> {
                               ),
                             ),
                             const Spacer(),
-                            // 麦克风占位：与工作模式同规格（38 圆钮、
-                            // 同填充），在发送键左侧；语音识别未接入，
-                            // 点按给如实提示。
-                            Pressable(
-                              borderRadius: BorderRadius.circular(999),
-                              child: SizedBox(
-                                width: 38,
-                                height: 38,
-                                child: Material(
-                                  color: h.dark
-                                      ? const Color(0xFF2C2C2E)
-                                      : h.surfaceAlt,
-                                  shape: const CircleBorder(
-                                    side: BorderSide(
-                                      color: Colors.transparent,
+                            // 麦克风：与工作模式同规格（38 圆钮、
+                            // 同填充），在发送键左侧；行为与工作模式
+                            // 共用 VoiceInputController（点录/再点停
+                            // 并识别填字，录音中变红停止键）。
+                            AnimatedBuilder(
+                              animation: VoiceInputController.shared(),
+                              builder: (context, _) {
+                                final voice =
+                                    VoiceInputController.shared();
+                                final recording = voice.recording;
+                                final recognizing = voice.busy;
+                                return Pressable(
+                                  borderRadius: BorderRadius.circular(999),
+                                  enabled: !recognizing,
+                                  child: SizedBox(
+                                    width: 38,
+                                    height: 38,
+                                    child: Material(
+                                      color: recording
+                                          ? const Color(0xFFFF3B30)
+                                          : (h.dark
+                                              ? const Color(0xFF2C2C2E)
+                                              : h.surfaceAlt),
+                                      shape: const CircleBorder(
+                                        side: BorderSide(
+                                          color: Colors.transparent,
+                                        ),
+                                      ),
+                                      child: InkWell(
+                                        onTap: recognizing
+                                            ? null
+                                            : () => voice.onMicTap(
+                                                  target:
+                                                      widget.inputController,
+                                                  toast: (m) =>
+                                                      showIosToast(
+                                                    context,
+                                                    m,
+                                                    icon: AppIcons.mic,
+                                                  ),
+                                                ),
+                                        customBorder: const CircleBorder(),
+                                        child: recognizing
+                                            ? CupertinoActivityIndicator(
+                                                radius: 9,
+                                                color: h.textDim,
+                                              )
+                                            : Icon(
+                                                recording
+                                                    ? AppIcons.stop
+                                                    : AppIcons.mic,
+                                                size: 19,
+                                                color: recording
+                                                    ? Colors.white
+                                                    : h.textDim,
+                                              ),
+                                      ),
                                     ),
                                   ),
-                                  child: InkWell(
-                                    onTap: () => showIosToast(
-                                      context,
-                                      '语音识别还没接入，这个按钮先占位',
-                                      icon: AppIcons.mic,
-                                    ),
-                                    customBorder: const CircleBorder(),
-                                    child: Icon(
-                                      AppIcons.mic,
-                                      size: 19,
-                                      color: h.textDim,
-                                    ),
-                                  ),
-                                ),
-                              ),
+                                );
+                              },
                             ),
                             const SizedBox(width: 8),
                             // ★ 发送键与工作模式 _SendButton 逐项同规格

@@ -1,0 +1,345 @@
+package com.theohowie.heracles.bridge
+
+import android.app.Activity
+import android.content.ComponentName
+import android.content.ContentValues
+import android.content.Intent
+import android.content.pm.PackageManager
+import android.graphics.Bitmap
+import android.net.Uri
+import android.os.Build
+import android.provider.MediaStore
+import android.provider.OpenableColumns
+import java.io.File
+import java.io.FileOutputStream
+
+/**
+ * 系统相机拍照 —— **零第三方依赖**，与 [FilePickerBridge] 同一套
+ * 经典 startActivityForResult 模式（见那边的说明：androidx.activity
+ * 不在编译期 classpath 上）。
+ *
+ * ## 为什么不用 FileProvider
+ *
+ * 给相机 intent 传 EXTRA_OUTPUT 需要一个相机 App 能写的 URI。
+ * FileProvider 要 androidx.core 在编译期可见，没把握；改走
+ * **MediaStore 插入**：先向系统相册申请一个空的图片条目拿到
+ * content:// URI，相机直接写进去 —— 不需要 FileProvider
+ * （API 29+ 分区存储下 insert 自己的条目免存储权限；低版本
+ * 用 DATA 指向 App 私有外部目录，同样免权限）。注意相机
+ * **权限**是另一回事：个别 ROM 的相机入口要求调用方持有
+ * CAMERA 权限，见文末第二轮真机结论。拍完把内容复制进
+ * cache/attachments，
+ * 回与 [FilePickerBridge] 同形状的 {path, name, size}，
+ * 前端当普通图片附件走既有管线。
+ *
+ * 用户取消时把预留的空条目删掉，不在相册里留空壳。
+ *
+ * ## 拉起相机的多级兜底（2026-10-29 真机实报后补）
+ *
+ * 第一版只发一条隐式 ACTION_IMAGE_CAPTURE＋EXTRA_OUTPUT，在
+ * Redmi K60（HyperOS）上 startActivityForResult 直接抛异常，
+ * 界面报「没有可用的相机应用」—— 但机器明明有相机。抛的到底
+ * 是什么异常，第一版 catch 后全压成一句话，无从判断（疑似
+ * EXTRA_OUTPUT 的 URI 授权标志与该 ROM 的校验不合）。
+ * 现在按成功率从高到低逐级试，每级失败都留痕：
+ *
+ * 1. 隐式 intent ＋ EXTRA_OUTPUT ＋ 读写授权标志
+ * 2. 隐式 intent ＋ EXTRA_OUTPUT（去掉授权标志）
+ * 3. 显式 intent（按 queryIntentActivities 枚举到的相机组件）
+ *    ＋ EXTRA_OUTPUT ＋ 授权标志 —— 需要 Manifest 里
+ *    `<queries>` 声明 IMAGE_CAPTURE，包可见性才放行枚举
+ * 4. 裸 intent（无 EXTRA_OUTPUT，结果走 data 里的缩略图 ——
+ *    分辨率低，但至少能拍到）
+ * 5. 显式组件 ＋ 裸 intent
+ *
+ * 全部失败时错误信息带上最后一次异常的类名与消息，
+ * 不再把所有失败都说成「没有相机应用」。
+ *
+ * **第二轮真机结论（2026-10-29 09:48）**：兜底链跑通后错误
+ * 摘要实锤了根因 —— SecurityException: Permission Denial …
+ * with revoked permission android.permission.CAMERA。这个 ROM
+ * 的相机入口要求调用方持有 CAMERA 权限，「委托系统相机就不用
+ * 本 App 授权」的假设在这台机器上不成立。正解在 Dart 侧：
+ * 点拍照前先查 devicePermissions，未授权先 requestPermission
+ * 拉起系统申请（权限页的相机行是同一条链）。本类只负责把
+ * 漏网的权限型失败翻成人话。
+ */
+class CameraBridge(private val activity: Activity) {
+
+    private var pendingResult: ((Map<String, Any?>?) -> Unit)? = null
+    private var pendingError: ((String) -> Unit)? = null
+    private var pendingUri: Uri? = null
+    private var pendingName: String? = null
+
+    /** 当前这次拍照是否走缩略图模式（无 EXTRA_OUTPUT）。 */
+    private var pendingThumbnail = false
+
+    /** 逐级兜底时最后一次启动异常的摘要，进最终错误信息。 */
+    private var lastStartError: String? = null
+
+    companion object {
+        const val REQUEST_CODE = 0x4843  // 'HC'
+    }
+
+    /** 拉起系统相机。全部路径都失败时走 onError（带异常摘要）。 */
+    fun launch(
+        onResult: (Map<String, Any?>?) -> Unit,
+        onError: (String) -> Unit,
+    ) {
+        pendingResult = onResult
+        pendingError = onError
+        lastStartError = null
+
+        val name = "IMG_${System.currentTimeMillis()}.jpg"
+        val uri = insertPendingImage(name)
+
+        if (uri != null) {
+            // 1/2 级：隐式 intent 带 EXTRA_OUTPUT
+            if (tryStart(captureIntent(uri, withGrant = true)) ||
+                tryStart(captureIntent(uri, withGrant = false))
+            ) {
+                pendingUri = uri
+                pendingName = name
+                pendingThumbnail = false
+                return
+            }
+            // 3 级：显式组件带 EXTRA_OUTPUT
+            for (component in captureComponents()) {
+                val intent = captureIntent(uri, withGrant = true)
+                    .setComponent(component)
+                if (tryStart(intent)) {
+                    pendingUri = uri
+                    pendingName = name
+                    pendingThumbnail = false
+                    return
+                }
+            }
+            // 带输出的路径全灭 —— 预留条目删掉，别在相册留空壳
+            runCatching {
+                activity.contentResolver.delete(uri, null, null)
+            }
+        }
+
+        // 4 级：裸 intent 走缩略图
+        if (tryStart(Intent(MediaStore.ACTION_IMAGE_CAPTURE))) {
+            pendingThumbnail = true
+            return
+        }
+        // 5 级：显式组件裸 intent
+        for (component in captureComponents()) {
+            val intent = Intent(MediaStore.ACTION_IMAGE_CAPTURE)
+                .setComponent(component)
+            if (tryStart(intent)) {
+                pendingThumbnail = true
+                return
+            }
+        }
+
+        clearPending()
+        // 权限型失败单独说人话（2026-10-29 第二轮真机实证）：
+        // HyperOS 的相机入口（com.android.camera/.OneShotImage
+        // Capture）要求调用方持有 CAMERA 权限，没授权时每一级
+        // 都抛 SecurityException…revoked permission CAMERA。
+        // Dart 侧点拍照前已先走申请链，这里是兜底口径。
+        val err = lastStartError
+        if (err != null &&
+            err.contains("SecurityException") &&
+            err.contains("CAMERA")
+        ) {
+            onError("相机权限未开启：请允许相机权限后再点一次拍照")
+        } else {
+            onError(
+                "无法打开相机" +
+                    (err?.let { "（$it）" } ?: ""),
+            )
+        }
+    }
+
+    /** 用户取消拍照 —— 删掉预留空条目并回 null（不是错误）。 */
+    fun onCancelled() {
+        deletePending()
+        val r = pendingResult
+        clearPending()
+        r?.invoke(null)
+    }
+
+    /** 相机带结果返回时调这里；[data] 供缩略图模式取图。 */
+    fun onActivityResult(data: Intent?) {
+        val result = pendingResult
+        val error = pendingError
+        val uri = pendingUri
+        val name = pendingName
+        val thumbnail = pendingThumbnail
+        clearPending()
+
+        if (result == null) return
+
+        if (thumbnail) {
+            // 裸 intent 的图在返回 intent 的 "data" extra 里（Bitmap）
+            val bmp = runCatching {
+                @Suppress("DEPRECATION")
+                data?.extras?.get("data") as? Bitmap
+            }.getOrNull()
+            if (bmp == null) {
+                error?.invoke("相机没有返回照片")
+                return
+            }
+            val saved = saveThumbnail(bmp, name)
+            if (saved == null) {
+                error?.invoke("拍到的照片保存失败")
+            } else {
+                result(saved)
+            }
+            return
+        }
+
+        if (uri == null) {
+            result(null)
+            return
+        }
+        try {
+            val copied = copyToCache(uri, name)
+            if (copied == null) {
+                // 相机声称成功却读不到内容 —— 当失败报，不假装拍到了
+                activity.contentResolver.delete(uri, null, null)
+                error?.invoke("拍到的照片读取失败")
+                return
+            }
+            result(copied)
+        } catch (e: Throwable) {
+            error?.invoke(e.message ?: e.javaClass.simpleName)
+        }
+    }
+
+    /** 组一条带 EXTRA_OUTPUT 的拍照 intent。 */
+    private fun captureIntent(uri: Uri, withGrant: Boolean): Intent =
+        Intent(MediaStore.ACTION_IMAGE_CAPTURE).apply {
+            putExtra(MediaStore.EXTRA_OUTPUT, uri)
+            if (withGrant) {
+                addFlags(
+                    Intent.FLAG_GRANT_WRITE_URI_PERMISSION or
+                        Intent.FLAG_GRANT_READ_URI_PERMISSION,
+                )
+            }
+        }
+
+    /** 试着拉起一个拍照 intent；失败记摘要、回 false 让上层换下一级。 */
+    private fun tryStart(intent: Intent): Boolean = try {
+        activity.startActivityForResult(intent, REQUEST_CODE)
+        true
+    } catch (e: Throwable) {
+        lastStartError = "${e.javaClass.simpleName}: ${e.message ?: ""}"
+            .trimEnd(':', ' ')
+        false
+    }
+
+    /**
+     * 枚举能处理拍照的组件（显式启动用）。靠 Manifest 的
+     * `<queries>` 声明放行包可见性；枚举不到就返回空表，
+     * 显式那两级自动跳过。
+     */
+    private fun captureComponents(): List<ComponentName> = runCatching {
+        val probe = Intent(MediaStore.ACTION_IMAGE_CAPTURE)
+        @Suppress("DEPRECATION")
+        activity.packageManager
+            .queryIntentActivities(probe, PackageManager.MATCH_ALL)
+            .map { ComponentName(it.activityInfo.packageName, it.activityInfo.name) }
+    }.getOrDefault(emptyList())
+
+    /** 缩略图模式：把 Bitmap 存成 JPEG 进 cache/attachments。 */
+    private fun saveThumbnail(
+        bmp: Bitmap,
+        fallbackName: String?,
+    ): Map<String, Any?>? = runCatching {
+        val name = fallbackName ?: "photo_${System.currentTimeMillis()}.jpg"
+        val dir = File(activity.cacheDir, "attachments").apply { mkdirs() }
+        val target = File(dir, "${System.currentTimeMillis()}_$name")
+        FileOutputStream(target).use { out ->
+            bmp.compress(Bitmap.CompressFormat.JPEG, 92, out)
+        }
+        if (target.length() <= 0L) return null
+        mapOf(
+            "path" to target.absolutePath,
+            "name" to name,
+            "size" to target.length(),
+        )
+    }.getOrNull()
+
+    private fun clearPending() {
+        pendingResult = null
+        pendingError = null
+        pendingUri = null
+        pendingName = null
+        pendingThumbnail = false
+    }
+
+    private fun deletePending() {
+        val uri = pendingUri ?: return
+        runCatching { activity.contentResolver.delete(uri, null, null) }
+    }
+
+    /**
+     * 向 MediaStore 申请一个待写入的图片条目。
+     * API 29+：RELATIVE_PATH 到 Pictures/Heracles，免权限；
+     * 更低版本：DATA 指向 App 私有外部目录文件，同样免权限。
+     */
+    private fun insertPendingImage(name: String): Uri? = runCatching {
+        val values = ContentValues().apply {
+            put(MediaStore.Images.Media.DISPLAY_NAME, name)
+            put(MediaStore.Images.Media.MIME_TYPE, "image/jpeg")
+            if (Build.VERSION.SDK_INT >= 29) {
+                put(
+                    MediaStore.Images.Media.RELATIVE_PATH,
+                    "Pictures/Heracles",
+                )
+                put(MediaStore.Images.Media.IS_PENDING, 1)
+            } else {
+                val dir = File(
+                    activity.getExternalFilesDir("Pictures"), "Heracles",
+                ).apply { mkdirs() }
+                @Suppress("DEPRECATION")
+                put(MediaStore.Images.Media.DATA, File(dir, name).absolutePath)
+            }
+        }
+        activity.contentResolver.insert(
+            MediaStore.Images.Media.EXTERNAL_CONTENT_URI, values,
+        )
+    }.getOrNull()
+
+    /** 拍完把 MediaStore 里的内容复制进 cache/attachments（同 FilePickerBridge 口径） */
+    private fun copyToCache(uri: Uri, fallbackName: String?): Map<String, Any?>? =
+        runCatching {
+            val resolver = activity.contentResolver
+
+            // 解除 pending，照片正式进相册
+            if (Build.VERSION.SDK_INT >= 29) {
+                val done = ContentValues().apply {
+                    put(MediaStore.Images.Media.IS_PENDING, 0)
+                }
+                runCatching { resolver.update(uri, done, null, null) }
+            }
+
+            val name = queryDisplayName(uri) ?: fallbackName
+                ?: "photo_${System.currentTimeMillis()}.jpg"
+            val dir = File(activity.cacheDir, "attachments").apply { mkdirs() }
+            val target = File(dir, "${System.currentTimeMillis()}_$name")
+
+            resolver.openInputStream(uri)?.use { input ->
+                target.outputStream().use { output -> input.copyTo(output) }
+            } ?: return null
+            if (target.length() <= 0L) return null
+
+            mapOf(
+                "path" to target.absolutePath,
+                "name" to name,
+                "size" to target.length(),
+            )
+        }.getOrNull()
+
+    private fun queryDisplayName(uri: Uri): String? = runCatching {
+        activity.contentResolver.query(uri, null, null, null, null)?.use { c ->
+            val idx = c.getColumnIndex(OpenableColumns.DISPLAY_NAME)
+            if (idx >= 0 && c.moveToFirst()) c.getString(idx) else null
+        }
+    }.getOrNull()
+}

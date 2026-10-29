@@ -11,7 +11,8 @@ import 'bw_approval.dart';
 /// 结构（自上而下）：
 /// - 抓手
 /// - 标题行「模型」+ 右上 × 关闭；副标题「切换后对新消息生效」
-/// - 模型单选行：单选圆圈 + 名称（主）+ 说明（副），行间细分隔线；
+/// - 模型行 = 全 App 统一的边框选项卡（BwOptionCard，2026-10-29
+///   用户以审批模式图一为范式定版）：名称（主）+ 说明（副）；
 ///   当前项带「当前」徽标、端侧项带「端侧」徽标，配了模型目录的
 ///   带 ›（点进去选具体模型，沿用 2026-10-14 用户要求的两层结构）
 /// - 分组「思考等级」+ 分段条（五档）；协议不区分档位时（后端 rLv
@@ -114,10 +115,10 @@ Future<void> showModelSheet(
               ),
               const SizedBox(height: 6),
               for (var i = 0; i < visible.length; i++) ...[
-                if (i > 0)
-                  Divider(height: 1, indent: 36, color: h.border),
-                _ModelRadioRow(
+                if (i > 0) const SizedBox(height: 8),
+                BwOptionCard(
                   h: h,
+                  selected: visible[i].id == activeProviderId,
                   title: visible[i].model.isNotEmpty
                       ? visible[i].model
                       : visible[i].name,
@@ -127,9 +128,20 @@ Future<void> showModelSheet(
                       '模型目录 · ${visible[i].modelCatalog.length} 个',
                     if (AppSettings.isLocalConfig(visible[i])) '端侧运行',
                   ].join(' · '),
-                  hasCatalog: visible[i].modelCatalog.isNotEmpty,
-                  active: visible[i].id == activeProviderId,
-                  isLocal: AppSettings.isLocalConfig(visible[i]),
+                  trailing: Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      if (visible[i].id == activeProviderId)
+                        _Badge(h: h, label: '当前')
+                      else if (AppSettings.isLocalConfig(visible[i]))
+                        _Badge(h: h, label: '端侧'),
+                      if (visible[i].modelCatalog.isNotEmpty) ...[
+                        const SizedBox(width: 6),
+                        Icon(AppIcons.chevronRight,
+                            size: 17, color: h.textFaint),
+                      ],
+                    ],
+                  ),
                   onTap: () {
                     Navigator.of(sheetCtx).pop();
                     // 配了模型目录 → 进目录选具体模型（选中即切
@@ -192,103 +204,6 @@ Future<void> showModelSheet(
       ),
     )),
   );
-}
-
-/// 模型单选行（图六形态）：单选圆圈 + 名称/说明 + 徽标/箭头。
-/// 选中 = 圆圈描边加粗 + 中心实点 + 名称加粗。
-class _ModelRadioRow extends StatelessWidget {
-  const _ModelRadioRow({
-    required this.h,
-    required this.title,
-    required this.subtitle,
-    required this.hasCatalog,
-    required this.active,
-    required this.isLocal,
-    required this.onTap,
-  });
-
-  final Hue h;
-  final String title;
-  final String subtitle;
-  final bool hasCatalog;
-  final bool active;
-  final bool isLocal;
-  final VoidCallback onTap;
-
-  @override
-  Widget build(BuildContext context) {
-    return GestureDetector(
-      onTap: onTap,
-      behavior: HitTestBehavior.opaque,
-      child: Padding(
-        padding: const EdgeInsets.symmetric(horizontal: 2, vertical: 12),
-        child: Row(
-          children: [
-            Container(
-              width: 22,
-              height: 22,
-              decoration: BoxDecoration(
-                shape: BoxShape.circle,
-                border: Border.all(
-                  color: active ? h.text : h.border,
-                  width: active ? 2 : 1.5,
-                ),
-              ),
-              child: active
-                  ? Center(
-                      child: Container(
-                        width: 11,
-                        height: 11,
-                        decoration: BoxDecoration(
-                          shape: BoxShape.circle,
-                          color: h.text,
-                        ),
-                      ),
-                    )
-                  : null,
-            ),
-            const SizedBox(width: 12),
-            Expanded(
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Text(
-                    title,
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
-                    style: TextStyle(
-                      fontSize: 15,
-                      fontWeight:
-                          active ? FontWeight.w600 : FontWeight.w400,
-                      color: h.text,
-                    ),
-                  ),
-                  if (subtitle.isNotEmpty) ...[
-                    const SizedBox(height: 2),
-                    Text(
-                      subtitle,
-                      maxLines: 1,
-                      overflow: TextOverflow.ellipsis,
-                      style: TextStyle(fontSize: 12, color: h.textFaint),
-                    ),
-                  ],
-                ],
-              ),
-            ),
-            const SizedBox(width: 10),
-            if (active)
-              _Badge(h: h, label: '当前')
-            else if (isLocal)
-              _Badge(h: h, label: '端侧'),
-            if (hasCatalog) ...[
-              const SizedBox(width: 6),
-              Icon(AppIcons.chevronRight, size: 17, color: h.textFaint),
-            ],
-          ],
-        ),
-      ),
-    );
-  }
 }
 
 /// 行尾徽标（当前 / 端侧）：浅底胶囊，两者同式（图六）。

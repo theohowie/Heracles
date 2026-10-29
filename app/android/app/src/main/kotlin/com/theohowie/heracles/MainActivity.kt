@@ -23,9 +23,10 @@ import com.theohowie.heracles.bridge.DevicePermissionChecker
 import com.theohowie.heracles.bridge.DeviceShell
 import com.theohowie.heracles.bridge.DeviceShellManager
 import com.theohowie.heracles.bridge.BuildTaskProgress
+import com.theohowie.heracles.bridge.CameraBridge
+import com.theohowie.heracles.bridge.VoiceRecorder
 import com.theohowie.heracles.bridge.FilePickerBridge
 import com.theohowie.heracles.bridge.FolderPickerBridge
-import com.theohowie.heracles.bridge.SandboxBridge
 import com.theohowie.heracles.bridge.MemoryStore
 import com.theohowie.heracles.bridge.WorkspaceRegistry
 import io.flutter.embedding.android.FlutterActivity
@@ -91,8 +92,9 @@ class MainActivity : FlutterActivity() {
     private lateinit var registry: WorkspaceRegistry
     private lateinit var deviceFs: DeviceFs
     private lateinit var filePicker: FilePickerBridge
+    private lateinit var cameraBridge: CameraBridge
+    private lateinit var voiceRecorder: VoiceRecorder
     private lateinit var folderPicker: FolderPickerBridge
-    private lateinit var sandbox: SandboxBridge
 
     /** `heracles/command` 通道引用 —— 通知点击回跳要往 Dart 推送。 */
     private var commandChannel: MethodChannel? = null
@@ -109,11 +111,6 @@ class MainActivity : FlutterActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        // ★ 仅 debug：沙箱自检（由 adb 触发，用户可见行为零变化）
-        //   adb shell am start -n com.theohowie.heracles/.MainActivity --ez sandbox.selftest true
-        if (BuildConfig.DEBUG && intent?.getBooleanExtra("sandbox.selftest", false) == true) {
-            window.decorView.post { sandbox.runSelfTest() }
-        }
         // ★ 冷启动：从完成通知点进来（Dart 还没就绪 ⇒ 先存 pending）
         handleNotifyIntent(intent)
         // ★ 运行时请求通知权限（API 33+）——
@@ -138,10 +135,6 @@ class MainActivity : FlutterActivity() {
         // 让下面的 `intent` 属性读到**这一次**的 extra（否则还是启动时那个）
         setIntent(intent)
         handleNotifyIntent(intent)
-            // ★ 仅 debug：热启动时也能触发沙箱自检（冷启动走 onCreate 那条）
-            if (BuildConfig.DEBUG && intent.getBooleanExtra("sandbox.selftest", false)) {
-                window.decorView.post { sandbox.runSelfTest() }
-            }
     }
 
     override fun onResume() {
@@ -168,6 +161,8 @@ class MainActivity : FlutterActivity() {
         registry = WorkspaceRegistry(ctx)
         deviceFs = DeviceFs(ctx, registry)
         filePicker = FilePickerBridge(this)
+        cameraBridge = CameraBridge(this)
+        voiceRecorder = VoiceRecorder(this)
         folderPicker = FolderPickerBridge(this)
 
         // ★ 设备能力通道（`heracles/device`）—— 协议见 [DeviceChannel]
@@ -186,14 +181,6 @@ class MainActivity : FlutterActivity() {
             mainHandler = mainHandler,
         ).register(flutterEngine)
 
-        // ★ 内置沙箱（Heracles-taixu-sandbox）—— 内联执行面，不是第二个 App
-        //   通道：`heracles/sandbox`（控制）+ `heracles/sandbox/output`（流式输出）
-        sandbox = SandboxBridge(
-            context = ctx,
-            scope = scope,
-            mainHandler = mainHandler,
-        ).also { it.register(flutterEngine) }
-
         // ★ 命令通道（`heracles/command`）—— 工作区登记 + 权限引导 + 通知回跳
         MethodChannel(
             flutterEngine.dartExecutor.binaryMessenger,
@@ -211,6 +198,11 @@ class MainActivity : FlutterActivity() {
 
             // ---- 文件 ----
             "pickFiles" -> handlePickFiles(call, result)
+            "takePhoto" -> handleTakePhoto(result)
+            // ---- 语音录音（2026-10-29，离线识别的录音桥） ----
+            "startVoiceRecord" -> reply(result, voiceRecorder.start())
+            "stopVoiceRecord" -> reply(result, voiceRecorder.stop())
+            "cancelVoiceRecord" -> reply(result, voiceRecorder.cancel())
             "listDir" -> handleListDir(call, result)
 
             // ---- 设备权限（无线调试 / Shizuku / Stellar 引导） ----
@@ -410,6 +402,27 @@ class MainActivity : FlutterActivity() {
         }
     }
 
+    /**
+     * 拍照（**[CameraBridge]**：MediaStore 预留位置 → 系统相机 →
+     * 复制进 cache 回真实路径）。成功回 {path, name, size}；
+     * 用户取消回 null（Dart 侧 invokeMapMethod 得 null，不是错误）；
+     * 真失败才回错误 map。
+     */
+    private fun handleTakePhoto(result: MethodChannel.Result) {
+        runOnUiThread {
+            try {
+                cameraBridge.launch(
+                    onResult = { map -> reply(result, map) },
+                    onError = { msg ->
+                        reply(result, mapOf("ok" to false, "error" to msg))
+                    },
+                )
+            } catch (e: Throwable) {
+                reply(result, mapOf("ok" to false, "error" to (e.message ?: "无法打开相机")))
+            }
+        }
+    }
+
     // ------------------------------------------------------------ 设备权限
 
     /**
@@ -507,6 +520,8 @@ class MainActivity : FlutterActivity() {
                 )
                 "camera" -> requestPermissions(
                     arrayOf(Manifest.permission.CAMERA), 4023)
+                "microphone" -> requestPermissions(
+                    arrayOf(Manifest.permission.RECORD_AUDIO), 4025)
                 "calendar" -> requestPermissions(
                     arrayOf(
                         Manifest.permission.READ_CALENDAR,
@@ -639,6 +654,11 @@ class MainActivity : FlutterActivity() {
             if (has(Manifest.permission.CAMERA)) "granted" else "denied"
         }.getOrDefault("unknown")
 
+        // 麦克风（2026-10-29 语音识别）：运行时权限 RECORD_AUDIO。
+        val microphone = runCatching {
+            if (has(Manifest.permission.RECORD_AUDIO)) "granted" else "denied"
+        }.getOrDefault("unknown")
+
         val calendar = runCatching {
             if (has(Manifest.permission.READ_CALENDAR) &&
                 has(Manifest.permission.WRITE_CALENDAR)) "granted" else "denied"
@@ -658,6 +678,7 @@ class MainActivity : FlutterActivity() {
             "overlay" to overlay,
             "media" to media,
             "camera" to camera,
+            "microphone" to microphone,
             "calendar" to calendar,
             // 屏幕自动化：厂商专属，无平台 API 可查 —— 恒 unknown，
             // 前端渲染为「接口预留」，不猜状态。
@@ -770,6 +791,11 @@ class MainActivity : FlutterActivity() {
             FilePickerBridge.REQUEST_CODE -> {
                 if (resultCode == RESULT_OK) filePicker.onActivityResult(data)
                 else filePicker.onCancelled()
+                return
+            }
+            CameraBridge.REQUEST_CODE -> {
+                if (resultCode == RESULT_OK) cameraBridge.onActivityResult(data)
+                else cameraBridge.onCancelled()
                 return
             }
             FolderPickerBridge.REQUEST_CODE -> {

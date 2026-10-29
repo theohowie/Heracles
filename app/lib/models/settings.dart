@@ -437,6 +437,23 @@ class ModelProviderConfig {
 
   bool get isConfigured => apiKey.isNotEmpty;
 
+  /// **当前模型的上下文窗口 —— 全 App 单一口径**（2026-10-29）。
+  ///
+  /// 此前有三处各算各的：后端帧用 [contextLength]（单值字段，
+  /// 常为 0 → 掉进 128K 契约默认）、用量抽屉用 [modelCapabilities]
+  /// 的逐模型值（1M）—— 同一会话里总数在 128K ↔ 1M 之间来回
+  /// 跳（用户对图抓到）。现在统一走这里：
+  ///
+  /// 1. 逐模型能力（服务端上报，权威）[modelCapabilities]
+  /// 2. provider 级 [contextLength]（拉目录/手填时写下的单值）
+  /// 3. 都没有 → `0`（未知；调用方决定兜底，别处不许再自创口径）
+  int get effectiveContextWindow {
+    final cap = modelCapabilities[model]?.contextWindow ?? 0;
+    if (cap > 0) return cap;
+    if (contextLength > 0) return contextLength;
+    return 0;
+  }
+
   ModelProviderConfig copyWith({
     String? name,
     String? baseUrl,

@@ -839,13 +839,17 @@ class _ChatScreenState extends State<ChatScreen> {
   }
 
   /// 决策模式的顶栏右列：引擎来源 + 就绪状态（与 [_topMetrics]
-  /// 同版式）。状态口径：云端填好地址 = 就绪；本地引擎未接入
-  /// 如实写「未接入」，不假装能跑。
+  /// 同版式）。状态口径：云端地址（已预置）与密钥都齐 = 就绪，
+  /// 缺密钥写「待填密钥」；本地引擎未接入如实写「未接入」，
+  /// 不假装能跑。
   Widget _jevTopStatus(Hue h) {
     final source = _jev.config.source;
     final (statusText, ready) = switch (source) {
-      JevSource.cloud =>
-        _jev.config.cloudReady ? ('就绪', true) : ('未配置', false),
+      JevSource.cloud => !_jev.config.cloudReady
+          ? ('未配置', false)
+          : !_jev.cloudKeyPresent
+              ? ('待填密钥', false)
+              : ('就绪', true),
       JevSource.local08 || JevSource.local2b => ('未接入', false),
     };
     return Container(
@@ -1734,12 +1738,17 @@ class _ChatScreenState extends State<ChatScreen> {
 
       switch (role) {
         case 'user':
+          // ★ 结构化附件（2026-10-29）：新记录带 attachments
+          //   [{path,name,kind}]，气泡渲染成图；老记录只有
+          //   attach 名字串（路径已不可考、不编造），仍旧文案。
+          final atts = attachmentsFromRow(m['attachments'], id);
           final attach = m['attach'] as String?;
           out.add(HUserMessage(
             id: id,
-            text: attach == null || attach.isEmpty
+            text: atts.isNotEmpty || attach == null || attach.isEmpty
                 ? text
                 : '$text\n\n📎 $attach',
+            attachments: atts,
           ));
         case 'tool':
           final argsRaw = m['args'];
@@ -2119,6 +2128,27 @@ class _ChatScreenState extends State<ChatScreen> {
               mainAxisSize: MainAxisSize.min,
               crossAxisAlignment: CrossAxisAlignment.stretch,
               children: [
+                // ★ 抓手必须有（2026-10-29 用户实报图 6：这张抽屉
+                // 漏了抓手，看着不像上拉抽屉 —— 其余 bw 抽屉都有）。
+                Center(
+                  child: Container(
+                    width: 36,
+                    height: 4,
+                    decoration: BoxDecoration(
+                      color: h.border,
+                      borderRadius: BorderRadius.circular(999),
+                    ),
+                  ),
+                ),
+                const SizedBox(height: 8),
+                // 顺序：相机在照片上面（2026-10-29 用户指定）。
+                _sheetPickRow(
+                  h,
+                  icon: AppIcons.camera,
+                  label: '相机',
+                  subtitle: '拍照',
+                  onTap: () => Navigator.of(ctx).pop('camera'),
+                ),
                 _sheetPickRow(
                   h,
                   icon: AppIcons.image,
@@ -2142,29 +2172,52 @@ class _ChatScreenState extends State<ChatScreen> {
     if (source == null || !mounted) return;
 
     try {
+      if (source == 'camera') {
+        // ★ 先查相机权限（2026-10-29 真机实证的根因）：这台机器
+        // 的系统相机入口要求调用方**持有** CAMERA 权限，没授权
+        // 时 startActivity 直接抛 SecurityException（revoked
+        // permission CAMERA），五级兜底全过不了。没授权先拉起
+        // 系统申请，用户允许后再点一次拍照即可。权限页
+        // （设置 → 设备权限 → 相机）是同一条申请链。
+        final perms = await _bridge.devicePermissions();
+        if (!mounted) return;
+        if (perms['camera'] != 'granted') {
+          await _bridge.requestPermission('camera');
+          if (!mounted) return;
+          setState(() => _error = '请先允许相机权限，再点一次拍照');
+          return;
+        }
+        final shot = await _bridge.takePhoto();
+        if (!mounted || shot == null) return;
+        setState(() => _addPickedAttachments([shot]));
+        return;
+      }
       final picked = await _bridge.pickFiles(
         imagesOnly: source == 'image',
         multiple: true,
       );
       if (!mounted || picked.isEmpty) return;
-      setState(() {
-        for (final f in picked) {
-          final path = (f['path'] as String?) ?? '';
-          final name = (f['name'] as String?) ?? '';
-          if (path.isEmpty) continue;
-          if (_attachments.any((a) => a.path == path)) continue;
-          _attachments.add(HAttachment(
-            id: 'att-${DateTime.now().microsecondsSinceEpoch}-$name',
-            name: name.isEmpty ? path.split('/').last : name,
-            path: path,
-            kind: HAttachment.kindOf(name),
-            sizeBytes: (f['size'] as num?)?.toInt() ?? 0,
-          ));
-        }
-      });
+      setState(() => _addPickedAttachments(picked));
     } catch (e) {
       if (!mounted) return;
-      setState(() => _error = '选择文件失败：$e');
+      setState(() => _error = source == 'camera' ? '拍照失败：$e' : '选择文件失败：$e');
+    }
+  }
+
+  /// 把宿主回的 {path, name, size} 列表并进附件（去重、空路径跳过）。
+  void _addPickedAttachments(List<Map<String, dynamic>> picked) {
+    for (final f in picked) {
+      final path = (f['path'] as String?) ?? '';
+      final name = (f['name'] as String?) ?? '';
+      if (path.isEmpty) continue;
+      if (_attachments.any((a) => a.path == path)) continue;
+      _attachments.add(HAttachment(
+        id: 'att-${DateTime.now().microsecondsSinceEpoch}-$name',
+        name: name.isEmpty ? path.split('/').last : name,
+        path: path,
+        kind: HAttachment.kindOf(name),
+        sizeBytes: (f['size'] as num?)?.toInt() ?? 0,
+      ));
     }
   }
 
@@ -3173,7 +3226,12 @@ class _ChatScreenState extends State<ChatScreen> {
     //   (a) provider 配置里持久化的能力（用户点过"获取可用模型"）
     //   (b) 内存缓存（本次会话内刚拉过）
     //   (c) **自动拉取**（都没有时，后台拉一次并持久化）
-    var fromServer = p?.modelCapabilities[modelName]?.contextWindow;
+    // ★ 单一口径（2026-10-29）：逐模型能力 → provider 单值，
+    //   见 [ModelProviderConfig.effectiveContextWindow] —— 与
+    //   后端 context_updated 帧、顶栏环图共用一个数，不再跳变。
+    var fromServer = (p != null && p.effectiveContextWindow > 0)
+        ? p.effectiveContextWindow
+        : null;
     if ((fromServer == null || fromServer <= 0) && isCloud && p != null) {
       fromServer = _bridge.capabilitiesOf(modelName)?.contextWindow;
       if (fromServer == null && !_autoFetchingCaps) {
@@ -4163,11 +4221,14 @@ class _ChatScreenState extends State<ChatScreen> {
       return;
     }
     setState(() {
-      final names = _attachments.map((a) => a.name).join('、');
-      final label = _attachments.isEmpty
-          ? request
-          : '${request.isEmpty ? '（仅附件）' : request}\n\n📎 $names';
-      _messages.add(HUserMessage(id: _nextId(), text: label));
+      // ★ 附件结构化挂在消息上（2026-10-29）：不再把文件名
+      //   拍扁成「📎 名字」拼进文本 —— 气泡按附件渲染
+      //   （图片成图、点开看大图），落盘也存结构化字段。
+      _messages.add(HUserMessage(
+        id: _nextId(),
+        text: request,
+        attachments: List<HAttachment>.of(_attachments),
+      ));
       _error = null;
       // ★ 用户刚按下发送 = 明确想看最新内容：恢复跟随（2026-10-23）。
       //   用户可能是先上滑翻记录、再直接在输入框里发的 —— 发送本身就是
@@ -4321,9 +4382,35 @@ class _ChatScreenState extends State<ChatScreen> {
               _progressId = null;
             }
             _messages.removeWhere((m) => m is HProgress);
+            // ★ 半截回复要有操作行（2026-10-29 用户报：主动停止后
+            //   「这个后面没有复制、点赞、点踩等这一行工具按钮」）。
+            //   被停掉的正文还躺在最后一个步骤的正文轨里 —— 把它
+            //   **搬**成一条正式助手消息（带操作行），步骤只留
+            //   思考/工具痕迹；正文与思考都空的步骤直接撤掉，
+            //   不留空壳。搬完再补「已停止」提示（bare：系统
+            //   提示不带操作行）。
+            var partial = '';
+            for (var i = _messages.length - 1; i >= 0; i--) {
+              final m = _messages[i];
+              if (m is HStepStream && m.text.trim().isNotEmpty) {
+                partial = m.text.trim();
+                if (m.reasoning.trim().isEmpty) {
+                  _messages.removeAt(i);
+                } else {
+                  _messages[i] = m.copyWith(text: '');
+                }
+                break;
+              }
+            }
+            if (partial.isNotEmpty) {
+              final id = _nextId();
+              _messages.add(HAssistantMessage(id: id, text: partial));
+              _answerTs[id] = DateTime.now();
+            }
             _messages.add(HAssistantMessage(
               id: _nextId(),
               text: '已停止。你可以继续发消息。',
+              bare: true,
             ));
           });
           // 「已停止」是**新消息**：跟随时才滚过去（不跟随时别打断阅读）
@@ -4781,55 +4868,24 @@ class _ChatScreenState extends State<ChatScreen> {
             ),
           ),
         ),
-        title: Column(
-          mainAxisSize: MainAxisSize.min,
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            // ★ 标题只有会话名（无会话时回退工作区名）：模型信息在
-            //   输入框的模型选择框里已有，标题不重复（2026-10-12）。
-            Text(
-              _decisionMode
-                  ? '决策'
-                  : (_activeSession?.title ?? _workspaceName),
-              maxLines: 1,
-              overflow: TextOverflow.ellipsis,
-              textAlign: TextAlign.start,
-              style: TextStyle(
-                fontSize: 15,
-                fontWeight: FontWeight.w600,
-                color: h.text,
-              ),
-            ),
-            // 灵动岛收起胶囊：标题下层居中。点它展开，面板从顶栏
-            // 下方正中垂下（body Stack 悬浮层渲染）；展开时胶囊
-            // 让位给面板自己的标题行，避免同屏两颗胶囊。
-            if (!_decisionMode &&
-                _planSteps != null &&
-                _planSteps!.isNotEmpty &&
-                _planCollapsed) ...[
-              const SizedBox(height: 4),
-              // 标题列左起 63、右列占 108，列内居中会比屏幕中心
-              // 左偏 (108−63)/2 = 22.5 —— 横向补偿后灵动岛仍在
-              // 屏幕正中（用户令：标题靠左、灵动岛居中，两者都要）
-              Transform.translate(
-                offset: const Offset(22.5, 0),
-                child: Align(
-                  alignment: Alignment.center,
-                  child: DynamicIsland(
-                steps: _planSteps!,
-                doneCount: _planDone,
-                activeIndex: _planActive,
-                collapsed: true,
-                onToggle: () => setState(() => _planCollapsed = false),
-                reachedGoal: _planReachedGoal,
-                closedReason: _planClosedReason,
-                cancelledIndices: _planCancelled,
-                onAdjust: _prefillPlanAdjust,
-                  ),
-                ),
-              ),
-            ],
-          ],
+        // ★ 标题永远只有会话名这一行（无会话时回退工作区名；
+        //   模型信息在输入框的模型胶囊里已有，不重复）。
+        //
+        // 灵动岛**不住在标题列里**（2026-10-29 用户报「标题名
+        // 会上下移动」）：此前收起胶囊排在标题下方同一 Column
+        // 里，AppBar 把整列垂直居中 —— 胶囊出现/展开收起都会
+        // 改变列高，标题被顶着上下挪。现在胶囊与展开面板都在
+        // body 的 Stack 悬浮层（顶栏下方正中），标题位置钉死。
+        title: Text(
+          _decisionMode ? '决策' : (_activeSession?.title ?? _workspaceName),
+          maxLines: 1,
+          overflow: TextOverflow.ellipsis,
+          textAlign: TextAlign.start,
+          style: TextStyle(
+            fontSize: 15,
+            fontWeight: FontWeight.w600,
+            color: h.text,
+          ),
         ),
         actions: [_decisionMode ? _jevTopStatus(h) : _topMetrics(h)],
       ),
@@ -4941,12 +4997,13 @@ class _ChatScreenState extends State<ChatScreen> {
                       hasNewContent: _hasNewContent,
                     ),
                   ),
-                // ---- 灵动岛展开面板（原型 01）----
-                //   收起胶囊在顶栏里（见 AppBar）；点开后本悬浮层在
-                //   顶栏下方正中垂下面板（完整清单 + 调整入口），
-                //   盖在消息之上、不挤占布局高度。再点面板标题行
-                //   收回，胶囊回到顶栏。
-                if (_planSteps != null && _planSteps!.isNotEmpty && !_planCollapsed)
+                // ---- 灵动岛（收起胶囊 + 展开面板，原型 01）----
+                //   两种形态都在本悬浮层、顶栏下方正中：收起是
+                //   一颗胶囊，点开垂下面板（完整清单 + 调整入口），
+                //   盖在消息之上、不挤占任何布局 —— 尤其不进
+                //   AppBar 标题列（2026-10-29：胶囊住标题列时
+                //   展开/收起会把标题顶得上下移动，已迁出）。
+                if (_planSteps != null && _planSteps!.isNotEmpty)
                   Positioned(
                     top: 6,
                     left: 0,
@@ -4956,7 +5013,7 @@ class _ChatScreenState extends State<ChatScreen> {
                         steps: _planSteps!,
                         doneCount: _planDone,
                         activeIndex: _planActive,
-                        collapsed: false,
+                        collapsed: _planCollapsed,
                         onToggle: () => setState(
                             () => _planCollapsed = !_planCollapsed),
                         reachedGoal: _planReachedGoal,
@@ -6130,8 +6187,9 @@ class _QueueChip extends StatelessWidget {
 /// 动作语义与 `InputBar` 的排队条**保持一致**（见 `_QueuedRow` 的说明）：
 /// · 置顶 ⇒ 下一个发，不打断当前运行
 /// · 立即发送 ⇒ 插话（当前在跑就 `interruptRun`），不是排队
-/// 抽屉里的「图标 + 标题 + 副标题」选择行（附件来源等短菜单用，
-/// 与全 App 的 BwSheetShell 菜单行同一套规格）。
+/// 抽屉里的动作行（附件来源等短菜单用）= 边框动作卡
+/// （BwActionCard，2026-10-29 用户定版：灰边框、无单选圆圈，
+/// 按下时边框变主文本色）。卡片自带 8 的下间距。
 Widget _sheetPickRow(
   Hue h, {
   required IconData icon,
@@ -6139,28 +6197,14 @@ Widget _sheetPickRow(
   String? subtitle,
   required VoidCallback onTap,
 }) {
-  return InkWell(
-    borderRadius: BorderRadius.circular(12),
-    onTap: onTap,
-    child: Padding(
-      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 11),
-      child: Row(
-        children: [
-          Icon(icon, size: 19, color: h.textDim),
-          const SizedBox(width: 12),
-          Expanded(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Text(label, style: TextStyle(fontSize: 15, color: h.text)),
-                if (subtitle != null)
-                  Text(subtitle,
-                      style: TextStyle(fontSize: 11.5, color: h.textFaint)),
-              ],
-            ),
-          ),
-        ],
-      ),
+  return Padding(
+    padding: const EdgeInsets.only(bottom: 8),
+    child: BwActionCard(
+      h: h,
+      icon: icon,
+      label: label,
+      subtitle: subtitle,
+      onTap: onTap,
     ),
   );
 }
@@ -6327,6 +6371,36 @@ class _QueuedMsg {
 ///
 /// 另：`**粗体**` 的星号在此处**不**处理 —— 步骤正文是"过程叙述"，
 /// 与最终回答的 Markdown 渲染是两个层级（HStepStream 的渲染器管它）。
+/// 会话记录里的结构化附件 → [HAttachment] 列表（2026-10-29）。
+///
+/// 记录形状：`attachments: [{path, name, kind}]`（kind 是
+/// [AttachmentKind] 的 name）。宽容解析：坏行跳过、缺 kind
+/// 按扩展名推断、没 path 的不要 —— `.jsonl` 是长期数据，
+/// 一条坏附件不能拖垮整条会话的读回。
+List<HAttachment> attachmentsFromRow(Object? raw, String messageId) {
+  if (raw is! List) return const [];
+  final out = <HAttachment>[];
+  for (var i = 0; i < raw.length; i++) {
+    final r = raw[i];
+    if (r is! Map) continue;
+    final path = (r['path'] as String?)?.trim() ?? '';
+    if (path.isEmpty) continue;
+    final name = (r['name'] as String?)?.trim().isNotEmpty == true
+        ? (r['name'] as String).trim()
+        : path.split('/').last;
+    final kindName = r['kind'] as String?;
+    final kind = AttachmentKind.values.asNameMap()[kindName] ??
+        HAttachment.kindOf(name);
+    out.add(HAttachment(
+      id: 'att-$messageId-$i',
+      name: name,
+      path: path,
+      kind: kind,
+    ));
+  }
+  return out;
+}
+
 String stripProtocolShell(String raw) {
   final s = raw.trim();
   if (!s.startsWith('{') || !s.endsWith('}')) return raw;

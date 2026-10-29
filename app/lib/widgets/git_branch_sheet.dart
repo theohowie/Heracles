@@ -8,9 +8,9 @@
 /// │  ┌────────────────────────┐  │
 /// │  │ 🔍 搜索                 │  │  ← 有边框
 /// │  └────────────────────────┘  │
-/// │  ○ frontend                  │
-/// │  ○ gh-pages                  │
-/// │  ✓ master                    │
+/// │  ◯ frontend   （边框选项卡）  │
+/// │  ◉ master     （选中黑边框）  │
+/// │  [＋ 新建分支] [提交与推送]   │  ← 并排黑按钮
 /// └──────────────────────────────┘
 /// ```
 ///
@@ -264,87 +264,84 @@ class _GitBranchSheetState extends State<_GitBranchSheet> {
                         ),
             ),
 
-            // ---- 新建分支（与 Trae 的分支面板对齐：列表下方收敛成一个动作）----
-            const SizedBox(height: HSpace.xs),
-            Divider(height: 1, thickness: 1, color: h.border),
-            InkWell(
-              onTap: () => Navigator.of(context).pop(gitBranchSheetCreate),
-              child: Padding(
-                padding: const EdgeInsets.symmetric(vertical: 15),
-                child: Row(
-                  mainAxisAlignment: MainAxisAlignment.center,
-                  children: [
-                    Icon(CupertinoIcons.add, size: 15, color: h.accent),
-                    const SizedBox(width: HSpace.xs),
-                    Text('新建分支',
-                        style: TextStyle(fontSize: 14, color: h.accent)),
-                  ],
-                ),
-              ),
-            ),
-
-            // ---- 提交 / 推送入口（第三格直接开本面板后必须有的出口）----
-            if (widget.onAdvanced != null) ...[
-              Divider(height: 1, thickness: 1, color: h.border),
-              InkWell(
-                onTap: () => Navigator.of(context).pop(gitBranchSheetAdvanced),
-                child: Padding(
-                  padding: const EdgeInsets.symmetric(vertical: 15),
-                  child: Row(
-                    mainAxisAlignment: MainAxisAlignment.center,
-                    children: [
-                      Icon(CupertinoIcons.cloud_upload,
-                          size: 15, color: h.textDim),
-                      const SizedBox(width: HSpace.xs),
-                      Text(
-                        '提交与推送',
-                        style: TextStyle(fontSize: 14, color: h.textDim),
-                      ),
-                    ],
+            // ---- 底部动作（2026-10-29 用户定版）：不再上下两层
+            // 无样式的文字行 —— 新建分支 / 提交与推送并排两个
+            // 黑色实心按钮（无「提交与推送」入口时新建分支占满整行）。
+            const SizedBox(height: HSpace.sm),
+            Row(
+              children: [
+                Expanded(
+                  child: _blackButton(
+                    h,
+                    icon: CupertinoIcons.add,
+                    label: '新建分支',
+                    onTap: () =>
+                        Navigator.of(context).pop(gitBranchSheetCreate),
                   ),
                 ),
-              ),
-            ],
+                if (widget.onAdvanced != null) ...[
+                  const SizedBox(width: 10),
+                  Expanded(
+                    child: _blackButton(
+                      h,
+                      icon: CupertinoIcons.cloud_upload,
+                      label: '提交与推送',
+                      onTap: () =>
+                          Navigator.of(context).pop(gitBranchSheetAdvanced),
+                    ),
+                  ),
+                ],
+              ],
+            ),
           ],
         ),
       ),
     );
   }
 
-  /// 一行：未选中 ○ / 当前 ✓ + 分支名。
+  /// 一行 = 全 App 统一的边框选项卡（BwOptionCard）：当前分支
+  /// 选中态（主文本色边框 + 实心点），点选其余分支即切换。
   Widget _row(Hue h, String name) {
     final isCurrent = name == widget.current;
-    return InkWell(
-      onTap: isCurrent ? null : () => Navigator.of(context).pop(name),
-      child: Padding(
-        padding: const EdgeInsets.symmetric(vertical: 13),
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 8),
+      child: BwOptionCard(
+        h: h,
+        selected: isCurrent,
+        title: name,
+        onTap: isCurrent ? () {} : () => Navigator.of(context).pop(name),
+      ),
+    );
+  }
+
+  /// 底部黑色实心按钮（新建分支 / 提交与推送同式）。
+  Widget _blackButton(
+    Hue h, {
+    required IconData icon,
+    required String label,
+    required VoidCallback onTap,
+  }) {
+    final fg = h.dark ? const Color(0xFF0A0A0B) : Colors.white;
+    return GestureDetector(
+      onTap: onTap,
+      behavior: HitTestBehavior.opaque,
+      child: Container(
+        height: 48,
+        decoration: BoxDecoration(
+          color: h.text,
+          borderRadius: BorderRadius.circular(14),
+        ),
         child: Row(
+          mainAxisAlignment: MainAxisAlignment.center,
           children: [
-            SizedBox(
-              width: 22,
-              child: isCurrent
-                  ? Icon(CupertinoIcons.checkmark, size: 19, color: h.text)
-                  : Container(
-                      width: 17,
-                      height: 17,
-                      margin: const EdgeInsets.only(left: 2),
-                      decoration: BoxDecoration(
-                        shape: BoxShape.circle,
-                        border: Border.all(color: h.border, width: 1.5),
-                      ),
-                    ),
-            ),
-            const SizedBox(width: HSpace.md),
-            Expanded(
-              child: Text(
-                name,
-                maxLines: 1,
-                overflow: TextOverflow.ellipsis,
-                style: TextStyle(
-                  fontSize: 16,
-                  fontWeight: isCurrent ? FontWeight.w600 : FontWeight.w400,
-                  color: h.text,
-                ),
+            Icon(icon, size: 16, color: fg),
+            const SizedBox(width: 6),
+            Text(
+              label,
+              style: TextStyle(
+                fontSize: 14.5,
+                fontWeight: FontWeight.w600,
+                color: fg,
               ),
             ),
           ],

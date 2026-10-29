@@ -80,26 +80,115 @@ abstract final class JevStore {
 /// 云端决策客户端 —— `/v1/systemone` 兼容接口（Jev 官方 /
 /// StartLux 云端 / 自建 startlux-decide 三者同一报文）。
 abstract final class JevCloudClient {
-  /// 由配置的地址推出请求端点：地址填到 `/v1` 为止时补
-  /// `/systemone`；已是完整 `/decisions` 地址（如 bamboonode
-  /// 免费托管）时原样使用。
+  /// 由配置的地址推出请求端点（基元律动文档定版，2026-10-29）：
+  /// 已是完整端点（`/decision` 推荐 / `/decisions` / `/systemone`
+  /// 兼容）时原样使用；填到 `/v1` 为止时补**推荐端点**
+  /// `/decision`；其余情况按官方 System One 形状补 `/systemone`。
   static String endpointFor(String baseUrl) {
     var b = baseUrl.trim();
     while (b.endsWith('/')) {
       b = b.substring(0, b.length - 1);
     }
-    if (b.endsWith('/decisions') || b.endsWith('/systemone')) return b;
+    if (b.endsWith('/decision') ||
+        b.endsWith('/decisions') ||
+        b.endsWith('/systemone')) {
+      return b;
+    }
+    if (b.endsWith('/v1')) return '$b/decision';
     return '$b/systemone';
   }
 
-  /// 问一次是非题。返回「是」的概率、模型自带思考（AutoThink 才有）
+  /// **模型目录地址**（编辑页「获取模型」用）：决策端点去掉最后
+  /// 一段（`/decision` 等）后拼 `/models` —— 与提供商编辑页拉
+  /// `GET /v1/models` 同一口径。平台文档说可用性与价格以模型
+  /// 目录返回为准，目录里通常只有 `NeoHorse-Jev-4B` 一个决策模型
+  /// （混着聊天模型时点选即可，JEV 只认决策模型）。
+  static String modelsUrlFor(String baseUrl) {
+    var b = baseUrl.trim();
+    while (b.endsWith('/')) {
+      b = b.substring(0, b.length - 1);
+    }
+    for (final seg in ['/decision', '/decisions', '/systemone']) {
+      if (b.endsWith(seg)) {
+        b = b.substring(0, b.length - seg.length);
+        break;
+      }
+    }
+    return '$b/models';
+  }
+
+  /// 拉模型目录（编辑页「获取模型」）。返回模型 ID 列表（去重排序）。
+  /// 失败抛 [JevException]（人话原因，与决策请求同一套错误翻译）。
+  static Future<List<String>> fetchModels({
+    required String baseUrl,
+    required String apiKey,
+  }) async {
+    final dio = Dio(
+      BaseOptions(
+        connectTimeout: const Duration(seconds: 10),
+        receiveTimeout: const Duration(seconds: 30),
+        responseType: ResponseType.json,
+      ),
+    );
+    final Response<dynamic> resp;
+    try {
+      resp = await dio.get<dynamic>(
+        modelsUrlFor(baseUrl),
+        options: Options(
+          headers: {
+            if (apiKey.trim().isNotEmpty)
+              'Authorization': 'Bearer ${apiKey.trim()}',
+          },
+        ),
+      );
+    } on DioException catch (e) {
+      throw JevException(_humanizeHttpError(e));
+    }
+    final data = resp.data;
+    final out = <String>{};
+    void collect(Object? v) {
+      if (v is List) {
+        for (final e in v) {
+          if (e is Map && e['id'] is String) {
+            out.add(e['id'] as String);
+          } else if (e is String) {
+            out.add(e);
+          }
+        }
+      }
+    }
+
+    if (data is Map) {
+      collect(data['data']);
+      collect(data['models']);
+    } else if (data is List) {
+      collect(data);
+    }
+    if (out.isEmpty) {
+      throw JevException('模型目录是空的 —— 检查接口地址与密钥。');
+    }
+    return out.toList()..sort();
+  }
+
+  /// 问一次是非题。返回「是」的概率、模型自带思考（若服务端给）
   /// 与服务端回报的模型名。
+  ///
+  /// 报文严格照基元律动《JEV 决策模型 API》：`state` 用**字符串**
+  /// （文档建议；旧版发 `{question: …}` 对象是 TypeSafe 官方形状，
+  /// 本平台不认）、`questions.<id>` 为 noul 题、平台模型 ID 固定。
+  /// 文档没有 `return_thought` 参数 —— 不再下发（未知参数可能
+  /// 被平台以 422 拒掉）；服务端若仍回带 thought 就照常读。
   static Future<({double yesProb, String? thought, String model})> decide({
     required String baseUrl,
     required String apiKey,
     required String model,
     required String question,
   }) async {
+    if (apiKey.trim().isEmpty) {
+      throw JevException(
+          '还没填 JEV 的 API 密钥 —— 到「设置 → 模型 → JEV 决策」里'
+          '填上平台密钥（sk_ 开头）再试。');
+    }
     final dio = Dio(
       BaseOptions(
         connectTimeout: const Duration(seconds: 10),
@@ -113,19 +202,16 @@ abstract final class JevCloudClient {
       resp = await dio.post<dynamic>(
         endpointFor(baseUrl),
         data: {
-          'state': {'question': question},
+          'model': model.trim().isEmpty ? kJevDefaultModel : model.trim(),
+          'state': question,
           'questions': {
             'recommend': {'type': 'noul', 'instructions': '推荐用户这样做吗？'},
           },
-          // AutoThink 模型不确定时会先写一段思考 —— 要回来当理由。
-          'return_thought': true,
-          if (model.trim().isNotEmpty) 'model': model.trim(),
         },
         options: Options(
           headers: {
             'Content-Type': 'application/json',
-            if (apiKey.trim().isNotEmpty)
-              'Authorization': 'Bearer ${apiKey.trim()}',
+            'Authorization': 'Bearer ${apiKey.trim()}',
           },
         ),
       );
@@ -156,11 +242,27 @@ abstract final class JevCloudClient {
 
   static String _humanizeHttpError(DioException e) {
     final code = e.response?.statusCode;
+    // 平台错误统一形状 {code, message, traceId}：message 是平台
+    // 给的人话原因（如 422 的题数/体积超限），原样带出；traceId
+    // 按文档要求保留供排障。
+    final body = e.response?.data;
+    String? serverMsg;
+    String? traceId;
+    if (body is Map) {
+      if (body['message'] is String) serverMsg = body['message'] as String;
+      if (body['traceId'] is String) traceId = body['traceId'] as String;
+    }
+    if (serverMsg != null && serverMsg.trim().isNotEmpty) {
+      final tail = traceId == null ? '' : '（traceId: $traceId）';
+      return '决策服务出错（HTTP $code）：${serverMsg.trim()}$tail';
+    }
     if (code == 401 || code == 403) {
-      return '决策服务拒绝了密钥（$code）—— 检查 JEV 配置里的 API 密钥。';
+      return '决策服务拒绝了密钥（$code）—— 401 多为密钥无效，'
+          '403 多为账号还没拿到灰度权限，检查 JEV 配置里的 API 密钥。';
     }
     if (code == 404) {
-      return '接口地址不对（404）—— 地址填到 /v1 为止，或填完整的 /v1/decisions 地址。';
+      return '接口地址不对（404）—— 推荐地址是 '
+          'https://tokenrhythm.studio/v1/decision，或填到 /v1 由应用补全。';
     }
     if (code != null) return '决策服务出错（HTTP $code）。';
     return switch (e.type) {
@@ -379,10 +481,25 @@ class JevController extends ChangeNotifier {
   Future<void> load() async {
     config = await JevStore.loadConfig();
     history = await JevStore.loadHistory();
+    await refreshCloudKey();
     profile ??= await AgentBridge().deviceProfile();
     refreshDownloaded();
     loaded = true;
     notifyListeners();
+  }
+
+  /// 云端密钥是否已填（2026-10-29 预置端点后新增的就绪维度：
+  /// 地址已预置，「配没配好」只看密钥）。状态展示（模型页卡、
+  /// 决策顶栏）据此区分「已配置 / 待填密钥」，不假装就绪。
+  bool cloudKeyPresent = false;
+
+  Future<void> refreshCloudKey() async {
+    try {
+      cloudKeyPresent = (await JevStore.readCloudKey()).trim().isNotEmpty;
+    } catch (_) {
+      cloudKeyPresent = false;
+    }
+    if (loaded) notifyListeners();
   }
 
   Future<void> reloadProfile() async {
@@ -609,7 +726,7 @@ class JevController extends ChangeNotifier {
       switch (config.source) {
         case JevSource.cloud:
           if (!config.cloudReady) {
-            throw JevException('云端还没配置：先去 JEV 配置里填接口地址。');
+            throw JevException('云端接口地址是空的：先去 JEV 配置里恢复预置地址，或填上接口地址。');
           }
           final key = await JevStore.readCloudKey();
           final r = await JevCloudClient.decide(

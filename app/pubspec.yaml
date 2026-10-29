@@ -16,7 +16,7 @@ publish_to: 'none' # Remove this line if you wish to publish to pub.dev
 # https://developer.apple.com/library/archive/documentation/General/Reference/InfoPlistKeyReference/Articles/CoreFoundationKeys.html
 # In Windows, build-name is used as the major, minor, and patch parts
 # of the product and file versions while build-number is used as the build suffix.
-version: 0.3.0+5
+version: 0.2.2+4
 
 environment:
   sdk: ^3.12.2
@@ -78,6 +78,7 @@ dependencies:
   # 打开外部链接（2026-10-27，Step 3）：GitHub Device Flow 要自动打开
   # 授权页；「断开连接」要能跳撤销页。官方维护的小包，不引第三方服务。
   url_launcher: ^6.3.1
+  sherpa_onnx: ^2.0.1
 
 
 dev_dependencies:

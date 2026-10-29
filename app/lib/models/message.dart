@@ -4,6 +4,8 @@
 /// 上下文的唯一来源是 Kotlin 侧（铁律 1），UI 只消费不构造。
 library;
 
+import 'attachment.dart';
+
 /// 后端类型 —— 与 Kotlin 侧 `ProviderKind` 对应。
 enum BackendKind {
   /// 本地模型：开发测试用
@@ -22,11 +24,23 @@ sealed class HMessage {
 
 /// 用户输入
 class HUserMessage extends HMessage {
-  const HUserMessage({required this.id, required this.text});
+  const HUserMessage({
+    required this.id,
+    required this.text,
+    this.attachments = const [],
+  });
 
   @override
   final String id;
   final String text;
+
+  /// 本条消息带的文件/图片（2026-10-29）：此前发送时把附件
+  /// 拍扁成「📎 文件名」拼进 text —— 用户发的是图片，气泡里
+  /// 却只有一行文件名。现在附件结构化挂在消息上：图片渲染
+  /// 缩略图、点开看大图；落盘走记录的 `attachments` 字段，
+  /// 重开会话原样读回。老记录只有 `attach` 名字串，读回时
+  /// 仍按旧文案展示（路径已不可考，不编造）。
+  final List<HAttachment> attachments;
 }
 
 /// 助手最终回答
@@ -35,11 +49,18 @@ class HAssistantMessage extends HMessage {
     required this.id,
     required this.text,
     this.changes,
+    this.bare = false,
   });
 
   @override
   final String id;
   final String text;
+
+  /// 系统提示型消息（2026-10-29）：如「已停止。你可以继续
+  /// 发消息。」—— 只渲染正文，**不带**复制/点赞/点踩操作行
+  /// （对一句系统提示做反馈没有意义）。仅实时路径使用，
+  /// 不落盘。
+  final bool bare;
 
   /// **变更报告**（2026-10-22，用户指正位置：总结正文**下面**、
   /// 复制/点赞操作行**上面**）。

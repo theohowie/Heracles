@@ -570,56 +570,11 @@ Future<T?> showBwRadioSheet<T>(
               ],
               const SizedBox(height: 12),
               for (final o in options) ...[
-                GestureDetector(
+                BwOptionCard(
+                  h: h,
+                  selected: o == current,
+                  title: labelOf(o),
                   onTap: () => Navigator.of(sheetCtx).pop(o),
-                  behavior: HitTestBehavior.opaque,
-                  child: Container(
-                    padding: const EdgeInsets.symmetric(
-                        horizontal: 16, vertical: 14),
-                    decoration: BoxDecoration(
-                      color: o == current ? h.bg : Colors.transparent,
-                      border: Border.all(
-                        color: o == current ? h.text : h.border,
-                        width: 2,
-                      ),
-                      borderRadius: BorderRadius.circular(18),
-                    ),
-                    child: Row(
-                      children: [
-                        Container(
-                          width: 22,
-                          height: 22,
-                          decoration: BoxDecoration(
-                            shape: BoxShape.circle,
-                            border: Border.all(
-                              color: o == current ? h.text : h.border,
-                              width: 2,
-                            ),
-                          ),
-                          child: o == current
-                              ? Center(
-                                  child: Container(
-                                    width: 11,
-                                    height: 11,
-                                    decoration: BoxDecoration(
-                                      shape: BoxShape.circle,
-                                      color: h.text,
-                                    ),
-                                  ),
-                                )
-                              : null,
-                        ),
-                        const SizedBox(width: 12),
-                        Expanded(
-                          child: Text(labelOf(o),
-                              style: TextStyle(
-                                  fontSize: 15,
-                                  fontWeight: FontWeight.w600,
-                                  color: h.text)),
-                        ),
-                      ],
-                    ),
-                  ),
                 ),
                 const SizedBox(height: 8),
               ],
@@ -629,6 +584,204 @@ Future<T?> showBwRadioSheet<T>(
       ),
     ),
   );
+}
+
+/// **抽屉边框选项卡**（2026-10-29 用户定版，全 App 唯一单选形态）：
+/// 圆角 18、边框 2、内距 16×14、左侧单选圆圈 22（选中实心点）；
+/// 未选中 = 灰边框（h.border）+ 透明底，选中 = 主文本色边框
+/// （浅色下黑边框）+ 卡面转页面底色。审批模式（图一）就是这张卡，
+/// 其余抽屉里的单选（模型、分支、分组/排序/筛选、通用单选抽屉）
+/// 一律用它，不再各画各的。
+class BwOptionCard extends StatelessWidget {
+  const BwOptionCard({
+    super.key,
+    required this.h,
+    required this.selected,
+    required this.title,
+    this.subtitle,
+    this.trailing,
+    required this.onTap,
+  });
+
+  final Hue h;
+  final bool selected;
+  final String title;
+  final String? subtitle;
+  final Widget? trailing;
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    return GestureDetector(
+      onTap: onTap,
+      behavior: HitTestBehavior.opaque,
+      child: Container(
+        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
+        decoration: BoxDecoration(
+          color: selected ? h.bg : Colors.transparent,
+          border: Border.all(
+            color: selected ? h.text : h.border,
+            width: 2,
+          ),
+          borderRadius: BorderRadius.circular(18),
+        ),
+        child: Row(
+          crossAxisAlignment: subtitle != null
+              ? CrossAxisAlignment.start
+              : CrossAxisAlignment.center,
+          children: [
+            Container(
+              width: 22,
+              height: 22,
+              margin: EdgeInsets.only(top: subtitle != null ? 1 : 0),
+              decoration: BoxDecoration(
+                shape: BoxShape.circle,
+                border: Border.all(
+                  color: selected ? h.text : h.border,
+                  width: 2,
+                ),
+              ),
+              child: selected
+                  ? Center(
+                      child: Container(
+                        width: 11,
+                        height: 11,
+                        decoration: BoxDecoration(
+                          shape: BoxShape.circle,
+                          color: h.text,
+                        ),
+                      ),
+                    )
+                  : null,
+            ),
+            const SizedBox(width: 12),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Text(
+                    title,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: TextStyle(
+                      fontSize: 15,
+                      fontWeight: FontWeight.w600,
+                      color: h.text,
+                    ),
+                  ),
+                  if (subtitle != null && subtitle!.isNotEmpty) ...[
+                    const SizedBox(height: 2),
+                    Text(
+                      subtitle!,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: TextStyle(fontSize: 12, color: h.textFaint),
+                    ),
+                  ],
+                ],
+              ),
+            ),
+            if (trailing != null) ...[
+              const SizedBox(width: 10),
+              trailing!,
+            ],
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+/// **抽屉边框动作卡**（2026-10-29 用户定版）：动作类行（附件来源、
+/// 添加工作区、会话/工作区菜单）不用单选圆圈，同样收进边框卡 ——
+/// 平时灰边框（h.border），**按下时边框变主文本色**（浅色下黑边框），
+/// 松开恢复。[danger] 时图标与文字语义红、按下边框也走红色。
+class BwActionCard extends StatefulWidget {
+  const BwActionCard({
+    super.key,
+    required this.h,
+    required this.icon,
+    required this.label,
+    this.subtitle,
+    this.iconColor,
+    this.danger = false,
+    required this.onTap,
+  });
+
+  final Hue h;
+  final IconData icon;
+  final String label;
+  final String? subtitle;
+  final Color? iconColor;
+  final bool danger;
+  final VoidCallback onTap;
+
+  @override
+  State<BwActionCard> createState() => _BwActionCardState();
+}
+
+class _BwActionCardState extends State<BwActionCard> {
+  bool _pressed = false;
+
+  void _setPressed(bool v) {
+    if (_pressed != v) setState(() => _pressed = v);
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final h = widget.h;
+    final err = HColors.errorOn(h.dark);
+    final accent = widget.danger ? err : h.text;
+    return GestureDetector(
+      behavior: HitTestBehavior.opaque,
+      onTapDown: (_) => _setPressed(true),
+      onTapUp: (_) => _setPressed(false),
+      onTapCancel: () => _setPressed(false),
+      onTap: widget.onTap,
+      child: Container(
+        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 13),
+        decoration: BoxDecoration(
+          border: Border.all(
+            color: _pressed ? accent : h.border,
+            width: 2,
+          ),
+          borderRadius: BorderRadius.circular(18),
+        ),
+        child: Row(
+          children: [
+            Icon(
+              widget.icon,
+              size: 20,
+              color:
+                  widget.danger ? err : (widget.iconColor ?? h.textDim),
+            ),
+            const SizedBox(width: 12),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Text(
+                    widget.label,
+                    style: TextStyle(
+                      fontSize: 15,
+                      color: widget.danger ? err : h.text,
+                    ),
+                  ),
+                  if (widget.subtitle != null)
+                    Text(
+                      widget.subtitle!,
+                      style: TextStyle(fontSize: 11.5, color: h.textFaint),
+                    ),
+                ],
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
 }
 
 class _ApprovalModeRow extends StatelessWidget {
