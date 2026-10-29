@@ -217,6 +217,11 @@ class SandboxBridge(
         //   所以构造时补一次（幂等，register 允许同名覆盖）。
         if (runCatching { core.rootfs.status().installed }.getOrDefault(false)) {
             registerDefaultMounts()
+            // ★ T1（aapt2/aidl/zipalign）同理（2026-10-29 真机抓到的 bug）：
+            //   内置资产只在「rootfs 首次安装」那条路上解包，rootfs 已装过就跳过 ——
+            //   真机现象是 `/opt/as: No such file or directory`、`aapt2: not found`。
+            //   T1 是**每次启动都要保证**的东西，所以构造时补一次（幂等）。
+            runCatching { core.ensureTooltools() }
         }
     }
 

@@ -170,6 +170,21 @@ Future<void> _sandboxSelfTest() async {
     final mounts = await sandbox.listMounts();
     log('mounts: ${mounts.map((m) => "${m.prefix}${m.readOnly ? "(只读)" : ""}").join(", ")}');
 
+    // ---- T1 内置工具（aapt2/aidl/zipalign）是否真的解包并能执行 ----
+    // 这是「内置≠生效」的唯一证据：资产在 APK 里躺着但没解包出来时，
+    // 沙箱里 `command -v aapt2` 会找不到。
+    final t1 = await _sandboxRunOnce(
+      sandbox,
+      'ls -l /opt/as 2>&1; echo "---"; /opt/as/aapt2 version 2>&1',
+      log,
+    );
+    log('T1(aapt2): ${t1.trim().replaceAll("\n", " | ")}');
+
+    // ---- T2 编译环境状态（不触发 415 MB 下载，只看装没装）----
+    final t2 = await sandbox.buildSuiteStatus();
+    log('T2: ready=${t2.ready} version="${t2.version}" '
+        'missing=${t2.missing.join(",")} err=${t2.error ?? ""}');
+
     await subOut.cancel();
     await subDone.cancel();
     await subErr.cancel();
@@ -179,4 +194,61 @@ Future<void> _sandboxSelfTest() async {
   } finally {
     sandbox.dispose();
   }
+}
+
+/// 自检用：在沙箱里跑一条命令并收集输出（不依赖全局流监听）。
+Future<String> _sandboxRunOnce(
+  SandboxService sandbox,
+  String command,
+  void Function(String) log,
+) async {
+  final out = StringBuffer();
+  final done = Completer<SandboxExecResult>();
+  final subs = <StreamSubscription<Object?>>[
+    sandbox.outputStream.listen((c) {
+      if (c.isProgress || c.chunk.isEmpty) return;
+      out.write(c.chunk);
+    }),
+    sandbox.doneStream.listen((d) {
+      if (!done.isCompleted) done.complete(d.result);
+    }),
+    sandbox.errorStream.listen((e) {
+      if (!done.isCompleted) {
+        log('run error: code=${e.code} msg=${e.message}');
+        done.complete(const SandboxExecResult(
+          exitCode: -1,
+          stdout: '',
+          stderr: '',
+          durationMs: 0,
+          timedOut: false,
+          cancelled: false,
+          truncated: false,
+        ));
+      }
+    }),
+  ];
+  final submit = await sandbox.execute(command, workdir: '/', timeoutMs: 120000);
+  if (!submit.ok) {
+    for (final s in subs) {
+      await s.cancel();
+    }
+    return '提交失败：${submit.error}';
+  }
+  final r = await done.future.timeout(
+    const Duration(seconds: 150),
+    onTimeout: () => const SandboxExecResult(
+      exitCode: -1,
+      stdout: 'TIMEOUT',
+      stderr: '',
+      durationMs: 0,
+      timedOut: true,
+      cancelled: false,
+      truncated: false,
+    ),
+  );
+  for (final s in subs) {
+    await s.cancel();
+  }
+  if (r.exitCode != 0) out.write(' [exit=${r.exitCode}]');
+  return out.toString();
 }

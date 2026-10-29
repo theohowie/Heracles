@@ -28,6 +28,7 @@ import com.theohowie.heracles.bridge.VoiceRecorder
 import com.theohowie.heracles.bridge.FilePickerBridge
 import com.theohowie.heracles.bridge.FolderPickerBridge
 import com.theohowie.heracles.bridge.MemoryStore
+import com.theohowie.heracles.bridge.SandboxBridge
 import com.theohowie.heracles.bridge.WorkspaceRegistry
 import io.flutter.embedding.android.FlutterActivity
 import io.flutter.embedding.engine.FlutterEngine
@@ -89,6 +90,7 @@ class MainActivity : FlutterActivity() {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
     private val mainHandler = Handler(Looper.getMainLooper())
 
+    private lateinit var sandbox: SandboxBridge
     private lateinit var registry: WorkspaceRegistry
     private lateinit var deviceFs: DeviceFs
     private lateinit var filePicker: FilePickerBridge
@@ -111,6 +113,11 @@ class MainActivity : FlutterActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        // ★ 仅 debug：沙箱自检（由 adb 触发，用户可见行为零变化）
+        //   adb shell am start -n com.theohowie.heracles/.MainActivity --ez sandbox.selftest true
+        if (BuildConfig.DEBUG && intent?.getBooleanExtra("sandbox.selftest", false) == true) {
+            window.decorView.post { sandbox.runSelfTest() }
+        }
         // ★ 冷启动：从完成通知点进来（Dart 还没就绪 ⇒ 先存 pending）
         handleNotifyIntent(intent)
         // ★ 运行时请求通知权限（API 33+）——
@@ -135,6 +142,10 @@ class MainActivity : FlutterActivity() {
         // 让下面的 `intent` 属性读到**这一次**的 extra（否则还是启动时那个）
         setIntent(intent)
         handleNotifyIntent(intent)
+        // ★ 仅 debug：热启动时也能触发沙箱自检（冷启动走 onCreate 那条）
+        if (BuildConfig.DEBUG && intent.getBooleanExtra("sandbox.selftest", false)) {
+            window.decorView.post { sandbox.runSelfTest() }
+        }
     }
 
     override fun onResume() {
@@ -180,6 +191,17 @@ class MainActivity : FlutterActivity() {
             scope = scope,
             mainHandler = mainHandler,
         ).register(flutterEngine)
+
+        // ★ 内置沙箱（Heracles-taixu-sandbox）—— 内联执行面，不是第二个 App
+        //   通道：`heracles/sandbox`（控制）+ `heracles/sandbox/output`（流式输出）
+        //
+        //   ⚠️ 这段曾在 2026-10-29 合并 `jev-sheets` 时被覆盖掉，真机自检
+        //   立刻报「通道不可用」—— 沙箱整套能力静默失效。删这段前想清楚。
+        sandbox = SandboxBridge(
+            context = ctx,
+            scope = scope,
+            mainHandler = mainHandler,
+        ).also { it.register(flutterEngine) }
 
         // ★ 命令通道（`heracles/command`）—— 工作区登记 + 权限引导 + 通知回跳
         MethodChannel(
