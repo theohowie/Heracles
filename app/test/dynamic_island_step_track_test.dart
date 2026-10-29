@@ -131,4 +131,129 @@ void main() {
     expect(find.text('步骤 1'), findsWidgets);
     expect(find.text('步骤 3'), findsOneWidget);
   });
+
+  // ===========================================================================
+  // 2026-10-29 追加：P1「收起态看不到最后一步」修复的规格钉子。
+  //
+  // 生产帧（chat_screen.dart）里 activeIndex = indexWhere(status=='active')：
+  //   · 走到第 k 步      ⇒ activeIndex = k-1
+  //   · 全部做完/plan_closed ⇒ **没有 active 步 ⇒ -1**
+  // 旧实现的 target = active*36 - 54，active=-1 时是 -90 ⇒ clamp 到 0
+  // ⇒ 轨道被弹回最左，7 步计划永远只看到 1→2→3→4（用户报的现象）。
+  //
+  // ⚠️ 断言必须**量几何位置**，不能用 `find.text('7')` 是否存在：
+  //    ListView.builder 会预建 cacheExtent 里的项 ⇒ 滚出视口的数字仍在树上。
+  // ===========================================================================
+
+  /// 轨道视口矩形（收起态下唯一的 ListView）。
+  Rect trackViewport(WidgetTester tester) => tester.getRect(find.byType(ListView));
+
+  /// 该数字是否**完整**落在轨道视口内。
+  bool fullyInTrack(WidgetTester tester, String label) {
+    final f = find.text(label);
+    if (f.evaluate().isEmpty) return false; // 已被回收/从未构建
+    final r = tester.getRect(f);
+    final v = trackViewport(tester);
+    return r.left >= v.left - 0.5 && r.right <= v.right + 0.5;
+  }
+
+  double trackOffset(WidgetTester tester) =>
+      tester.widget<ListView>(find.byType(ListView)).controller!.offset;
+
+  testWidgets('★★★ 7 步全部完成（done=7 / active=-1）⇒ 滚到末尾，看得见 7 且固定显示 7/7',
+      (tester) async {
+    await tester.pumpWidget(wrap(island(
+      collapsed: true,
+      steps: 7,
+      doneCount: 7,
+      activeIndex: -1, // 生产帧：做完最后一步后没有 active 步
+    )));
+    await tester.pump(const Duration(milliseconds: 600));
+
+    expect(fullyInTrack(tester, '7'), isTrue,
+        reason: '完成态没有 active 步，轨道必须滚到末尾让第 7 步可见'
+            '（旧实现 target=-90 clamp 到 0 ⇒ 只看得见 1..4）');
+    expect(trackOffset(tester), greaterThan(0), reason: '完成态不许停在最左');
+    expect(find.text('7/7'), findsOneWidget, reason: '收起态右侧要固定显示 done/total');
+    expect(tester.widget<Text>(find.text('7/7')).style!.color,
+        const Color(0xFF22C55E),
+        reason: '做完的总数按既有绿色约定（#22C55E）');
+  });
+
+  testWidgets('★★ 无 active 的中间态 ⇒ 保留上次滚动位置，不回最左', (tester) async {
+    // 先走到第 6 步（activeIndex=5）⇒ 轨道滚到 [4..7]。
+    await tester.pumpWidget(wrap(island(
+      collapsed: true,
+      steps: 7,
+      doneCount: 5,
+      activeIndex: 5,
+    )));
+    await tester.pump(const Duration(milliseconds: 600));
+    final before = trackOffset(tester);
+    expect(fullyInTrack(tester, '7'), isTrue);
+    expect(before, greaterThan(0));
+
+    // 生产帧：active 步消失但还没全部完成（剩余步骤被取消 / 计划暂停）。
+    await tester.pumpWidget(wrap(island(
+      collapsed: true,
+      steps: 7,
+      doneCount: 5,
+      activeIndex: -1,
+    )));
+    await tester.pump(const Duration(milliseconds: 600));
+
+    expect(trackOffset(tester), closeTo(before, 0.5),
+        reason: '中间态没有 active 步时不许把轨道弹回最左（应保留上次位置）');
+    expect(fullyInTrack(tester, '7'), isTrue, reason: '保留位置 ⇒ 第 7 步仍可见');
+  });
+
+  testWidgets('★ 未开始（done=0 / active=-1）⇒ 停在最左，1..4 全可见', (tester) async {
+    await tester.pumpWidget(wrap(island(
+      collapsed: true,
+      steps: 7,
+      doneCount: 0,
+      activeIndex: -1,
+    )));
+    await tester.pump(const Duration(milliseconds: 600));
+
+    expect(trackOffset(tester), 0, reason: '还没开始不该滚动');
+    for (final n in ['1', '2', '3', '4']) {
+      expect(fullyInTrack(tester, n), isTrue, reason: '未开始状态必须看得见第 $n 步');
+    }
+    expect(find.text('0/7'), findsOneWidget, reason: '收起态右侧要固定显示 done/total');
+  });
+
+  testWidgets('★★ 7 步 activeIndex=5 ⇒ 第 7 步可见（视口 4..7）', (tester) async {
+    await tester.pumpWidget(wrap(island(
+      collapsed: true,
+      steps: 7,
+      doneCount: 5,
+      activeIndex: 5,
+    )));
+    await tester.pump(const Duration(milliseconds: 600));
+
+    expect(fullyInTrack(tester, '6'), isTrue, reason: '当前步（第 6 步）必须可见');
+    expect(fullyInTrack(tester, '7'), isTrue, reason: '滚到第 6 步时应同时看到第 7 步');
+    expect(find.text('5/7'), findsOneWidget, reason: '收起态右侧要固定显示 done/total');
+  });
+
+  testWidgets('★ 只自动滚、不可拖（NeverScrollableScrollPhysics）', (tester) async {
+    await tester.pumpWidget(wrap(island(
+      collapsed: true,
+      steps: 7,
+      doneCount: 3,
+      activeIndex: 3,
+    )));
+    await tester.pump(const Duration(milliseconds: 600));
+
+    final list = tester.widget<ListView>(find.byType(ListView));
+    expect(list.physics, isA<NeverScrollableScrollPhysics>(),
+        reason: '轨道只允许程序自动滚动，不许用户拖');
+
+    final before = trackOffset(tester);
+    await tester.drag(find.byType(ListView), const Offset(-120, 0));
+    await tester.pump(const Duration(milliseconds: 300));
+    expect(trackOffset(tester), closeTo(before, 0.5),
+        reason: '用户拖动不应改变轨道偏移');
+  });
 }

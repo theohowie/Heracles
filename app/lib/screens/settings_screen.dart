@@ -35,6 +35,7 @@ class SettingsScreen extends StatelessWidget {
     required this.controller,
     this.archivedCountLoader,
     this.onOpenArchived,
+    this.memorySource,
   });
 
   final SettingsController controller;
@@ -44,6 +45,9 @@ class SettingsScreen extends StatelessWidget {
   /// 点了没反应"。
   final int Function()? archivedCountLoader;
   final Future<void> Function()? onOpenArchived;
+
+  /// 记忆页数据源（测试注入 mock / 将来由 B1 实现替换）；null = 默认。
+  final MemoryDataSource? memorySource;
 
   @override
   Widget build(BuildContext context) {
@@ -79,7 +83,9 @@ class SettingsScreen extends StatelessWidget {
               _GroupCard(
                 children: [
                   _GlobalMemoryEntry(
-                    onOpen: () => _push(context, const GlobalMemoryPage()),
+                    source: memorySource,
+                    onOpen: () => _push(
+                        context, GlobalMemoryPage(source: memorySource)),
                   ),
                   _DevicePermissionEntry(
                     onOpen: () =>
@@ -331,6 +337,16 @@ class _DevicePermissionPageState extends State<DevicePermissionPage>
   /// 整段不渲染，不画假状态。
   Map<String, String> _perms = const {};
 
+  /// 系统授权页 / 应用详情页打开中（2026-10-29）：期间全部权限开关禁点，
+  /// 否则连点会叠着拉起多个系统意图。
+  bool _openingSystemPage = false;
+
+  /// 用户试图关闭一个**App 无权自行撤销**的运行时权限后，记下键与
+  /// 展示名：等从系统页回到前台、重查完真实状态再解释一次
+  /// （若用户真在系统里关了，开关会自己变关，就不再解释）。
+  String? _pendingCloseKey;
+  String? _pendingCloseLabel;
+
   /// 执行路由诊断明细是否展开（默认收起：页面只给结论，
   /// 逐项清单是调试信息，不该整墙糊在用户脸上）。
   bool _diagExpanded = false;
@@ -353,7 +369,24 @@ class _DevicePermissionPageState extends State<DevicePermissionPage>
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
     if (state == AppLifecycleState.resumed && mounted) {
-      unawaited(_refresh());
+      unawaited(_refreshThenExplainClose());
+    }
+  }
+
+  /// 从系统页回到前台：先查真实状态，再决定要不要解释"关不掉"。
+  /// 顺序很重要 —— 先刷新，用户真在系统里撤了权限时开关自己就关了，
+  /// 这时再弹出"系统不允许 App 自行关闭"就是错的。
+  Future<void> _refreshThenExplainClose() async {
+    await _refresh();
+    final key = _pendingCloseKey;
+    if (key == null || !mounted) return;
+    _pendingCloseKey = null;
+    if (_perms[key] == 'granted') {
+      showIosToast(
+        context,
+        '系统不允许 App 自行关闭权限：「${_pendingCloseLabel ?? key}」'
+        '仍是开启状态，请在应用详情页里关闭。',
+      );
     }
   }
 
@@ -422,6 +455,46 @@ class _DevicePermissionPageState extends State<DevicePermissionPage>
 
     Widget control(String key) {
       final v = _perms[key] ?? 'unknown';
+
+      /// 权限开关统一形态（2026-10-29）：**不乐观预演**（视觉只跟真实查询
+      /// 值走，见 ElasticSwitch.optimistic）+ 系统页打开期间禁点。
+      Widget toggle({
+        required bool value,
+        required ValueChanged<bool> onChanged,
+      }) =>
+          ElasticSwitch(
+            value: value,
+            optimistic: false,
+            onChanged: _openingSystemPage ? null : onChanged,
+          );
+
+      // 状态未知：不许画成一个"关着但能拨"的假开关（拨了也没有真实值可查）。
+      // 例外：shizuku 的 unknown 是「服务没启动」，有自己的文案；
+      // allFiles / install / automation 本来就是胶囊（声明而非开关）。
+      if (v == 'unknown' &&
+          const {
+            'files',
+            'media',
+            'camera',
+            'microphone',
+            'calendar',
+            'notifications',
+            'accessibility',
+            'overlay',
+          }.contains(key)) {
+        return pill('检测中', false);
+      }
+
+      // 运行时权限（mic / camera / media / calendar）：拨开走系统授权弹窗；
+      // 拨关 —— **Android 不允许 App 自己撤销运行时权限**，只能把用户送去
+      // 应用详情页，开关保持真实状态（旧行为会先翻成关，骗人）。
+      Widget runtimePerm(String label) => toggle(
+            value: v == 'granted',
+            onChanged: (want) => unawaited(want
+                ? _requestPermission(key)
+                : _explainCannotClose(key, label)),
+          );
+
       switch ((key, v)) {
         case ('allFiles', 'denied'):
           return pill('未开启 · 按设计', false);
@@ -431,7 +504,7 @@ class _DevicePermissionPageState extends State<DevicePermissionPage>
           // 文件夹访问的「申请」= 走一次工作区文件夹授权（SAF
           // 选择器，选中即授权 + 登记）—— 这就是本 App 的文件夹
           // 权限模型；取消授权 = 在工作区列表移除该文件夹。
-          return ElasticSwitch(
+          return toggle(
             value: v == 'granted',
             onChanged: (want) {
               if (want) {
@@ -442,29 +515,13 @@ class _DevicePermissionPageState extends State<DevicePermissionPage>
             },
           );
         case ('media', _):
-          return ElasticSwitch(
-            value: v == 'granted',
-            onChanged: (want) => unawaited(
-                _requestPermission(want ? 'media' : 'appSettings')),
-          );
+          return runtimePerm('图片与视频');
         case ('camera', _):
-          return ElasticSwitch(
-            value: v == 'granted',
-            onChanged: (want) => unawaited(
-                _requestPermission(want ? 'camera' : 'appSettings')),
-          );
+          return runtimePerm('相机');
         case ('microphone', _):
-          return ElasticSwitch(
-            value: v == 'granted',
-            onChanged: (want) => unawaited(
-                _requestPermission(want ? 'microphone' : 'appSettings')),
-          );
+          return runtimePerm('麦克风');
         case ('calendar', _):
-          return ElasticSwitch(
-            value: v == 'granted',
-            onChanged: (want) => unawaited(
-                _requestPermission(want ? 'calendar' : 'appSettings')),
-          );
+          return runtimePerm('日历');
         case ('automation', _):
           // 厂商专属（小米「后台弹出界面」等），无统一申请方式：
           // 占位 + 写明预留，不给一个拨了没反应的假开关。
@@ -479,7 +536,8 @@ class _DevicePermissionPageState extends State<DevicePermissionPage>
         case ('shizuku', _):
           return ElasticSwitch(
             value: v == 'granted',
-            onChanged: _shizukuBusy
+            optimistic: false,
+            onChanged: (_openingSystemPage || _shizukuBusy)
                 ? null
                 : (want) {
                     if (want) {
@@ -490,18 +548,18 @@ class _DevicePermissionPageState extends State<DevicePermissionPage>
                   },
           );
         case ('notifications', _):
-          return ElasticSwitch(
+          return toggle(
             value: v == 'granted',
-            onChanged: (want) => unawaited(
-                _requestPermission(want ? 'notifications' : 'notificationsOff')),
+            onChanged: (want) => unawaited(_requestPermission(
+                want ? 'notifications' : 'notificationsOff')),
           );
         case ('accessibility', _):
-          return ElasticSwitch(
+          return toggle(
             value: v == 'granted',
             onChanged: (_) => unawaited(_requestPermission('accessibility')),
           );
         case ('overlay', _):
-          return ElasticSwitch(
+          return toggle(
             value: v == 'granted',
             onChanged: (_) => unawaited(_requestPermission('overlay')),
           );
@@ -555,30 +613,58 @@ class _DevicePermissionPageState extends State<DevicePermissionPage>
   /// （[AgentBridge.pickWorkspace]：系统选择器，选中即 SAF 授权 +
   /// 登记为工作区）。受限目录等失败原因由桥如实带回，直接展示。
   Future<void> _grantFolder() async {
+    if (_openingSystemPage) return;
+    setState(() => _openingSystemPage = true);
     try {
-      final r = await AgentBridge().pickWorkspace();
-      if (!mounted) return;
-      if (r != null && r['ok'] == false) {
-        showIosToast(context, (r['error'] as String?) ?? '这个位置无法授权');
+      try {
+        final r = await AgentBridge().pickWorkspace();
+        if (!mounted) return;
+        if (r != null && r['ok'] == false) {
+          showIosToast(context, (r['error'] as String?) ?? '这个位置无法授权');
+        }
+      } on AgentBridgeException catch (e) {
+        if (mounted) showIosToast(context, e.message);
       }
-    } on AgentBridgeException catch (e) {
-      if (mounted) showIosToast(context, e.message);
+      if (mounted) await _refresh();
+    } finally {
+      if (mounted) setState(() => _openingSystemPage = false);
     }
-    if (mounted) await _refresh();
   }
 
   /// **开关拨动 → 拉起系统授权流程**（通知/无障碍/悬浮窗共用）。
   /// 结果不猜：回到前台时 [didChangeAppLifecycleState] 会重查；
   /// 这里再补一次延时重查，覆盖运行时弹窗那种不切生命周期的情况。
   Future<void> _requestPermission(String kind) async {
-    final ok = await AgentBridge().requestPermission(kind);
-    if (!mounted) return;
-    if (!ok) {
-      showIosToast(context, '没能打开系统授权界面');
-      return;
+    if (_openingSystemPage) return;
+    setState(() => _openingSystemPage = true);
+    try {
+      final ok = await AgentBridge().requestPermission(kind);
+      if (!mounted) return;
+      if (!ok) {
+        showIosToast(context, '没能打开系统授权界面');
+        return;
+      }
+      await Future<void>.delayed(const Duration(milliseconds: 700));
+      if (mounted) await _refresh();
+    } finally {
+      if (mounted) setState(() => _openingSystemPage = false);
     }
-    await Future<void>.delayed(const Duration(milliseconds: 700));
-    if (mounted) await _refresh();
+  }
+
+  /// 用户想把一个**已授**的运行时权限关掉（2026-10-29）。
+  ///
+  /// Android 不允许 App 自行撤销运行时权限 —— 只有用户能在系统设置里关。
+  /// 所以这里**不预演、不假翻**：记住意图 → 送去应用详情页 → 回来重查
+  /// 后若仍是开启，再由 [_refreshThenExplainClose] 解释一次。
+  /// 绝不把"关不掉"画成"已关"。
+  Future<void> _explainCannotClose(String key, String label) async {
+    _pendingCloseKey = key;
+    _pendingCloseLabel = label;
+    showIosToast(
+      context,
+      '系统不允许 App 自行关闭权限，请在应用详情页里关闭「$label」',
+    );
+    await _requestPermission('appSettings');
   }
 
   /// Shizuku 授权动作（胶囊「去开启」/ 一键授权 / 重新申请共用）：
@@ -1053,24 +1139,308 @@ class _ArchivedEntryState extends State<_ArchivedEntry> {
   }
 }
 
-// ============================================================ 全局记忆
+// ============================================================ 记忆（三作用域）
 
-/// **全局记忆入口**（2026-10-23）—— 主页一行 + 规模徽章，详情在二级页。
+/// **记忆作用域**（UI 侧视图；契约见 `docs/INTERFACE.md` §N12.1）。
 ///
-/// 与「设备权限」同一形态：主页只给"看一眼"的规模，全文与清空在二级页。
-/// 从二级页返回后**重新读一次**（用户可能刚点了清空 —— 徽章得跟着变）。
+/// 三段互相隔离：会话私有只在该会话可见，工作区在该工作区所有会话间共享，
+/// 全局对 agent 只读（agent 只能提议，用户确认后晋升）。
+enum MemoryScopeView { global, workspace, session }
+
+/// 段标题（三段统一用这一份，别在别处再写字面量）。
+const _memoryScopeTitles = {
+  MemoryScopeView.global: '全局',
+  MemoryScopeView.workspace: '本工作区',
+  MemoryScopeView.session: '本会话',
+};
+
+/// 一条记忆的 **UI 视图模型**。
+///
+/// 为什么不直接用 `services/memory_service.dart` 的 `MemoryEntry`：
+/// B1 还在后端线手里写，UI 不该 import 一个未交付的服务（会连锁编译失败）。
+/// 这里只定义页面需要看到的字段，默认数据源负责把旧 API 映射过来。
+class MemoryScopeEntry {
+  const MemoryScopeEntry({
+    required this.id,
+    required this.kind,
+    required this.text,
+    required this.source,
+    required this.createdAt,
+    this.expiresAt,
+  });
+
+  final String id;
+  final String kind;
+  final String text;
+
+  /// `user` / `agent` / `legacy` / `promoted`（§N12.3）
+  final String source;
+  final int createdAt;
+  final int? expiresAt;
+}
+
+/// 作用域读取结果的状态。
+///
+/// ★ **"空"与"错"必须不同形**（§N12.4）：`ok` + 空列表 = 还没有记忆；
+/// `error` = 读不出来；`unavailable` = 这条作用域还没接入（B1 未交付）。
+enum MemoryLoadStatus { ok, error, unavailable }
+
+/// 一个作用域的读取结果。
+class MemoryScopeSnapshot {
+  MemoryScopeSnapshot.ok({
+    required List<MemoryScopeEntry> entries,
+    this.usedBytes,
+    this.softMaxBytes,
+  })  : status = MemoryLoadStatus.ok,
+        entries = List<MemoryScopeEntry>.unmodifiable(entries),
+        message = null;
+
+  const MemoryScopeSnapshot.error(String reason)
+      : status = MemoryLoadStatus.error,
+        entries = const <MemoryScopeEntry>[],
+        usedBytes = null,
+        softMaxBytes = null,
+        message = reason;
+
+  const MemoryScopeSnapshot.unavailable(String reason)
+      : status = MemoryLoadStatus.unavailable,
+        entries = const <MemoryScopeEntry>[],
+        usedBytes = null,
+        softMaxBytes = null,
+        message = reason;
+
+  final MemoryLoadStatus status;
+  final List<MemoryScopeEntry> entries;
+
+  /// 占用字节（宿主回报；null = 不知道）
+  final int? usedBytes;
+
+  /// 存储**软预算**字节 —— 不是"上限"：满了淘汰最旧条目，不拒写。
+  /// null = 这条作用域还没有软预算数字（B1 未交付）。
+  final int? softMaxBytes;
+
+  /// error / unavailable 时的人话原因
+  final String? message;
+}
+
+/// 一条「模型想记住」提议（`proposals.jsonl` → `memory.proposals`）。
+class MemoryProposal {
+  const MemoryProposal({
+    required this.id,
+    required this.text,
+    required this.kind,
+    this.createdAt = 0,
+  });
+
+  final String id;
+  final String text;
+  final String kind;
+  final int createdAt;
+}
+
+class MemoryProposalsSnapshot {
+  MemoryProposalsSnapshot.ok(List<MemoryProposal> entries)
+      : status = MemoryLoadStatus.ok,
+        entries = List<MemoryProposal>.unmodifiable(entries),
+        message = null;
+
+  const MemoryProposalsSnapshot.unavailable(String reason)
+      : status = MemoryLoadStatus.unavailable,
+        entries = const <MemoryProposal>[],
+        message = reason;
+
+  final MemoryLoadStatus status;
+  final List<MemoryProposal> entries;
+  final String? message;
+}
+
+/// **注入预算**（§N12.8：每轮的 token 花销，与存储量无关 —— 两组数字之一）。
+class MemoryBudgetSnapshot {
+  MemoryBudgetSnapshot.ok({
+    required this.globalWorkspaceInjectChars,
+    required this.sessionInjectChars,
+    this.fromHost = false,
+  })  : status = MemoryLoadStatus.ok,
+        message = null;
+
+  const MemoryBudgetSnapshot.unavailable(String reason)
+      : status = MemoryLoadStatus.unavailable,
+        globalWorkspaceInjectChars = 0,
+        sessionInjectChars = 0,
+        fromHost = false,
+        message = reason;
+
+  final MemoryLoadStatus status;
+
+  /// 全局 + 工作区合计上限（字符）
+  final int globalWorkspaceInjectChars;
+
+  /// 会话独立上限（字符）
+  final int sessionInjectChars;
+
+  /// 数字是否来自宿主回报（false = 契约默认值 / 降级，UI 要如实标注）
+  final bool fromHost;
+  final String? message;
+}
+
+/// 一次写操作的结果（失败原因直接给人看，不吞）。
+class MemoryWriteOutcome {
+  const MemoryWriteOutcome.ok()
+      : ok = true,
+        error = null;
+  const MemoryWriteOutcome.failure(this.error) : ok = false;
+
+  final bool ok;
+  final String? error;
+}
+
+/// **记忆页数据源**（UI 侧抽象，可在测试里注入 mock）。
+///
+/// 为什么不直接 `const GlobalMemory()`：三作用域是 B1 才有的形状，而
+/// `services/memory_service.dart` 正在后端线手里写。默认实现
+/// [BridgeMemoryDataSource] 只用 HEAD 就有的旧 API 读全局，工作区/会话
+/// **如实降级**；B1 落地后换一个实现即可，页面与测试都不用动。
+abstract class MemoryDataSource {
+  Future<MemoryScopeSnapshot> loadScope(MemoryScopeView scope);
+  Future<MemoryProposalsSnapshot> loadProposals();
+  Future<MemoryBudgetSnapshot> loadBudget();
+  Future<MemoryWriteOutcome> add(MemoryScopeView scope, String text,
+      {String kind = 'other'});
+  Future<MemoryWriteOutcome> update(
+      MemoryScopeView scope, String id, String text);
+  Future<MemoryWriteOutcome> remove(MemoryScopeView scope, String id);
+  Future<MemoryWriteOutcome> clear(MemoryScopeView scope);
+  Future<MemoryWriteOutcome> resolveProposal(String id, {required bool promote});
+}
+
+/// 默认数据源：**只有全局是真的，工作区/会话如实降级**。
+///
+/// · 全局：走 HEAD 的 [GlobalMemory]（`memory.read` 全文 → 结构化条目）；
+///   读失败原因原样透传（`readResult().error`），绝不吞成"暂无记忆"；
+/// · 工作区 / 会话：B1 未交付 ⇒ [MemoryScopeSnapshot.unavailable]，
+///   UI 写「后端 B1 接入中」，**不假造数据**；
+/// · 提议 / 注入预算：同上（依赖 B1 的 `memory.proposals` / `memory.stats`）。
+///
+/// ⚠️ 过渡期：全局的写（新增/编辑/删除）暂时仍走旧 `clear + append` 实现
+/// （B1 的 `memory.userEdit` 由后端线接，见 INTERFACE.md §N12.10）。
+/// 在 B1 落地**且** AgentBridge 切到 `userEdit` 之前，真机上不要编辑/删除
+/// 全局条目 —— 否则可能先清空再回写失败。
+class BridgeMemoryDataSource implements MemoryDataSource {
+  const BridgeMemoryDataSource({this.sessionId, this.workspacePath});
+
+  /// 会话 / 工作区上下文 —— B1 落地后拼 `MemoryAddress` 用（§N12.4）。
+  /// 现在工作区/会话段还没接通，只用于把降级说明说清楚；但接口先带上，
+  /// 免得将来改页面 API（数据源本来就该知道自己寻址到哪一层）。
+  final String? sessionId;
+  final String? workspacePath;
+
+  static const _b1Note = '后端 B1 接入中：本作用域的记忆读取与写入尚未接通';
+
+  @override
+  Future<MemoryScopeSnapshot> loadScope(MemoryScopeView scope) async {
+    if (scope != MemoryScopeView.global) {
+      return const MemoryScopeSnapshot.unavailable(_b1Note);
+    }
+    final r = await const GlobalMemory().readResult();
+    if (r.error != null) return MemoryScopeSnapshot.error(r.error!);
+    final entries = <MemoryScopeEntry>[
+      for (final e in GlobalMemory.parseEntries(r.text))
+        if (e.isAlive())
+          MemoryScopeEntry(
+            id: e.id,
+            kind: e.kind,
+            text: e.text,
+            source: e.source,
+            createdAt: e.createdAt,
+            expiresAt: e.expiresAt,
+          ),
+    ];
+    // softMaxBytes 故意留 null：旧实现是 256KB **硬上限**（到顶拒写），
+    // 软预算要等 B1 的 `memory.stats().limits`，这里不谎报。
+    return MemoryScopeSnapshot.ok(entries: entries, usedBytes: r.bytes);
+  }
+
+  @override
+  Future<MemoryProposalsSnapshot> loadProposals() async =>
+      const MemoryProposalsSnapshot.unavailable(_b1Note);
+
+  @override
+  Future<MemoryBudgetSnapshot> loadBudget() async =>
+      const MemoryBudgetSnapshot.unavailable(_b1Note);
+
+  @override
+  Future<MemoryWriteOutcome> add(MemoryScopeView scope, String text,
+      {String kind = 'other'}) async {
+    if (scope != MemoryScopeView.global) {
+      return const MemoryWriteOutcome.failure(_b1Note);
+    }
+    final r =
+        await const GlobalMemory().addEntry(text, kind: kind, source: 'user');
+    return r.ok
+        ? const MemoryWriteOutcome.ok()
+        : MemoryWriteOutcome.failure(r.error ?? '保存失败');
+  }
+
+  @override
+  Future<MemoryWriteOutcome> update(
+      MemoryScopeView scope, String id, String text) async {
+    if (scope != MemoryScopeView.global) {
+      return const MemoryWriteOutcome.failure(_b1Note);
+    }
+    final r = await const GlobalMemory().updateEntry(id, text);
+    return r.ok
+        ? const MemoryWriteOutcome.ok()
+        : MemoryWriteOutcome.failure(r.error ?? '保存失败');
+  }
+
+  @override
+  Future<MemoryWriteOutcome> remove(MemoryScopeView scope, String id) async {
+    if (scope != MemoryScopeView.global) {
+      return const MemoryWriteOutcome.failure(_b1Note);
+    }
+    final r = await const GlobalMemory().deleteEntry(id);
+    return r.ok
+        ? const MemoryWriteOutcome.ok()
+        : MemoryWriteOutcome.failure(r.error ?? '删除失败');
+  }
+
+  @override
+  Future<MemoryWriteOutcome> clear(MemoryScopeView scope) async {
+    if (scope != MemoryScopeView.global) {
+      return const MemoryWriteOutcome.failure(_b1Note);
+    }
+    final ok = await const GlobalMemory().clear();
+    return ok
+        ? const MemoryWriteOutcome.ok()
+        : const MemoryWriteOutcome.failure('清空失败');
+  }
+
+  @override
+  Future<MemoryWriteOutcome> resolveProposal(String id,
+          {required bool promote}) async =>
+      const MemoryWriteOutcome.failure(_b1Note);
+}
+
+/// **记忆入口**（2026-10-23；2026-10-29 扩成三作用域）—— 主页一行 + 规模徽章。
+///
+/// 与「设备权限」同一形态：主页只给"看一眼"的规模，全文在二级页。
+/// 从二级页返回后**重新读一次**（用户可能刚清空/晋升 —— 徽章得跟着变）。
 class _GlobalMemoryEntry extends StatefulWidget {
-  const _GlobalMemoryEntry({required this.onOpen});
+  const _GlobalMemoryEntry({required this.onOpen, this.source});
 
   /// 打开二级页；**返回后**才完成（徽章据此刷新）。
   final Future<void> Function() onOpen;
+
+  /// 可注入数据源（测试用）；null = 默认 [BridgeMemoryDataSource]。
+  final MemoryDataSource? source;
 
   @override
   State<_GlobalMemoryEntry> createState() => _GlobalMemoryEntryState();
 }
 
 class _GlobalMemoryEntryState extends State<_GlobalMemoryEntry> {
-  final _memory = const GlobalMemory();
+  late final MemoryDataSource _src =
+      widget.source ?? const BridgeMemoryDataSource();
 
   /// null = 还没读到。加载中显示 '…' —— 一闪而过的"暂无记忆"比不显示更骗人。
   String? _badge;
@@ -1082,17 +1452,30 @@ class _GlobalMemoryEntryState extends State<_GlobalMemoryEntry> {
   }
 
   Future<void> _reload() async {
-    final r = await _memory.readResult();
+    final g = await _src.loadScope(MemoryScopeView.global);
+    final w = await _src.loadScope(MemoryScopeView.workspace);
     if (!mounted) return;
     // 读不出来**不说**"暂无记忆" —— 那是两句话，说错就骗人
-    setState(() => _badge = r.error != null
-        ? '读取失败'
-        : (r.isEmpty ? '暂无记忆' : '${_entryCount(r.text)} 条'));
+    setState(() {
+      if (g.status == MemoryLoadStatus.error) {
+        _badge = '读取失败';
+        return;
+      }
+      final gn = g.entries.length;
+      final wn = w.entries.length;
+      if (w.status == MemoryLoadStatus.ok) {
+        _badge = gn == 0 && wn == 0 ? '暂无记忆' : '全局 $gn · 本工作区 $wn';
+      } else {
+        // 工作区还没接入（B1 未交付）⇒ 只报全局，不画一个假的本工作区数
+        _badge = gn == 0 ? '暂无记忆' : '全局 $gn';
+      }
+    });
   }
 
   @override
   Widget build(BuildContext context) {
     return _HomeRow(
+      key: const ValueKey('memory_home_row'),
       title: '全局记忆',
       // 规模作卡片副行 —— 不进二级页也知道记了多少
       subtitle: _badge ?? '…',
@@ -1105,14 +1488,35 @@ class _GlobalMemoryEntryState extends State<_GlobalMemoryEntry> {
   }
 }
 
-/// **全局记忆二级页**（2026-10-25 改版）—— 结构化条目卡片。
+/// **记忆二级页**（2026-10-29 三作用域重做）—— 全局 / 本工作区 / 本会话。
 ///
-/// 记忆存在 App 全局（不在工作区），每轮系统提示都会把它带回去。
-/// 后端 N7 落地后记忆按条目组织（kind/source/createdAt），本页按
-/// kind 分组逐条展示，可增 / 改 / 删单条，也可整表清空。
-/// 旧格式（legacy）条目是纯文本行自动迁移来的，元信息行标「旧格式」。
+/// ## 为什么要分三段（用户报的问题）
+/// 记忆只有"一份全局"时，会话里随手记的东西会串到所有会话，而全局又能被
+/// 模型直接改写。契约（§N12）把它拆成三层：会话私有、工作区共享、
+/// 全局（对 agent 只读，模型只能提议、用户确认后晋升）。
+///
+/// ## 诚实口径
+/// · 每个作用域**单独**读：读失败 ≠ 暂无记忆（三态各有各的话）；
+/// · B1 未交付的作用域显示「后端 B1 接入中」，不画假数据；
+/// · 容量分两组数字：**存储软预算**（满了淘汰、不拒写）与
+///   **注入预算**（每轮最多 N 字符、按任务检索后注入）——
+///   不再有 256KB 上限压迫，也没有「会注入每次对话」那句错话。
 class GlobalMemoryPage extends StatefulWidget {
-  const GlobalMemoryPage({super.key});
+  const GlobalMemoryPage({
+    super.key,
+    this.source,
+    this.sessionId,
+    this.workspacePath,
+  });
+
+  /// 可注入数据源（测试用）；null = 默认 [BridgeMemoryDataSource]。
+  final MemoryDataSource? source;
+
+  /// 会话上下文：null = 从设置主页进来（没有"本会话"这一段）。
+  final String? sessionId;
+
+  /// 当前工作区路径（决定"本工作区"是哪一层）；null = 未知。
+  final String? workspacePath;
 
   @override
   State<GlobalMemoryPage> createState() => _GlobalMemoryPageState();
@@ -1131,6 +1535,7 @@ String _memorySourceLabel(String source) => switch (source) {
       'user' => '手动添加',
       'agent' => '模型记的',
       'legacy' => '旧格式',
+      'promoted' => '提议晋升',
       _ => source,
     };
 
@@ -1155,14 +1560,33 @@ String _memoryDateTime(int ms) {
 }
 
 class _GlobalMemoryPageState extends State<GlobalMemoryPage> {
-  final _memory = const GlobalMemory();
+  late final MemoryDataSource _src = widget.source ??
+      BridgeMemoryDataSource(
+        sessionId: widget.sessionId,
+        workspacePath: widget.workspacePath,
+      );
 
-  /// null = 读取中（转圈）
-  List<MemoryEntry>? _entries;
-  ({int usedBytes, int maxBytes})? _capacity;
+  /// 各作用域的读取结果（缺 key = 还没读到 → 该段显示 '…'）
+  final Map<MemoryScopeView, MemoryScopeSnapshot> _scopes = {};
 
-  /// 清空进行中 —— 右上角动作锁住并转圈，避免连点二次触发
-  bool _clearing = false;
+  MemoryProposalsSnapshot? _proposals;
+  MemoryBudgetSnapshot? _budget;
+
+  /// 首次加载完成（false = 整页转圈）
+  bool _loaded = false;
+
+  /// 写入/清空/晋升进行中 —— 所有动作锁住，避免连点二次触发
+  bool _busy = false;
+
+  bool get _hasSession =>
+      widget.sessionId != null && widget.sessionId!.isNotEmpty;
+
+  /// 页面上要显示的段（会话段只在有会话上下文时出现）
+  List<MemoryScopeView> get _visibleScopes => [
+        MemoryScopeView.global,
+        MemoryScopeView.workspace,
+        if (_hasSession) MemoryScopeView.session,
+      ];
 
   @override
   void initState() {
@@ -1171,36 +1595,78 @@ class _GlobalMemoryPageState extends State<GlobalMemoryPage> {
   }
 
   Future<void> _load() async {
-    final entries = await _memory.listEntries();
-    final cap = await _memory.capacity();
+    final snaps = <MemoryScopeView, MemoryScopeSnapshot>{};
+    for (final s in _visibleScopes) {
+      snaps[s] = await _guard(s);
+    }
+    final proposals = await _guardProposals();
+    final budget = await _guardBudget();
     if (!mounted) return;
     setState(() {
-      _entries = entries;
-      _capacity = cap;
+      _scopes
+        ..clear()
+        ..addAll(snaps);
+      _proposals = proposals;
+      _budget = budget;
+      _loaded = true;
     });
   }
 
-  /// 清空**不可逆** —— 先弹确认抽屉（2026-10-25 起统一走上拉抽屉，
-  /// 不再用居中弹窗），破坏性按钮红色实心。
-  Future<void> _confirmClear() async {
+  /// 读一段：数据源自己抛异常也要变成**错误态**，不能当成"空"。
+  Future<MemoryScopeSnapshot> _guard(MemoryScopeView scope) async {
+    try {
+      return await _src.loadScope(scope);
+    } catch (e) {
+      return MemoryScopeSnapshot.error('$e');
+    }
+  }
+
+  Future<MemoryProposalsSnapshot> _guardProposals() async {
+    try {
+      return await _src.loadProposals();
+    } catch (e) {
+      return MemoryProposalsSnapshot.unavailable('提议列表读取失败：$e');
+    }
+  }
+
+  Future<MemoryBudgetSnapshot> _guardBudget() async {
+    try {
+      return await _src.loadBudget();
+    } catch (e) {
+      return MemoryBudgetSnapshot.unavailable('预算读取失败：$e');
+    }
+  }
+
+  String _scopeNoun(MemoryScopeView scope) => switch (scope) {
+        MemoryScopeView.global => '全局记忆',
+        MemoryScopeView.workspace => '本工作区记忆',
+        MemoryScopeView.session => '本会话记忆',
+      };
+
+  /// 清空**不可逆** —— 按作用域分开确认（禁止一个按钮清三层）。
+  Future<void> _confirmClear(MemoryScopeView scope) async {
+    final noun = _scopeNoun(scope);
     final ok = await showBwConfirmSheet(
       context,
-      title: '清空全局记忆？',
-      message: '所有跨会话记忆都会被删除，无法恢复。'
-          '之后的新会话不再带着这些内容开始。',
+      title: '清空$noun？',
+      message: switch (scope) {
+        MemoryScopeView.global => '所有跨会话记忆都会被删除，无法恢复。'
+            '之后的新会话不再带着这些内容开始。',
+        MemoryScopeView.workspace =>
+          '本工作区的共享记忆都会被删除（其它作用域不受影响），无法恢复。',
+        MemoryScopeView.session => '这个会话的私有记忆会被删除'
+            '（工作区 / 全局不受影响），无法恢复。',
+      },
       confirmLabel: '清空记忆',
       destructive: true,
     );
-    if (ok && mounted) await _doClear();
-  }
-
-  Future<void> _doClear() async {
-    setState(() => _clearing = true);
-    final ok = await _memory.clear();
+    if (!ok || !mounted) return;
+    setState(() => _busy = true);
+    final r = await _src.clear(scope);
     if (!mounted) return;
-    setState(() => _clearing = false);
-    if (!ok) {
-      showIosToast(context, '清空失败');
+    setState(() => _busy = false);
+    if (!r.ok) {
+      showIosToast(context, r.error ?? '清空失败');
       return;
     }
     await _load();
@@ -1208,7 +1674,8 @@ class _GlobalMemoryPageState extends State<GlobalMemoryPage> {
     showIosToast(context, '已清空');
   }
 
-  Future<void> _confirmDelete(MemoryEntry e) async {
+  Future<void> _confirmDelete(
+      MemoryScopeView scope, MemoryScopeEntry e) async {
     final ok = await showBwConfirmSheet(
       context,
       title: '删除这条记忆？',
@@ -1217,8 +1684,10 @@ class _GlobalMemoryPageState extends State<GlobalMemoryPage> {
       destructive: true,
     );
     if (!ok || !mounted) return;
-    final r = await _memory.deleteEntry(e.id);
+    setState(() => _busy = true);
+    final r = await _src.remove(scope, e.id);
     if (!mounted) return;
+    setState(() => _busy = false);
     if (!r.ok) {
       showIosToast(context, r.error ?? '删除失败');
       return;
@@ -1226,7 +1695,10 @@ class _GlobalMemoryPageState extends State<GlobalMemoryPage> {
     await _load();
   }
 
-  Future<void> _openEditor({MemoryEntry? entry}) async {
+  Future<void> _openEditor({
+    required MemoryScopeView scope,
+    MemoryScopeEntry? entry,
+  }) async {
     final saved = await showModalBottomSheet<bool>(
       context: context,
       isScrollControlled: true,
@@ -1234,7 +1706,11 @@ class _GlobalMemoryPageState extends State<GlobalMemoryPage> {
       shape: const RoundedRectangleBorder(),
       builder: (sheetCtx) => BwSheetShell(
         onDismissRequest: () => Navigator.of(sheetCtx).pop(),
-        child: _MemoryEditorSheet(memory: _memory, entry: entry),
+        child: _MemoryEditorSheet(
+          source: _src,
+          scope: scope,
+          entry: entry,
+        ),
       ),
     );
     if (saved == true) {
@@ -1244,199 +1720,409 @@ class _GlobalMemoryPageState extends State<GlobalMemoryPage> {
     }
   }
 
+  /// 提议：晋升为全局 / 忽略（**只有用户动作**能晋升，agent 不可触发）。
+  Future<void> _resolveProposal(MemoryProposal item,
+      {required bool promote}) async {
+    setState(() => _busy = true);
+    final r = await _src.resolveProposal(item.id, promote: promote);
+    if (!mounted) return;
+    setState(() => _busy = false);
+    if (!r.ok) {
+      showIosToast(context, r.error ?? (promote ? '晋升失败' : '操作失败'));
+      return;
+    }
+    await _load();
+    if (!mounted) return;
+    showIosToast(context, promote ? '已晋升为全局记忆' : '已忽略');
+  }
+
+  // ------------------------------------------------------------ 容量：两组数字
+
+  /// **存储软预算 + 注入预算**（两组数字，§N12.8）。
+  ///
+  /// 旧卡把"存储硬上限"当"每轮都会注入的开销"展示（「会注入每次对话」/
+  /// 「接近上限，建议清理」）—— 那是把用户吓坏的口径，这里删掉：
+  /// 存储只管"能存多少"（满了淘汰，不拒写），注入只管"每轮花多少"。
+  Widget _budgetCard(Hue h) {
+    final budget = _budget;
+    final rows = <Widget>[];
+    var anySoftBudget = false;
+    for (final scope in _visibleScopes) {
+      final snap = _scopes[scope];
+      String right;
+      if (snap == null) {
+        right = '…';
+      } else if (snap.status == MemoryLoadStatus.error) {
+        right = '读取失败';
+      } else if (snap.status == MemoryLoadStatus.unavailable) {
+        right = '待后端 B1 接入';
+      } else {
+        final used = snap.usedBytes;
+        final soft = snap.softMaxBytes;
+        if (soft != null) anySoftBudget = true;
+        if (used == null) {
+          right = '—';
+        } else if (soft == null) {
+          right = '已用 ${_fmtBytes(used)} · 软预算 待后端 B1 接入';
+        } else {
+          right = '已用 ${_fmtBytes(used)} · 软预算 ${_fmtBytes(soft)}';
+        }
+      }
+      rows.add(Padding(
+        padding: const EdgeInsets.symmetric(vertical: 3),
+        child: Row(
+          children: [
+            Text(_memoryScopeTitles[scope]!,
+                style: TextStyle(fontSize: 12.5, color: h.textDim)),
+            const Spacer(),
+            Text(right, style: TextStyle(fontSize: 12, color: h.textFaint)),
+          ],
+        ),
+      ));
+    }
+
+    final storageNote = anySoftBudget
+        ? '软预算：满了会淘汰最旧条目，不会拒绝新增'
+        : '软预算：B1 接入后按「满了淘汰最旧条目、不拒写」执行';
+
+    final injection = <Widget>[];
+    if (budget != null && budget.status == MemoryLoadStatus.ok) {
+      injection.addAll([
+        Text('每轮最多 ${budget.globalWorkspaceInjectChars} 字符（全局 + 本工作区）',
+            style: TextStyle(fontSize: 12.5, color: h.textDim)),
+        const SizedBox(height: 4),
+        Text('每轮最多 ${budget.sessionInjectChars} 字符（本会话）',
+            style: TextStyle(fontSize: 12.5, color: h.textDim)),
+        const SizedBox(height: 6),
+        Text('按任务检索后注入；没命中的条目压成摘要',
+            style: TextStyle(fontSize: 11.5, height: 1.5, color: h.textFaint)),
+        if (!budget.fromHost) ...[
+          const SizedBox(height: 4),
+          Text('上限为契约默认值（§N12.8），B1 接入后以宿主回报为准',
+              style: TextStyle(fontSize: 11.5, height: 1.5, color: h.textFaint)),
+        ],
+      ]);
+    } else {
+      injection.add(Text(budget?.message ?? '待后端 B1 接入',
+          style: TextStyle(fontSize: 12.5, height: 1.5, color: h.textFaint)));
+    }
+
+    return Container(
+      key: const ValueKey('memory_budget'),
+      width: double.infinity,
+      padding: const EdgeInsets.fromLTRB(18, 16, 18, 16),
+      decoration: BoxDecoration(
+        color: h.surfaceAlt,
+        borderRadius: BorderRadius.circular(HRadius.xl),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text('存储软预算',
+              style: TextStyle(
+                  fontSize: 13,
+                  fontWeight: FontWeight.w600,
+                  color: h.textDim)),
+          const SizedBox(height: 8),
+          ...rows,
+          const SizedBox(height: 6),
+          Text(storageNote,
+              style: TextStyle(fontSize: 11.5, height: 1.5, color: h.textFaint)),
+          const SizedBox(height: 14),
+          Divider(height: 1, color: h.border),
+          const SizedBox(height: 14),
+          Text('注入预算',
+              style: TextStyle(
+                  fontSize: 13,
+                  fontWeight: FontWeight.w600,
+                  color: h.textDim)),
+          const SizedBox(height: 8),
+          ...injection,
+        ],
+      ),
+    );
+  }
+
+  // ------------------------------------------------------------ 三段
+
+  String _scopeCaption(MemoryScopeView scope) => switch (scope) {
+        MemoryScopeView.global => '全局记忆对所有会话只读 · 模型只能提议，不能直接写',
+        MemoryScopeView.workspace => '本工作区所有会话共享',
+        MemoryScopeView.session => '只在本会话生效',
+      };
+
+  Widget _scopeAction({
+    required Key key,
+    required String label,
+    required Color color,
+    VoidCallback? onTap,
+  }) =>
+      GestureDetector(
+        key: key,
+        onTap: onTap,
+        behavior: HitTestBehavior.opaque,
+        child: Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+          child: Text(label, style: TextStyle(fontSize: 12.5, color: color)),
+        ),
+      );
+
+  Widget _scopeSection(Hue h, MemoryScopeView scope) {
+    final snap = _scopes[scope];
+    final ok = snap?.status == MemoryLoadStatus.ok;
+    final count = snap?.entries.length ?? 0;
+    return Column(
+      key: ValueKey('memory_scope_${scope.name}'),
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Row(
+          children: [
+            Text(_memoryScopeTitles[scope]!,
+                style: TextStyle(
+                    fontSize: 14,
+                    fontWeight: FontWeight.w600,
+                    color: h.text)),
+            const SizedBox(width: 8),
+            if (ok)
+              Text('$count 条',
+                  style: TextStyle(fontSize: 12, color: h.textFaint)),
+            const Spacer(),
+            // 没有条目就没有可清的东西 —— 动作干脆不出现（iOS 的做法）
+            if (ok && count > 0)
+              _scopeAction(
+                key: ValueKey('memory_clear_${scope.name}'),
+                label: '清空',
+                color: HColors.errorOn(h.dark),
+                onTap: _busy ? null : () => _confirmClear(scope),
+              ),
+            if (ok)
+              _scopeAction(
+                key: ValueKey('memory_add_${scope.name}'),
+                label: '添加',
+                color: h.textDim,
+                onTap: _busy ? null : () => _openEditor(scope: scope),
+              ),
+          ],
+        ),
+        const SizedBox(height: 4),
+        Text(_scopeCaption(scope),
+            style: TextStyle(fontSize: 11.5, height: 1.5, color: h.textFaint)),
+        const SizedBox(height: 10),
+        ..._scopeBody(h, scope),
+      ],
+    );
+  }
+
+  List<Widget> _scopeBody(Hue h, MemoryScopeView scope) {
+    final snap = _scopes[scope];
+    if (snap == null) {
+      return [
+        Text('…', style: TextStyle(fontSize: 13, color: h.textFaint)),
+      ];
+    }
+    switch (snap.status) {
+      case MemoryLoadStatus.error:
+        // ★ 读失败 ≠ 暂无记忆：显式说"读取失败"并给重试，绝不画成空
+        return [
+          Text('读取失败',
+              style: TextStyle(
+                  fontSize: 13.5,
+                  fontWeight: FontWeight.w600,
+                  color: HColors.errorOn(h.dark))),
+          if (snap.message != null) const SizedBox(height: 4),
+          if (snap.message != null)
+            Text(snap.message!,
+                style:
+                    TextStyle(fontSize: 12, height: 1.5, color: h.textFaint)),
+          const SizedBox(height: 6),
+          _scopeAction(
+            key: ValueKey('memory_retry_${scope.name}'),
+            label: '重试',
+            color: h.text,
+            onTap: _busy ? null : () => _load(),
+          ),
+        ];
+      case MemoryLoadStatus.unavailable:
+        return [
+          Text(snap.message ?? '后端 B1 接入中',
+              style:
+                  TextStyle(fontSize: 13, height: 1.55, color: h.textFaint)),
+        ];
+      case MemoryLoadStatus.ok:
+        if (snap.entries.isEmpty) {
+          return [
+            Padding(
+              padding: const EdgeInsets.symmetric(vertical: 10),
+              child: Text('暂无记忆',
+                  style: TextStyle(fontSize: 12.5, color: h.textFaint)),
+            ),
+          ];
+        }
+        return [
+          for (final e in snap.entries)
+            _MemoryCard(
+              key: ValueKey('memory_entry_${scope.name}_${e.id}'),
+              entry: e,
+              h: h,
+              onEdit:
+                  _busy ? null : () => _openEditor(scope: scope, entry: e),
+              onDelete: _busy ? null : () => _confirmDelete(scope, e),
+            ),
+        ];
+    }
+  }
+
+  // ------------------------------------------------------------ 模型想记住
+
+  List<Widget> _proposalsSection(Hue h) {
+    final p = _proposals;
+    if (p == null || p.status != MemoryLoadStatus.ok || p.entries.isEmpty) {
+      // 未接入 / 没有提议 ⇒ 整段不渲染（不显示假的"0 条"）
+      return const <Widget>[];
+    }
+    return [
+      const SizedBox(height: HSpace.sm),
+      Column(
+        key: const ValueKey('memory_proposals'),
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text('模型想记住（${p.entries.length}）',
+              style: TextStyle(
+                  fontSize: 14,
+                  fontWeight: FontWeight.w600,
+                  color: h.text)),
+          const SizedBox(height: 4),
+          Text('模型提议的全局记忆，只有你确认后才会对所有会话生效',
+              style:
+                  TextStyle(fontSize: 11.5, height: 1.5, color: h.textFaint)),
+          const SizedBox(height: 10),
+          for (final item in p.entries) _proposalCard(h, item),
+        ],
+      ),
+    ];
+  }
+
+  Widget _proposalCard(Hue h, MemoryProposal item) {
+    return Container(
+      key: ValueKey('memory_proposal_${item.id}'),
+      margin: const EdgeInsets.only(bottom: HSpace.sm),
+      padding: const EdgeInsets.fromLTRB(16, 12, 12, 12),
+      decoration: BoxDecoration(
+        color: h.surfaceAlt,
+        borderRadius: BorderRadius.circular(HRadius.xl),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              _memoryKindPill(h, item.kind),
+              const SizedBox(width: 8),
+              Text('模型提议',
+                  style: TextStyle(fontSize: 12, color: h.textFaint)),
+            ],
+          ),
+          const SizedBox(height: 8),
+          Text(item.text,
+              style: TextStyle(fontSize: 14.5, height: 1.5, color: h.text)),
+          const SizedBox(height: 8),
+          Row(
+            children: [
+              const Spacer(),
+              _scopeAction(
+                key: ValueKey('memory_reject_${item.id}'),
+                label: '忽略',
+                color: h.textDim,
+                onTap: _busy
+                    ? null
+                    : () => _resolveProposal(item, promote: false),
+              ),
+              const SizedBox(width: 6),
+              _scopeAction(
+                key: ValueKey('memory_promote_${item.id}'),
+                label: '晋升为全局',
+                color: h.text,
+                onTap:
+                    _busy ? null : () => _resolveProposal(item, promote: true),
+              ),
+            ],
+          ),
+        ],
+      ),
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     final h = Hue.of(context);
-    final entries = _entries;
-    final cap = _capacity;
-    final nearlyFull =
-        cap != null && cap.usedBytes >= cap.maxBytes * 0.9;
     return Scaffold(
       appBar: AppBar(
-        title: const Text('全局记忆'),
+        title: const Text('记忆'),
         leading: _iosBackLeading(context),
-        actions: [
-          CupertinoButton(
-            onPressed: () => _openEditor(),
-            minimumSize: const Size(0, 44),
-            padding: const EdgeInsets.symmetric(horizontal: HSpace.sm),
-            child: Icon(AppIcons.add, size: 22, color: h.text),
-          ),
-          // 没有记忆就没有可清的东西 —— 动作干脆不出现（iOS 的做法）
-          if (entries != null && entries.isNotEmpty)
-            CupertinoButton(
-              onPressed: _clearing ? null : _confirmClear,
-              minimumSize: const Size(0, 44),
-              padding: const EdgeInsets.symmetric(horizontal: HSpace.sm),
-              child: Container(
-                padding:
-                    const EdgeInsets.symmetric(horizontal: 13, vertical: 6),
-                decoration: BoxDecoration(
-                  color: h.surface,
-                  borderRadius: BorderRadius.circular(999),
-                ),
-                child: _clearing
-                    ? CupertinoActivityIndicator(
-                        radius: 8, color: HColors.errorOn(h.dark))
-                    : Text('清空',
-                        style: TextStyle(
-                            fontSize: 13.5,
-                            color: HColors.errorOn(h.dark))),
-              ),
-            ),
-          const SizedBox(width: HSpace.sm),
-        ],
       ),
-      body: entries == null
+      body: !_loaded
           ? Center(child: CupertinoActivityIndicator(color: h.accent))
           : ListView(
               padding: const EdgeInsets.all(HSpace.lg),
               children: [
-                // ---- 容量头卡（2026-10-25 晚按概念图 03）：大数字 +
-                //   容量条 + 已用/上限，一张卡说清规模 ----
-                if (cap != null) ...[
-                  Container(
-                    width: double.infinity,
-                    padding: const EdgeInsets.fromLTRB(18, 16, 18, 14),
-                    decoration: BoxDecoration(
-                      color: h.surfaceAlt,
-                      borderRadius: BorderRadius.circular(HRadius.xl),
-                    ),
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        Row(
-                          crossAxisAlignment: CrossAxisAlignment.baseline,
-                          textBaseline: TextBaseline.alphabetic,
-                          children: [
-                            Text(
-                              '${entries.length}',
-                              style: TextStyle(
-                                fontSize: 26,
-                                fontWeight: FontWeight.w700,
-                                color: h.text,
-                              ),
-                            ),
-                            const SizedBox(width: 6),
-                            Text(
-                              '条记忆',
-                              style:
-                                  TextStyle(fontSize: 14, color: h.textDim),
-                            ),
-                            const Spacer(),
-                            Text(
-                              nearlyFull ? '接近上限，建议清理' : '会注入每次对话',
-                              style: TextStyle(
-                                fontSize: 12.5,
-                                color: nearlyFull
-                                    ? HColors.warnOn(h.dark)
-                                    : h.textFaint,
-                              ),
-                            ),
-                          ],
-                        ),
-                        const SizedBox(height: 12),
-                        ClipRRect(
-                          borderRadius: BorderRadius.circular(3),
-                          child: LinearProgressIndicator(
-                            value: cap.maxBytes > 0
-                                ? (cap.usedBytes / cap.maxBytes)
-                                    .clamp(0.0, 1.0)
-                                : 0,
-                            minHeight: 6,
-                            backgroundColor: h.border,
-                            valueColor: AlwaysStoppedAnimation<Color>(
-                              nearlyFull
-                                  ? HColors.warnOn(h.dark)
-                                  : h.text,
-                            ),
-                          ),
-                        ),
-                        const SizedBox(height: 8),
-                        Row(
-                          children: [
-                            Text(
-                              '已用 ${_fmtBytes(cap.usedBytes)}',
-                              style: TextStyle(
-                                  fontSize: 12, color: h.textFaint),
-                            ),
-                            const Spacer(),
-                            Text(
-                              '上限 ${_fmtBytes(cap.maxBytes)}',
-                              style: TextStyle(
-                                  fontSize: 12, color: h.textFaint),
-                            ),
-                          ],
-                        ),
-                      ],
-                    ),
-                  ),
-                  const SizedBox(height: HSpace.lg),
+                _budgetCard(h),
+                const SizedBox(height: HSpace.lg),
+                for (final scope in _visibleScopes) ...[
+                  _scopeSection(h, scope),
+                  const SizedBox(height: HSpace.md),
                 ],
-                if (entries.isEmpty)
-                  Padding(
-                    padding: const EdgeInsets.symmetric(vertical: 36),
-                    child: Text(
-                      '还没有任何记忆。\n和 Heracles 聊天时它会把值得记住的事'
-                      '写在这里（跨会话生效），也可以点右上角 + 手动添加。',
-                      textAlign: TextAlign.center,
-                      style: TextStyle(
-                        fontSize: 13,
-                        height: 1.7,
-                        color: h.textFaint,
-                      ),
-                    ),
-                  )
-                else ...[
-                  Padding(
-                    padding: const EdgeInsets.only(bottom: HSpace.sm),
-                    child: Text(
-                      '全部记忆',
-                      style: TextStyle(
-                        fontSize: 13,
-                        fontWeight: FontWeight.w600,
-                        color: h.textDim,
-                      ),
-                    ),
-                  ),
-                  for (final e in entries)
-                    _MemoryCard(
-                      entry: e,
-                      h: h,
-                      onEdit: () => _openEditor(entry: e),
-                      onDelete: () => _confirmDelete(e),
-                    ),
-                  const SizedBox(height: HSpace.sm),
+                // 没有会话上下文 ⇒ 不画一个假的会话记忆段，指向会话去
+                if (!_hasSession)
                   Center(
-                    child: Text(
-                      '记忆由对话自动提炼，也可以手动添加',
-                      style: TextStyle(fontSize: 12, color: h.textFaint),
-                    ),
+                    child: Text('会话私有记忆只在该会话里生效 · 进入某个会话查看',
+                        textAlign: TextAlign.center,
+                        style: TextStyle(
+                            fontSize: 12.5, height: 1.6, color: h.textFaint)),
                   ),
-                ],
+                ..._proposalsSection(h),
               ],
             ),
     );
   }
 }
 
+/// 记忆类别的小胶囊（卡片头行与提议卡共用）。
+Widget _memoryKindPill(Hue h, String kind) => Container(
+      padding: const EdgeInsets.symmetric(horizontal: 9, vertical: 3),
+      decoration: BoxDecoration(
+        color: h.surface,
+        borderRadius: BorderRadius.circular(999),
+      ),
+      child: Text(
+        _memoryKindShort[kind] ?? kind,
+        style: TextStyle(
+          fontSize: 11,
+          fontWeight: FontWeight.w600,
+          color: h.textDim,
+        ),
+      ),
+    );
+
 /// 一条记忆的卡片：正文 + 来源/日期元信息 + 编辑/删除。
+///
+/// [onEdit] / [onDelete] 为 null 时不画动作（例如只读段 / 动作锁住时）。
 class _MemoryCard extends StatelessWidget {
   const _MemoryCard({
+    super.key,
     required this.entry,
     required this.h,
-    required this.onEdit,
-    required this.onDelete,
+    this.onEdit,
+    this.onDelete,
   });
 
-  final MemoryEntry entry;
+  final MemoryScopeEntry entry;
   final Hue h;
-  final VoidCallback onEdit;
-  final VoidCallback onDelete;
+  final VoidCallback? onEdit;
+  final VoidCallback? onDelete;
 
   @override
   Widget build(BuildContext context) {
-    // 卡底元信息：来源（手动添加 / 模型记的 / 旧格式）+ 到期标注
+    // 卡底元信息：来源（手动添加 / 模型记的 / 旧格式 / 提议晋升）+ 到期标注
     final meta = <String>[
       _memorySourceLabel(entry.source),
       if (entry.expiresAt != null) '到期 ${_memoryDate(entry.expiresAt!)}',
@@ -1455,22 +2141,7 @@ class _MemoryCard extends StatelessWidget {
           // 头行（概念图 03）：类别标签 + 日期 …… 编辑 / 删除小方钮
           Row(
             children: [
-              Container(
-                padding:
-                    const EdgeInsets.symmetric(horizontal: 9, vertical: 3),
-                decoration: BoxDecoration(
-                  color: h.surface,
-                  borderRadius: BorderRadius.circular(999),
-                ),
-                child: Text(
-                  _memoryKindShort[entry.kind] ?? entry.kind,
-                  style: TextStyle(
-                    fontSize: 11,
-                    fontWeight: FontWeight.w600,
-                    color: h.textDim,
-                  ),
-                ),
-              ),
+              _memoryKindPill(h, entry.kind),
               const SizedBox(width: 8),
               if (entry.createdAt > 0)
                 Text(
@@ -1478,9 +2149,10 @@ class _MemoryCard extends StatelessWidget {
                   style: TextStyle(fontSize: 12, color: h.textFaint),
                 ),
               const Spacer(),
-              _iconBtn(AppIcons.edit, onEdit),
-              const SizedBox(width: 6),
-              _iconBtn(AppIcons.trash, onDelete),
+              if (onEdit != null) _iconBtn(AppIcons.edit, onEdit!),
+              if (onEdit != null && onDelete != null)
+                const SizedBox(width: 6),
+              if (onDelete != null) _iconBtn(AppIcons.trash, onDelete!),
             ],
           ),
           const SizedBox(height: 9),
@@ -1516,13 +2188,20 @@ class _MemoryCard extends StatelessWidget {
 
 /// 记忆编辑抽屉：新增（可选 kind）/ 编辑正文。
 ///
-/// 写入失败（疑似密钥拒收 / 超限）把后端给的人话原因直接显示在
-/// 输入框下方，不吞错误。
+/// 写入失败（疑似密钥拒收 / 超限 / 该作用域未接入）把数据源给的人话原因
+/// 直接显示在输入框下方，不吞错误。
 class _MemoryEditorSheet extends StatefulWidget {
-  const _MemoryEditorSheet({required this.memory, this.entry});
+  const _MemoryEditorSheet({
+    required this.source,
+    required this.scope,
+    this.entry,
+  });
 
-  final GlobalMemory memory;
-  final MemoryEntry? entry;
+  final MemoryDataSource source;
+
+  /// 写进哪一层（三段各自独立）
+  final MemoryScopeView scope;
+  final MemoryScopeEntry? entry;
 
   @override
   State<_MemoryEditorSheet> createState() => _MemoryEditorSheetState();
@@ -1548,8 +2227,8 @@ class _MemoryEditorSheetState extends State<_MemoryEditorSheet> {
       _error = null;
     });
     final r = _isEdit
-        ? await widget.memory.updateEntry(widget.entry!.id, text)
-        : await widget.memory.addEntry(text, kind: _kind, source: 'user');
+        ? await widget.source.update(widget.scope, widget.entry!.id, text)
+        : await widget.source.add(widget.scope, text, kind: _kind);
     if (!mounted) return;
     if (!r.ok) {
       setState(() {
@@ -1688,15 +2367,7 @@ class _MemoryEditorSheetState extends State<_MemoryEditorSheet> {
   }
 }
 
-/// 条目数 = 非空行数。
-///
-/// 与存储侧同一口径：Kotlin 那边**一条一行**（行首 ISO 时间戳由它加），
-/// 而契约只给全文字符串、没有单独的条数字段 —— 所以这里按行数，
-/// **不要**再在别处发明第二种"条数"算法。
-int _entryCount(String text) =>
-    text.split('\n').where((l) => l.trim().isNotEmpty).length;
-
-/// 人类可读的字节数：整数就不带小数（256 KB），否则一位小数（3.4 KB）。
+/// 人类可读的字节数：整数就不带小数（8 MB），否则一位小数（3.4 KB）。
 String _fmtBytes(int bytes) {
   if (bytes < 1024) return '$bytes B';
   final kb = bytes / 1024;
@@ -1709,11 +2380,12 @@ String _fmtNum(double v) =>
     v % 1 == 0 ? v.toInt().toString() : v.toStringAsFixed(1);
 
 // ------------------------------------------------------------
-// 记忆的**真存储**在 `services/global_memory.dart`（写进
-// `<externalFilesDir>/heracles/memory.md`，与工作区无关、跨工作区共享，
-// 由 `local_agent` 每轮读出来注入 system prompt）。
-// 上面这一节只是它的**查看 + 清空 UI**：读走 `readResult()` 而不是 `read()`
-// —— 它带真实字节数与失败原因，而"读不出来"和"还没有记忆"对用户是两句话。
+// 记忆的**真存储**仍在 `services/global_memory.dart`（旧单文件
+// `<externalFilesDir>/heracles/memory.md`）与后端线的 B1（三作用域
+// `memory/` 目录）里 —— **UI 不碰存储、不做迁移**。
+// 上面这一节只做展示与用户动作：数据源是 [MemoryDataSource]，
+// 默认实现 [BridgeMemoryDataSource] 只读全局旧数据，工作区/会话
+// 如实降级；测试注入 mock。B1 交付后换实现即可，页面不用重写。
 
 // ============================================================ 通用设置
 class GeneralSettingsPage extends StatelessWidget {
@@ -4032,7 +4704,7 @@ class _GroupCard extends StatelessWidget {
 /// 设置主页的一行（住在 [_GroupCard] 里，不自带卡片外壳）：
 /// 标题 + 副行状态值 + 右箭头，整行可点。
 class _HomeRow extends StatelessWidget {
-  const _HomeRow({required this.title, this.subtitle, this.onTap});
+  const _HomeRow({super.key, required this.title, this.subtitle, this.onTap});
 
   final String title;
   final String? subtitle;

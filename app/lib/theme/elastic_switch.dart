@@ -9,10 +9,27 @@ import 'app_theme.dart';
 /// 进度在关（灰）与开（正文黑）之间渐变。支持点按与横向拖动
 /// （拖过中点即翻转）。新开关一律用它，不要再用 CupertinoSwitch。
 class ElasticSwitch extends StatefulWidget {
-  const ElasticSwitch({super.key, required this.value, this.onChanged});
+  const ElasticSwitch({
+    super.key,
+    required this.value,
+    this.onChanged,
+    this.optimistic = true,
+  });
 
   final bool value;
   final ValueChanged<bool>? onChanged;
+
+  /// **是否乐观预演**（2026-10-29 新增，默认 true = 原有行为）。
+  ///
+  /// true：点按/拖动结束立刻把圆钮动画到目标位置，再回调 onChanged ——
+  /// 适合"本地状态说了算"的开关（设置项、抽屉选项）。
+  ///
+  /// false：**只回调、不动画**，视觉等父级 `value` 变化后在
+  /// `didUpdateWidget` 里对齐 —— 适合"真实值只能查询确认"的开关
+  /// （设备权限页）。否则会出现权限页的假状态：App 根本无权撤销
+  /// 运行时权限，预演出来的"已关"会一直骗用户到页面重建
+  /// （2026-10-29 用户反馈：关麦克风后开关显示关，实际没关）。
+  final bool optimistic;
 
   @override
   State<ElasticSwitch> createState() => _ElasticSwitchState();
@@ -74,7 +91,8 @@ class _ElasticSwitchState extends State<ElasticSwitch>
 
   void _toggle() {
     final target = widget.value ? 0.0 : 1.0;
-    _animateTo(target);
+    // 非乐观：不预演动画（视觉只跟父级真值走），但仍如实回调用户意图
+    if (widget.optimistic) _animateTo(target);
     widget.onChanged?.call(target == 1);
   }
 
@@ -108,7 +126,13 @@ class _ElasticSwitchState extends State<ElasticSwitch>
                 final pos = _dragPos ?? _pos;
                 _dragPos = null;
                 final target = pos > 0.5 ? 1.0 : 0.0;
-                _animateTo(target);
+                if (widget.optimistic) {
+                  _animateTo(target);
+                } else {
+                  // 非乐观：松开就落回父级真实值（不预演）；真值变了
+                  // 由 didUpdateWidget 负责动画过去。
+                  setState(() {});
+                }
                 if ((target == 1) != widget.value) {
                   widget.onChanged?.call(target == 1);
                 }

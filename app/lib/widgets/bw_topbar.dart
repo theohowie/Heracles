@@ -677,6 +677,11 @@ class _StepTrack extends StatefulWidget {
 const double kStepSlotExtent = 36;
 
 /// 收起态轨道视口宽度：约 4.4 步 ⇒ 用户说的"只可以放下 4 个数字"。
+///
+/// ★ **不要为了给右侧 done/total 腾地方而缩窄它**（2026-10-29 第 1 条）：
+///   视口缩到 3.x 步后，"未开始"时连 1..4 都看不全，违背用户
+///   「收起态上铺出 1，2，3，4」的要求。收起胶囊宽度由内容自适应
+///   （`maxWidth: 280` 的余量足够放下 `0/7`、`10/12` 这种计数）。
 const double kStepTrackWidth = 144;
 
 /// 当前步：黄色；已完成：绿色。
@@ -686,18 +691,38 @@ const _kDoneGreen = Color(0xFF22C55E);
 class _StepTrackState extends State<_StepTrack> {
   final _ctrl = ScrollController();
 
+  /// 最近一次**有 active 步**时的下标（-1 = 还没有过）。
+  ///
+  /// 生产帧（`chat_screen.dart`）的 activeIndex 是 `indexWhere(status=='active')`：
+  /// 做完最后一步 / `plan_closed` / 剩余步骤全被取消时都是 **-1**。
+  /// 旧实现拿 -1 硬算偏移：`-1*36 - 54 = -90` ⇒ clamp 到 0 ⇒ **轨道弹回最左**，
+  /// 7 步计划收起来永远只看到 1→2→3→4（用户报的现象）。
+  /// 现在 -1 只表示"没有当前步"，怎么滚由 doneCount 决定（见 [_scrollToActive]）。
+  int _lastActive = -1;
+
   @override
   void initState() {
     super.initState();
-    WidgetsBinding.instance.addPostFrameCallback((_) => _scrollToActive(animate: false));
+    _captureActive();
+    WidgetsBinding.instance
+        .addPostFrameCallback((_) => _scrollToActive(animate: false));
   }
 
   @override
   void didUpdateWidget(_StepTrack old) {
     super.didUpdateWidget(old);
-    if (old.activeIndex != widget.activeIndex || old.steps != widget.steps) {
+    if (old.activeIndex != widget.activeIndex ||
+        old.steps != widget.steps ||
+        // doneCount 也要跟：完成态可能在 activeIndex 一直是 -1 的情况下到来
+        old.doneCount != widget.doneCount) {
+      _captureActive();
       _scrollToActive(animate: true);
     }
+  }
+
+  void _captureActive() {
+    final a = widget.activeIndex;
+    if (a >= 0 && a < widget.steps) _lastActive = a;
   }
 
   @override
@@ -706,13 +731,38 @@ class _StepTrackState extends State<_StepTrack> {
     super.dispose();
   }
 
-  /// 把当前步滚到视口**中间**（首尾自动夹紧，不会滚过头）。
+  /// 把轨道滚到该去的位置（首尾自动夹紧，不会滚过头）。
+  ///
+  /// - 有 active 步 ⇒ 滚到视口**中间**；
+  /// - **全部完成**（没有 active 步，doneCount 已满）⇒ 滚到**末尾**，最后一步可见；
+  /// - **未开始**（doneCount == 0）⇒ 停在最左；
+  /// - 其余中间态 ⇒ 回到 [_lastActive] 的位置，**绝不弹回最左**。
+  ///
+  /// 视口宽度用 `position.viewportDimension`（**实测值**）而不是
+  /// [kStepTrackWidth] 常量：这样以后若为放总数缩窄视口，居中偏移也跟着对
+  /// （写死常量时套 LayoutBuilder 才是空操作）。
   void _scrollToActive({required bool animate}) {
     if (!_ctrl.hasClients) return;
     final max = _ctrl.position.maxScrollExtent;
-    final target = (widget.activeIndex * kStepSlotExtent -
-            (kStepTrackWidth - kStepSlotExtent) / 2)
-        .clamp(0.0, max);
+    final viewport = _ctrl.position.viewportDimension;
+    final active = widget.activeIndex;
+    double center(int index) =>
+        (index * kStepSlotExtent - (viewport - kStepSlotExtent) / 2)
+            .clamp(0.0, max);
+
+    final double target;
+    if (active >= 0 && active < widget.steps) {
+      target = center(active);
+    } else if (widget.steps > 0 && widget.doneCount >= widget.steps) {
+      target = max; // 完成态：没有 active 步 ⇒ 看到最后一步
+    } else if (widget.doneCount <= 0) {
+      target = 0; // 未开始：停在最左
+    } else if (_lastActive >= 0) {
+      target = center(_lastActive); // 中间态：保留上次位置
+    } else {
+      return; // 中间态且从未有过 active 步 ⇒ 保持当前偏移，别动
+    }
+
     if (animate) {
       _ctrl.animateTo(target,
           duration: const Duration(milliseconds: 320), curve: _kFluidSizeCurve);
@@ -723,7 +773,12 @@ class _StepTrackState extends State<_StepTrack> {
 
   @override
   Widget build(BuildContext context) {
-    return SizedBox(
+    // ★ 收起态 = [数字轨道][固定 done/total]（2026-10-29 第 1 条）。
+    //   轨道只放得下 4 个数字，用户在收起态还得能一眼看出"做完几步/共几步"；
+    //   全部做完时按既有绿色约定（#22C55E）变绿 —— 这时轨道已滚到末尾。
+    //   ⚠️ 计数器放在**轨道视口之外**：视口仍是 [kStepTrackWidth] = 4 步，
+    //      "未开始"时 1..4 才能完整可见（见 kStepTrackWidth 注释）。
+    final Widget track = SizedBox(
       width: kStepTrackWidth,
       height: 24,
       child: ListView.builder(
@@ -777,6 +832,23 @@ class _StepTrackState extends State<_StepTrack> {
           );
         },
       ),
+    );
+    return Row(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        track,
+        const SizedBox(width: 5),
+        Text(
+          '${widget.doneCount}/${widget.steps}',
+          style: TextStyle(
+            fontSize: 11,
+            fontWeight: FontWeight.w600,
+            // 等宽数字：done/total 逐位跳变时整行不抖
+            fontFeatures: const [FontFeature.tabularFigures()],
+            color: widget.doneCount >= widget.steps ? _kDoneGreen : widget.dim,
+          ),
+        ),
+      ],
     );
   }
 }
