@@ -26,8 +26,23 @@ void main() {
             installed ? 'bundled-minimal (source=1, 9040693 B, snapshots=0)' : '',
         'prootReady': installed,
         'channels': [
-          {'type': 0, 'name': '应用内执行', 'available': true, 'reason': '', 'risk': 0},
-          {'type': 1, 'name': 'Shizuku', 'available': false, 'reason': '未连接', 'risk': 1},
+          {'type': 0, 'name': '普通 App', 'available': true, 'reason': '', 'risk': 0},
+          // 原因用真机实测的整句长文（2026-10-28 截图）：短数据测不出溢出，
+          // 通道行曾经就因为这句长原因把通道名挤成竖排单字。
+          {
+            'type': 1,
+            'name': 'Shizuku',
+            'available': false,
+            'reason': 'Shizuku 未授权本应用：到权限步骤申请 Shizuku 授权',
+            'risk': 1,
+          },
+          {
+            'type': 2,
+            'name': 'Root',
+            'available': false,
+            'reason': '设备没有 su：需解锁 bootloader 并刷入 Magisk / KernelSU 后再试',
+            'risk': 2,
+          },
         ],
       };
 
@@ -37,8 +52,7 @@ void main() {
     // ★ 必须装：SettingsController.load() 会 await 安全存储读取，
     //   该通道在测试里没 handler 时 Future 永不完成（不是抛异常），
     //   第 4 个测试会整份卡死。见 support/secure_storage_mock.dart。
-    installSecureStorageMock();
-    TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+    installSecureStorageMock();    TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
         .setMockMethodCallHandler(channel, (call) async {
       calls.add(call.method);
       return switch (call.method) {
@@ -86,6 +100,14 @@ void main() {
         home: home,
       );
 
+  /// 按真机宽度（393dp）跑：默认 800 宽测不出窄屏溢出
+  /// （通道行 2026-10-28 就是在真机上才翻的车）。
+  void usePhoneSurface(WidgetTester tester) {
+    tester.view.physicalSize = const Size(1179, 2556);
+    tester.view.devicePixelRatio = 3.0;
+    addTearDown(tester.view.reset);
+  }
+
   testWidgets('未激活：状态卡 + 激活按钮，挂载区是占位文案', (tester) async {
     await tester.pumpWidget(wrap(const SandboxScreen()));
     await tester.pump();
@@ -97,6 +119,7 @@ void main() {
 
   testWidgets('点激活 → 通道 activate 被调 → 状态变已激活、挂载出现',
       (tester) async {
+    usePhoneSurface(tester);
     await tester.pumpWidget(wrap(const SandboxScreen()));
     await tester.pump();
     await tester.tap(find.text('激活沙箱'));
@@ -108,10 +131,12 @@ void main() {
     expect(find.text('@libs'), findsOneWidget);
     expect(find.text('只读'), findsOneWidget);
     expect(find.text('读写'), findsOneWidget);
-    // 通道行
-    expect(find.text('应用内执行'), findsOneWidget);
+    // 通道行：名字完整、状态词在，长原因独占一行（不溢出才找得到整句）
+    expect(find.text('普通 App'), findsOneWidget);
     expect(find.text('Shizuku'), findsOneWidget);
-    expect(find.text('未连接'), findsOneWidget);
+    expect(find.text('Root'), findsOneWidget);
+    expect(find.text('不可用'), findsWidgets);
+    expect(find.textContaining('未授权本应用'), findsOneWidget);
     // 让「已激活」轻提示的 2.2 秒定时器走完，免得测试以 pending Timer 收尾
     await tester.pump(const Duration(seconds: 3));
   });
