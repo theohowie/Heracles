@@ -3580,7 +3580,13 @@ class _ChatScreenState extends State<ChatScreen> {
   }
 
   void _onSend(String request) {
-    if (!_busy) {
+    // ★ 2026-10-29 修「排队发送失效」：以前只判 `_busy` —— 那是**屏幕级**标志，
+    //   而"有运行在途"的真相是 `_runInFlight`。两者在一个窗口内会不一致
+    //   （收尾时 `_busy` 已复位、run 还没返回）⇒ 用户的"排队"会掉进 `_runAgent`
+    //   变成**并发第二个运行**（架构禁止：事件流只有一个 sink、事件无 session id），
+    //   表现就是"排队没生效/消息像被吞了"。改用两者**并集**。
+    final running = _busy || _runInFlight;
+    if (!running) {
       unawaited(_runAgent(request));
       return;
     }
@@ -3607,6 +3613,9 @@ class _ChatScreenState extends State<ChatScreen> {
       ));
       _attachments.clear();
     });
+    // ★ 2026-10-29：用户报「不能排队」很可能就是**没反馈** ——
+    //   排队条在输入框上方，视线还在输入框时容易以为没发出去。
+    showIosToast(context, '已排队，当前任务结束后自动发送');
   }
 
   /// 当前运行结束后，把队首发出去（在 `_runAgent` 的 finally 里调）。
