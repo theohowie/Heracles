@@ -133,14 +133,22 @@ String? _deviceOnlyPathIn(String command) {
 /// **决定这条命令在哪跑**。
 ///
 /// 判定顺序（**顺序即语义，别调换**）：
+/// 0. 沙箱未就绪 → **报错**（见下），**绝不静默回落手机**
 /// 1. 命令引用了 `@name` 挂载点 → **沙箱**（挂载点本身就在沙箱侧解析）
 /// 2. 命令首个词命中 [kDeviceOnlyCommandPrefixes] → **手机**
 /// 3. 命令里出现 [kDeviceOnlyPathPrefixes] 的路径 → **手机**
 /// 4. 其余 → **沙箱**（默认）
 ///
+/// ## 为什么没有「未就绪回落手机」这个分支（2026-10-29 用户裁定）
+///
+/// 沙箱未就绪时把命令**静默改到手机上跑**，等于让 agent 在用户不知情的情况下
+/// 操作**真实文件系统** —— 而沙箱存在的意义正是「别碰真实系统」。
+/// 这不是降级，是**绕过产品前提**。所以必须：
+/// - 返回 [ExecutionSurface.sandbox] 但携带 `sandboxNotReady: true` 的决策，
+///   由调用方转成明确的**错误**（「请先激活沙箱」），让用户去激活。
+///
 /// @param command      原始命令串
-/// @param sandboxReady 沙箱是否已激活且可用；**false 时一律回落手机**
-///                     （否则未激活沙箱的用户所有命令都会失败）
+/// @param sandboxReady 沙箱是否已激活且可用。**false 时不走手机，而是报错。**
 SurfaceDecision decideSurface(String command, {required bool sandboxReady}) {
   final trimmed = command.trim();
   if (trimmed.isEmpty) {
@@ -149,8 +157,9 @@ SurfaceDecision decideSurface(String command, {required bool sandboxReady}) {
 
   if (!sandboxReady) {
     return const SurfaceDecision(
-      ExecutionSurface.device,
-      '沙箱未激活（或不可用）—— 按现状回落手机 shell；激活后默认走沙箱',
+      ExecutionSurface.sandbox,
+      '沙箱未激活（或不可用）—— 本命令需要沙箱，未激活时**拒绝执行**'
+          '（不会改在手机 shell 上跑：那会让 agent 在用户不知情下动真实系统）',
       matchedRule: 'sandbox-not-ready',
     );
   }

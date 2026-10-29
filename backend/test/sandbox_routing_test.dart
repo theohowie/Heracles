@@ -97,17 +97,20 @@ void main() {
     });
   });
 
-  group('沙箱未就绪时回落', () {
-    test('未激活 → 一律手机（否则用户所有命令都会失败）', () {
+  group('沙箱未就绪时拒绝执行（不回落手机，2026-10-29 用户裁定）', () {
+    test('未激活 → 拒绝并提示激活，绝不静默改走手机', () {
       for (final cmd in <String>[
         'ls',
-        'cat @workspace/a.txt', // 连挂载点引用都回落
+        'cat @workspace/a.txt',
         'pm list packages',
       ]) {
         final r = d(cmd, ready: false);
-        expect(r.surface, ExecutionSurface.device, reason: cmd);
+        // ★ 面仍是 sandbox（不是 device）—— 调用方看到 matchedRule 就知道要拒绝
+        expect(r.surface, ExecutionSurface.sandbox, reason: cmd);
         expect(r.matchedRule, 'sandbox-not-ready', reason: cmd);
         expect(r.reason, contains('沙箱未激活'), reason: cmd);
+        expect(r.reason, contains('拒绝执行'), reason: cmd);
+        expect(r.reason, isNot(contains('回落')), reason: cmd);
       }
     });
   });

@@ -1,6 +1,7 @@
 import 'package:dart_agent_core/dart_agent_core.dart';
 import 'package:heracles_backend/heracles_backend.dart';
 import 'package:test/test.dart';
+import 'support/tool_result.dart';
 
 /// **K3 大改写门禁**（2026-10-25 接线门禁）。
 ///
@@ -20,7 +21,7 @@ void main() {
   }
 
   Future<dynamic> call(Tool t, Map<String, dynamic> args) async =>
-      await t.executable!(args);
+      textOf(await t.executable!(args));
 
   Tool pick(List<Tool> tools, String name) =>
       tools.firstWhere((t) => t.name == name);

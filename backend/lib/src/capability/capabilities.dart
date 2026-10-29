@@ -77,6 +77,46 @@ final class CapabilityNeedsApproval extends CapabilityResult {
   final String detail;
 }
 
+/// **需要用户「激活」某个能力**（2026-10-29）。
+///
+/// ============================================================================
+/// 为什么它不是 [CapabilityFailure]
+/// ============================================================================
+/// 失败 = "这条路走不通，别试了"。而这里是：**用户点一下就能继续**。
+/// 混淆两者的后果：
+/// - 当失败 ⇒ 模型会放弃或换个歪招（比如偷偷改用手机 shell），用户永远不知道该激活；
+/// - 当成功 ⇒ 更糟，模型以为命令跑了，基于假结果继续往下做。
+///
+/// 所以单独成一类：工具层翻译成「不要重试，已通知用户去激活」，
+/// 同时带结构化 metadata，让宿主发 `activation_required` 事件弹引导卡。
+///
+/// ============================================================================
+/// 当前唯一场景：T2 编译环境
+/// ============================================================================
+/// 基础沙箱（T0，Alpine rootfs）与常用工具（T1，aapt2 那套）都**内置在 APK**，
+/// 随装随用。只有 **T2（JDK 17 + Gradle + android.jar，约 415 MB）** 要用户主动激活 ——
+/// 它只服务「从源码编 APK」这一个低频重活。判据是「值不值得让所有人背这 415 MB」。
+final class CapabilityNeedsActivation extends CapabilityResult {
+  const CapabilityNeedsActivation({
+    required this.capability,
+    required this.downloadBytes,
+    required this.summary,
+    required this.benefit,
+  });
+
+  /// 能力标识（宿主据此决定装什么）。当前只有 `'apk-build'`。
+  final String capability;
+
+  /// 预计下载字节数（UI 要如实显示，别写"约几十 MB"糊弄）。
+  final int downloadBytes;
+
+  /// 一行说明，如 `JDK 17 + Gradle`。
+  final String summary;
+
+  /// 激活后能做到什么，如 `可以在沙箱内直接编译 APK`。
+  final String benefit;
+}
+
 /// **工作区文件能力**。
 ///
 /// 为什么参数是 `String path` 而不是 `Uri`/`File`：路径语义由实现决定

@@ -181,10 +181,26 @@ class ToolFactory {
   /// 按前缀判定才不会把成功误判成失败 —— **误判成功是假信息，
   /// 误判失败是噪音**，两者都要避免，但前者更糟。
   static bool _looksLikeFailure(dynamic result) {
+    // ★ 2026-10-29：工具返回 [AgentToolResult]（为了让 metadata —— 执行面 /
+    //   退出码 / 耗时 / 截断 —— 能顺着框架流到 UI），判定改读 content 文本。
+    if (result is AgentToolResult) {
+      return _isFailureText(_textOf(result));
+    }
     if (result is! String) return false;
-    return result.startsWith('失败（') ||
-        result.startsWith('未执行：') ||
-        result.startsWith('需要用户批准');
+    return _isFailureText(result);
+  }
+
+  static bool _isFailureText(String s) =>
+      s.startsWith('失败（') ||
+      s.startsWith('未执行：') ||
+      s.startsWith('需要用户批准') ||
+      s.startsWith('需要先激活');
+
+  /// 取出 [AgentToolResult] 里给模型看的那段文本（测试与判定共用）。
+  static String _textOf(AgentToolResult r) {
+    final parts = r.contents ??
+        (r.content == null ? const <UserContentPart>[] : <UserContentPart>[r.content!]);
+    return parts.map((p) => p is TextPart ? p.text : p.toString()).join('\n');
   }
 
   /// 把 [CapabilityResult] 翻译成模型看到的文本。
@@ -192,17 +208,60 @@ class ToolFactory {
   /// ⚠️ **成功时原样返回 `data`**，不加 JSON 信封。
   /// 旧实现要求模型用 `{"final":...}` 格式回答，导致"输出无法解析"熔断；
   /// 这里工具结果就是人话，模型直接读。
+  ///
+  /// ## 2026-10-29：返回 [AgentToolResult]（带上 metadata）
+  ///
+  /// 只回传字符串的话，`CapabilitySuccess.metadata`（执行面 / 退出码 / 耗时 /
+  /// 截断）**到不了 UI** —— 框架只认 `AgentToolResult.metadata`。
+  /// 前端的命令卡要显示「在沙箱 / 在手机执行」+ 结构化退出码，只能走这条正规通道。
+  /// **模型看到的文本完全不变**。
   dynamic _translate(CapabilityResult r) {
     return switch (r) {
-      CapabilitySuccess(:final data) => data,
-      CapabilityFailure(:final reason, :final isRetryable) => isRetryable
-          ? '失败（可换个方式重试）：$reason'
-          : '失败（这条路不通，不要重试）：$reason',
-      CapabilityNeedsApproval(:final detail) => '需要用户批准才能执行：$detail',
+      CapabilitySuccess(:final data, :final metadata) => AgentToolResult(
+          content: TextPart(data),
+          metadata: metadata,
+        ),
+      CapabilityFailure(:final reason, :final isRetryable) => AgentToolResult(
+          content: TextPart(
+              isRetryable ? '失败（可换个方式重试）：$reason' : '失败（这条路不通，不要重试）：$reason'),
+        ),
+      CapabilityNeedsApproval(:final detail) => AgentToolResult(
+          content: TextPart('需要用户批准才能执行：$detail'),
+        ),
+      // ★ 2026-10-29：需要「激活」能力（T2 编译环境）——
+      //   不是普通失败：用户点一下就能继续，所以单独成一类。
+      //   metadata 里的标记让宿主发 `activation_required` 事件、弹引导卡。
+      CapabilityNeedsActivation(:final capability, :final downloadBytes, :final summary, :final benefit) =>
+        AgentToolResult(
+          content: TextPart(
+            '需要先激活「$summary」（约 ${_humanSize(downloadBytes)}）。\n'
+            '这次没有执行，也**不要重试** —— 已通知用户在设置里激活，'
+            '激活后重试本命令即可。\n'
+            '如果用户不方便激活，可以改用电脑构建。',
+          ),
+          metadata: {
+            'needsActivation': true,
+            'capability': capability,
+            'downloadBytes': downloadBytes,
+            'summary': summary,
+            'benefit': benefit,
+          },
+        ),
     };
   }
 
-  dynamic _fail(String reason) => '未执行：$reason';
+  /// 字节数 → 人话（与 UI 上的显示口径一致）。
+  static String _humanSize(int bytes) {
+    if (bytes < 1024) return '$bytes B';
+    if (bytes < 1024 * 1024) return '${(bytes / 1024).toStringAsFixed(1)} KB';
+    if (bytes < 1024 * 1024 * 1024) {
+      return '${(bytes / (1024 * 1024)).toStringAsFixed(0)} MB';
+    }
+    return '${(bytes / (1024 * 1024 * 1024)).toStringAsFixed(2)} GB';
+  }
+
+  dynamic _fail(String reason) =>
+      AgentToolResult(content: TextPart('未执行：$reason'));
 
   /// 把异常变成一句人话（不暴露堆栈给模型）。
   String _humanize(Object e) {

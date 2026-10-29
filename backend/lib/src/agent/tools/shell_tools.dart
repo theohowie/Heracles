@@ -104,10 +104,38 @@ List<Tool> buildShellTools(ToolFactory f, Capabilities caps) {
         final timeout = Duration(seconds: timeoutSec);
 
         // ---- 决定执行面（**唯一入口**，规则见 decideSurface 的 KDoc）----
-        final sandboxReady = sandbox != null
-            ? await _safeIsReady(sandbox)
-            : false;
-        final decision = decideSurface(command, sandboxReady: sandboxReady);
+        //
+        // ★ 三种情况必须分清（2026-10-29）：
+        //
+        // | `sandbox` 能力 | 就绪 | 语义 | 行为 |
+        // |---|---|---|---|
+        // | `null`（宿主**没接沙箱**） | — | 这个部署没有沙箱 | **走手机 shell**（保持旧行为） |
+        // | 非 null | false | 接了但**没激活** | **拒绝执行** + 提示激活（不回落手机） |
+        // | 非 null | true | 正常 | 按路由表决定沙箱/手机 |
+        //
+        // ⚠️ 第一行很关键：`Capabilities.sandbox == null` 表示"这个宿主根本没接沙箱"
+        //   （CLI、测试、还没接沙箱的 App 版本）。把这种情况也当成"未激活"会让
+        //   **所有 shell 命令都失败** —— 连 `ls` 都跑不了，直接打断主功能。
+        final sandboxAttached = sandbox != null;
+        final sandboxReady = sandboxAttached ? await _safeIsReady(sandbox) : false;
+        final decision = sandboxAttached
+            ? decideSurface(command, sandboxReady: sandboxReady)
+            : const SurfaceDecision(
+                ExecutionSurface.device,
+                '本宿主没有接入沙箱能力 —— 命令在手机 shell 上执行',
+                matchedRule: 'no-sandbox-capability',
+              );
+
+        // ★ 沙箱**接了但没就绪** ⇒ 拒绝执行（用户裁定：不静默回落手机）。
+        if (decision.matchedRule == 'sandbox-not-ready') {
+          return CapabilityFailure(
+            '这条命令需要在沙箱里执行，但沙箱还没激活。\n'
+                '请在设置里激活沙箱（内置基础环境约 9 MB，无需下载）；\n'
+                '激活后重试本命令。'
+                '${command.contains('@') ? "（命令里的 @挂载点 也依赖沙箱）" : ""}',
+            isRetryable: true,
+          );
+        }
 
         final startedAt = DateTime.now();
         final CapabilityResult r;

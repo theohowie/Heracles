@@ -16,6 +16,7 @@ library;
 import 'package:dart_agent_core/dart_agent_core.dart' show Tool;
 import 'package:heracles_backend/heracles_backend.dart';
 import 'package:test/test.dart';
+import 'support/tool_result.dart';
 
 /// 记账式假 git：记录被调用的方法与参数，返回预设结果。
 class _RecordingGit implements GitCapability {
@@ -124,7 +125,8 @@ void main() {
   Future<dynamic> invoke(String name, [Map<String, dynamic> args = const {}]) async {
     final tool = byName[name]!;
     final fn = tool.executable!;
-    return await fn(args);
+    // 工具返回 AgentToolResult（带 UI 用的 metadata）；这里取文本给断言用。
+    return textOf(await fn(args));
   }
 
   group('工具清单与 schema 形状', () {
@@ -340,9 +342,8 @@ void main() {
       const caps = Capabilities();
       final t = buildGitTools(const ToolFactory(caps), caps);
       final status = t.firstWhere((x) => x.name == 'git_status');
-      final r = await status.executable!(<String, dynamic>{});
-      expect(r, isA<String>());
-      expect(r as String, contains('不支持'));
+      final r = textOf(await status.executable!(<String, dynamic>{}));
+      expect(r, contains('不支持'));
       expect(r, contains('git'), reason: '要说清是"不支持 git"而不是别的');
     });
   });

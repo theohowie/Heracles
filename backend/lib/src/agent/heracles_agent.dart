@@ -341,6 +341,13 @@ class HeraclesAgent {
   final BackendConfig _config;
   final Capabilities _caps;
 
+  /// 本次 `run` 开始时探测到的沙箱就绪状态（2026-10-29）。
+  ///
+  /// 为什么缓存：事件回调是**同步路径**，不能在里面 `await` 探测。
+  /// 每次 `run` 开头探一次就够 —— 一次运行期间沙箱不会突然装好/卸掉。
+  /// `null` = 还没探测过（等价于"未就绪"）。
+  bool? _sandboxReadyForRun;
+
   /// 提问门禁（UI 注入）。传 null 表示当前环境不能问用户。
   final AskGate? _askGate;
   final RunOptions _options;
@@ -707,6 +714,18 @@ class HeraclesAgent {
     CancelToken? cancelToken,
   }) async* {
     final bridge = StreamController<HeraclesEvent>();
+
+    // ★ 2026-10-29：run 开始时探一次沙箱就绪状态（给工具卡标题用）。
+    //   探测失败按"未就绪"处理 —— 事件层的提示宁可保守，也不要骗 UI 说在沙箱里跑。
+    _sandboxReadyForRun = null;
+    final sandbox = _caps.sandbox;
+    if (sandbox != null) {
+      try {
+        _sandboxReadyForRun = await sandbox.isReady();
+      } catch (_) {
+        _sandboxReadyForRun = false;
+      }
+    }
 
     // 驱动整个 run（它自己负责把事件写进 bridge，并在结束时 close）。
     final runner = _drive(
@@ -1176,10 +1195,18 @@ class HeraclesAgent {
           final calls = ev.data as List<FunctionCall>;
           for (final c in calls) {
             pendingToolStart[c.id] = Stopwatch()..start();
+            final callArgs = _safeParseArgs(c.arguments);
             emit(HeraclesToolRequested(
               toolName: c.name,
-              arguments: _safeParseArgs(c.arguments),
+              arguments: callArgs,
               id: c.id,
+              // ★ 2026-10-29：执行面在**请求这一刻**就告诉 UI。
+              //   前端要在卡片标题上写「在沙箱 / 在手机执行了命令」，
+              //   等执行完再标就晚了。用的是与真正执行**同一张规则表**
+              //   （decideSurface），不会前后打架。
+              surface: _surfaceHintFor(c.name, callArgs),
+              command:
+                  callArgs['command'] is String ? callArgs['command'] as String : null,
             ));
           }
         }
@@ -1514,6 +1541,36 @@ class HeraclesAgent {
     } catch (_) {
       return {'_raw': raw};
     }
+  }
+
+  /// **执行面预判**：给 UI 的工具卡标题用（`'sandbox'` / `'device'`）。
+  ///
+  /// ==========================================================================
+  /// 为什么在这里算，而不是等执行完
+  /// ==========================================================================
+  /// 前端要求 `tool_started` 就带执行面 —— 用户看着卡片时就要知道
+  /// 「这条命令是在沙箱里跑，还是要动我的手机」。等 `tool_finished` 才标，
+  /// 那几秒里用户是瞎的。
+  ///
+  /// ## 规则来源是同一张表
+  /// 用 [decideSurface]（`sandbox_capability.dart`），**不是**另写一套 if ——
+  /// 两处规则一旦分叉，卡片会显示 A 而实际跑在 B，比不显示更糟。
+  ///
+  /// ## 沙箱是否就绪
+  /// 只有 `run_shell_command` 需要这个提示。就绪状态在每次 `run` 开始时探测一次
+  /// 并缓存（`_sandboxReadyForRun`）—— **不在事件回调里 await**（那是同步路径）。
+  String? _surfaceHintFor(String toolName, Map<String, dynamic> args) {
+    if (toolName != 'run_shell_command') return null;
+    final command = args['command'];
+    if (command is! String || command.trim().isEmpty) return null;
+
+    final sandbox = _caps.sandbox;
+    if (sandbox == null) {
+      // 宿主没接沙箱 ⇒ 一定在手机上跑（与执行时一致）
+      return ExecutionSurface.device.wire;
+    }
+    final ready = _sandboxReadyForRun ?? false;
+    return decideSurface(command, sandboxReady: ready).surface.wire;
   }
 
   String _flattenContent(List<UserContentPart> parts) {
@@ -2039,9 +2096,23 @@ final class HeraclesToolRequested extends HeraclesEvent {
     required this.toolName,
     required this.arguments,
     this.id = '',
+    this.surface,
+    this.command,
   });
   final String toolName;
   final Map<String, dynamic> arguments;
+
+  /// 这条命令会在哪个执行面跑：`'sandbox'` / `'device'`（2026-10-29）。
+  ///
+  /// UI 据此在卡片标题上写「在沙箱 / 在手机执行了命令」。
+  /// `null` = 该工具不涉及执行面（读文件、git、web 等）。
+  ///
+  /// ⚠️ 这是**预判**：与真正执行时用同一张规则表（`decideSurface`）。
+  /// 若执行时状态已变，以 `HeraclesToolFinished.metadata` 里的 `surface` 为准。
+  final String? surface;
+
+  /// 命令全文（**不截断**）—— 前端要完整显示，这里不做任何裁剪。
+  final String? command;
 
   /// **框架的调用 id**（2026-10-24 新增）。
   ///

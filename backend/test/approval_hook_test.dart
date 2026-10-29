@@ -65,7 +65,7 @@ void main() {
         client,
         mode: ApprovalMode.fullAccess,
         gate: gate,
-        caps: Capabilities(shell: shell),
+        caps: Capabilities(shell: shell, sandbox: _FakeSandbox(shell)),
       );
 
       await for (final _ in agent.run('跑条命令')) {}
@@ -103,7 +103,7 @@ void main() {
         client,
         mode: ApprovalMode.workspaceAuto,
         gate: gate,
-        caps: Capabilities(shell: shell),
+        caps: Capabilities(shell: shell, sandbox: _FakeSandbox(shell)),
       );
 
       final events = <HeraclesEvent>[];
@@ -147,7 +147,7 @@ void main() {
         client,
         mode: ApprovalMode.manual,
         gate: gate,
-        caps: Capabilities(shell: shell),
+        caps: Capabilities(shell: shell, sandbox: _FakeSandbox(shell)),
       );
 
       final events = <HeraclesEvent>[];
@@ -174,7 +174,7 @@ void main() {
         client,
         mode: ApprovalMode.manual,
         gate: null, // ★ 无审批通道
-        caps: Capabilities(shell: shell),
+        caps: Capabilities(shell: shell, sandbox: _FakeSandbox(shell)),
       );
 
       final events = <HeraclesEvent>[];
@@ -521,4 +521,42 @@ class _FakeGate implements AskGate {
     risks.add(risk);
     return approve;
   }
+}
+
+/// ★ 2026-10-29 路由改动后必须注入：`run_shell_command` 默认走沙箱，
+/// 沙箱未就绪会**拒绝执行**。这个测试验的是**审批门禁**语义，
+/// 不是路由 —— 所以注入一个"恒就绪"的假沙箱，让 shell 流程照旧走到。
+class _FakeSandbox implements SandboxCapability {
+  /// 把执行记到同一个 `ran` —— 这些测试断言的是「工具真的执行了」，
+  /// 至于是沙箱还是手机 shell 执行的，与本测试无关（那是路由测试的事）。
+  _FakeSandbox(this.shell);
+
+  final _FakeShell shell;
+
+  @override
+  Future<bool> isReady() async => true;
+
+  @override
+  Future<CapabilityResult> run(
+    String command, {
+    Duration timeout = const Duration(minutes: 5),
+    void Function(String chunk)? onOutput,
+  }) async {
+    shell.ran.add(command);
+    return CapabilitySuccess(
+      '【命令输出开始】\n(fake sandbox output)\n【命令输出结束】',
+      metadata: {
+        'surface': 'sandbox',
+        'command': command,
+        'exitCode': 0,
+        'durationMs': 1,
+        'truncated': false,
+        'timedOut': false,
+      },
+    );
+  }
+
+  @override
+  Future<CapabilityResult> reset({String snapshot = ''}) async =>
+      CapabilitySuccess('重置完成');
 }

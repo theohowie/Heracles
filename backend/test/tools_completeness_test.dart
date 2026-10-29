@@ -1,5 +1,6 @@
 import 'package:heracles_backend/heracles_backend.dart';
 import 'package:test/test.dart';
+import 'support/tool_result.dart';
 
 /// **工具完整性门禁** —— 32 个工具都要在、Schema 都要对。
 ///
@@ -129,8 +130,8 @@ void main() {
       final read = tools.firstWhere((t) => t.name == 'read_file');
 
       final result = await read.executable!({'path': 'a.txt'});
-      expect(result.toString(), contains('未执行'));
-      expect(result.toString(), contains('不支持文件访问'),
+      expect(textOf(result), contains('未执行'));
+      expect(textOf(result), contains('不支持文件访问'),
           reason: '必须说清是"环境不支持"，不是"参数错"');
     });
 
@@ -144,8 +145,8 @@ void main() {
           {'question': '要覆盖吗？'}
         ]
       });
-      expect(result.toString(), contains('未执行'));
-      expect(result.toString(), contains('请自行做出合理决定'),
+      expect(textOf(result), contains('未执行'));
+      expect(textOf(result), contains('请自行做出合理决定'),
           reason: '要引导模型自己决策，而不是卡住');
     });
   });
@@ -160,7 +161,7 @@ void main() {
 
     test('★★ questions 为空数组 ⇒ 报错', () async {
       final r = await call({'questions': []});
-      expect(r.toString(), contains('非空数组'));
+      expect(textOf(r), contains('非空数组'));
     });
 
     test('★★ question 缺失 ⇒ 报错并指出下标', () async {
@@ -169,7 +170,7 @@ void main() {
           {'options': ['a']}
         ]
       });
-      expect(r.toString(), contains('questions[0]'));
+      expect(textOf(r), contains('questions[0]'));
     });
 
     test('★★ 用户没回答 ⇒ 明确说"没回答"，不编造', () async {
@@ -183,9 +184,9 @@ void main() {
           {'question': '选哪个？'}
         ]
       });
-      expect(r.toString(), contains('用户没有回答'));
+      expect(textOf(r), contains('用户没有回答'));
       // 必须引导它自己决策，而不是卡住或编一个答案
-      expect(r.toString(), contains('最合理的决定'));
+      expect(textOf(r), contains('最合理的决定'));
     });
   });
 
@@ -203,7 +204,7 @@ void main() {
           'src_dir': 'src',
           'out_apk': 'out.apk',
         });
-        expect(r.toString(), contains('未执行'), reason: '${t.name} 应提示未执行');
+        expect(textOf(r), contains('未执行'), reason: '${t.name} 应提示未执行');
       }
     });
   });

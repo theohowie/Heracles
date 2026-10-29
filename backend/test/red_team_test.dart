@@ -2,6 +2,7 @@ import 'package:dart_agent_core/dart_agent_core.dart';
 import 'package:heracles_backend/heracles_backend.dart';
 import 'package:heracles_backend/src/capability/local_workspace_capability.dart';
 import 'package:test/test.dart';
+import 'support/tool_result.dart';
 
 /// **红队自测（SEC6）**—— 用对抗性输入攻击每一道**护栏**，钉住"拦得住"。
 ///
@@ -60,7 +61,7 @@ void main() {
     }
 
     Future<dynamic> call(Map<String, dynamic> args) async =>
-        tool().executable!(args);
+        textOf(await tool().executable!(args));
 
     test('★★ 未知字段（可塞指令的载体）被拒', () async {
       final out = await call({
@@ -83,7 +84,7 @@ void main() {
         shell: _NoShell(),
       ));
       final shell = tools.first;
-      final r = await shell.executable!({'command': 'echo hi'}) as String;
+      final r = textOf(await shell.executable!({'command': 'echo hi'}));
       // 无 workspace ⇒ list 类失败；shell 无审批路径下 run_shell_command
       // 属 workspaceAuto 要批的档 —— 由 _ApprovalHook 拦（e2e 见
       // approval_hook_test 的 fail-closed 条）。这里只验证工具本身可用。

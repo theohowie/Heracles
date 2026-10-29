@@ -1,6 +1,7 @@
 import 'package:dart_agent_core/dart_agent_core.dart';
 import 'package:heracles_backend/heracles_backend.dart';
 import 'package:test/test.dart';
+import 'support/tool_result.dart';
 
 /// **"先读再改"强制 e2e**（2026-10-24，K1 —— Claude Code FileEditTool 形态）。
 ///
@@ -32,8 +33,7 @@ void main() {
   }
 
   Future<dynamic> call(Tool t, Map<String, dynamic> args) async {
-    final r = await t.executable!(args);
-    return r is String ? r : r;
+    return textOf(await t.executable!(args));
   }
 
   group('edit —— 没读就改 ⇒ 拒绝', () {
