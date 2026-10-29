@@ -4042,7 +4042,14 @@ class _ChatScreenState extends State<ChatScreen> {
     //
     // 代价是诚实的：工具卡在长命令上时，提示会等它到边界才出现 ——
     // 但那段时间步骤区也确实还在转，界面没有撒谎说「已经停了」。
-    final seq = _inflightRun?.runSeq ?? _liveOrigin?.runSeq;
+    // ★ 2026-10-29 修「停止文案不出现」：
+    //   以前只从 `_inflightRun` / `_liveOrigin` 取 seq。两者都可能为 null
+    //   （运行刚收尾、或 origin 已被清）⇒ `seq == null` ⇒ **提示不登记** ⇒
+    //   用户点了停止却永远看不到「用户选择停止」（用户实报的正是这个）。
+    //   `_runSeq` 是每次运行的递增计数，最近一次运行就是它 —— 用它兜底。
+    final seq = _inflightRun?.runSeq ??
+        _liveOrigin?.runSeq ??
+        (_runSeq > 0 ? _runSeq : null);
     setState(() {
       // ★ 2026-10-13 修：**必须立刻复位 `_busy`** —— 取消是用户显式
       //   动作，界面必须立刻反映，不等后端收尾。
