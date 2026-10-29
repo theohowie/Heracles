@@ -484,30 +484,8 @@ class RootfsManager(
      * 改用 NIO `walkFileTree`（**不传 FOLLOW_LINKS**）：目录链接不下钻、
      * 链接本身不计入 → 与 `du` 口径一致。
      */
-    private fun directorySize(dir: File): Long = runCatching {
-        if (!dir.isDirectory) return@runCatching 0L
-        var total = 0L
-        java.nio.file.Files.walkFileTree(
-            dir.toPath(),
-            object : java.nio.file.SimpleFileVisitor<java.nio.file.Path>() {
-                override fun visitFile(
-                    file: java.nio.file.Path,
-                    attrs: java.nio.file.attribute.BasicFileAttributes,
-                ): java.nio.file.FileVisitResult {
-                    // 没传 FOLLOW_LINKS 时，符号链接的 isRegularFile 为 false
-                    if (attrs.isRegularFile) total += attrs.size()
-                    return java.nio.file.FileVisitResult.CONTINUE
-                }
-
-                override fun visitFileFailed(
-                    file: java.nio.file.Path,
-                    exc: java.io.IOException,
-                ): java.nio.file.FileVisitResult =
-                    java.nio.file.FileVisitResult.CONTINUE
-            },
-        )
-        total
-    }.getOrDefault(0L)
+    /** 统计目录体积 —— 实现见 [directorySizeNoFollowLinks]（顶层函数，便于 JVM 单测）。 */
+    internal fun directorySize(dir: File): Long = directorySizeNoFollowLinks(dir)
 
     private fun deleteTree(file: File) {
         // ★ 用 NIO 判符号链接（等价于 isSymlinkNoFollow，但不跨文件依赖扩展函数）

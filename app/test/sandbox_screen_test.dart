@@ -17,6 +17,8 @@ void main() {
 
   const channel = MethodChannel('heracles/sandbox');
   var installed = false;
+  /// T2 编译环境是否已装（2026-10-29 新增）
+  var suiteReady = false;
   final calls = <String>[];
 
   Map<String, Object?> statusMap() => {
@@ -80,6 +82,25 @@ void main() {
                   ]
                 : <Object?>[],
           },
+          // ---- T2 编译环境（2026-10-29）----
+          "buildSuiteStatus" => {
+              "ok": true,
+              "ready": suiteReady,
+              "version": suiteReady ? "t2-2026-10-29" : "",
+              "installDir": "/data/x/opt/t2",
+              "parts": {
+                "jdk": suiteReady,
+                "gradle": suiteReady,
+                "androidJar": suiteReady,
+              },
+            },
+          "activateBuildSuite" => (suiteReady = true, {
+                  "ok": true,
+                  "message": "编译环境已就绪",
+                  "alreadyReady": false,
+                  "ready": true,
+                })
+              .$2,
         _ => {'ok': true},
       };
     });
@@ -166,5 +187,62 @@ void main() {
     await tester.scrollUntilVisible(find.text('沙箱'), 120);
     expect(find.text('沙箱'), findsOneWidget);
     expect(find.textContaining('已激活'), findsWidgets);
+  });
+
+  // ==========================================================================
+  // T2 编译环境（2026-10-29）—— 真机 bug：整行点击无响应，改成明确的按钮
+  // ==========================================================================
+  group("T2 编译环境", () {
+    testWidgets("★ 未安装时有「下载」真按钮（不再依赖整行手势）", (tester) async {
+      installed = true;
+      usePhoneSurface(tester);
+      await tester.pumpWidget(wrap(const SandboxScreen()));
+      await tester.pump();
+
+      expect(find.text("编译环境 · 未安装"), findsOneWidget);
+      // 关键：必须能找到一个**按钮**，而不是靠点整行
+      expect(find.widgetWithText(FilledButton, "下载"), findsOneWidget,
+          reason: "真机整行 tap 不响应，必须给明确按钮");
+      // 缺哪项要说清（不能只写"未安装"）
+      expect(find.textContaining("缺 JDK 17"), findsOneWidget);
+    });
+
+    testWidgets("★★ 点「下载」→ 弹确认抽屉（写清体积）", (tester) async {
+      installed = true;
+      usePhoneSurface(tester);
+      await tester.pumpWidget(wrap(const SandboxScreen()));
+      await tester.pump();
+
+      await tester.tap(find.widgetWithText(FilledButton, "下载"));
+      await tester.pumpAndSettle();
+
+      expect(find.text("下载编译环境？"), findsOneWidget);
+      expect(find.textContaining("415 MB"), findsWidgets,
+          reason: "415 MB 必须如实写出来，不能让用户不知情花流量");
+      expect(find.textContaining("续传"), findsOneWidget);
+    });
+
+    testWidgets("★★★ 确认 → 真的调用 activateBuildSuite，状态变已就绪",
+        (tester) async {
+      installed = true;
+      usePhoneSurface(tester);
+      await tester.pumpWidget(wrap(const SandboxScreen()));
+      await tester.pump();
+
+      await tester.tap(find.widgetWithText(FilledButton, "下载"));
+      await tester.pumpAndSettle();
+      // 抽屉里的确认按钮（与卡片按钮同文案，取最后一个）
+      await tester.tap(find.text("下载").last);
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 300));
+
+      expect(calls, contains("activateBuildSuite"), reason: "必须真的下发激活");
+      await tester.pumpAndSettle();
+      expect(find.text("编译环境 · 已就绪"), findsOneWidget);
+      expect(find.widgetWithText(FilledButton, "下载"), findsNothing,
+          reason: "已就绪后不该再显示下载按钮");
+        // 让轻提示的 2.2s 定时器走完，否则测试以 pending Timer 收尾
+        await tester.pump(const Duration(seconds: 3));
+    });
   });
 }
