@@ -83,11 +83,23 @@ class MessageRow extends StatelessWidget {
     };
   }
 
-  /// 工具调用 → 纯文字行（2026-10-24 黑白改版，替代 ToolCallCard 卡片）。
+  /// 工具调用 → **命令类工具用双层命令卡**，其它工具仍是纯文字行。
   ///
-  /// 摘要复用 `toolCallLabel`（动词表是唯一真相源）；明细按 StepDetail 档位：
-  /// 精简档不显示参数，非完整档截断结果，完全展开档另附模型原始输出。
+  /// ★ 2026-10-29（P1 第 2 条）：接线 —— `commandSurfaceOf(call) != null`
+  /// ⇒ `ToolCallCard`。此前这里对**所有**工具都返回 `PlainToolLine`，
+  /// 于是新双层命令卡成了只在测试里 `new` 的死代码：14 条 spec 测试全绿，
+  /// 真机对话流里却永远看不到命令卡。
+  ///
+  /// 判据只用 `commandSurfaceOf`（后端结构化 surface 优先，判不出才回退到
+  /// 工具名/参数标记）；**不按工具名猜执行面** —— 同一个 `run_shell_command`
+  /// 既可能跑沙箱也可能跑手机，猜必错（见 `.docs/命令卡片要求-提示词.md`）。
+  ///
+  /// 非命令工具：摘要复用 `toolCallLabel`（动词表是唯一真相源）；明细按
+  /// StepDetail 档位：精简档不显示参数，非完整档截断结果，完全展开档另附原始输出。
   Widget _toolLine(HToolCall call, StepDetail detail) {
+    if (commandSurfaceOf(call) != null) {
+      return ToolCallCard(call: call, stepDetail: detail);
+    }
     final running = call.status == ToolStatus.running;
     final failed = call.status == ToolStatus.failure;
     final lines = <String>[];

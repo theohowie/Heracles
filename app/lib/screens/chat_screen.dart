@@ -581,6 +581,14 @@ class _ChatScreenState extends State<ChatScreen> {
   }
 
   bool _busy = false;
+
+  /// **运行中切档提示条是否显示**（2026-10-29 第 5 条 P1）。
+  ///
+  /// 只在"档位确认生效 + 当前会话确有 run 在跑"时置位。显示条件里还带着
+  /// [_currentSessionRunning] ⇒ run 一结束提示自动消失，不必在每条收尾
+  /// 路径上清理；新一轮开始时显式清掉（那一轮要用的是刚选的新档位）。
+  bool _runTierNotice = false;
+
   bool _loading = true;
   String? _error;
 
@@ -4278,7 +4286,11 @@ class _ChatScreenState extends State<ChatScreen> {
       return;
     }
 
-    setState(() => _busy = true);
+    setState(() {
+      _busy = true;
+      // 新一轮开始 ⇒ 它用的是刚选定的档位，旧的"下次生效"提示必须清掉
+      _runTierNotice = false;
+    });
 
     // ★ 记录这次运行的**归属**：哪个会话、哪个工作区、第几次运行。
     //   await 返回后据此判断"用户是不是正看着它"。
@@ -5124,8 +5136,15 @@ class _ChatScreenState extends State<ChatScreen> {
             // 权限改的是**设置**（会持久化），不等同于"这一次运行"的参数 ——
             // 与 `_settleOrphanSteps` 那类运行态无关。
             permission: widget.settings.value.permission,
-            onPermissionChanged: (v) =>
-                unawaited(widget.settings.setPermission(v)),
+            onPermissionChanged: (v) => unawaited(_onPermissionChanged(v)),
+            // ★ 运行中切档提示（2026-10-29 第 5 条 P1）：档位在 run 开始那一刻
+            //   就被快照进执行器 ⇒ 运行中改档只对**下一轮**生效。提示条可关闭，
+            //   且 run 一结束就不再显示。
+            runTierNotice: (_runTierNotice && _currentSessionRunning)
+                ? kRunTierNoticeText
+                : null,
+            onDismissRunTierNotice: () =>
+                setState(() => _runTierNotice = false),
             reasoningLevel: widget.settings.value.reasoningLevel,
             onReasoningLevelChanged: (v) =>
                 unawaited(widget.settings.setReasoningLevel(v)),
@@ -5393,16 +5412,19 @@ class _ChatScreenState extends State<ChatScreen> {
   /// ## 边界（安全默认）
   ///
   /// · **跳过** ⇒ 该题不进答案 map（模型看到「未回答」），而不是编一个答案
-  /// · **关弹窗（点外面）** ⇒ 同跳过，但**已答的题仍然回传**（别浪费用户已做的选择）
+  /// · **放弃弹层** ⇒ 同跳过，但**已答的题仍然回传**（别浪费用户已做的选择）；
+  ///   且必须先二次确认（弹层不许被返回键/遮罩静默关掉）
   /// · 题目结构非法（`questions` 为空）⇒ 走**降级**：把 `text` 当纯文本问题展示，
   ///   只给一个"知道了"按钮 —— 至少让用户知道模型在等什么，不能弹个空窗
+  ///
+  /// ★ 2026-10-29（第 4 条 P1）：选项式弹层本体已抽到
+  ///   `widgets/bw_approval.dart` 的 `showAskGateSheet` —— 遮罩 / 返回键 /
+  ///   键盘重排都要能被 widget 测试钉住。本方法只保留「降级分支 + 回传答案」。
   Future<void> _showAskDialog(
     BuildContext context,
     List<Map<String, dynamic>>? questions,
     String fallbackText,
   ) async {
-    final h = Hue.of(context);
-
     // 降级：老版本 Kotlin / 解析失败 —— 只显示题干，没有选项可点
     if (questions == null || questions.isEmpty) {
       // 只有一个"知道了"按钮；关掉后回传空答案（= 全部未回答，绝不编造）
@@ -5420,405 +5442,40 @@ class _ChatScreenState extends State<ChatScreen> {
       return;
     }
 
-    // ★ 逐题作答的状态：题目 id → 已选 label 集合
-    final picked = <String, Set<String>>{};
-
-    // ★ 2026-10-23：每题「其他…」的自填状态（用户原话「或者选其他，然后自己填」）。
-    //
-    // 用 controller（按题目 id）：用户可能选「其他」后翻到下一题、再翻回来 ——
-    // 若只把文本存在 map 里，来回翻页时 TextField 会被销毁重建，
-    // 结果就是"界面显示空、提交却带着旧文本"（自相矛盾）。
-    //
-    // ⚠️ 不主动 dispose：弹窗退场动画期间 TextField 还在树上，立刻 dispose
-    //   会撞 "A TextEditingController was used after being disposed"；
-    //   这里与 `_renameSession` 的既有处理一致（controller 无原生资源，
-    //   弹窗 State 卸载后随 GC 回收）。
-    final customOn = <String>{};
-    final customCtl = <String, TextEditingController>{};
-
-    /// 合成回传答案（题目 id → 答案列表）：点选的 label + 自填**原文**。
-    ///
-    /// · 只收非空项；**留空的自填框 = 未作答**（不编答案，该题不进 map）
-    /// · 自填的是用户原文，**不是**"其他…"两个字
-    Map<String, List<String>> collect() {
-      final out = <String, List<String>>{};
-      for (final e in picked.entries) {
-        final list = e.value.toList();
-        if (list.isNotEmpty) out[e.key] = list;
-      }
-      for (final id in customOn) {
-        final raw = (customCtl[id]?.text ?? '').trim();
-        if (raw.isEmpty) continue;
-        (out[id] ??= <String>[]).add(raw);
-      }
-      return out;
-    }
-
-    var page = 0;
-    final total = questions.length;
-
-    // ★ 2026-10-25 晚：居中弹窗改上拉抽屉（用户定：所有弹层统一抽屉式，
-    //   高度随问题内容自适应）。语义与弹窗时代一条不变：
-    //   · 点外面 / 下拉关闭 = null ⇒ 空答案（全部未回答，绝不编造）
-    //   · 「跳过」= 回传**已答部分**（collect）；单选点选项自动跳题；
-    //     「其他…」自填留空 = 该题未作答；controller 跨翻页保留输入。
-    //   高度：内容区 Flexible + 滚动 —— 选项少时抽屉贴合内容，
-    //   选项多时抽屉长到上限、内部滚动，按钮行始终钉底。
-    final result = await showModalBottomSheet<Map<String, List<String>>>(
-      context: context,
-      backgroundColor: Colors.transparent,
-      isScrollControlled: true,
-      isDismissible: true,
-      shape: const RoundedRectangleBorder(),
-      builder: (sheetCtx) {
-        return BwSheetShell(
-          onDismissRequest: () => Navigator.of(sheetCtx).pop(),
-          child: StatefulBuilder(
-          builder: (ctx, setDlgState) {
-            final q = questions[page];
-            final id = (q['id'] as String?) ?? 'q${page + 1}';
-            final title = (q['question'] as String?) ?? '';
-            final multi = (q['multi'] as bool?) ?? false;
-            final options = (q['options'] as List?) ?? const [];
-            final sel = picked.putIfAbsent(id, () => <String>{});
-            final isLast = page == total - 1;
-
-            void toggle(String label) {
-              setDlgState(() {
-                if (multi) {
-                  // 多选：点了就切换；「其他…」可与普通选项**共存**，不动它
-                  if (!sel.remove(label)) sel.add(label);
-                } else {
-                  // ★ 单选：替换，并**自动跳下一题**（用户要求"答完自动下一个"）
-                  sel
-                    ..clear()
-                    ..add(label);
-                  // 单选里普通选项与「其他…」互斥 —— 选普通项就收起自填
-                  customOn.remove(id);
-                  customCtl[id]?.clear();
-                  if (!isLast) {
-                    // 让当前帧先画出来再跳，避免"点完看不到选中态"
-                    Future.microtask(() => setDlgState(() => page++));
-                  }
-                }
-              });
-            }
-
-            /// ★「其他…」：选中后展开自填框。
-            ///
-            /// · 单选：与普通选项互斥；**不自动跳题**（用户还没填）
-            /// · 多选：只切换自己，普通选项保持不变
-            void toggleCustom() {
-              setDlgState(() {
-                if (customOn.remove(id)) {
-                  // 取消选中 ⇒ 清空已填内容（否则隐藏的文本会被一起提交）
-                  customCtl[id]?.clear();
-                } else {
-                  customOn.add(id);
-                  customCtl.putIfAbsent(id, () => TextEditingController());
-                  if (!multi) sel.clear();
-                }
-              });
-            }
-
-            return SafeArea(
-              child: Padding(
-                // 键盘弹起时抽屉整体上移（自填框 autofocus 会拉键盘）
-                padding: EdgeInsets.fromLTRB(
-                  20,
-                  10,
-                  20,
-                  16 + MediaQuery.viewInsetsOf(ctx).bottom,
-                ),
-                child: Column(
-                  mainAxisSize: MainAxisSize.min,
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Center(
-                      child: Container(
-                        width: 36,
-                        height: 4,
-                        decoration: BoxDecoration(
-                          color: h.border,
-                          borderRadius: BorderRadius.circular(999),
-                        ),
-                      ),
-                    ),
-                    const SizedBox(height: 14),
-                    Row(
-                      children: [
-                        Icon(CupertinoIcons.question_circle_fill,
-                            size: 20, color: h.text),
-                        const SizedBox(width: HSpace.sm),
-                        const Expanded(
-                          child: Text('模型需要你的回答',
-                              style: TextStyle(
-                                  fontSize: 16, fontWeight: FontWeight.w700)),
-                        ),
-                        // 进度：多题时必须让用户知道还有几题
-                        if (total > 1)
-                          Text('${page + 1}/$total',
-                              style:
-                                  TextStyle(fontSize: 12, color: h.textFaint)),
-                      ],
-                    ),
-                    const SizedBox(height: 12),
-                    // 题目 + 选项：随内容长高，超限内部滚动
-                    Flexible(
-                      child: SingleChildScrollView(
-                        child: Column(
-                          mainAxisSize: MainAxisSize.min,
-                          crossAxisAlignment: CrossAxisAlignment.start,
-                          children: [
-                            Text(title,
-                                style: TextStyle(
-                                    fontSize: 15, height: 1.5, color: h.text)),
-                            const SizedBox(height: HSpace.xs),
-                            Text(
-                              multi
-                                  ? '可多选（也可选「其他」自己填）'
-                                  : '单选（也可选「其他」自己填）',
-                              style: TextStyle(
-                                  fontSize: 11.5, color: h.textFaint),
-                            ),
-                            const SizedBox(height: HSpace.md),
-                            // ★ 选项：编号 + label + description，整块可点
-                            for (var i = 0; i < options.length; i++)
-                              _askOptionTile(
-                                h: h,
-                                index: i + 1,
-                                label: (options[i] as Map)['label'] as String? ??
-                                    '',
-                                description: (options[i]
-                                        as Map)['description'] as String? ??
-                                    '',
-                                selected: sel.contains(
-                                    (options[i] as Map)['label'] as String? ??
-                                        ''),
-                                multi: multi,
-                                onTap: () => toggle(
-                                    (options[i] as Map)['label'] as String? ??
-                                        ''),
-                              ),
-                            // ★ 每题末尾固定一个「其他…」
-                            _askOptionTile(
-                              h: h,
-                              index: options.length + 1,
-                              label: '其他…',
-                              description: '自己填写',
-                              selected: customOn.contains(id),
-                              multi: multi,
-                              onTap: toggleCustom,
-                            ),
-                            // 选中「其他…」才展开自填框；**留空 = 该题未作答**
-                            if (customOn.contains(id))
-                              Padding(
-                                padding:
-                                    const EdgeInsets.only(bottom: HSpace.sm),
-                                child: CupertinoTextField(
-                                  // controller 跨"上一题/下一题"保留用户输入
-                                  controller: customCtl.putIfAbsent(
-                                      id, () => TextEditingController()),
-                                  autofocus: true,
-                                  placeholder: '在这里填写你的回答…',
-                                  minLines: 1,
-                                  maxLines: 3,
-                                  padding:
-                                      const EdgeInsets.all(HSpace.sm + 2),
-                                  style: TextStyle(
-                                      fontSize: 13.5,
-                                      height: 1.4,
-                                      color: h.text),
-                                  decoration: BoxDecoration(
-                                    color: h.surfaceAlt,
-                                    borderRadius:
-                                        BorderRadius.circular(HRadius.md),
-                                    border: Border.all(color: h.border),
-                                  ),
-                                ),
-                              ),
-                          ],
-                        ),
-                      ),
-                    ),
-                    const SizedBox(height: 12),
-                    // 底部按钮行：跳过在左；翻页 / 提交在右（提交 = 黑钮）
-                    Row(
-                      children: [
-                        CupertinoButton(
-                          padding: const EdgeInsets.symmetric(
-                              horizontal: 18, vertical: 10),
-                          color: h.surface,
-                          borderRadius: BorderRadius.circular(12),
-                          // 跳过 = 已答的仍然回传（别浪费用户已做的选择）
-                          onPressed: () =>
-                              Navigator.of(sheetCtx).pop(collect()),
-                          child: Text('跳过',
-                              style: TextStyle(fontSize: 14.5, color: h.text)),
-                        ),
-                        const Spacer(),
-                        if (page > 0) ...[
-                          CupertinoButton(
-                            padding: const EdgeInsets.symmetric(
-                                horizontal: 18, vertical: 10),
-                            color: h.surface,
-                            borderRadius: BorderRadius.circular(12),
-                            onPressed: () => setDlgState(() => page--),
-                            child: Text('上一题',
-                                style:
-                                    TextStyle(fontSize: 14.5, color: h.text)),
-                          ),
-                          const SizedBox(width: 8),
-                        ],
-                        if (!isLast)
-                          CupertinoButton(
-                            padding: const EdgeInsets.symmetric(
-                                horizontal: 18, vertical: 10),
-                            color: h.text,
-                            borderRadius: BorderRadius.circular(12),
-                            onPressed: () => setDlgState(() => page++),
-                            child: Text('下一题',
-                                style: TextStyle(
-                                    fontSize: 14.5,
-                                    fontWeight: FontWeight.w600,
-                                    color: h.bg)),
-                          ),
-                        if (isLast)
-                          CupertinoButton(
-                            padding: const EdgeInsets.symmetric(
-                                horizontal: 18, vertical: 10),
-                            color: h.text,
-                            borderRadius: BorderRadius.circular(12),
-                            onPressed: () =>
-                                Navigator.of(sheetCtx).pop(collect()),
-                            child: Text('提交',
-                                style: TextStyle(
-                                    fontSize: 14.5,
-                                    fontWeight: FontWeight.w600,
-                                    color: h.bg)),
-                          ),
-                      ],
-                    ),
-                  ],
-                ),
-              ),
-            );
-          },
-        ));
-      },
-    );
-
-    // 提交 / 跳过 / 点外面 —— 都回传**确定的结果**（null ⇒ 空 map = 全部未回答）
+    final result = await showAskGateSheet(context, questions: questions);
+    // 提交 / 跳过 / 放弃（null）—— 都回传**确定的结果**（null ⇒ 空 map = 全部未回答）
     await _bridge.replyAsk(result ?? const {});
   }
 
-  /// 一条可点击的 ask 选项（编号 + 标题 + 说明 + 选中态）。
+  /// **权限档位变更**（2026-10-29 第 5 条 P1）。
   ///
-  /// 抽成独立 widget 是为了让"选中态"的视觉在同一处定义 ——
-  /// 单选/多选只是圆/方的区别，其余一致。
-  Widget _askOptionTile({
-    required Hue h,
-    required int index,
-    required String label,
-    required String description,
-    required bool selected,
-    required bool multi,
-    required VoidCallback onTap,
-  }) {
-    return Padding(
-      padding: const EdgeInsets.only(bottom: HSpace.sm),
-      // ★★ 必须包 `Material`（2026-10-21 真机 bug：选项点不动）★★
-      //
-      // ## 现象
-      //
-      // 弹窗能正常显示，「下一题」「跳过」也都能点 —— **唯独选项卡片点不动**：
-      // 点下去没有选中态、也不会自动跳下一题。用户会以为 App 卡死了。
-      //
-      // ## 根因
-      //
-      // `InkWell` 的水波纹与**命中测试**都依赖祖先 `Material`。
-      // 这里原来是 `Padding → InkWell → Container` —— **没有 Material 祖先**
-      //（`AlertDialog` 的 content 在 `SingleChildScrollView` 里，
-      //  那层不提供 Material）。于是 `InkWell` 的 `onTap` **根本不触发**，
-      //  而旁边的 `TextButton` 自带 Material ⇒ 能点。
-      //  这正是"同一个弹窗里有的能点、有的不能点"的原因。
-      //
-      // 修法：`Material(transparent) → InkWell → 内容`。
-      // 用 `type: MaterialType.transparency` 是为了不改变既有的 `Container`
-      // 背景色/边框（外观零变化）。
-      child: Material(
-        type: MaterialType.transparency,
-        child: InkWell(
-          onTap: onTap,
-          borderRadius: BorderRadius.circular(HRadius.md),
-          child: Container(
-            padding: const EdgeInsets.symmetric(
-                horizontal: HSpace.md, vertical: 10),
-            decoration: BoxDecoration(
-              color: selected ? h.accent.withValues(alpha: 0.12) : h.surface,
-              borderRadius: BorderRadius.circular(HRadius.md),
-              border: Border.all(
-                color: selected ? h.accent : h.border,
-                width: selected ? 1.5 : 1,
-              ),
-            ),
-            child: Row(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              // 序号（1/2/3/4 —— 用户要求"一般是 1、2、3、4 等等几个选项"）
-              Container(
-                width: 20,
-                height: 20,
-                alignment: Alignment.center,
-                decoration: BoxDecoration(
-                  color: selected ? h.accent : h.surfaceAlt,
-                  shape: multi ? BoxShape.rectangle : BoxShape.circle,
-                  borderRadius:
-                      multi ? BorderRadius.circular(HRadius.sm) : null,
-                ),
-                child: Text(
-                  '$index',
-                  style: TextStyle(
-                    fontSize: 11,
-                    fontWeight: FontWeight.w600,
-                    color: selected
-                        ? (h.dark ? const Color(0xFF1A0E08) : Colors.white)
-                        : h.textDim,
-                  ),
-                ),
-              ),
-              const SizedBox(width: HSpace.sm),
-              Expanded(
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Text(label,
-                        style: TextStyle(
-                            fontSize: 13.5,
-                            height: 1.3,
-                            fontWeight:
-                                selected ? FontWeight.w600 : FontWeight.w400,
-                            color: h.text)),
-                    if (description.isNotEmpty)
-                      Padding(
-                        padding: const EdgeInsets.only(top: 2),
-                        child: Text(description,
-                            style: TextStyle(
-                                fontSize: 11.5,
-                                height: 1.35,
-                                color: h.textFaint)),
-                      ),
-                  ],
-                ),
-              ),
-              if (selected)
-                Icon(AppIcons.check, size: 16, color: h.accent),
-            ],
-          ),
-          ),
-        ),
-      ),
-    );
+  /// ## 为什么要专门一个方法
+  ///
+  /// 档位在 **run 开始那一刻**就被快照进执行器
+  /// （`services/local_agent.dart` 的档位快照），运行中改档位**不影响**
+  /// 正在跑的这一轮。旧实现只是 `setPermission(v)` 就完事 —— 用户切成
+  /// 「完全访问」后看到弹窗还在问，会以为 App 没听他的（假信息）。
+  ///
+  /// ## 两步顺序（都不能反）
+  ///
+  /// 1. **先 `await setPermission(v)`**：只有档位**确认生效后**才谈提示。
+  ///    「完全访问」要过二次确认（取消 ⇒ `onPicked` 根本不触发）；
+  /// 2. **再判当前会话是否真有 run 在跑**：没在跑就是"立即生效"，
+  ///    这时提示"下次运行生效"反而是假信息。
+  Future<void> _onPermissionChanged(PermissionMode v) async {
+    final from = widget.settings.value.permission;
+    await widget.settings.setPermission(v);
+    if (!mounted) return;
+    // 用**写入后的真实值**判定（不拿 v 猜：设置层没变时不该提示）
+    final applied = widget.settings.value.permission;
+    if (!shouldShowRunTierNotice(
+      from: from,
+      to: applied,
+      runInFlight: _currentSessionRunning,
+    )) {
+      return;
+    }
+    setState(() => _runTierNotice = true);
   }
 
   /// **危险操作审批弹窗**（2026-10-19）。

@@ -64,6 +64,8 @@ class InputBar extends StatefulWidget {
     this.onQueuedPin,
     this.reasoningLevel = ReasoningLevel.auto,
     this.onReasoningLevelChanged,
+    this.runTierNotice,
+    this.onDismissRunTierNotice,
   });
 
   final void Function(String text) onSend;
@@ -195,6 +197,18 @@ class InputBar extends StatefulWidget {
   // 用户原话：「排队的消息要在输入框上面显示……
   //           不是在工作步骤里显示已排队」。
 
+  /// **运行中切档提示条**（2026-10-29 第 5 条 P1）。
+  ///
+  /// 非 null 时在输入卡上方显示一条可关闭的提示（内容见
+  /// [kRunTierNoticeText]）。为什么需要它：权限档位在 **run 开始那一刻**
+  /// 就被快照进执行器（`services/local_agent.dart` 的档位快照），
+  /// 运行中改档位**不会**影响正在跑的这一轮 —— 不告诉用户，用户会以为
+  /// "我刚切成完全访问了，怎么还在问我"，那是假信息。
+  final String? runTierNotice;
+
+  /// 关闭提示条（点提示条右侧的 ✕）。
+  final VoidCallback? onDismissRunTierNotice;
+
   /// 排队中消息的文本（按顺序，第一行最先发出）
   final List<String> queuedTexts;
 
@@ -289,6 +303,16 @@ class _InputBarState extends State<InputBar>
         child: Column(
           mainAxisSize: MainAxisSize.min,
           children: [
+            // ---- ★ 运行中切档提示（2026-10-29 第 5 条 P1）----
+            //
+            // 档位在 run 开始那一刻就被快照 ⇒ 运行中改档位只对**下一轮**生效。
+            // 必须说清"本轮没变"，否则用户以为已经生效了（假信息）。
+            if (widget.runTierNotice != null)
+              _RunTierNotice(
+                h: h,
+                text: widget.runTierNotice!,
+                onDismiss: widget.onDismissRunTierNotice,
+              ),
             // ---- ★ 排队待发栏（2026-10-13，用户参考图）----
             //
             // 位置：**输入框正上方**。用户原话：
@@ -1463,4 +1487,95 @@ class _FlowBorderPainter extends CustomPainter {
   @override
   bool shouldRepaint(_FlowBorderPainter old) =>
       old.radius != radius || old.colors != colors;
+}
+
+// ============================================================================
+// 运行中切档提示（2026-10-29 第 5 条 P1）
+// ============================================================================
+
+/// 提示条文案。
+///
+/// ⚠️ 措辞要求（用户原话）：**不许说"已生效"** —— 档位在 run 开始时就快照了，
+/// 这一轮用的还是旧档位，只有下一轮才是新档位。
+const String kRunTierNoticeText = '本轮已开始，新档位从下次运行生效';
+
+/// 运行中切档**要不要提示**（纯函数，便于单测）。
+///
+/// 三条同时成立才提示：
+/// 1. 档位**真的变了**（`from != to`）—— 重复选同一档不打扰用户；
+/// 2. 当前会话**确实有 run 在跑**（`runInFlight`）—— 没在跑就是"立即生效"，
+///    提示反而是假信息；
+/// 3. 调用方只在档位**确认生效之后**才调它（"完全访问"的二次确认取消 ⇒
+///    `onPicked` 根本不会触发 ⇒ 不会走到这里）。
+bool shouldShowRunTierNotice({
+  required PermissionMode from,
+  required PermissionMode to,
+  required bool runInFlight,
+}) =>
+    from != to && runInFlight;
+
+/// 输入卡上方的「运行中切档」提示条：一条可关闭的浅色横幅。
+class _RunTierNotice extends StatelessWidget {
+  const _RunTierNotice({
+    required this.h,
+    required this.text,
+    required this.onDismiss,
+  });
+
+  final Hue h;
+  final String text;
+  final VoidCallback? onDismiss;
+
+  @override
+  Widget build(BuildContext context) {
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(
+        HSpace.md,
+        HSpace.xs,
+        HSpace.md,
+        0,
+      ),
+      child: Container(
+        padding: const EdgeInsets.fromLTRB(HSpace.sm + 2, 6, 4, 6),
+        decoration: BoxDecoration(
+          color: h.surfaceAlt,
+          borderRadius: BorderRadius.circular(HRadius.md),
+          border: Border.all(color: h.border),
+        ),
+        child: Row(
+          children: [
+            Icon(CupertinoIcons.info_circle, size: 14, color: h.textFaint),
+            const SizedBox(width: 6),
+            Expanded(
+              child: Text(
+                text,
+                style: TextStyle(
+                  fontSize: 12,
+                  height: 1.35,
+                  color: h.textDim,
+                ),
+              ),
+            ),
+            // 关闭键：可点区域给足（真机手指），视觉仍克制
+            SizedBox(
+              width: 30,
+              height: 26,
+              child: Material(
+                color: Colors.transparent,
+                child: InkWell(
+                  customBorder: const CircleBorder(),
+                  onTap: onDismiss,
+                  child: Icon(
+                    CupertinoIcons.xmark,
+                    size: 13,
+                    color: h.textFaint,
+                  ),
+                ),
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
 }

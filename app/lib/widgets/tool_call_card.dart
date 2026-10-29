@@ -1,4 +1,5 @@
 import 'dart:convert';
+import 'dart:ui' show ImageFilter;
 
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -451,6 +452,19 @@ const double kResultLayerMaxHeight = 112;
 /// 保证滑到底时末尾文字不被悬浮按钮永久压住。
 const double kCommandEndClearance = 136;
 
+/// 卡内**上下两层之间的 1px 分隔线**（规格点名 `#232325`，2026-10-29）。
+///
+/// 比全局 border token（深色 `#2A2A2C`）更暗一档：卡片底色 `#141415` 上
+/// 它只做"分层提示"，规格给的就是这个值 —— 浅色模式由规格另行定义结构，
+/// 这里先按深色值落（见 `.docs/命令卡片要求-提示词.md`「卡片本体」）。
+const Color kCommandCardRule = Color(0xFF232325);
+
+/// 结果层里的错误信息行（stderr 段）红字（规格点名 `#F87171`，2026-10-29）。
+const Color kCommandErrorText = Color(0xFFF87171);
+
+/// 悬浮「退出码 + 复制」药丸的底色（规格点名 `rgba(28,28,30,.82)`）。
+const Color kCommandPillFill = Color.fromRGBO(28, 28, 30, 0.82);
+
 /// 这次命令在哪个执行面跑；判不出（不是命令类工具）返回 null。
 ///
 /// 今天只有手机 Shell 真接了工具（`run_shell_command`）；沙箱侧等
@@ -538,9 +552,22 @@ const _kOutputEndMarker = '【命令输出结束】';
 /// 失败文案前面的「（执行面：sandbox）」前缀（后端 2026-10-29 加的）。
 final _kSurfacePrefix = RegExp(r'^\s*（执行面：\s*(sandbox|device|shell)\s*）\s*');
 
+/// 设备侧结果尾注「（耗时 Nms）」—— `device_capabilities._composeText`
+/// （:1428）把它拼进结果文本。
+///
+/// ★ 2026-10-29 追加（**规格硬项**）：`docs` 规格第 45 行
+/// 「不显示执行时间（任何位置都不许）」⇒ 整行剥掉。
+///
+/// ## 取舍（为什么复制也一起剥）
+/// 规格的「复制 = 命令全文 + 结果全文」在这里取**用户可见正文**口径：
+/// 执行耗时是诊断元数据（用量面板另有 `wallMs` 口径，不在这张卡重复），
+/// 而且"复制出来的和看到的不一样"比少一条元数据更糟 ⇒ 显示与复制同源。
+final _kElapsedNote = RegExp(r'^\s*（耗时\s*-?\d+(?:\.\d+)?\s*ms）\s*$');
+
 /// 把结果文本清理成**可展示**的样子：
 /// - 剥掉输出包裹标记（首尾各一行）
 /// - 剥掉「（执行面：xxx）」前缀
+/// - 剥掉「（耗时 Nms）」尾注（规格：任何位置都不许显示执行时间）
 String cleanCommandOutput(String raw) {
   var s = raw;
   // 前缀（可能出现在包裹标记之后，也可能在最前）
@@ -553,6 +580,8 @@ String cleanCommandOutput(String raw) {
   while (lines.isNotEmpty && lines.last.trim() == _kOutputEndMarker) {
     lines.removeLast();
   }
+  // ★ 规格硬项：执行时间整行剥掉（显示层与复制共用这份清洗结果）
+  lines.removeWhere(_kElapsedNote.hasMatch);
   s = lines.join('\n');
   // 包裹标记剥完可能留下前导空行
   s = s.replaceFirst(RegExp(r'^\n+'), '');
@@ -739,7 +768,14 @@ class ToolCallCard extends StatefulWidget {
 class _ToolCallCardState extends State<ToolCallCard> {
   /// 是否展开明细。
   ///
-  /// ## ★ 2026-10-22：默认值随档位走（真机截图驱动的改版）
+  /// ## ★ 2026-10-29（P1 第 2 条）：命令卡**默认收起**，与档位无关
+  ///
+  /// 双层命令卡在对话流里的存在形态就是「收起时一行、点开原地展开」
+  /// （`.docs/命令卡片要求-提示词.md`：标题行只说在哪执行，整行可点）。
+  /// 所以命令类工具**不看 `showArgs`** —— 用户选了「完全展开」档也只展开
+  /// 到标题行为止，命令全文要点开才看；否则真机上一屏会被命令卡撑爆。
+  ///
+  /// ## ★ 2026-10-22：非命令工具默认值随档位走（真机截图驱动的改版）
   ///
   /// 用户原话：「我不要调用工具是一个卡片的形式……可以点击展开……」
   /// 真机截图里他处在**精简档**，而旧实现在精简档下 `_hasBody == false`
@@ -751,7 +787,8 @@ class _ToolCallCardState extends State<ToolCallCard> {
   ///
   /// 为什么用 `late` 而不是在 `build` 里改状态：`build` 里改 state 会触发布局期
   /// setState（Flutter 会警告）。初始化只发生一次，正是我们要的"默认值"。
-  late bool _expanded = widget.stepDetail.showArgs;
+  late bool _expanded =
+      widget.stepDetail.showArgs && commandSurfaceOf(widget.call) == null;
 
   /// **改动详情**是否展开（2026-10-21，BUG-4）。
   ///
@@ -814,7 +851,9 @@ class _ToolCallCardState extends State<ToolCallCard> {
 
     return Container(
       margin: const EdgeInsets.only(bottom: HSpace.xs),
-      decoration: _expanded && hasBody
+      // ★ 命令卡（2026-10-29 规格）：卡片本身就是最外层 —— 展开时外层
+      //   不再给底色/圆角（否则是"卡里套卡"）。非命令工具保持旧形态。
+      decoration: surface == null && _expanded && hasBody
           ? BoxDecoration(
               color: h.surfaceAlt,
               borderRadius: BorderRadius.circular(HRadius.sm),
@@ -863,7 +902,9 @@ class _ToolCallCardState extends State<ToolCallCard> {
                         style: TextStyle(
                           // ★ 2026-10-22：工具行字号**小于正文**（12 vs 15），
                           //   让"模型说的话"与"工具日志"一眼分开。
-                          fontSize: 12,
+                          // ★ 2026-10-29 规格：命令卡标题行字号 **14**
+                          //   （`.docs/命令卡片要求-提示词.md`：标题字号 14）。
+                          fontSize: surface != null ? 14 : 12,
                           fontWeight: FontWeight.w500,
                           color: call.status == ToolStatus.failure
                               ? HColors.errorOn(h.dark)
@@ -907,23 +948,26 @@ class _ToolCallCardState extends State<ToolCallCard> {
           ),
 
           if (hasBody && _expanded) ...[
-            Divider(height: 1),
-            Padding(
-              padding: const EdgeInsets.all(HSpace.md),
-              child: surface != null
-                  ? Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        _commandCard(h, call, surface),
-                        // ---- 模型原始输出（仅「完全展开」）----
-                        if (detail.showRawOutput)
-                          _rawOutput(h, call.rawOutput),
-                      ],
-                    )
-                  : Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        // ---- 文件改动详情（2026-10-21，BUG-4）----
+            // ★ 命令卡（2026-10-29 规格）：展开内容**直接**贴在标题行下面 ——
+            //   旧实现外套 `Divider` + `Padding(all: HSpace.md)`：卡片比标题行
+            //   两侧各窄 12dp，还多出一条不属于卡片的线。规格原话：「外面不许
+            //   再套任何容器、底色、圆角或 Padding——卡片本身就是最外层」。
+            if (surface != null) ...[
+              _commandCard(h, call, surface),
+              // ---- 模型原始输出（仅「完全展开」）----
+              // 它是独立的诊断块、不是卡片的容器，所以跟在卡片后面单独渲染。
+              if (detail.showRawOutput) ...[
+                const SizedBox(height: HSpace.sm),
+                _rawOutput(h, call.rawOutput),
+              ],
+            ] else ...[
+              Divider(height: 1),
+              Padding(
+                padding: const EdgeInsets.all(HSpace.md),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    // ---- 文件改动详情（2026-10-21，BUG-4）----
                   //
                   // 放在参数**之前**：用户最想看的是"改了什么代码"，
                   // 而不是"调用时传了哪几个参数名"。
@@ -991,9 +1035,10 @@ class _ToolCallCardState extends State<ToolCallCard> {
 
                   // ---- 模型原始输出（仅「完全展开」）----
                   if (detail.showRawOutput) _rawOutput(h, call.rawOutput),
-                ],
+                  ],
+                ),
               ),
-            ),
+            ],
           ],
         ],
       ),
@@ -1026,7 +1071,8 @@ class _ToolCallCardState extends State<ToolCallCard> {
             children: [
               _commandLayer(h, call, surface, dotColor),
               if (running) ...[
-                Divider(height: 1, color: h.border),
+                // ★ 规格 2026-10-29：两处分隔线用 #232325（不是全局 border）。
+                Divider(height: 1, color: kCommandCardRule),
                 Padding(
                   padding:
                       const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
@@ -1049,7 +1095,7 @@ class _ToolCallCardState extends State<ToolCallCard> {
                   ),
                 ),
               ] else if (call.result != null) ...[
-                Divider(height: 1, color: h.border),
+                Divider(height: 1, color: kCommandCardRule),
                 _resultLayer(h, call),
               ],
             ],
@@ -1098,23 +1144,38 @@ class _ToolCallCardState extends State<ToolCallCard> {
     );
   }
 
+  /// 悬浮药丸（退出码 / 复制）—— 规格：半透明深色底 `rgba(28,28,30,.82)`
+  /// **带毛玻璃模糊**、细边框、胶囊圆角。
+  ///
+  /// `BackdropFilter` 必须被 `ClipRRect` 裁住：它的模糊作用于父级裁剪区域，
+  /// 不裁就会把整个 `Stack`（含卡片）一起糊掉。
   Widget _floatPill(Hue h, Widget child) {
-    return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 9, vertical: 3.5),
-      decoration: BoxDecoration(
-        color: h.surfaceAlt.withValues(alpha: 0.85),
-        border: Border.all(color: h.border),
-        borderRadius: BorderRadius.circular(999),
+    return ClipRRect(
+      borderRadius: BorderRadius.circular(999),
+      child: BackdropFilter(
+        filter: ImageFilter.blur(sigmaX: 12, sigmaY: 12),
+        child: Container(
+          padding: const EdgeInsets.symmetric(horizontal: 9, vertical: 3.5),
+          decoration: BoxDecoration(
+            color: kCommandPillFill,
+            border: Border.all(color: h.border),
+            borderRadius: BorderRadius.circular(999),
+          ),
+          child: child,
+        ),
       ),
-      child: child,
     );
   }
 
   void _copyCommand(HToolCall call) {
     final command = call.args['command'] ?? '';
-    final text = call.result == null || call.result!.isEmpty
-        ? command
-        : '$command\n${call.result}';
+    // ★ 2026-10-29 规格：「复制」= 命令全文 + **清洗后**的结果全文。
+    //   结果里给模型的边界标记（【命令输出开始/结束】）与「（执行面：xxx）」
+    //   前缀都不能粘进剪贴板 —— 用户复制出来是要直接用的。
+    final result = call.result == null || call.result!.isEmpty
+        ? ''
+        : cleanCommandOutput(call.result!);
+    final text = result.isEmpty ? command : '$command\n$result';
     Clipboard.setData(ClipboardData(text: text));
     showIosToast(context, '已复制');
   }
@@ -1128,8 +1189,9 @@ class _ToolCallCardState extends State<ToolCallCard> {
     final style = TextStyle(
       fontFamily: kMonoFontFamily,
       fontFamilyFallback: kMonoFallback,
-      fontSize: 12.5,
-      height: 1.7,
+      // ★ 规格 2026-10-29：命令等宽 12.3px、行高 1.75。
+      fontSize: 12.3,
+      height: 1.75,
       color: h.text,
     );
     return ConstrainedBox(
@@ -1230,16 +1292,12 @@ class _ToolCallCardState extends State<ToolCallCard> {
               child: Padding(
                 padding: const EdgeInsets.fromLTRB(
                     12, 8, kCommandEndClearance, 10),
-                child: Text(
-                  text,
-                  softWrap: false,
-                  style: TextStyle(
-                    fontFamily: kMonoFontFamily,
-                    fontFamilyFallback: kMonoFallback,
-                    fontSize: 12.5,
-                    height: 1.7,
-                    color: h.textDim,
-                  ),
+                // ★ 2026-10-29 规格：结果层逐行渲染 —— stderr 段的行要红字
+                //   `#F87171`，整段一个 Text 就没法只给错误行上色。
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: _resultLines(h, text),
                 ),
               ),
             ),
@@ -1247,6 +1305,36 @@ class _ToolCallCardState extends State<ToolCallCard> {
         ),
       ),
     );
+  }
+
+  /// 结果层逐行渲染：**`[stderr]` 标记之后**的行是错误信息行 ⇒ 规格红字
+  /// `#F87171`；其余行用正文色。
+  ///
+  /// · 空行渲染成一个空格：`Text('')` 在 Column 里会被算成 0 高，行距会塌。
+  /// · `softWrap: false` + 外层横向滚动 ⇒ 长行永不换行（规格）。
+  List<Widget> _resultLines(Hue h, String text) {
+    final base = TextStyle(
+      fontFamily: kMonoFontFamily,
+      fontFamilyFallback: kMonoFallback,
+      // ★ 规格 2026-10-29：结果层等宽 12.3px、行高 1.7。
+      fontSize: 12.3,
+      height: 1.7,
+      color: h.textDim,
+    );
+    var inStderr = false;
+    final widgets = <Widget>[];
+    for (final line in text.split('\n')) {
+      final isMarker = line.trim() == '[stderr]';
+      // 标记行本身是段落头、不是错误正文 —— 只有它**后面**的行才上红字
+      final isError = inStderr && line.trim().isNotEmpty;
+      if (isMarker) inStderr = true;
+      widgets.add(Text(
+        line.isEmpty ? ' ' : line,
+        softWrap: false,
+        style: isError ? base.copyWith(color: kCommandErrorText) : base,
+      ));
+    }
+    return widgets;
   }
 
   /// 当前档位下这张卡片是否有可展开的内容。

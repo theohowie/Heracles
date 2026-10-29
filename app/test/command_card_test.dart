@@ -30,6 +30,7 @@ void main() {
     String command = 'echo hi',
     String? result = 'hi',
     ToolStatus status = ToolStatus.success,
+    int? exitCode,
     Map<String, String>? extraArgs,
   }) =>
       HToolCall(
@@ -38,7 +39,16 @@ void main() {
         args: {'command': command, ...?extraArgs},
         result: result,
         status: status,
+        exitCode: exitCode,
       );
+
+  /// 展开命令卡（2026-10-29 规格：命令卡**默认收起**，点标题行原地展开）。
+  ///
+  /// 收起态整个 `ToolCallCard` 就是那 44dp 标题行 ⇒ 点组件中心等于点整行。
+  Future<void> expand(WidgetTester tester) async {
+    await tester.tap(find.byType(ToolCallCard));
+    await tester.pump();
+  }
 
   test('执行面判定：shell 工具→Shell，sandbox 标记→SandBox，非命令工具→null',
       () {
@@ -55,8 +65,13 @@ void main() {
         isNull);
   });
 
-  test('退出码判定：成功=0，失败解析后端附文，运行中/解析不到=null', () {
-    expect(commandExitCodeOf(shell()), 0);
+  test('退出码判定：结构化优先，失败解析后端附文，拿不到=null（不编造 0）', () {
+    // ★ 规格变更（2026-10-29）：旧断言 `成功 ⇒ 0` 是错的 ——
+    //   「工具调用成功」≠「命令退出码 0」（grep 无匹配 / javac 失败都是
+    //   工具成功但命令非 0）。现在只认后端 metadata 的结构化 exitCode。
+    expect(commandExitCodeOf(shell(exitCode: 0)), 0);
+    expect(commandExitCodeOf(shell()), isNull,
+        reason: '没有结构化退出码就不许编造 0');
     expect(
         commandExitCodeOf(shell(
           result: 'boom（命令退出码：13 —— 命令执行了，但没有成功返回。）',
@@ -76,8 +91,13 @@ void main() {
     await tester.pumpWidget(wrap(shell(
       command: 'cd @workspace && \\\n./gradlew assembleRelease && \\\necho DONE',
       result: 'BUILD SUCCESSFUL\nDONE',
+      // ★ 规格变更（2026-10-29）：退出码只认后端结构化值 —— 这里显式给 0；
+      //   不给就**不显示 chip**（spec 测试已钉「不许编造」）。
+      exitCode: 0,
     )));
     expect(find.text('在手机执行了命令'), findsOneWidget);
+    // ★ 规格变更（2026-10-29）：命令卡默认收起，先点标题行展开
+    await expand(tester);
     // 第一行执行面名 + 后续行号
     expect(find.text('Shell'), findsOneWidget);
     expect(find.text('2'), findsOneWidget);
@@ -105,6 +125,7 @@ void main() {
       status: ToolStatus.running,
     )));
     expect(find.text('正在手机执行命令'), findsOneWidget);
+    await expand(tester);
     expect(find.textContaining('执行中…'), findsOneWidget);
     expect(find.textContaining('退出码'), findsNothing);
     expect(find.text('复制'), findsOneWidget);
@@ -117,6 +138,7 @@ void main() {
       status: ToolStatus.failure,
     )));
     expect(find.text('在手机执行了命令（失败）'), findsOneWidget);
+    await expand(tester);
     expect(find.text('退出码 13'), findsOneWidget);
   });
 
@@ -127,6 +149,7 @@ void main() {
       extraArgs: {'surface': 'sandbox'},
     )));
     expect(find.text('在沙箱执行了命令'), findsOneWidget);
+    await expand(tester);
     expect(find.text('SandBox'), findsOneWidget);
   });
 
@@ -135,6 +158,7 @@ void main() {
       command: 'echo ${'x' * 120}',
       result: 'y' * 120,
     )));
+    await expand(tester);
     final horizontals = tester
         .widgetList<SingleChildScrollView>(find.byType(SingleChildScrollView))
         .where((s) => s.scrollDirection == Axis.horizontal)

@@ -1,9 +1,12 @@
+import 'dart:async';
+
 import 'package:flutter/cupertino.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/physics.dart';
 
 import '../models/settings.dart';
 import '../theme/app_theme.dart';
+import '../theme/cupertino_kit.dart';
 
 /// 审批相关弹层（2026-10-24 黑白改版；2026-10-25 按原型 10/11 重做）。
 ///
@@ -880,13 +883,22 @@ class _ApprovalModeRow extends StatelessWidget {
 /// 先回 deny、再停 run，不直接上行后端。
 enum ApprovalDecision { deny, once, always, stop }
 
-/// 运行时审批请求弹窗：拒绝 / 允许一次 / 始终允许（可带「停止任务」）。
+/// 审批弹层被"放弃"后给用户的一句交代（2026-10-29 第 4 条）。
+///
+/// 关闭审批**就是**一次决定（按拒绝处理），必须说出来 ——
+/// 用户报的正是"弹层一关，模型就把这件事拒了，而我根本不知道"。
+const String kApprovalDismissedToast = '已按拒绝处理';
+
+/// 审批请求弹窗：拒绝 / 允许一次 / 始终允许（可带「停止任务」）。
 ///
 /// 调用方在后端 N1 的 `approval_required` 事件到达时弹出；
 /// 用户选「始终允许」后调用方负责写 alwaysAllowedTools。
 /// 超时/断线时调用方按 fail-closed 处理（拒绝），本 UI 不擅自决定。
 /// [allowStop] 为 true 时多一个「停止任务」入口（返回 [ApprovalDecision.stop]），
 /// 解决审批弹窗盖住输入栏停止键、用户物理上停不下来的问题。
+///
+/// ★ 2026-10-29（第 4 条 P1「弹层误关」）：**系统返回键不再能静默关掉它** ——
+/// 走 [_onApprovalBackPressed] 的二次确认（见该函数注释）。
 Future<ApprovalDecision?> showApprovalRequestSheet(
   BuildContext context, {
   required String tool,
@@ -898,6 +910,8 @@ Future<ApprovalDecision?> showApprovalRequestSheet(
 }) {
   final h = Hue.of(context);
   final hasArgs = argsPreview.trim().isNotEmpty && argsPreview != '（无参数）';
+  // 返回键处理要读"当前在第几步"、也要能把它退回第一步 ⇒ 需要拿到 body 的 State。
+  final bodyKey = GlobalKey<_ApprovalRequestBodyState>();
   return showModalBottomSheet<ApprovalDecision>(
     context: context,
     backgroundColor: Colors.transparent,
@@ -905,21 +919,68 @@ Future<ApprovalDecision?> showApprovalRequestSheet(
     enableDrag: false,
     isScrollControlled: true,
     shape: const RoundedRectangleBorder(),
-    builder: (sheetCtx) => BwSheetShell(
-      onDismissRequest: () => Navigator.of(sheetCtx).pop(),
-      allowDrag: false,
-      child: _ApprovalRequestBody(
-        h: h,
-        tool: tool,
-        argsPreview: argsPreview,
-        hasArgs: hasArgs,
-        risk: risk,
-        note: note,
-        workspaceInside: workspaceInside,
-        allowStop: allowStop,
+    builder: (sheetCtx) => PopScope(
+      // ★ canPop:false ⇒ 系统返回键先经过我们，而不是直接 pop 掉弹层。
+      canPop: false,
+      onPopInvokedWithResult: (didPop, _) {
+        if (didPop) return;
+        unawaited(_onApprovalBackPressed(sheetCtx, bodyKey));
+      },
+      child: BwSheetShell(
+        onDismissRequest: () => Navigator.of(sheetCtx).pop(),
+        allowDrag: false,
+        child: _ApprovalRequestBody(
+          key: bodyKey,
+          h: h,
+          tool: tool,
+          argsPreview: argsPreview,
+          hasArgs: hasArgs,
+          risk: risk,
+          note: note,
+          workspaceInside: workspaceInside,
+          allowStop: allowStop,
+        ),
       ),
     ),
   );
+}
+
+/// 审批弹层的**系统返回键**处理（2026-10-29 第 4 条 P1「弹层误关」）。
+///
+/// ## 旧实现的洞（用户报的症状）
+///
+/// `isDismissible:false` / `enableDrag:false` 只挡住了**点遮罩**和**下滑**，
+/// **系统返回键**照样把抽屉 pop 掉 ⇒ 调用方拿到 `null` ⇒ `_ => 'deny'`
+/// 静默上行拒绝。用户看到的只是"弹层凭空消失"，并不知道自己刚刚拒绝了操作。
+///
+/// ## 现在的契约
+///
+/// · 第二步（「始终允许」的二次确认）⇒ **退一步**回第一步（不弹确认、不关层）；
+/// · 第一步 ⇒ 弹二次确认「放弃本次审批？」；
+///   · 确认 ⇒ 以 **[ApprovalDecision.deny]** 关闭 + 轻提示「已按拒绝处理」；
+///   · 取消 ⇒ 留在原地，什么都不改。
+///
+/// ⚠️ 关掉**绝不**等于允许：这里只回传 deny。
+Future<void> _onApprovalBackPressed(
+  BuildContext sheetCtx,
+  GlobalKey<_ApprovalRequestBodyState> bodyKey,
+) async {
+  final body = bodyKey.currentState;
+  if (body != null && body.step > 0) {
+    body.backToStep0();
+    return;
+  }
+  final discard = await showBwConfirmSheet(
+    sheetCtx,
+    title: '放弃本次审批？',
+    message: '关闭后将按「拒绝」处理这次请求，模型不会执行它。',
+    confirmLabel: '放弃并拒绝',
+    cancelLabel: '继续审批',
+    destructive: true,
+  );
+  if (!discard || !sheetCtx.mounted) return;
+  showIosToast(sheetCtx, kApprovalDismissedToast);
+  Navigator.of(sheetCtx).pop(ApprovalDecision.deny);
 }
 
 
@@ -933,6 +994,7 @@ Future<ApprovalDecision?> showApprovalRequestSheet(
 /// 流程，不再是「点完就生效」或另开一层抽屉。
 class _ApprovalRequestBody extends StatefulWidget {
   const _ApprovalRequestBody({
+    super.key,
     required this.h,
     required this.tool,
     required this.argsPreview,
@@ -958,6 +1020,17 @@ class _ApprovalRequestBody extends StatefulWidget {
 
 class _ApprovalRequestBodyState extends State<_ApprovalRequestBody> {
   int _step = 0;
+
+  /// 当前在第几步（0 = 批准请求，1 = 「始终允许」二次确认）。
+  ///
+  /// 系统返回键要据此判断"退一步"还是"二次确认关层"（见
+  /// [_onApprovalBackPressed]）。
+  int get step => _step;
+
+  /// 返回键在第 2 步时**先回第 1 步** —— 不弹确认、更不关层。
+  void backToStep0() {
+    if (_step != 0) setState(() => _step = 0);
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -1182,9 +1255,13 @@ class _ApprovalRequestBodyState extends State<_ApprovalRequestBody> {
           style: const TextStyle(fontSize: 15, fontWeight: FontWeight.w600),
         ),
         const SizedBox(height: 8),
+        // ★ 2026-10-29（第 10 条 P3）：说清**范围**与**可撤销**。
+        //   用户原话：「『始终允许』到底允许了什么？换个参数还算不算？」
+        //   —— 旧文案「之后再调用这个工具时会直接执行」没写参数范围，
+        //   容易被读成"只记住这次这条命令"。现在明确"不论参数"。
         Text(
-          '之后再调用这个工具时会直接执行、不再询问你。随时可在'
-          '「通用设置 · 已始终允许的工具」里撤销。',
+          '之后调用 ${widget.tool}（不论参数）都会直接执行、不再询问你。'
+          '可随时在「通用设置 · 已始终允许的工具」里撤销。',
           style: TextStyle(fontSize: 13.5, height: 1.55, color: h.textDim),
         ),
         if (widget.hasArgs) ...[
@@ -1500,4 +1577,457 @@ class _BwTextInputSheetState extends State<_BwTextInputSheet> {
       ),
     );
   }
+}
+
+/// **ask_user 提问弹层**（2026-10-29 从 chat_screen 抽到 UI 套件）。
+///
+/// ## 为什么抽出来
+///
+/// 第 4 条要求"提问弹层不许误关"，而它原先内联在 300KB 的聊天页里 ——
+/// 触发它要跑通一整轮 run，所以**没有任何 widget 测试能钉住它的关闭语义**。
+/// 抽成独立函数后：遮罩/返回键/键盘重排都能直接在 widget 测试里验。
+/// 行为与抽离前**完全一致**（选项式多题、单选自动跳题、「其他…」自填、
+/// 跳过回传已答部分、未答如实回传「未回答」）。
+///
+/// 返回：题目 id → 答案列表；`null` = 弹层被放弃（调用方按"全部未回答"处理）。
+Future<Map<String, List<String>>?> showAskGateSheet(
+  BuildContext context, {
+  required List<Map<String, dynamic>> questions,
+}) async {
+  final h = Hue.of(context);
+  // ★ 逐题作答的状态：题目 id → 已选 label 集合
+  final picked = <String, Set<String>>{};
+
+  // ★ 2026-10-23：每题「其他…」的自填状态（用户原话「或者选其他，然后自己填」）。
+  //
+  // 用 controller（按题目 id）：用户可能选「其他」后翻到下一题、再翻回来 ——
+  // 若只把文本存在 map 里，来回翻页时 TextField 会被销毁重建，
+  // 结果就是"界面显示空、提交却带着旧文本"（自相矛盾）。
+  //
+  // ⚠️ 不主动 dispose：弹窗退场动画期间 TextField 还在树上，立刻 dispose
+  //   会撞 "A TextEditingController was used after being disposed"；
+  //   这里与 `_renameSession` 的既有处理一致（controller 无原生资源，
+  //   弹窗 State 卸载后随 GC 回收）。
+  final customOn = <String>{};
+  final customCtl = <String, TextEditingController>{};
+
+  /// 合成回传答案（题目 id → 答案列表）：点选的 label + 自填**原文**。
+  ///
+  /// · 只收非空项；**留空的自填框 = 未作答**（不编答案，该题不进 map）
+  /// · 自填的是用户原文，**不是**"其他…"两个字
+  Map<String, List<String>> collect() {
+    final out = <String, List<String>>{};
+    for (final e in picked.entries) {
+      final list = e.value.toList();
+      if (list.isNotEmpty) out[e.key] = list;
+    }
+    for (final id in customOn) {
+      final raw = (customCtl[id]?.text ?? '').trim();
+      if (raw.isEmpty) continue;
+      (out[id] ??= <String>[]).add(raw);
+    }
+    return out;
+  }
+
+  var page = 0;
+  final total = questions.length;
+
+  // ★ 2026-10-25 晚：居中弹窗改上拉抽屉（用户定：所有弹层统一抽屉式，
+  //   高度随问题内容自适应）。语义与弹窗时代一条不变：
+  //   · 放弃（null）⇒ 空答案（全部未回答，绝不编造）—— 但**必须先确认**（见下）
+  //   · 「跳过」= 回传**已答部分**（collect）；单选点选项自动跳题；
+  //     「其他…」自填留空 = 该题未作答；controller 跨翻页保留输入。
+  //   高度：内容区 Flexible + 滚动 —— 选项少时抽屉贴合内容，
+  //   选项多时抽屉长到上限、内部滚动，按钮行始终钉底。
+  //
+  // ★★ 2026-10-29（第 4 条 P1「弹层误关」）：
+  //   · `isDismissible: false` —— **点遮罩不再关掉它**。旧实现点一下外面
+  //     就等于"全部未回答"，用户在真机上最容易碰到的正是这一步（想收键盘 /
+  //     手滑碰一下，模型就以为用户拒答了）。
+  //   · `PopScope(canPop: false)` —— 系统返回键先走 [_onAskBackPressed] 的
+  //     二次确认，确认后才以 null 关闭并给一句轻提示。
+  final result = await showModalBottomSheet<Map<String, List<String>>>(
+    context: context,
+    backgroundColor: Colors.transparent,
+    isScrollControlled: true,
+    isDismissible: false,
+    shape: const RoundedRectangleBorder(),
+    builder: (sheetCtx) => PopScope(
+      canPop: false,
+      onPopInvokedWithResult: (didPop, _) {
+        if (didPop) return;
+        unawaited(_onAskBackPressed(sheetCtx));
+      },
+      child: BwSheetShell(
+        onDismissRequest: () => Navigator.of(sheetCtx).pop(),
+        child: StatefulBuilder(
+        builder: (ctx, setDlgState) {
+          final q = questions[page];
+          final id = (q['id'] as String?) ?? 'q${page + 1}';
+          final title = (q['question'] as String?) ?? '';
+          final multi = (q['multi'] as bool?) ?? false;
+          final options = (q['options'] as List?) ?? const [];
+          final sel = picked.putIfAbsent(id, () => <String>{});
+          final isLast = page == total - 1;
+
+          void toggle(String label) {
+            setDlgState(() {
+              if (multi) {
+                // 多选：点了就切换；「其他…」可与普通选项**共存**，不动它
+                if (!sel.remove(label)) sel.add(label);
+              } else {
+                // ★ 单选：替换，并**自动跳下一题**（用户要求"答完自动下一个"）
+                sel
+                  ..clear()
+                  ..add(label);
+                // 单选里普通选项与「其他…」互斥 —— 选普通项就收起自填
+                customOn.remove(id);
+                customCtl[id]?.clear();
+                if (!isLast) {
+                  // 让当前帧先画出来再跳，避免"点完看不到选中态"
+                  Future.microtask(() => setDlgState(() => page++));
+                }
+              }
+            });
+          }
+
+          /// ★「其他…」：选中后展开自填框。
+          ///
+          /// · 单选：与普通选项互斥；**不自动跳题**（用户还没填）
+          /// · 多选：只切换自己，普通选项保持不变
+          void toggleCustom() {
+            setDlgState(() {
+              if (customOn.remove(id)) {
+                // 取消选中 ⇒ 清空已填内容（否则隐藏的文本会被一起提交）
+                customCtl[id]?.clear();
+              } else {
+                customOn.add(id);
+                customCtl.putIfAbsent(id, () => TextEditingController());
+                if (!multi) sel.clear();
+              }
+            });
+          }
+
+          return SafeArea(
+            child: Padding(
+              // 键盘弹起时抽屉整体上移（自填框 autofocus 会拉键盘）
+              padding: EdgeInsets.fromLTRB(
+                20,
+                10,
+                20,
+                16 + MediaQuery.viewInsetsOf(ctx).bottom,
+              ),
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Center(
+                    child: Container(
+                      width: 36,
+                      height: 4,
+                      decoration: BoxDecoration(
+                        color: h.border,
+                        borderRadius: BorderRadius.circular(999),
+                      ),
+                    ),
+                  ),
+                  const SizedBox(height: 14),
+                  Row(
+                    children: [
+                      Icon(CupertinoIcons.question_circle_fill,
+                          size: 20, color: h.text),
+                      const SizedBox(width: HSpace.sm),
+                      const Expanded(
+                        child: Text('模型需要你的回答',
+                            style: TextStyle(
+                                fontSize: 16, fontWeight: FontWeight.w700)),
+                      ),
+                      // 进度：多题时必须让用户知道还有几题
+                      if (total > 1)
+                        Text('${page + 1}/$total',
+                            style:
+                                TextStyle(fontSize: 12, color: h.textFaint)),
+                    ],
+                  ),
+                  const SizedBox(height: 12),
+                  // 题目 + 选项：随内容长高，超限内部滚动
+                  Flexible(
+                    child: SingleChildScrollView(
+                      child: Column(
+                        mainAxisSize: MainAxisSize.min,
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Text(title,
+                              style: TextStyle(
+                                  fontSize: 15, height: 1.5, color: h.text)),
+                          const SizedBox(height: HSpace.xs),
+                          Text(
+                            multi
+                                ? '可多选（也可选「其他」自己填）'
+                                : '单选（也可选「其他」自己填）',
+                            style: TextStyle(
+                                fontSize: 11.5, color: h.textFaint),
+                          ),
+                          const SizedBox(height: HSpace.md),
+                          // ★ 选项：编号 + label + description，整块可点
+                          for (var i = 0; i < options.length; i++)
+                            _askOptionTile(
+                              h: h,
+                              index: i + 1,
+                              label: (options[i] as Map)['label'] as String? ??
+                                  '',
+                              description: (options[i]
+                                      as Map)['description'] as String? ??
+                                  '',
+                              selected: sel.contains(
+                                  (options[i] as Map)['label'] as String? ??
+                                      ''),
+                              multi: multi,
+                              onTap: () => toggle(
+                                  (options[i] as Map)['label'] as String? ??
+                                      ''),
+                            ),
+                          // ★ 每题末尾固定一个「其他…」
+                          _askOptionTile(
+                            h: h,
+                            index: options.length + 1,
+                            label: '其他…',
+                            description: '自己填写',
+                            selected: customOn.contains(id),
+                            multi: multi,
+                            onTap: toggleCustom,
+                          ),
+                          // 选中「其他…」才展开自填框；**留空 = 该题未作答**
+                          if (customOn.contains(id))
+                            Padding(
+                              padding:
+                                  const EdgeInsets.only(bottom: HSpace.sm),
+                              child: CupertinoTextField(
+                                // controller 跨"上一题/下一题"保留用户输入
+                                controller: customCtl.putIfAbsent(
+                                    id, () => TextEditingController()),
+                                autofocus: true,
+                                placeholder: '在这里填写你的回答…',
+                                minLines: 1,
+                                maxLines: 3,
+                                padding:
+                                    const EdgeInsets.all(HSpace.sm + 2),
+                                style: TextStyle(
+                                    fontSize: 13.5,
+                                    height: 1.4,
+                                    color: h.text),
+                                decoration: BoxDecoration(
+                                  color: h.surfaceAlt,
+                                  borderRadius:
+                                      BorderRadius.circular(HRadius.md),
+                                  border: Border.all(color: h.border),
+                                ),
+                              ),
+                            ),
+                        ],
+                      ),
+                    ),
+                  ),
+                  const SizedBox(height: 12),
+                  // 底部按钮行：跳过在左；翻页 / 提交在右（提交 = 黑钮）
+                  Row(
+                    children: [
+                      CupertinoButton(
+                        padding: const EdgeInsets.symmetric(
+                            horizontal: 18, vertical: 10),
+                        color: h.surface,
+                        borderRadius: BorderRadius.circular(12),
+                        // 跳过 = 已答的仍然回传（别浪费用户已做的选择）
+                        onPressed: () =>
+                            Navigator.of(sheetCtx).pop(collect()),
+                        child: Text('跳过',
+                            style: TextStyle(fontSize: 14.5, color: h.text)),
+                      ),
+                      const Spacer(),
+                      if (page > 0) ...[
+                        CupertinoButton(
+                          padding: const EdgeInsets.symmetric(
+                              horizontal: 18, vertical: 10),
+                          color: h.surface,
+                          borderRadius: BorderRadius.circular(12),
+                          onPressed: () => setDlgState(() => page--),
+                          child: Text('上一题',
+                              style:
+                                  TextStyle(fontSize: 14.5, color: h.text)),
+                        ),
+                        const SizedBox(width: 8),
+                      ],
+                      if (!isLast)
+                        CupertinoButton(
+                          padding: const EdgeInsets.symmetric(
+                              horizontal: 18, vertical: 10),
+                          color: h.text,
+                          borderRadius: BorderRadius.circular(12),
+                          onPressed: () => setDlgState(() => page++),
+                          child: Text('下一题',
+                              style: TextStyle(
+                                  fontSize: 14.5,
+                                  fontWeight: FontWeight.w600,
+                                  color: h.bg)),
+                        ),
+                      if (isLast)
+                        CupertinoButton(
+                          padding: const EdgeInsets.symmetric(
+                              horizontal: 18, vertical: 10),
+                          color: h.text,
+                          borderRadius: BorderRadius.circular(12),
+                          onPressed: () =>
+                              Navigator.of(sheetCtx).pop(collect()),
+                          child: Text('提交',
+                              style: TextStyle(
+                                  fontSize: 14.5,
+                                  fontWeight: FontWeight.w600,
+                                  color: h.bg)),
+                        ),
+                    ],
+                  ),
+                ],
+              ),
+            ),
+          );
+        },
+        ),
+      ),
+    ),
+  );
+  return result;
+}
+
+/// 提问弹层的**系统返回键**处理（2026-10-29 第 4 条 P1）。
+///
+/// 旧实现：返回键直接把抽屉 pop 掉 ⇒ 调用方拿到 null ⇒ `replyAsk(const {})`
+/// ⇒ 模型被告知"用户没有回答"—— 而用户只是想退回去看一眼。
+///
+/// 现在：二次确认「放弃回答？」；
+/// · 确认 ⇒ 以 **null** 关闭（= 全部未回答，绝不编答案）+ 轻提示；
+/// · 取消 ⇒ 留在原地，已答的题一个都不丢。
+Future<void> _onAskBackPressed(BuildContext sheetCtx) async {
+  final discard = await showBwConfirmSheet(
+    sheetCtx,
+    title: '放弃回答？',
+    message: '关闭后这些题会按「未回答」回传，模型不会拿到任何答案。',
+    confirmLabel: '放弃回答',
+    cancelLabel: '继续回答',
+    destructive: true,
+  );
+  if (!discard || !sheetCtx.mounted) return;
+  showIosToast(sheetCtx, kAskDismissedToast);
+  Navigator.of(sheetCtx).pop();
+}
+
+/// 提问弹层被"放弃"后的交代（2026-10-29 第 4 条）。
+const String kAskDismissedToast = '已按未回答处理';
+
+/// 一条可点击的 ask 选项（编号 + 标题 + 说明 + 选中态）。
+///
+/// 抽成独立 widget 是为了让"选中态"的视觉在同一处定义 ——
+/// 单选/多选只是圆/方的区别，其余一致。
+Widget _askOptionTile({
+  required Hue h,
+  required int index,
+  required String label,
+  required String description,
+  required bool selected,
+  required bool multi,
+  required VoidCallback onTap,
+}) {
+  return Padding(
+    padding: const EdgeInsets.only(bottom: HSpace.sm),
+    // ★★ 必须包 `Material`（2026-10-21 真机 bug：选项点不动）★★
+    //
+    // ## 现象
+    //
+    // 弹窗能正常显示，「下一题」「跳过」也都能点 —— **唯独选项卡片点不动**：
+    // 点下去没有选中态、也不会自动跳下一题。用户会以为 App 卡死了。
+    //
+    // ## 根因
+    //
+    // `InkWell` 的水波纹与**命中测试**都依赖祖先 `Material`。
+    // 这里原来是 `Padding → InkWell → Container` —— **没有 Material 祖先**
+    //（`AlertDialog` 的 content 在 `SingleChildScrollView` 里，
+    //  那层不提供 Material）。于是 `InkWell` 的 `onTap` **根本不触发**，
+    //  而旁边的 `TextButton` 自带 Material ⇒ 能点。
+    //  这正是"同一个弹窗里有的能点、有的不能点"的原因。
+    //
+    // 修法：`Material(transparent) → InkWell → 内容`。
+    // 用 `type: MaterialType.transparency` 是为了不改变既有的 `Container`
+    // 背景色/边框（外观零变化）。
+    child: Material(
+      type: MaterialType.transparency,
+      child: InkWell(
+        onTap: onTap,
+        borderRadius: BorderRadius.circular(HRadius.md),
+        child: Container(
+          padding: const EdgeInsets.symmetric(
+              horizontal: HSpace.md, vertical: 10),
+          decoration: BoxDecoration(
+            color: selected ? h.accent.withValues(alpha: 0.12) : h.surface,
+            borderRadius: BorderRadius.circular(HRadius.md),
+            border: Border.all(
+              color: selected ? h.accent : h.border,
+              width: selected ? 1.5 : 1,
+            ),
+          ),
+          child: Row(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            // 序号（1/2/3/4 —— 用户要求"一般是 1、2、3、4 等等几个选项"）
+            Container(
+              width: 20,
+              height: 20,
+              alignment: Alignment.center,
+              decoration: BoxDecoration(
+                color: selected ? h.accent : h.surfaceAlt,
+                shape: multi ? BoxShape.rectangle : BoxShape.circle,
+                borderRadius:
+                    multi ? BorderRadius.circular(HRadius.sm) : null,
+              ),
+              child: Text(
+                '$index',
+                style: TextStyle(
+                  fontSize: 11,
+                  fontWeight: FontWeight.w600,
+                  color: selected
+                      ? (h.dark ? const Color(0xFF1A0E08) : Colors.white)
+                      : h.textDim,
+                ),
+              ),
+            ),
+            const SizedBox(width: HSpace.sm),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(label,
+                      style: TextStyle(
+                          fontSize: 13.5,
+                          height: 1.3,
+                          fontWeight:
+                              selected ? FontWeight.w600 : FontWeight.w400,
+                          color: h.text)),
+                  if (description.isNotEmpty)
+                    Padding(
+                      padding: const EdgeInsets.only(top: 2),
+                      child: Text(description,
+                          style: TextStyle(
+                              fontSize: 11.5,
+                              height: 1.35,
+                              color: h.textFaint)),
+                    ),
+                ],
+              ),
+            ),
+            if (selected)
+              Icon(AppIcons.check, size: 16, color: h.accent),
+          ],
+        ),
+        ),
+      ),
+    ),
+  );
 }
