@@ -14,8 +14,7 @@ import '../services/agent_bridge.dart';
 import '../services/global_memory.dart';
 import '../services/jev_service.dart';
 import '../services/settings_controller.dart';
-import '../services/sandbox_service.dart';
-import 'sandbox_screen.dart';
+import '../services/voice_service.dart';
 import '../theme/app_theme.dart';
 import '../theme/cupertino_kit.dart';
 import '../theme/elastic_switch.dart';
@@ -25,6 +24,7 @@ import '../data/open_source_licenses.dart';
 import '../widgets/bw_approval.dart';
 import 'jev_settings_screen.dart';
 import 'oss_licenses_screen.dart';
+import 'voice_settings_screen.dart';
 
 /// 设置主页 —— 分类列表（对应参考图的侧栏结构）。
 class SettingsScreen extends StatelessWidget {
@@ -56,63 +56,78 @@ class SettingsScreen extends StatelessWidget {
           return ListView(
             padding: const EdgeInsets.only(bottom: HSpace.xl),
             children: [
-              // ★ 设置主页卡片式（2026-10-25 用户参照账户页截图指定）：
-              //   小字分组标签在上，每个设置项一张圆角卡片包裹（标题 +
-              //   副行状态值 + 右箭头）。「通用设置」不再做小字链接，
-              //   与其他项同为卡片；状态值放副行、整行省略 —— 旧平直行
-              //   把值放右侧，长模型名把标题挤成竖排（真机实测翻车）。
+              // ★ 设置主页分组卡片式（2026-10-29 用户参照系统设置
+              //   截图改定）：小字分组标签在上，**一个分组 = 一张
+              //   圆角卡片**，组内条目是行、行间细线分隔 —— 取代
+              //   2026-10-25 的「一项一卡」。行内仍是标题 + 副行
+              //   状态值 + 右箭头（状态值不放右侧：长模型名会把
+              //   标题挤成竖排，真机翻过车）。
               const _SectionLabel('通用'),
-              _HomeCard(
-                title: '通用设置',
-                subtitle: '界面字号 · 工作步骤 · 繁忙发送 · 最大轮次',
-                onTap: () => _push(
-                    context, GeneralSettingsPage(controller: controller)),
+              _GroupCard(
+                children: [
+                  _HomeRow(
+                    title: '通用设置',
+                    subtitle: '界面字号 · 工作步骤 · 繁忙发送 · 最大轮次',
+                    onTap: () => _push(
+                        context, GeneralSettingsPage(controller: controller)),
+                  ),
+                ],
               ),
               const _SectionLabel('智能体'),
-              _GlobalMemoryEntry(
-                onOpen: () => _push(context, const GlobalMemoryPage()),
-              ),
-              _DevicePermissionEntry(
-                onOpen: () => _push(context, const DevicePermissionPage()),
-              ),
-              _SandboxEntry(
-                onOpen: () => _push(context, const SandboxScreen()),
-              ),
-              if (archivedCountLoader != null && onOpenArchived != null)
-                _ArchivedEntry(
-                  countOf: archivedCountLoader!,
-                  onOpen: onOpenArchived!,
-                ),
-              _HomeCard(
-                title: '模型',
-                // 与聊天页同源同字段（2026-10-15 修 BUG-5 的口径保留）：
-                // effectiveProvider + 「服务商 · 模型名」
-                subtitle: s.effectiveProvider == null
-                    ? '未选择'
-                    : (s.effectiveProvider!.model.isEmpty
-                        ? s.effectiveProvider!.name
-                        : '${s.effectiveProvider!.name} · ${s.effectiveProvider!.model}'),
-                onTap: () => _push(
-                    context, ModelSettingsPage(controller: controller)),
+              _GroupCard(
+                children: [
+                  _GlobalMemoryEntry(
+                    onOpen: () => _push(context, const GlobalMemoryPage()),
+                  ),
+                  _DevicePermissionEntry(
+                    onOpen: () =>
+                        _push(context, const DevicePermissionPage()),
+                  ),
+                  _VoiceEntry(
+                    onOpen: () =>
+                        _push(context, const VoiceSettingsScreen()),
+                  ),
+                  if (archivedCountLoader != null && onOpenArchived != null)
+                    _ArchivedEntry(
+                      countOf: archivedCountLoader!,
+                      onOpen: onOpenArchived!,
+                    ),
+                  _HomeRow(
+                    title: '模型',
+                    // 与聊天页同源同字段（2026-10-15 修 BUG-5 的口径保留）：
+                    // effectiveProvider + 「服务商 · 模型名」
+                    subtitle: s.effectiveProvider == null
+                        ? '未选择'
+                        : (s.effectiveProvider!.model.isEmpty
+                            ? s.effectiveProvider!.name
+                            : '${s.effectiveProvider!.name} · ${s.effectiveProvider!.model}'),
+                    onTap: () => _push(
+                        context, ModelSettingsPage(controller: controller)),
+                  ),
+                ],
               ),
               // ★ JEV 入口已按用户要求（2026-10-28）搬进「模型」页，
               // 与提供商卡并列、点「编辑」进入 —— 设置主页不再单列。
               const _SectionLabel('应用'),
-              _HomeCard(
-                title: '外观',
-                subtitle: s.appearance.label,
-                onTap: () => _push(
-                    context, AppearanceSettingsPage(controller: controller)),
-              ),
-              _HomeCard(
-                title: '关于 Heracles',
-                subtitle: 'Dart 内核',
-                onTap: () => _push(context, const AboutPage()),
-              ),
-              _HomeCard(
-                title: '开源许可',
-                subtitle: '${kOssEntries.length} 个开源项目 · 谨此致谢',
-                onTap: () => _push(context, const OssLicensesScreen()),
+              _GroupCard(
+                children: [
+                  _HomeRow(
+                    title: '外观',
+                    subtitle: s.appearance.label,
+                    onTap: () => _push(
+                        context, AppearanceSettingsPage(controller: controller)),
+                  ),
+                  _HomeRow(
+                    title: '关于 Heracles',
+                    subtitle: 'Dart 内核',
+                    onTap: () => _push(context, const AboutPage()),
+                  ),
+                  _HomeRow(
+                    title: '开源许可',
+                    subtitle: '${kOssEntries.length} 个开源项目 · 谨此致谢',
+                    onTap: () => _push(context, const OssLicensesScreen()),
+                  ),
+                ],
               ),
             ],
           );
@@ -199,7 +214,7 @@ class _DevicePermissionEntryState extends State<_DevicePermissionEntry> {
 
   @override
   Widget build(BuildContext context) {
-    return _HomeCard(
+    return _HomeRow(
       title: '设备权限',
       // 状态作卡片副行 —— 不进二级页也知道几项没开
       subtitle: _badge,
@@ -207,6 +222,60 @@ class _DevicePermissionEntryState extends State<_DevicePermissionEntry> {
         widget.onOpen();
         // 从二级页返回后刷新状态（用户可能刚执行了授权命令）
         await _refresh();
+      },
+    );
+  }
+}
+
+/// **语音识别入口**（2026-10-29）—— 副行带模型状态（未下载 /
+/// 下载中 / 已就绪），与设备权限入口同一形态：不进二级页也
+/// 知道配没配好；从二级页返回后刷新。
+class _VoiceEntry extends StatefulWidget {
+  const _VoiceEntry({required this.onOpen});
+
+  final VoidCallback onOpen;
+
+  @override
+  State<_VoiceEntry> createState() => _VoiceEntryState();
+}
+
+class _VoiceEntryState extends State<_VoiceEntry> {
+  final _voice = VoiceModelController.shared();
+
+  @override
+  void initState() {
+    super.initState();
+    unawaited(_voice.load());
+    _voice.addListener(_onVoiceChanged);
+  }
+
+  void _onVoiceChanged() {
+    if (mounted) setState(() {});
+  }
+
+  @override
+  void dispose() {
+    _voice.removeListener(_onVoiceChanged);
+    super.dispose();
+  }
+
+  String get _badge {
+    if (_voice.engineReady) return 'SenseVoiceSmall · 已就绪';
+    if (_voice.preparing) return 'SenseVoiceSmall · 准备中';
+    if (_voice.installed) return 'SenseVoiceSmall · 已下载';
+    if (_voice.downloading) return 'SenseVoiceSmall · 下载中';
+    return 'SenseVoiceSmall · 未下载';
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return _HomeRow(
+      title: '语音识别',
+      subtitle: _badge,
+      onTap: () async {
+        widget.onOpen();
+        _voice.refreshInstalled();
+        if (mounted) setState(() {});
       },
     );
   }
@@ -309,6 +378,7 @@ class _DevicePermissionPageState extends State<DevicePermissionPage>
       ('allFiles', '所有文件访问', '按设计不申请，文件经授权目录访问'),
       ('media', '图片与视频', '读取相册，用于发送图片、视频附件'),
       ('camera', '相机', '拍照后直接作为附件发送'),
+      ('microphone', '麦克风', '语音输入，把说的话转成文字'),
       ('notifications', '通知', '任务完成与审批请求提醒'),
       ('calendar', '日历', '后续自动化任务可能需要读写日历'),
       ('accessibility', '无障碍服务', '读取界面元素、辅助点击操作'),
@@ -374,6 +444,12 @@ class _DevicePermissionPageState extends State<DevicePermissionPage>
             value: v == 'granted',
             onChanged: (want) => unawaited(
                 _requestPermission(want ? 'camera' : 'appSettings')),
+          );
+        case ('microphone', _):
+          return ElasticSwitch(
+            value: v == 'granted',
+            onChanged: (want) => unawaited(
+                _requestPermission(want ? 'microphone' : 'appSettings')),
           );
         case ('calendar', _):
           return ElasticSwitch(
@@ -883,48 +959,6 @@ Widget _iosBackLeading(BuildContext context) => IconButton(
 /// **已归档对话入口**（2026-10-27）—— 与「全局记忆」同一形态：
 /// 主页一行 + 数量徽章，列表在二级页；从二级页返回后重读一次
 /// 数量（用户可能刚取消归档或删了几条，徽章得跟着变）。
-/// **沙箱入口**（2026-10-28）：副行如实显示激活状态，
-/// 与设备权限入口同一形态。沙箱页只是管理面（激活/状态/挂载/
-/// 通道/重置）—— 执行在对话的工具卡里看，见 [SandboxScreen]。
-class _SandboxEntry extends StatefulWidget {
-  const _SandboxEntry({required this.onOpen});
-
-  final VoidCallback onOpen;
-
-  @override
-  State<_SandboxEntry> createState() => _SandboxEntryState();
-}
-
-class _SandboxEntryState extends State<_SandboxEntry> {
-  bool? _installed;
-
-  @override
-  void initState() {
-    super.initState();
-    _refresh();
-  }
-
-  Future<void> _refresh() async {
-    final st = await SandboxService().status();
-    if (!mounted) return;
-    setState(() => _installed = st.installed);
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    return _HomeCard(
-      title: '沙箱',
-      subtitle: _installed == null
-          ? '内置 Linux 环境'
-          : (_installed! ? '内置 Linux 环境 · 已激活' : '内置 Linux 环境 · 未激活'),
-      onTap: () async {
-        widget.onOpen();
-        _refresh();
-      },
-    );
-  }
-}
-
 class _ArchivedEntry extends StatefulWidget {
   const _ArchivedEntry({required this.countOf, required this.onOpen});
 
@@ -953,7 +987,7 @@ class _ArchivedEntryState extends State<_ArchivedEntry> {
 
   @override
   Widget build(BuildContext context) {
-    return _HomeCard(
+    return _HomeRow(
       title: '已归档对话',
       subtitle: _badge ?? '…',
       onTap: () async {
@@ -1003,7 +1037,7 @@ class _GlobalMemoryEntryState extends State<_GlobalMemoryEntry> {
 
   @override
   Widget build(BuildContext context) {
-    return _HomeCard(
+    return _HomeRow(
       title: '全局记忆',
       // 规模作卡片副行 —— 不进二级页也知道记了多少
       subtitle: _badge ?? '…',
@@ -2140,8 +2174,17 @@ class _JevCardState extends State<_JevCard> {
         final String status;
         switch (config.source) {
           case JevSource.cloud:
-            ready = config.cloudReady;
-            status = ready ? '已配置' : '未配置接口地址';
+            // 地址已预置（2026-10-29）→「配没配好」看密钥在不在位。
+            if (!config.cloudReady) {
+              ready = false;
+              status = '未配置接口地址';
+            } else if (!_jev.cloudKeyPresent) {
+              ready = false;
+              status = '待填密钥';
+            } else {
+              ready = true;
+              status = '已配置';
+            }
           case JevSource.local08:
           case JevSource.local2b:
             final downloaded = _jev.isDownloaded(config.source);
@@ -3894,8 +3937,47 @@ class _CardWarnNote extends StatelessWidget {
 /// 设置主页的卡片项（2026-10-25 用户参照账户页截图指定）：圆角卡片
 /// 包裹，标题在上、状态值作副行（整行省略）、右侧箭头。与子页里
 /// 继续使用的平直行 [_HomeRow] 分工：主页用卡片，子页用行。
-class _HomeCard extends StatelessWidget {
-  const _HomeCard({required this.title, this.subtitle, this.onTap});
+/// **分组卡片**（2026-10-29）：一个设置分组 = 一张圆角卡，
+/// 组内每行之间一条缩进细线（对齐系统设置页的观感）。
+class _GroupCard extends StatelessWidget {
+  const _GroupCard({required this.children});
+
+  final List<Widget> children;
+
+  @override
+  Widget build(BuildContext context) {
+    final h = Hue.of(context);
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(HSpace.lg, 0, HSpace.lg, 10),
+      child: Container(
+        decoration: BoxDecoration(
+          color: h.surfaceAlt,
+          borderRadius: BorderRadius.circular(HRadius.xl),
+        ),
+        clipBehavior: Clip.antiAlias,
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            for (var i = 0; i < children.length; i++) ...[
+              if (i > 0)
+                Container(
+                  height: 1,
+                  margin: const EdgeInsets.only(left: 18),
+                  color: h.border,
+                ),
+              children[i],
+            ],
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+/// 设置主页的一行（住在 [_GroupCard] 里，不自带卡片外壳）：
+/// 标题 + 副行状态值 + 右箭头，整行可点。
+class _HomeRow extends StatelessWidget {
+  const _HomeRow({required this.title, this.subtitle, this.onTap});
 
   final String title;
   final String? subtitle;
@@ -3904,49 +3986,42 @@ class _HomeCard extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final h = Hue.of(context);
-    return Padding(
-      padding: const EdgeInsets.fromLTRB(HSpace.lg, 0, HSpace.lg, 10),
-      child: GestureDetector(
-        onTap: onTap,
-        behavior: HitTestBehavior.opaque,
-        child: Container(
-          decoration: BoxDecoration(
-            color: h.surfaceAlt,
-            borderRadius: BorderRadius.circular(HRadius.xl),
-          ),
-          padding: const EdgeInsets.symmetric(horizontal: 18, vertical: 15),
-          child: Row(
-            children: [
-              Expanded(
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
+    return GestureDetector(
+      onTap: onTap,
+      behavior: HitTestBehavior.opaque,
+      child: Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 18, vertical: 15),
+        child: Row(
+          children: [
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Text(
+                    title,
+                    style: TextStyle(
+                        fontSize: 16,
+                        fontWeight: FontWeight.w500,
+                        color: h.text),
+                  ),
+                  if (subtitle != null) ...[
+                    const SizedBox(height: 3),
                     Text(
-                      title,
-                      style: TextStyle(
-                          fontSize: 16,
-                          fontWeight: FontWeight.w500,
-                          color: h.text),
+                      subtitle!,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: TextStyle(fontSize: 13, color: h.textFaint),
                     ),
-                    if (subtitle != null) ...[
-                      const SizedBox(height: 3),
-                      Text(
-                        subtitle!,
-                        maxLines: 1,
-                        overflow: TextOverflow.ellipsis,
-                        style: TextStyle(fontSize: 13, color: h.textFaint),
-                      ),
-                    ],
                   ],
-                ),
+                ],
               ),
-              if (onTap != null) ...[
-                const SizedBox(width: HSpace.sm),
-                Icon(AppIcons.chevronRight, size: 16, color: h.textFaint),
-              ],
+            ),
+            if (onTap != null) ...[
+              const SizedBox(width: HSpace.sm),
+              Icon(AppIcons.chevronRight, size: 16, color: h.textFaint),
             ],
-          ),
+          ],
         ),
       ),
     );

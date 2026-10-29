@@ -527,8 +527,10 @@ class AgentBridge {
         _lastFrozenTokens = executor.lastFrozenTokens;
         // ★ C5（2026-10-24）：构成统计供侧栏"构成"行使用（估算）。
         _lastContextBreakdown = executor.lastBreakdown;
-        _lastContextLimit = provider.contextLength > 0
-            ? provider.contextLength
+        // ★ 与帧/抽屉同一口径（2026-10-29）：逐模型能力优先，
+        //   见 [ModelProviderConfig.effectiveContextWindow]。
+        _lastContextLimit = provider.effectiveContextWindow > 0
+            ? provider.effectiveContextWindow
             : -1;
         return r;
       } finally {
@@ -1015,7 +1017,7 @@ class AgentBridge {
   /// · `notificationsOff` —— 去应用通知设置页（关通知只能在那里）
   /// · `accessibility` —— 无障碍设置页（系统没有授权弹窗）
   /// · `overlay` —— 悬浮窗授权页（直达本 App）
-  /// · `media` / `camera` / `calendar` —— 运行时权限，直接弹系统授权框
+  /// · `media` / `camera` / `calendar` / `microphone` —— 运行时权限，直接弹系统授权框
   /// · `appSettings` —— 本 App 系统详情页（撤销已授运行时权限只能去那）
   /// · `installPackages` —— 未知来源安装授权页（**预留给安装流程**：
   ///   构建出 APK 点安装时、未授权才调它，不在权限页里拨）
@@ -1038,14 +1040,60 @@ class AgentBridge {
     }
   }
 
-  /// **拍照并作为附件发送 —— 接口预留**（2026-10-27 用户定）。
+  /// **拍照 —— 宿主实现**（2026-10-29 落地；契约 2026-10-27 预留）。
   ///
-  /// 契约先行：返回拍到的图片文件路径，调用方把它当普通图片附件
-  /// 走既有附件管线。相机权限行已进权限页（`camera`），本方法
-  /// 等宿主实现（预计落在设备通道 `picker.takePhoto`：拉起系统
-  /// 相机 → 落盘到缓存目录 → 回路径）。**未实现前恒返回 null**，
-  /// 调用方必须按「暂不可用」如实处理，不得假装拍到了。
-  Future<String?> takePhoto() async => null;
+  /// 走命令通道 `takePhoto`：宿主向 MediaStore 申请一个图片
+  /// 位置 → 拉起系统相机写入 → 复制进 cache/attachments，
+  /// 回与 [pickFiles] 同形状的 `{path, name, size}`，调用方当
+  /// 普通图片附件走既有附件管线。用户取消 / 宿主未实现 /
+  /// 通道异常 → 返回 null，调用方按「没拍到」如实处理，
+  /// 不得假装拍到了。相机权限行已在权限页（`camera`）；委托
+  /// 系统相机拍照本身不要求本 App 持有相机权限。
+  Future<Map<String, dynamic>?> takePhoto() async {
+    try {
+      final m = await _channel.invokeMapMethod<dynamic, dynamic>('takePhoto');
+      if (m == null) return null;
+      final map = m.cast<String, dynamic>();
+      // 宿主把真失败回成错误 map（用户取消是回 null，不走这里）——
+      // 把人话原因抛给调用方显示，别静默吞掉。
+      if (map['ok'] == false && map['error'] is String) {
+        throw AgentBridgeException(map['error'] as String);
+      }
+      if ((map['path'] as String?)?.isEmpty ?? true) return null;
+      return map;
+    } on MissingPluginException {
+      return null;
+    } on PlatformException {
+      return null;
+    }
+  }
+
+  /// **语音录音**（2026-10-29）—— 宿主 `VoiceRecorder`
+  /// （AudioRecord 16kHz 单声道 PCM16 → WAV in cache/voice）。
+  /// 录音文件供 services/voice_asr.dart 离线识别。三个方法都回
+  /// 宿主的 map（{ok:true,...} / {ok:false,error:人话原因}）；
+  /// 通道不可用（测试环境/宿主未实现）回 null，调用方如实报错。
+  Future<Map<String, dynamic>?> startVoiceRecord() =>
+      _voiceRecordCall('startVoiceRecord');
+
+  /// 停录并封 WAV，成功回 {ok, path, name, size, durationMs}。
+  Future<Map<String, dynamic>?> stopVoiceRecord() =>
+      _voiceRecordCall('stopVoiceRecord');
+
+  Future<Map<String, dynamic>?> cancelVoiceRecord() =>
+      _voiceRecordCall('cancelVoiceRecord');
+
+  Future<Map<String, dynamic>?> _voiceRecordCall(String method) async {
+    try {
+      final m = await _channel.invokeMapMethod<dynamic, dynamic>(method);
+      if (m == null) return null;
+      return m.cast<String, dynamic>();
+    } on MissingPluginException {
+      return null;
+    } on PlatformException {
+      return null;
+    }
+  }
 
   /// **本机画像**（2026-10-27，JEV 决策引擎的本机检测用）——
   /// 宿主 `deviceProfile`（`heracles/command` 通道）：机型、总运行

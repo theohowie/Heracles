@@ -1,15 +1,18 @@
 import 'dart:async';
+import 'dart:io';
 
 import 'package:flutter/cupertino.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart' show Clipboard, ClipboardData;
 
+import '../models/attachment.dart';
 import '../models/message.dart';
 import '../models/settings.dart';
 import '../theme/app_theme.dart';
 import '../theme/cupertino_kit.dart';
 import 'brand_icons.dart';
 import 'bw_approval.dart';
+import 'image_viewer.dart';
 import 'stream_step.dart';
 import 'bw_topbar.dart';
 import 'tool_call_card.dart';
@@ -61,9 +64,10 @@ class MessageRow extends StatelessWidget {
     return switch (message) {
       // ★ 传 build context 给长按菜单（StatelessWidget 里
       //   `_showMessageMenu` 无法自取 —— 显式传，见该方法注释）
-      HUserMessage(:final text) => _user(h, text, message.id, context),
-      HAssistantMessage(:final text, :final changes) =>
-          _assistant(h, text, changes),
+      HUserMessage(:final text, :final attachments) =>
+        _user(h, text, attachments, message.id, context),
+      HAssistantMessage(:final text, :final changes, :final bare) =>
+          _assistant(h, text, changes, bare: bare),
       HToolCall() => _toolLine(message as HToolCall, stepDetail),
       HProgress(:final label) => _progress(h, label),
       HStepStream() => StreamStepView(
@@ -240,7 +244,13 @@ class MessageRow extends StatelessWidget {
   ///   · **用户消息**长按额外有「编辑重发」—— 文本放回输入框，
   ///     用户改完自己点发送。**不做历史改写**：会话 append-only
   ///     （铁律 1），编辑重发 = 以这段内容为基础发一条新消息。
-  Widget _user(Hue h, String text, String id, BuildContext context) {
+  Widget _user(
+    Hue h,
+    String text,
+    List<HAttachment> attachments,
+    String id,
+    BuildContext context,
+  ) {
     return GestureDetector(
       onLongPress: () => _showMessageMenu(context, h, text, id),
       child: Container(
@@ -272,18 +282,101 @@ class MessageRow extends StatelessWidget {
                 ),
               ),
               const SizedBox(height: HSpace.xs),
-              Text(
-                text,
-                textAlign: TextAlign.right,
-                style: TextStyle(
-                  fontSize: 15,
-                  height: 1.55,
-                  color: h.text,
+              if (text.trim().isNotEmpty)
+                Text(
+                  text,
+                  textAlign: TextAlign.right,
+                  style: TextStyle(
+                    fontSize: 15,
+                    height: 1.55,
+                    color: h.text,
+                  ),
                 ),
-              ),
+              // ★ 附件（2026-10-29）：图片渲染成图（点开看大图），
+              //   不再是「📎 文件名」一行字；文件给一行名片。
+              //   排在文字下方，与发送时图3 的版式一致。
+              if (attachments.isNotEmpty) ...[
+                const SizedBox(height: HSpace.sm),
+                Wrap(
+                  alignment: WrapAlignment.end,
+                  spacing: 8,
+                  runSpacing: 8,
+                  children: [
+                    for (final a in attachments)
+                      if (a.isImage)
+                        GestureDetector(
+                          onTap: () =>
+                              showImageViewer(context, a.path, name: a.name),
+                          child: ClipRRect(
+                            borderRadius: BorderRadius.circular(12),
+                            child: Image.file(
+                              File(a.path),
+                              width: 156,
+                              height: 156,
+                              fit: BoxFit.cover,
+                              errorBuilder: (_, _, _) => _sentImageMissing(h, a),
+                            ),
+                          ),
+                        )
+                      else
+                        _sentFileChip(h, a),
+                  ],
+                ),
+              ],
             ],
           ),
         ),
+      ),
+    );
+  }
+
+  /// 已发送图片但本地文件已不在（缓存被清等）：占位砖 + 名。
+  Widget _sentImageMissing(Hue h, HAttachment a) {
+    return Container(
+      width: 156,
+      height: 156,
+      color: h.surfaceAlt,
+      padding: const EdgeInsets.all(10),
+      child: Column(
+        mainAxisAlignment: MainAxisAlignment.center,
+        children: [
+          Icon(AppIcons.image, size: 26, color: h.textDim),
+          const SizedBox(height: 6),
+          Text(
+            a.name,
+            maxLines: 2,
+            overflow: TextOverflow.ellipsis,
+            textAlign: TextAlign.center,
+            style: TextStyle(fontSize: 11, color: h.textDim),
+          ),
+        ],
+      ),
+    );
+  }
+
+  /// 已发送的非图片附件：一行名片（图标 + 名）。
+  Widget _sentFileChip(Hue h, HAttachment a) {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+      decoration: BoxDecoration(
+        color: h.surfaceAlt,
+        borderRadius: BorderRadius.circular(10),
+      ),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Icon(AppIcons.file, size: 15, color: h.textDim),
+          const SizedBox(width: 6),
+          ConstrainedBox(
+            constraints: const BoxConstraints(maxWidth: 200),
+            child: Text(
+              a.name,
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              style: TextStyle(fontSize: 12.5, color: h.text),
+            ),
+          ),
+        ],
       ),
     );
   }
@@ -379,7 +472,12 @@ Widget _menuRow(
 }
 
 /// 助手消息：无边框，靠间距与字体区分
-  Widget _assistant(Hue h, String text, List<HChangeFile>? changes) {
+  Widget _assistant(
+    Hue h,
+    String text,
+    List<HChangeFile>? changes, {
+    bool bare = false,
+  }) {
     return Padding(
       padding: const EdgeInsets.only(bottom: HSpace.lg),
       child: Column(
@@ -432,16 +530,19 @@ Widget _menuRow(
           ],
           // ★ 回答末尾的操作行（2026-10-13 用户要求）：
           //   复制 · 点赞 · 点踩 · 新会话分支 · 用量统计 · 时间
-          const SizedBox(height: HSpace.sm),
-          _AnswerActions(
-            h: h,
-            text: text,
-            metrics: metrics,
-            onFeedback: onFeedback,
-            onBranch: onBranch,
-            feedback: feedback,
-            timestamp: timestamp,
-          ),
+          //   bare（系统提示，如「已停止」）不带这一行。
+          if (!bare) ...[
+            const SizedBox(height: HSpace.sm),
+            _AnswerActions(
+              h: h,
+              text: text,
+              metrics: metrics,
+              onFeedback: onFeedback,
+              onBranch: onBranch,
+              feedback: feedback,
+              timestamp: timestamp,
+            ),
+          ],
         ],
       ),
     );

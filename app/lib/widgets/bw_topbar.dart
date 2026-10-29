@@ -90,8 +90,18 @@ class _DynamicIslandState extends State<DynamicIsland>
         child: AnimatedContainer(
           duration: const Duration(milliseconds: 520),
           curve: _kFluidCurve,
-          constraints: const BoxConstraints(maxWidth: 280),
-          padding: const EdgeInsets.symmetric(horizontal: 13, vertical: 9),
+          // 收起形态（2026-10-29 用户对图定）：此前宽度全靠内容
+          // 撑（只有「● 5/5」时短短一截，不好看）—— 给 168 的
+          // 最小宽度拉长，同时纵向内边距压到 6 让胶囊更扁，
+          // 不靠增高占地方。展开形态维持原尺寸。
+          constraints: BoxConstraints(
+            maxWidth: 280,
+            minWidth: widget.collapsed ? 168 : 0,
+          ),
+          padding: EdgeInsets.symmetric(
+            horizontal: 13,
+            vertical: widget.collapsed ? 6 : 9,
+          ),
           decoration: BoxDecoration(
             color: bg,
             borderRadius: BorderRadius.circular(widget.collapsed ? 999 : 24),

@@ -62,22 +62,30 @@ enum JevReasonSource {
   );
 }
 
+/// JEV 云端预置（2026-10-29，用户实际接入的平台 = 基元律动
+/// Token Rhythm，其接口文档定版）：默认端点与固定模型 ID。
+/// 用户在配置页只需粘贴平台密钥（sk_ 开头）即可用；端点与
+/// 模型仍可改（自建/其它兼容服务）。
+const String kJevDefaultBaseUrl = 'https://tokenrhythm.studio/v1/decision';
+const String kJevDefaultModel = 'NeoHorse-Jev-4B';
+
 /// JEV 配置（落盘 SharedPreferences；**API 密钥不进这里**，
 /// 走 SecureKeyStore，见 jev_service.dart）。
 class JevConfig {
   const JevConfig({
     this.source = JevSource.cloud,
-    this.cloudBaseUrl = '',
-    this.cloudModel = '',
+    this.cloudBaseUrl = kJevDefaultBaseUrl,
+    this.cloudModel = kJevDefaultModel,
     this.reasonEnabled = true,
   });
 
   final JevSource source;
 
-  /// 云端接口地址（填到 `/v1` 为止，或完整的 `/v1/decisions` 地址）。
+  /// 云端接口地址（预置基元律动推荐端点 `/v1/decision`；
+  /// 也可填到 `/v1`，客户端会补 `/decision`）。
   final String cloudBaseUrl;
 
-  /// 云端模型名（可空 —— 空则不下发 `model` 字段，由服务端决定）。
+  /// 云端模型名（基元律动平台固定 `NeoHorse-Jev-4B`）。
   final String cloudModel;
 
   /// 决策出来后是否让对话模型补写理由。
@@ -106,10 +114,16 @@ class JevConfig {
 
   factory JevConfig.fromJson(Map<String, dynamic> j) => JevConfig(
     source: JevSource.parse(j['source'] as String?),
-    cloudBaseUrl: j['cloudBaseUrl'] as String? ?? '',
-    cloudModel: j['cloudModel'] as String? ?? '',
+    // 存量空值（预置上线前保存过空配置）回落到预置端点/模型，
+    // 免得老用户卡在「有配置但地址是空的」。真正停用云端靠
+    // 清空密钥（decide 时会拦），不靠清空地址。
+    cloudBaseUrl: _orDefault(j['cloudBaseUrl'] as String?, kJevDefaultBaseUrl),
+    cloudModel: _orDefault(j['cloudModel'] as String?, kJevDefaultModel),
     reasonEnabled: j['reasonEnabled'] as bool? ?? true,
   );
+
+  static String _orDefault(String? v, String fallback) =>
+      (v == null || v.trim().isEmpty) ? fallback : v;
 }
 
 /// 一条决策记录（问答历史落盘用）。

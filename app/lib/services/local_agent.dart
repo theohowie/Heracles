@@ -485,19 +485,22 @@ class LocalAgentExecutor {
         ProviderProtocol.openaiResponses => BackendProvider.openAiResponses,
         ProviderProtocol.openaiChat => BackendProvider.openAiCompatible,
       },
-      // ★ 单窗口上限取用户配置的模型上下文（`fetchModels` 从服务端读到的，
-      //   不是猜的）。`0`/未知 ⇒ 用契约默认值，别拿 4K 去压缩 1M 模型。
-      modelWindowTokens: provider.contextLength > 0
-          ? provider.contextLength
+      // ★ 单窗口上限走全 App 单一口径 [effectiveContextWindow]
+      //   （逐模型能力优先 —— 2026-10-29 修总数跳变：此前这里
+      //   只读单值 contextLength，常为 0 → 掉 128K 契约默认，
+      //   而用量抽屉读逐模型能力 1M，两处互相覆盖来回跳）。
+      //   未知 ⇒ 契约默认值（压缩需要一个数，别拿 4K 压 1M）。
+      modelWindowTokens: provider.effectiveContextWindow > 0
+          ? provider.effectiveContextWindow
           : ContractModel.defaultWindowTokens,
     );
     // N2：上限与来源（context_updated 帧载荷；与 ContextUsage 口径一致）。
     // 存实例字段 —— _drive 里发帧要用（executor 每次 run 新建，无跨 run 串扰）。
-    effectiveWindow = provider.contextLength > 0
-        ? provider.contextLength
+    effectiveWindow = provider.effectiveContextWindow > 0
+        ? provider.effectiveContextWindow
         : ContractModel.defaultWindowTokens;
     effectiveWindowSource =
-        provider.contextLength > 0 ? '服务端上报' : '按契约默认值';
+        provider.effectiveContextWindow > 0 ? '服务端上报' : '按契约默认值';
 
     // ---- 轮次上限 ----
     // `settings.maxTurns == 0` 的语义是"按后端自动"（UI 的 `kMaxTurnsOptions`）。
@@ -761,6 +764,7 @@ class LocalAgentExecutor {
       controller,
       images: images,
       imageNotes: imageNotes,
+      attachments: attachments,
       cancelToken: cancelToken,
     );
 
@@ -816,6 +820,7 @@ class LocalAgentExecutor {
     StreamController<AgentEvent> controller, {
     List<ImageInput>? images,
     List<String> imageNotes = const [],
+    List<HAttachment> attachments = const [],
     CancelToken? cancelToken,
   }) async {
     final sw = Stopwatch()..start();
@@ -884,9 +889,20 @@ class LocalAgentExecutor {
     }
 
     // 用户消息先落盘（与旧 Kotlin 的顺序一致：用户消息先于一切）
+    // ★ 附件结构化落盘（2026-10-29）：path/name/kind —— 读回时
+    //   气泡能把图片渲染成图。只增字段，老版本读到会原样保留
+    //   （_normalizeEntry 未知键透传），不破坏兼容。
     await sessionStore.appendMessage(sid, {
       'role': 'user',
       'text': request,
+      if (attachments.isNotEmpty)
+        'attachments': attachments
+            .map((a) => <String, dynamic>{
+                  'path': a.path,
+                  'name': a.name,
+                  'kind': a.kind.name,
+                })
+            .toList(),
       'ts': DateTime.now().millisecondsSinceEpoch,
     });
 

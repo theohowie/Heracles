@@ -7,6 +7,8 @@ import 'package:flutter/material.dart';
 
 import '../models/attachment.dart';
 import '../models/settings.dart';
+import 'image_viewer.dart';
+import '../services/voice_input.dart';
 import '../theme/app_theme.dart';
 import '../theme/cupertino_kit.dart';
 import 'brand_icons.dart';
@@ -520,7 +522,11 @@ _PermissionIconButton(
                           // ★ 麦克风占位（2026-10-28 用户令预留）：放在
                           // 盾与发送之间，后面接语音识别；现在点按
                           // 只提示未接入，不假装能用。
-                          _MicButton(h: h, enabled: widget.enabled),
+                          _MicButton(
+                            h: h,
+                            enabled: widget.enabled,
+                            controller: _controller,
+                          ),
                           const SizedBox(width: 8),
                                                     _SendButton(
                             enabled: (_hasText ||
@@ -770,13 +776,17 @@ class _ImageThumb extends StatelessWidget {
     return Stack(
       clipBehavior: Clip.none,
       children: [
-        ClipRRect(
-          borderRadius: BorderRadius.circular(16),
-          child: Image.file(
-            File(a.path),
-            width: 92,
-            height: 92,
-            fit: BoxFit.cover,
+        // 点缩略图看大图（2026-10-29 用户令：输入框里的待发
+        // 图片也要能点开看）；右上 × 仍是移除，互不干扰。
+        GestureDetector(
+          onTap: () => showImageViewer(context, a.path, name: a.name),
+          child: ClipRRect(
+            borderRadius: BorderRadius.circular(16),
+            child: Image.file(
+              File(a.path),
+              width: 92,
+              height: 92,
+              fit: BoxFit.cover,
             // 未解码完先占位 88×88：否则宽度塌成 0，右上角的 × 会
             // 落到 Stack 边界外（画得出来但点不中 —— hitTest 先查边界）
             frameBuilder: (_, child, frame, _) => frame == null
@@ -794,6 +804,7 @@ class _ImageThumb extends StatelessWidget {
               color: h.surface,
               alignment: Alignment.center,
               child: Icon(AppIcons.image, size: 26, color: h.textDim),
+            ),
             ),
           ),
         ),
@@ -900,38 +911,69 @@ class _RemoveBadge extends StatelessWidget {
 }
 
 
-/// **麦克风占位钮**（2026-10-28 用户令预留）—— 与 ＋ 同规格的
-/// 38 圆钮（深色提亮一档、浅色沉一档），位置在权限盾与发送之间。
-/// 语音识别尚未接入：点按只给一句如实提示，不录音、不假装。
+/// **麦克风按钮**（2026-10-28 预留占位；2026-10-29 接真识别）——
+/// 与 ＋ 同规格的 38 圆钮（深色提亮一档、浅色沉一档），位置在
+/// 权限盾与发送之间。点一次开始录音（变红停止键），再点一次
+/// 停录并离线识别、文本填进输入框；行为全在
+/// [VoiceInputController]，这里只管长相与状态呈现。生成中禁用
+/// （与从前一致），但录音中允许点（那是停录键）。
 class _MicButton extends StatelessWidget {
-  const _MicButton({required this.h, required this.enabled});
+  const _MicButton({
+    required this.h,
+    required this.enabled,
+    required this.controller,
+  });
 
   final Hue h;
   final bool enabled;
+  final TextEditingController controller;
 
   @override
   Widget build(BuildContext context) {
-    return Pressable(
-      borderRadius: BorderRadius.circular(999),
-      enabled: enabled,
-      child: SizedBox(
-        width: 38,
-        height: 38,
-        child: Material(
-          color: h.dark ? const Color(0xFF2C2C2E) : h.surfaceAlt,
-          shape: const CircleBorder(
-            side: BorderSide(color: Colors.transparent),
+    final voice = VoiceInputController.shared();
+    return AnimatedBuilder(
+      animation: voice,
+      builder: (context, _) {
+        final recording = voice.recording;
+        final recognizing = voice.busy;
+        final tappable = (enabled || recording) && !recognizing;
+        return Pressable(
+          borderRadius: BorderRadius.circular(999),
+          enabled: tappable,
+          child: SizedBox(
+            width: 38,
+            height: 38,
+            child: Material(
+              color: recording
+                  ? const Color(0xFFFF3B30)
+                  : (h.dark ? const Color(0xFF2C2C2E) : h.surfaceAlt),
+              shape: const CircleBorder(
+                side: BorderSide(color: Colors.transparent),
+              ),
+              child: InkWell(
+                onTap: tappable
+                    ? () => voice.onMicTap(
+                          target: controller,
+                          toast: (m) => showIosToast(context, m,
+                              icon: AppIcons.mic),
+                        )
+                    : null,
+                customBorder: const CircleBorder(),
+                child: recognizing
+                    ? CupertinoActivityIndicator(
+                        radius: 9,
+                        color: h.textDim,
+                      )
+                    : Icon(
+                        recording ? AppIcons.stop : AppIcons.mic,
+                        size: 19,
+                        color: recording ? Colors.white : h.textDim,
+                      ),
+              ),
+            ),
           ),
-          child: InkWell(
-            onTap: enabled
-                ? () => showIosToast(context, '语音识别还没接入，这个按钮先占位',
-                    icon: AppIcons.mic)
-                : null,
-            customBorder: const CircleBorder(),
-            child: Icon(AppIcons.mic, size: 19, color: h.textDim),
-          ),
-        ),
-      ),
+        );
+      },
     );
   }
 }

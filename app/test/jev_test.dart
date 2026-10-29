@@ -129,16 +129,45 @@ void main() {
   });
 
   group('云端端点拼装', () {
-    test('填到 /v1 → 补 /systemone', () {
+    test('填到 /v1 → 补推荐端点 /decision（基元律动文档定版）', () {
       expect(JevCloudClient.endpointFor('https://x.example/v1'),
-          'https://x.example/v1/systemone');
+          'https://x.example/v1/decision');
       expect(JevCloudClient.endpointFor('https://x.example/v1/'),
-          'https://x.example/v1/systemone');
+          'https://x.example/v1/decision');
     });
 
-    test('完整 /decisions 地址原样使用', () {
+    test('完整端点地址原样使用（/decision / /decisions / /systemone）', () {
       expect(JevCloudClient.endpointFor('https://b.example/v1/decisions'),
           'https://b.example/v1/decisions');
+      expect(
+          JevCloudClient.endpointFor('https://tokenrhythm.studio/v1/decision'),
+          'https://tokenrhythm.studio/v1/decision');
+      expect(JevCloudClient.endpointFor('https://b.example/v1/systemone'),
+          'https://b.example/v1/systemone');
+    });
+
+    test('模型目录地址：决策端点去掉末段拼 /models', () {
+      expect(
+          JevCloudClient.modelsUrlFor('https://tokenrhythm.studio/v1/decision'),
+          'https://tokenrhythm.studio/v1/models');
+      expect(JevCloudClient.modelsUrlFor('https://x.example/v1'),
+          'https://x.example/v1/models');
+      expect(JevCloudClient.modelsUrlFor('https://x.example/v1/systemone'),
+          'https://x.example/v1/models');
+    });
+
+    test('配置预置：默认端点与固定模型；存量空值回落预置', () {
+      const c = JevConfig();
+      expect(c.cloudBaseUrl, 'https://tokenrhythm.studio/v1/decision');
+      expect(c.cloudModel, 'NeoHorse-Jev-4B');
+      final back = JevConfig.fromJson(const {
+        'source': 'cloud',
+        'cloudBaseUrl': '',
+        'cloudModel': '',
+        'reasonEnabled': true,
+      });
+      expect(back.cloudBaseUrl, 'https://tokenrhythm.studio/v1/decision');
+      expect(back.cloudModel, 'NeoHorse-Jev-4B');
     });
   });
 
@@ -245,7 +274,8 @@ void main() {
       expect(find.text('新问题：要不要去黑客松'), findsOneWidget);
     });
 
-    testWidgets('配置页：云端在前、来源选择已挪走；检测给出 2B 推荐', (tester) async {
+    testWidgets('配置页：云端在前、来源选择已挪走；本地内容收进「本地配置」页',
+        (tester) async {
       jev.profile = const JevDeviceProfile(
         model: '23013RK75C',
         totalRamMb: 12288,
@@ -259,7 +289,17 @@ void main() {
       // 引擎来源分段选择已按用户要求挪到决策页的来源抽屉。
       expect(find.text('接口地址'), findsOneWidget);
       expect(find.text('引擎来源'), findsNothing);
-      // 本机检测与本地模型在后面 —— 滚到可见再断言。
+      // ★ 2026-10-29：与提供商编辑页同款的获取模型 / 测试连接。
+      expect(find.text('获取可用模型'), findsOneWidget);
+      expect(find.text('测试连接'), findsOneWidget);
+      // 本机检测与本地模型不在本页 —— 滚到「本地配置」入口点进去。
+      await tester.scrollUntilVisible(find.text('本地配置'), 120,
+          scrollable: find.byType(Scrollable).first);
+      await tester.pumpAndSettle();
+      expect(find.text('StartLux-Decision 2B'), findsNothing);
+      await tester.tap(find.text('本地配置'));
+      await tester.pumpAndSettle();
+      expect(find.text('本机检测'), findsOneWidget);
       await tester.scrollUntilVisible(find.text('23013RK75C'), 120,
           scrollable: find.byType(Scrollable).first);
       await tester.pumpAndSettle();
@@ -301,7 +341,8 @@ void main() {
           scrollable: find.byType(Scrollable).first);
       await tester.pumpAndSettle();
       expect(find.text('JEV 决策引擎'), findsOneWidget);
-      expect(find.text('来源 云端 · 未配置接口地址'), findsOneWidget);
+      // 地址已预置、测试环境无密钥 → 状态是「待填密钥」（2026-10-29 口径）
+      expect(find.text('来源 云端 · 待填密钥'), findsOneWidget);
       // JEV 卡在提供商之后，「编辑」取最后一个即它自己的。
       await tester.tap(find.text('编辑').last);
       await tester.pumpAndSettle();
