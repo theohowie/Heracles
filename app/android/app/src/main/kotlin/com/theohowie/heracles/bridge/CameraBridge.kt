@@ -66,19 +66,38 @@ import java.io.FileOutputStream
  */
 class CameraBridge(private val activity: Activity) {
 
-    private var pendingResult: ((Map<String, Any?>?) -> Unit)? = null
-    private var pendingError: ((String) -> Unit)? = null
-    private var pendingUri: Uri? = null
-    private var pendingName: String? = null
-
-    /** 当前这次拍照是否走缩略图模式（无 EXTRA_OUTPUT）。 */
-    private var pendingThumbnail = false
-
     /** 逐级兜底时最后一次启动异常的摘要，进最终错误信息。 */
     private var lastStartError: String? = null
 
+    // ⚠️ 下面的 pending 状态**必须是 companion（进程级静态）**，不能是实例字段。
+    //
+    // ## 真机 bug（2026-10-29 用户报「点了 √ 就返回主页了，输入框里没图片」）
+    //
+    // 系统相机在前台时，本 Activity 很容易被系统回收重建（MIUI 上尤其明显，
+    // 用户看到的是"返回主页/闪一下"）。重建后 `configureFlutterEngine` 会
+    // **新建一个 CameraBridge**；若 pending 回调是实例字段，新实例里它是 null
+    // ⇒ `onActivityResult` 拿到了照片却**没有收件人** ⇒ 照片被静默丢弃。
+    //
+    // 放进 companion 后：重建前后的实例共享同一份 pending 状态，
+    // 新实例的 `onActivityResult` 仍能把结果交回原来的 MethodChannel 回调。
     companion object {
         const val REQUEST_CODE = 0x4843  // 'HC'
+
+        @Volatile
+        private var pendingResult: ((Map<String, Any?>?) -> Unit)? = null
+
+        @Volatile
+        private var pendingError: ((String) -> Unit)? = null
+
+        @Volatile
+        private var pendingUri: Uri? = null
+
+        @Volatile
+        private var pendingName: String? = null
+
+        /** 当前这次拍照是否走缩略图模式（无 EXTRA_OUTPUT）。 */
+        @Volatile
+        private var pendingThumbnail = false
     }
 
     /** 拉起系统相机。全部路径都失败时走 onError（带异常摘要）。 */

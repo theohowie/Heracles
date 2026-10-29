@@ -4833,24 +4833,20 @@ class _ChatScreenState extends State<ChatScreen> {
               child: Stack(
                 clipBehavior: Clip.none,
                 children: [
-                  if (_decisionMode)
-                    Container(
+                  // ★ 2026-10-29 用户要求：**两种模式都用 App 图标**
+                  //   （Heracles 的手写体 H）。
+                  //
+                  //   之前决策模式会把图标换成 Material 的 `Icons.balance`
+                  //   天平 —— 那是通用图标、不是我们的品牌，用户明确否掉。
+                  //   模式差别交给右下角标（工作态显示天平=点了去决策，
+                  //   决策态显示对话=点了回工作），一眼能看出可切换。
+                  ClipRRect(
+                    borderRadius: BorderRadius.circular(10),
+                    child: Image.asset(
+                      'assets/branding/app_icon_source.png',
                       width: 37,
                       height: 37,
-                      decoration: BoxDecoration(
-                        color: h.text,
-                        borderRadius: BorderRadius.circular(10),
-                      ),
-                      child: Icon(Icons.balance, size: 21, color: h.bg),
-                    )
-                  else
-                    ClipRRect(
-                      borderRadius: BorderRadius.circular(10),
-                      child: Image.asset(
-                        'assets/branding/app_icon_source.png',
-                        width: 37,
-                        height: 37,
-                        fit: BoxFit.cover,
+                      fit: BoxFit.cover,
                       ),
                     ),
                   // 角标 = 点了会去的模式（工作态显示天平、决策态
