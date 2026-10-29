@@ -97,19 +97,37 @@ class _VoiceSettingsScreenState extends State<VoiceSettingsScreen> {
             ),
             const SizedBox(width: HSpace.md),
             Expanded(
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Text(
-                    'SenseVoiceSmall',
-                    style: HTxt.body.copyWith(fontWeight: FontWeight.w600),
-                  ),
-                  const SizedBox(height: 1),
-                  Text(
-                    'ONNX 量化版 · ${voiceFormatBytes(kVoiceModelTotalBytes)} · ${_statusText(state)}',
-                    style: HTxt.caption.copyWith(color: h.textFaint),
-                  ),
-                ],
+              // ★ 固定两行块（2026-10-29 用户反馈"下载时卡片抖"）：
+              //   行 1 文件名、行 2 「已下载 X / Y」；两行都 maxLines:1
+              //   ⇒ 行数被钉死，字节数变长/变短都改不了高度。
+              //   高度用 minHeight:38（与左侧图标同高）而不是写死 SizedBox：
+              //   字体放大时块会变高，不会被裁字（写死 2.0 缩放下必溢出）。
+              child: ConstrainedBox(
+                constraints: const BoxConstraints(minHeight: 38),
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  mainAxisAlignment: MainAxisAlignment.center,
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      'SenseVoiceSmall',
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: HTxt.body.copyWith(fontWeight: FontWeight.w600),
+                    ),
+                    const SizedBox(height: 1),
+                    Text(
+                      _statusLine(state),
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      // ★ tabular figures：数字等宽 ⇒ 位数变化也不挤动文本
+                      style: HTxt.caption.copyWith(
+                        color: h.textFaint,
+                        fontFeatures: const [FontFeature.tabularFigures()],
+                      ),
+                    ),
+                  ],
+                ),
               ),
             ),
             const SizedBox(width: HSpace.sm),
@@ -127,12 +145,8 @@ class _VoiceSettingsScreenState extends State<VoiceSettingsScreen> {
               color: h.text,
             ),
           ),
-          const SizedBox(height: 5),
-          Text(
-            '${state.note ?? '正在下载'} · ${voiceFormatBytes(state.received)}'
-            ' / ${voiceFormatBytes(state.total)}',
-            style: HTxt.caption.copyWith(color: h.textFaint),
-          ),
+          // 进度文案（原「正在下载 · X / Y」）已上收到行 2 的固定两行块里：
+          // 放在进度条下面时它的折行会改变卡片高度 —— 这正是抖动的根因。
         ],
         if (state.phase == VoiceModelPhase.error && state.error != null) ...[
           const SizedBox(height: HSpace.sm),
@@ -156,6 +170,31 @@ class _VoiceSettingsScreenState extends State<VoiceSettingsScreen> {
         ],
       ],
     );
+  }
+
+  /// 行 2 文案（固定一行）：
+  /// · 下载中 ⇒ 「已下载 X / Y」（数值固定 1 位小数，配 tabular figures）；
+  /// · 其它   ⇒ 「ONNX 量化版 · 230.4 MB · 未下载/已就绪…」。
+  ///
+  /// 为什么不把 `state.note`（'正在下载 model_quant.onnx'）放进来：文件名长度
+  /// 会变，且它会跟字节数抢同一行的宽度预算 —— 抖动的两个来源都在这行。
+  String _statusLine(VoiceDownloadState state) {
+    if (state.phase == VoiceModelPhase.downloading) {
+      return '已下载 ${_fmtFixed(state.received)} / ${_fmtFixed(state.total)}';
+    }
+    return 'ONNX 量化版 · ${voiceFormatBytes(kVoiceModelTotalBytes)} · '
+        '${_statusText(state)}';
+  }
+
+  /// 固定 1 位小数的字节数（**宽度稳定**优先于单位语义）：
+  /// 0 B 也写「0.0 KB」而不换回 B —— 保证「X.Y 单位」形状恒定；
+  /// 再配 tabular figures，数字本身也等宽。
+  String _fmtFixed(int bytes) {
+    if (bytes < 1024 * 1024) return '${(bytes / 1024).toStringAsFixed(1)} KB';
+    if (bytes < 1024 * 1024 * 1024) {
+      return '${(bytes / 1024 / 1024).toStringAsFixed(1)} MB';
+    }
+    return '${(bytes / 1024 / 1024 / 1024).toStringAsFixed(1)} GB';
   }
 
   String _statusText(VoiceDownloadState state) {

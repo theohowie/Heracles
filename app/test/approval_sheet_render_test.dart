@@ -65,6 +65,13 @@ void main() {
     }
     expect(tester.takeException(), isNull);
     expect(find.text('确认始终允许'), findsOneWidget);
+    // ★ 2026-10-29（第 10 条 P3）：第二步文案必须写明**范围**与**可撤销**。
+    //   「始终允许」= 之后**不论参数**都会直接执行 —— 旧文案只说
+    //   「之后再调用这个工具」，用户容易以为只记住这次的参数。
+    expect(find.textContaining('不论参数'), findsOneWidget,
+        reason: '始终允许是对**所有参数**生效，文案必须写清「不论参数」');
+    expect(find.textContaining('撤销'), findsOneWidget,
+        reason: '长期授权必须告诉用户还能撤销（在设置里）');
     await tester.tap(find.text('返回'));
     for (var i = 0; i < 12; i++) {
       await tester.pump(const Duration(milliseconds: 50));
