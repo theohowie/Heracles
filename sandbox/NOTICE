@@ -1,0 +1,166 @@
+Heracles-taixu-sandbox
+======================
+Copyright (C) 2026 Heracles-taixu-sandbox contributors
+
+This product is distributed under the GNU General Public License, version 3.
+The complete license text is in the file LICENSE in this directory
+(35149 bytes, byte-identical to https://www.gnu.org/licenses/gpl-3.0.txt,
+SHA-256 3972DC9744F6499F0F9B2DBF76696F2AE7AD8AF9B23DDE66D6AF86C9DFB36986).
+
+Heracles-taixu-sandbox is a fork of taixu, into which the three-tier execution
+privilege model and the zero-width file channel from baicodex, and the wireless
+ADB channel from tianxuan, have been ported as a one-off patch set. It is an
+EXECUTION-SIDE sandbox only: no agent loop, no chat UI, no workflow editor and
+no project template are included.
+
+
+1. taixu — fork baseline (continuously tracked upstream)
+--------------------------------------------------------
+  Project      : taixu — Android No-Root Linux Runtime / Native Agent Harness /
+                 PTY Terminal / Workspace & Tool Ecosystem
+  Repository   : https://github.com/wkbin/taixu
+  Baseline     : dc7fcddb88e565929379597bbd811b440d00e34f  (main, 2026-10-26)
+  License      : GNU General Public License v3.0
+  Copyright    : Copyright (C) 2026 王克斌
+
+  Ported into this sandbox:
+    runtime/.../proot/                 -> sandbox-runtime (ProotEngine et al.)
+    runtime/.../pty/                   -> sandbox-runtime (PtySession)
+    runtime/.../shell/                 -> sandbox-runtime (ProcessRegistry)
+    runtime/.../rootfs/               -> sandbox-runtime (OciRootfsInstaller et al.)
+    runtime/.../WorkspaceManager.kt    -> sandbox-runtime (WorkspaceManager)
+    app/src/main/cpp/pty_native.c      -> sandbox-runtime/src/main/cpp/pty_bridge.cpp
+    app/src/main/cpp/CMakeLists.txt    -> sandbox-runtime/src/main/cpp/CMakeLists.txt
+
+  NOT ported (deliberately, belongs to the host control plane):
+    harness/, feature/, project-template/, tools/, app/ (Compose UI),
+    core/database (Room), webchat/, virtualdisplay/, gui/ (accessibility),
+    ftp/, remote/ (SSH), LocalLlmManager
+
+
+2. baicodex — one-off port source (NOT continuously tracked)
+------------------------------------------------------------
+  Project      : baicodex / BaiAgent — Android on-device AI Agent
+  Repository   : https://github.com/mubai0122/baicodex
+  Port commit  : fb4bd5f98bb8541ab0dcf83fb3b1ee29e6cb9d95  (main, 2026-10-27)
+  License      : GNU General Public License v3.0
+
+  Ported into this sandbox:
+    b/ai/exec/Router.kt             -> sandbox-channel (ChannelSelector)
+    b/ai/core/Perms.kt              -> sandbox-channel (ChannelManager state)
+    b/ai/exec/Shiz.kt, ShizukuShell.kt -> sandbox-channel (ShizukuChannel)
+    b/ai/exec/Root.kt               -> sandbox-channel (RootChannel)
+    b/ai/exec/FileOps.kt            -> sandbox-file (ZeroWidthFileChannel)
+    b/ai/exec/Workspace.kt          -> sandbox-file (PathSemantics, rewritten)
+
+  NOT ported (deliberately):
+    all Compose UI (ui/AskSheet.kt, ui/PermUi.kt, ui/DialogHost.kt,
+    ui/ChatScreen.kt, ...), the agent loop (agent/Agent.kt, agent/Tools.kt),
+    accessibility (exec/A11y.kt, exec/AutoA11y.kt), and the core/* grab bag.
+
+  Note on the "zero-width file channel": the upstream implementation probes a
+  list of path transformations against /storage/emulated/0/Android/{data,obb}
+  and uses whichever transformation actually lists. It is a device-owner tool
+  for that owner's own device; it does not reach /data/data/<pkg> and does not
+  bypass SELinux. See docs/security-boundary.md.
+
+
+3. tianxuan — one-off port source (NOT continuously tracked)
+------------------------------------------------------------
+  Project      : 天玄 TaiXuan — PRoot Linux sandbox + AI Agent Harness on
+                 non-rooted Android
+  Repository   : https://github.com/xiaozhe7772222/tianxuan
+  Port commit  : caad40090a4f2c2edbe54e6eaae60a3dd1de7d21  (main, 2026-10-26)
+  License      : GNU General Public License v3.0
+  Copyright    : Copyright (C) 2026 王克斌
+
+  Ported into this sandbox:
+    service/adb/AdbNotificationManager.kt -> sandbox-channel (WirelessAdbChannel)
+    service/adb/AdbNotificationReceiver.kt -> sandbox-channel
+                                              (AdbPairingStateMachine)
+    runtime/.../bridge/adb/EmbeddedAdbManager.kt -> sandbox-channel (adb transport)
+    app/src/main/assets/bin/adb            -> reference only (adb wrapper script)
+
+  NOT ported (HARD CONSTRAINT):
+    The accessibility (AccessibilityService) channel. Accessibility privileges
+    are too risky for open-source distribution and store review: they can read
+    the entire screen and synthesise arbitrary input. If a host project needs
+    GUI automation it must obtain accessibility permission itself; this sandbox
+    only exposes a call surface for an already-authorised channel.
+
+
+4. License compatibility
+------------------------
+  taixu, baicodex, tianxuan and this sandbox are all GPL-3.0, and Heracles
+  (the parent project) is GPL-3.0 as well. Because the upstreams are strong
+  copyleft, this sandbox can only be distributed under GPL-3.0 — it must not be
+  relicensed to MIT/Apache.
+
+  Every ported source file additionally carries, in its header, the upstream
+  commit and the original file path it derives from.
+
+
+5. Bundled binaries and rootfs (IMPORTANT — these ARE in the tree)
+------------------------------------------------------------------
+  Heracles-taixu-sandbox is an **offline, self-contained** sandbox: it must
+  work with no network, no server and no cloud. Therefore the following
+  third-party artefacts are **included in this repository** (not fetched at
+  build time).
+
+  5.1 PRoot runtime — GPL-2.0-or-later
+      Files, in sandbox-runtime/src/main/jniLibs/arm64-v8a/:
+
+        libproot.so           239,368 B  PRoot tracer (AArch64 executable,
+                                         not a JNI library)
+        libproot-loader.so     18,136 B  PRoot tracee loader
+        libtalloc.so           31,440 B  dynamic dependency of PRoot
+        libandroid-shmem.so    14,432 B  dynamic dependency of PRoot
+
+      Copyright (C) 2015-2024 STMicroelectronics and Termux PRoot
+      contributors. Licensed under GNU GPL version 2 or later.
+
+      **GPL-2.0 obligation**: because we redistribute these binaries, the
+      corresponding source must also be available. Upstream sources:
+        - PRoot:            https://github.com/termux/proot
+        - talloc:           https://talloc.samba.org/
+        - libandroid-shmem: https://github.com/termux/libandroid-shmem
+
+      If you fork and redistribute a binary build of this sandbox you inherit
+      this obligation. Shipping this repository (source + these binaries)
+      together with the upstream links above is the intended compliance path.
+      **Do not delete this section.**
+
+      Note: libproot.so has been binary-patched so that its DT_NEEDED entry
+      for talloc reads "libtalloc.so" instead of "libtalloc.so.2", because
+      Android APK packaging only permits lib*.so names. This is a load-path
+      adaptation, not a functional change; the talloc code is unmodified.
+      See docs/integration-guide.md §4.
+
+  5.2 Bundled rootfs — Alpine Linux 3.20 minirootfs
+      File: sandbox-runtime/src/main/assets/rootfs-bundle.tar.gz (3,947,906 B)
+
+      This is the official Alpine Linux aarch64 minirootfs
+      (alpine-minirootfs-3.20.3-aarch64.tar.gz), obtained unmodified from
+      https://alpinelinux.org / its mirrors.
+
+      It contains Alpine packages (busybox, musl libc, apk-tools and their
+      dependencies). Each carries its own upstream license — predominantly
+      GPL-2.0, MIT and BSD variants. License metadata ships inside the image
+      (/lib/apk/db/installed) and at https://pkgs.alpinelinux.org.
+      Alpine Linux is not affiliated with this project.
+
+  5.3 Optional: rootfs images pulled via installRootfs(ociRef)
+      installRootfs() is an **optional upgrade path**; the bundled rootfs is
+      the default. Images pulled this way are NOT in this repository, and the
+      license of the referenced distribution applies (e.g. Alpine, Debian).
+
+  5.4 Optional: toolchains installed inside the rootfs
+      Their own upstream licenses apply. None are included here.
+
+
+6. Security boundary of everything above
+-----------------------------------------
+  None of these bundled artefacts makes this sandbox a security boundary.
+  **PRoot provides no namespace / cgroup / seccomp isolation.** It solves
+  filesystem pollution and crash recovery, not untrusted-code isolation.
+  See docs/security-boundary.md — that statement must not be removed.

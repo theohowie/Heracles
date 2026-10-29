@@ -1,0 +1,42 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  sandbox-file 的 manifest 片段（合并进宿主 APK）
+
+  Copyright (C) 2026 Heracles-taixu-sandbox contributors
+  SPDX-License-Identifier: GPL-3.0
+
+  ★ 移植来源：
+      baicodex (mubai0122/baicodex) @ fb4bd5f98bb8541ab0dcf83fb3b1ee29e6cb9d95
+        app/src/main/kotlin/b/ai/exec/FileOps.kt（文件访问的核心；provider 本身为新增，
+        理由见 SandboxFileProvider 的 KDoc）
+-->
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <application>
+        <!--
+          跨进程文件访问 provider。
+
+          ★ authority 是**契约的一部分**，必须与 SandboxFileProvider.AUTHORITY 常量一致，
+            改动会让所有已持久化的 content:// URI 失效。
+
+          ★ exported=false：别的应用不能直接枚举本 provider。
+            跨进程交出文件靠 grantUriPermissions（每次一个 URI），
+            而不是靠「谁都来查」。这样即使 URI 泄露，
+            也只能访问那条 URI 指向的文件（且受白名单根二次约束）。
+
+          ★ grantUriPermissions=true：允许宿主用 grantUriPermission /
+            Intent.FLAG_GRANT_READ_URI_PERMISSION 把某个具体 URI 授给
+            PackageInstaller、分享目标等外部组件。
+
+          ★ 不声明 android:readPermission / writePermission：
+            本 provider 的安全边界是「白名单根 + 显式 grant」，
+            而不是一个全局权限。加一个全局读权限等于把它变成半公开接口。
+        -->
+        <provider
+            android:name="com.heracles.sandbox.file.SandboxFileProvider"
+            android:authorities="com.heracles.sandbox.file.provider"
+            android:exported="false"
+            android:grantUriPermissions="true" />
+    </application>
+
+</manifest>

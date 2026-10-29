@@ -1,0 +1,136 @@
+# Heracles-taixu-sandbox —— 独立工程的 .gitignore
+#
+# 本工程可以被单独拷出去当独立仓库发布，所以这里不能只依赖 Heracles 根目录的
+# .gitignore（那份是给 Dart/Flutter 项目写的）。
+
+# ============================================================================
+# ★ 关键：反向豁免 —— 别删
+# ============================================================================
+# Heracles 根目录的 .gitignore 有一条 `docs/`（本机私有材料的约定，
+# 见根目录 AGENTS.md 的说明），它是**任意深度匹配**的，会把
+# `sandbox/docs/` 一起吞掉。
+#
+# 但 sandbox/docs/ 是**交付物**（架构 / API / 通道矩阵 / 集成 / 安全边界 /
+# 移植日志），必须随仓库发布。
+#
+# 这里用 `!` 逐项豁免。注意 git 的规则：**父目录被忽略时，子路径的 `!`
+# 是无效的**，所以必须先 `!docs/` 再 `!docs/**`。
+!docs/
+!docs/**
+
+
+# Gradle / Kotlin
+.gradle/
+build/
+!gradle/wrapper/gradle-wrapper.jar
+.kotlin/
+*.hprof
+
+# Android
+local.properties
+*.apk
+*.aab
+*.aar
+captures/
+
+# NDK / CMake 中间产物
+.cxx/
+.cxx/**
+
+# IDE
+.idea/
+*.iml
+.vscode/
+
+# 本地敏感文件
+keystore.properties
+*.jks
+*.keystore
+
+# 运行时产物（跑 demo 时可能生成）
+*.log
+
+# ============================================================================
+# ★ 关于 PRoot 二进制与内置 rootfs：**都不排除**（刻意纳入仓库）
+# ============================================================================
+# 重要架构决策：本沙箱是**内置离线**沙箱 —— 不依赖服务器、不依赖云端、
+# 不需要联网安装。用户拿到 APK 装上就该能用。
+#
+# 因此下列产物**必须随仓库交付**（否则干净 clone 后跑不起来）：
+#
+#   sandbox-runtime/src/main/jniLibs/arm64-v8a/
+#     ├── libproot.so            239 KB  PRoot 主程序（AArch64 可执行）
+#     ├── libproot-loader.so      18 KB  PRoot tracee loader
+#     ├── libtalloc.so            31 KB  proot 的动态依赖
+#     └── libandroid-shmem.so     14 KB  proot 的动态依赖
+#
+#   sandbox-runtime/src/main/assets/
+#     └── rootfs-bundle.tar.gz  3.8 MB  Alpine minirootfs（内置离线 rootfs）
+#
+# 合计约 4.1 MB —— 对一个「开箱即用」的沙箱来说这是**可接受**的代价，
+# 换来的是「零网络依赖」。build.gradle.kts 里有构建期强校验：
+# 上述文件缺失会**直接构建失败**，不会出现"编过了但一跑就废"。
+#
+# ⚠️ 协议义务（重要）：
+#   - PRoot 是 GPL-2.0-or-later（STMicroelectronics / Termux PRoot 贡献者）。
+#     分发其二进制时，**必须**同时提供对应源码（或书面提供源码的要约）。
+#     见 NOTICE 第 5 节。
+#   - Alpine rootfs 内含 Alpine Linux 的软件包，各自适用其上游协议
+#     （主要是 GPL-2.0 / MIT / BSD）。见 NOTICE 第 5 节。
+#
+# 如果你 fork 后**不想**带上这些二进制（例如只发源码、由使用者自备），
+# 把下面两行取消注释即可 —— 但那时使用者必须自行提供，否则构建会失败。
+# sandbox-runtime/src/main/jniLibs/arm64-v8a/libproot.so
+# sandbox-runtime/src/main/jniLibs/arm64-v8a/libproot-loader.so
+# sandbox-runtime/src/main/jniLibs/arm64-v8a/libtalloc.so
+# sandbox-runtime/src/main/jniLibs/arm64-v8a/libandroid-shmem.so
+# sandbox-runtime/src/main/assets/rootfs-bundle.tar.gz
+
+# ============================================================================
+# ★ Android build-tools（aapt2 / zip / apksigner）—— **入库，不排除**
+# ============================================================================
+# 目的：让沙箱能**离线**完成「解包 APK → 改文件 → 重新打包」这条链。
+#
+#   sandbox-runtime/src/main/assets/toolchain/
+#     ├── bin/         aapt2（AArch64）、zip（AArch64）
+#     ├── lib/         aapt2 的 .so 依赖（libprotobuf / libc++ / …）
+#     ├── apksigner/   apksigner.jar（**需要 JDK 才能跑**，见下）
+#     └── MANIFEST.txt 每个文件的来源（包名/版本/sha256）
+#
+# 来源：Termux 官方 aarch64 包（https://packages.termux.dev/apt/termux-main/）
+# 用 `tools/fetch-toolchain.ps1` 生成，体积约 4-6 MB。
+#
+# ⚠️ **apksigner 的如实说明**：它是个 jar，需要 JDK 才能运行。
+#    JDK 有 96-106 MB，本次**没有内置**。所以 apksigner **装上但跑不起来**，
+#    BundledToolchain 会如实报告「缺 java」。这不是 bug，是刻意的体积取舍。
+#    ⇒ 所以「重打包」这条链现在到「能重新打包成合法 zip」为止，
+#      **「签名」这一步需要宿主提供 JDK**。
+#
+# ⚠️ **zipalign 不在其中**：Termux 源里没有这个包（整个索引搜不到）。
+#    而且 Heracles 的 ADR-027 已明确「Android 上不存在 zipalign，对齐由进程内
+#    ZipAligner 做」—— 所以沙箱侧也不需要它，对齐是宿主的责任。
+#
+# 协议义务：aapt2 / zip / apksigner 源自 Android Open Source Project，
+# 主要是 Apache-2.0（部分 GPL）。见 NOTICE 第 5 节。
+# 想改写生成脚本不重跑，可注释掉下面这行（但那时 assets/toolchain 需要自己保证）。
+# sandbox-runtime/src/main/assets/toolchain/
+
+
+
+# ============================================================================
+# tools/ 的临时工作区（**不入库**）
+# ============================================================================
+# fetch-toolchain.ps1 会下载 Termux 的 .deb 到 tools/.toolchain-work/ 再解包。
+# 那是**下载缓存 + 中间产物**（1162 个文件、几十 MB），不该进仓库 ——
+# 最终产物是 assets/toolchain/，那个才是要入库的。
+#
+# 同理 tools/.tmp 是脚本调试残留。
+tools/.toolchain-work/
+tools/.tmp/
+# ============================================================================
+# tools/fetch-bundled-tools.ps1 的下载缓存（**不入库**）
+# ============================================================================
+# 那个脚本会把 android-sdk-tools-static-aarch64.zip（13.7 MB）下载到这里再解压。
+# 最终产物是 sandbox-runtime/src/main/assets/tooltools/（3 个二进制，10.27 MB），
+# 那个才是要入库的；这里是中间缓存。
+tools/.tooltools-work/

@@ -1,0 +1,47 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  sandbox-channel 的 manifest 片段（合并进宿主 APK）
+
+  Copyright (C) 2026 Heracles-taixu-sandbox contributors
+  SPDX-License-Identifier: GPL-3.0
+
+  ★ 本文件只声明「通道探测/执行所必需的最小权限与组件」，不含任何 UI 组件。
+  ★ 移植来源：
+      baicodex (mubai0122/baicodex) @ fb4bd5f98bb8541ab0dcf83fb3b1ee29e6cb9d95
+        app/src/main/AndroidManifest.xml 里 Shizuku 用户服务与 INTERNET 的声明
+      tianxuan (xiaozhe7772222/tianxuan) @ caad40090a4f2c2edbe54e6eaae60a3dd1de7d21
+        app/src/main/AndroidManifest.xml 里 mDNS 发现所需的 CHANGE_WIFI_MULTICAST_STATE
+-->
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <!--
+      无线 ADB 通道的 mDNS 发现（_adb-tls-pairing / _adb-tls-connect）需要组播。
+      两者都是 normal 级权限，安装即授予，不涉及运行时申请、不弹窗。
+    -->
+    <uses-permission android:name="android.permission.INTERNET" />
+    <uses-permission android:name="android.permission.CHANGE_WIFI_MULTICAST_STATE" />
+
+    <!--
+      Shizuku 的用户服务。
+
+      ★ 为什么 exported=true：
+        用户服务进程由 **Shizuku App（moe.shizuku.privileged.api，另一个 uid）** 拉起，
+        不是由本应用拉起。exported=false 会导致 Shizuku 绑不上，整条通道失效。
+        安全性由服务内部的调用方 uid 白名单保证
+        （见 ShizukuExecService.onTransact：只放行本应用 uid / 0 / 2000）。
+
+      ★ 为什么 android:process 不写死：
+        Shizuku 用 processNameSuffix 决定进程名，写死会与它冲突。
+
+      ★ 注意：本组件**只在宿主同时打包了 dev.rikka.shizuku:api 时**才会被真正使用。
+        本模块对 Shizuku 是 compileOnly，所以没有 Shizuku 的设备上它只是一个
+        永远不会被 bind 的空组件，不影响普通 App 通道。
+    -->
+    <application>
+        <service
+            android:name="com.heracles.sandbox.channel.shizuku.ShizukuExecService"
+            android:exported="true"
+            android:label="Heracles sandbox exec" />
+    </application>
+
+</manifest>

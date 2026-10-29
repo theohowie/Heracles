@@ -1,0 +1,78 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Copyright (C) 2026 Heracles-taixu-sandbox contributors
+  SPDX-License-Identifier: GPL-3.0
+
+  sandbox-app 的清单 —— **library 形态**（2026-10-28 纠正）
+
+  ============================================================================
+  这个模块不是产品
+  ============================================================================
+  Heracles 是**一个 APK**；沙箱是内联在里面的四个 library 模块
+  （api / runtime / channel / file）。本模块只是开发期验证壳。
+
+  因此：
+    · 本模块是 com.android.library —— **没有 launcher、没有桌面图标**；
+    · 不产生可安装的独立 App，也就不会在用户桌面上多出一个图标；
+    · 不会进 Heracles 的最终 APK。
+
+  ★ 历史偏移（已纠正）：本模块一度是 com.android.application 且带
+    MAIN/LAUNCHER，结果测试机上多出一个 `com.heracles.sandbox.demo`。
+    那是错的 —— 沙箱是环境，不是软件。
+
+  权限说明（刻意最少，且**只在验证时**生效，宿主自己决定要不要）：
+    - INTERNET            ：OCI 拉取 rootfs、无线 ADB 探测
+    - ACCESS_NETWORK_STATE：判断能不能走 OCI
+    - 不申请 MANAGE_EXTERNAL_STORAGE / 无障碍 等敏感权限。
+-->
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <uses-permission android:name="android.permission.INTERNET" />
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+
+    <!--
+      ★ 只支持 arm64-v8a：PTY JNI（libpty_bridge.so）与 PRoot/loader 都是 AArch64。
+        32 位设备（armeabi-v7a）不支持 —— 这是刻意的取舍。见 README「ABI 支持」。
+    -->
+    <uses-feature
+        android:name="android.hardware.touchscreen"
+        android:required="false" />
+
+    <application
+        android:allowBackup="false"
+        android:extractNativeLibs="true"
+        android:supportsRtl="true">
+
+        <!--
+          验证用的参考 UI。
+
+          ★ **没有 intent-filter**：它不是入口，桌面上不会出现图标。
+            保留它是因为它把「装 rootfs → 执行 → 读写 → 查通道」四步
+            写成了可读代码，宿主集成时可以直接参考。
+            验证走 androidTest（见 src/androidTest/），不靠启动这个 Activity。
+        -->
+        <activity
+            android:name=".MainActivity"
+            android:exported="false"
+            android:configChanges="orientation|screenSize|keyboardHidden" />
+
+        <!--
+          AIDL 形态的 Service（ISandboxService 的实现承载者）。
+
+          android:process=":sandbox"
+            执行面跑在独立进程：PRoot 卡死 / 崩溃 / OOM 只带走 :sandbox。
+
+          android:exported="false"
+            只有**同一个 APK** 能绑。内联进 Heracles 后，这里的「同一个 APK」
+            就是 Heracles 自己 —— 不存在跨应用的漏洞面。
+            ★ 若要给**别的 App** 用，必须自行加 signature 级 <permission>：
+              一个未加防护的 exported 沙箱 Service 等于把执行面开源给整机。
+        -->
+        <service
+            android:name=".SandboxServiceHost"
+            android:exported="false"
+            android:process=":sandbox" />
+
+    </application>
+
+</manifest>
