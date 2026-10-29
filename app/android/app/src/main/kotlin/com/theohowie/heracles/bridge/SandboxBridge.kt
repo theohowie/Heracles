@@ -484,6 +484,15 @@ class SandboxBridge(
                 val st = withContext(Dispatchers.IO) {
                     runCatching { toolchain.status() }
                 }
+                // ★ 自愈（2026-10-29）：T2 就绪但 PATH 里没有 gradle 时补一次链接。
+                //   老用户是在"PATH 链接"这一步存在之前装的 T2 —— 他们不会再点一次
+                //   安装，所以必须在这里补，否则 `gradle` 永远 not found。
+                //   `ln -sf` 幂等，且只在就绪时才跑，代价可忽略。
+                if (st.getOrNull()?.ready == true) {
+                    withContext(Dispatchers.IO) {
+                        runCatching { toolchain.repairPath() }
+                    }
+                }
                 reply(result, st.fold(
                     onSuccess = { s ->
                         mapOf(

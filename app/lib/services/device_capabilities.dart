@@ -1602,11 +1602,26 @@ class ChannelSandboxCapability implements SandboxCapability {
     final failed = Completer<SandboxExecError>();
     final subs = <StreamSubscription<Object?>>[];
 
-    void finishIfPending() {
-      if (!done.isCompleted && !failed.isCompleted) return;
-    }
+    // ---- 按执行 id 过滤（2026-10-29 真机 bug）----
+    //
+    // 沙箱的 output/done/error 是**共享广播流**：同时跑两条命令时，
+    // 两边的输出会串进同一个 listener ⇒ 两条命令拿到同一份输出。
+    // 真机上模型自己发现了：「第一次并发执行时两路输出被串成了同一份，不可信」。
+    //
+    // 修法：先按 id 缓冲（submit 前后都可能来事件，不能只靠"之后才开始听"），
+    // 拿到本次的 id 后，只认这个 id 的事件。
+    final buffered = <String, List<SandboxOutputChunk>>{};
+    String? myId;
 
-    subs.add(_sandbox.outputStream.listen((c) {
+    void acceptChunk(SandboxOutputChunk c) {
+      if (myId == null) {
+        // 还没拿到 id：先按事件自带的 id 缓冲（submit 的返回值还没回来）
+        if (c.id.isNotEmpty) {
+          (buffered[c.id] ??= <SandboxOutputChunk>[]).add(c);
+        }
+        return;
+      }
+      if (c.id != myId) return; // ★ 别的并发命令的输出，丢弃
       if (c.isProgress || c.chunk.isEmpty) return;
       if (c.isStderr) {
         stderrBuf.write(c.chunk);
@@ -1614,12 +1629,15 @@ class ChannelSandboxCapability implements SandboxCapability {
         stdoutBuf.write(c.chunk);
       }
       onOutput?.call(c.chunk);
-      finishIfPending();
-    }));
+    }
+
+    subs.add(_sandbox.outputStream.listen(acceptChunk));
     subs.add(_sandbox.doneStream.listen((d) {
+      if (myId != null && d.id != myId) return; // ★ 不是我的结束帧
       if (!done.isCompleted && !failed.isCompleted) done.complete(d.result);
     }));
     subs.add(_sandbox.errorStream.listen((e) {
+      if (myId != null && e.id != myId) return;
       if (!done.isCompleted && !failed.isCompleted) failed.complete(e);
     }));
 
@@ -1632,7 +1650,16 @@ class ChannelSandboxCapability implements SandboxCapability {
         return CapabilityFailure(submit.error ?? '沙箱拒绝了这次执行', isRetryable: true);
       }
 
-      // 两侧都不带 id 时无法配对 —— 单飞场景下这样够用，但如实记在 KDoc 里。
+      // 定下本次执行 id，并把 submit 之前就到达的缓冲回放进来
+      myId = submit.id;
+      final early = buffered.remove(myId);
+      if (early != null) {
+        for (final c in early) {
+          acceptChunk(c);
+        }
+      }
+      buffered.clear(); // 别的执行的残留缓冲，不再需要
+
       final SandboxExecResult result;
       try {
         result = await Future.any<SandboxExecResult>([

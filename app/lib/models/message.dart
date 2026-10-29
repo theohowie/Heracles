@@ -137,6 +137,7 @@ class HToolCall extends HMessage {
     this.result,
     this.status = ToolStatus.running,
     this.rawOutput,
+    this.surface,
   });
 
   @override
@@ -163,7 +164,14 @@ class HToolCall extends HMessage {
   /// 原始输出 —— 那时为 null，卡片少显示一段，不影响其它档位。
   final String? rawOutput;
 
-  HToolCall copyWith({String? result, ToolStatus? status, String? rawOutput}) =>
+  /// **执行面**（2026-10-29）：`'sandbox'` / `'device'`，来自 `AgentEvent.surface`。
+  ///
+  /// 卡片标题据此写「在沙箱 / 在手机执行了命令」。
+  /// 为空时回退到按工具名猜测（见 `tool_call_card.dart` 的 `commandSurfaceOf`）。
+  final String? surface;
+
+  HToolCall copyWith(
+          {String? result, ToolStatus? status, String? rawOutput, String? surface}) =>
       HToolCall(
         id: id,
         tool: tool,
@@ -171,6 +179,7 @@ class HToolCall extends HMessage {
         result: result ?? this.result,
         status: status ?? this.status,
         rawOutput: rawOutput ?? this.rawOutput,
+        surface: surface ?? this.surface,
       );
 }
 

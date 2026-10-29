@@ -94,6 +94,10 @@ class ToolchainActivation(
         // ① 已就绪 → 直接返回
         val current = status()
         if (current.ready) {
+            // ★ 自愈（2026-10-29）：老用户装 T2 时还没有 PATH 链接这一步，
+            //   不能因为"已就绪"就跳过 —— 否则 `gradle` 永远 not found。
+            //   `ln -sf` 幂等，代价可忽略。
+            linkIntoPath(onProgress)
             return@withLock ActivationResult.alreadyReady(current)
         }
         // ② 单飞复用上次终态
@@ -160,6 +164,8 @@ class ToolchainActivation(
             File(t2, VERSION_MARKER).writeText("$VERSION\n")
             // 给沙箱内用的便捷链接：/opt/t2/gradle/bin/gradle 与 /opt/t2/platform/android.jar
             writeHelperScripts(t2)
+              // ★ 把 gradle 挂进 PATH（否则 `gradle` 报 not found，exit 127 —— 真机抓到）
+              linkIntoPath(onProgress)
 
             val done = status()
             if (!done.ready) {
@@ -235,6 +241,39 @@ class ToolchainActivation(
                 ).trimStart('/').let { "/$it" },
             )
         }
+    }
+
+    /**
+     * 把 T2 的可执行文件挂进 PATH（**沙箱内**执行 `ln -s`）。
+     *
+     * ## 为什么必须有这一步（2026-10-29 真机抓到）
+     *
+     * 装完 T2 后模型直接跑 `gradle --version`，得到：
+     *
+     *     /bin/sh: gradle: not found      EXIT=127
+     *
+     * 因为 gradle 只躺在 `/opt/t2/gradle/bin/gradle`，**不在 PATH** 上 ——
+     * 装了却用不了，等于没装。用户和模型都不会去猜那个绝对路径。
+     *
+     * 做法：在 rootfs 内建 `/usr/local/bin/gradle` 软链（Alpine 默认 PATH 含该目录）。
+     * 用沙箱内 `ln -s` 而不是宿主建链接：rootfs 是 Linux 布局，PRoot 里建最稳。
+     */
+    /** 供宿主调用：修一次 PATH 链接（幂等）。成功返回 true。 */
+    suspend fun repairPath(): Boolean = linkIntoPath { _, _, _ -> }
+
+    private suspend fun linkIntoPath(
+        onProgress: (Long, Long, String) -> Unit,
+    ): Boolean {
+        onProgress(0, -1, "把 gradle 挂进 PATH")
+        val r = runInSandbox(LINK_INTO_PATH, 60_000)
+        // 失败不致命（仍可用绝对路径调用），但要说清楚
+        if (r.exitCode != 0) {
+            onProgress(
+                0, -1,
+                "gradle 挂 PATH 失败（可用 /opt/t2/gradle/bin/gradle）：${r.tail(200)}",
+            )
+        }
+        return r.exitCode == 0
     }
 
     private fun CommandOutcome.tail(max: Int = 300): String =
@@ -314,6 +353,19 @@ class ToolchainActivation(
                 "nameserver 119.29.29.29\\n' > /etc/resolv.conf; " +
                 "echo wrote; else echo exists; fi; " +
                 "echo ---; cat /etc/resolv.conf"
+
+        /**
+         * 把 gradle 挂进 PATH（rootfs 内执行）。
+         *
+         * 只链接 gradle：javac/java 由 `apk add openjdk17-jdk` 自己放进了
+         * `/usr/bin`（实测 `javac -version` 直接可用），不用我们再管。
+         * 幂等：`ln -sf` 重复执行安全。
+         */
+        private const val LINK_INTO_PATH =
+            "mkdir -p /usr/local/bin && " +
+                "chmod +x /opt/t2/gradle/bin/gradle 2>/dev/null; " +
+                "ln -sf /opt/t2/gradle/bin/gradle /usr/local/bin/gradle && " +
+                "echo linked; command -v gradle; gradle --version 2>&1 | head -4"
 
         /** Alpine 官方源（JDK 用 musl 版，必须 `apk add` —— Temurin 是 glibc，跑不起来）。 */
         private const val APK_INSTALL_JDK =

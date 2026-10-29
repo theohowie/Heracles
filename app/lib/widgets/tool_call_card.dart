@@ -457,6 +457,18 @@ const double kCommandEndClearance = 136;
 /// 后端把沙箱接进工具链后，按它登记的形状点亮 —— 判据按宽容顺序：
 /// 工具名含 sandbox，或参数里带 `surface` / `executor` 标记。
 CommandSurface? commandSurfaceOf(HToolCall call) {
+  // ★ 2026-10-29：**优先用事件带来的真实执行面**（`AgentEvent.surface`）。
+  //
+  // 之前只从 `args['surface']` 猜 —— 但后端把 surface 放在**事件**上，
+  // 不在工具参数里（`run_shell_command` 的参数只有 command / timeout）。
+  // 后果：真机上沙箱命令的标题把执行面判成了「手机」。
+  final fromEvent = (call.surface ?? '').toLowerCase();
+  if (fromEvent.contains('sandbox')) return CommandSurface.sandbox;
+  if (fromEvent.contains('device') || fromEvent.contains('shell')) {
+    return CommandSurface.shell;
+  }
+
+  // 兜底：参数标记 / 工具名（老路径，保留兼容）
   final marker = (call.args['surface'] ?? call.args['executor'] ?? '')
       .toLowerCase();
   if (marker.contains('sandbox')) return CommandSurface.sandbox;
