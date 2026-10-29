@@ -614,7 +614,19 @@ class SandboxBridge(
             timeoutMillis = timeoutMs,
             usePty = usePty,
         )
-        scope.launch {
+          // ★★ 2026-10-29 修 ANR：**必须在 IO 线程执行** ★★
+          //
+          // 系统 dropbox 里的 ANR（真机证据）：
+          //     Subject: Input dispatching timed out
+          //              (MainActivity is not responding. Waited 5000ms)
+          //     at SandboxBridge$executeAsync$1.invokeSuspend(SandboxBridge.kt:612)
+          //     at ProotEngine.executePiped(...)
+          //     at SandboxServiceCore$runExecution$2.invokeSuspend
+          //
+          // 原因：`scope.launch` 跑在 Main 上，里面 `runBlocking` 等整条 proot 命令
+          // 跑完 ⇒ 主线程被占住命令全程（实测 CPU 77%）⇒ 输入打不进、键盘收不起、
+          // 甚至被系统判为无响应。
+          scope.launch(Dispatchers.IO) {
             try {
                 runBlocking {
                     core.executeAndWait(request, object : com.heracles.sandbox.runtime.ExecutionSink {
