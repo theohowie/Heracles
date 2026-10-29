@@ -471,15 +471,50 @@ class RootfsManager(
         }
     }
 
+    /**
+     * 统计目录体积（**不跟随符号链接**）。
+     *
+     * ## 旧实现为什么错（2026-10-29 真机抓到）
+     *
+     * 旧代码用 `dir.walkTopDown()`：它判断目录走 `File.isDirectory`，
+     * 而那个**跟随符号链接** ⇒ Alpine 的 `/lib -> usr/lib`、`/bin -> usr/bin`
+     * 以及 JDK 的 `default-jvm -> java-17-openjdk` 会被反复下钻，体积成倍放大。
+     * 真机现象：`du` 实际 295 MB，UI 显示 **21.6 GB**。
+     *
+     * 改用 NIO `walkFileTree`（**不传 FOLLOW_LINKS**）：目录链接不下钻、
+     * 链接本身不计入 → 与 `du` 口径一致。
+     */
     private fun directorySize(dir: File): Long = runCatching {
-        dir.walkTopDown()
-            .filter { it.isFile && !it.isSymlinkNoFollow() }
-            .sumOf { it.length() }
+        if (!dir.isDirectory) return@runCatching 0L
+        var total = 0L
+        java.nio.file.Files.walkFileTree(
+            dir.toPath(),
+            object : java.nio.file.SimpleFileVisitor<java.nio.file.Path>() {
+                override fun visitFile(
+                    file: java.nio.file.Path,
+                    attrs: java.nio.file.attribute.BasicFileAttributes,
+                ): java.nio.file.FileVisitResult {
+                    // 没传 FOLLOW_LINKS 时，符号链接的 isRegularFile 为 false
+                    if (attrs.isRegularFile) total += attrs.size()
+                    return java.nio.file.FileVisitResult.CONTINUE
+                }
+
+                override fun visitFileFailed(
+                    file: java.nio.file.Path,
+                    exc: java.io.IOException,
+                ): java.nio.file.FileVisitResult =
+                    java.nio.file.FileVisitResult.CONTINUE
+            },
+        )
+        total
     }.getOrDefault(0L)
 
     private fun deleteTree(file: File) {
-        if (!file.exists() && !file.isSymlinkNoFollow()) return
-        if (file.isSymlinkNoFollow()) {
+        // ★ 用 NIO 判符号链接（等价于 isSymlinkNoFollow，但不跨文件依赖扩展函数）
+        val isLink =
+            runCatching { java.nio.file.Files.isSymbolicLink(file.toPath()) }.getOrDefault(false)
+        if (!file.exists() && !isLink) return
+        if (isLink) {
             runCatching { Files.deleteIfExists(file.toPath()) }
             return
         }

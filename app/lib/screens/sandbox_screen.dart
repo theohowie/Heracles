@@ -564,8 +564,28 @@ class _SandboxScreenState extends State<SandboxScreen> {
                         color: h.textFaint,
                       ),
                     )
-                  : Icon(AppIcons.back,
-                      size: 18, color: h.textFaint),
+                  // ★ 用**真按钮**而不是整行手势（2026-10-29 真机：整行 tap 不响应）
+                  //   415 MB 的动作本来也该是个明确按钮，用户要有「按下去」的确定感。
+                  : FilledButton(
+                      onPressed: _activateSuite,
+                      style: FilledButton.styleFrom(
+                        backgroundColor: h.text,
+                        foregroundColor: h.bg,
+                        minimumSize: const Size(76, 36),
+                        padding: const EdgeInsets.symmetric(horizontal: 16),
+                        shape: RoundedRectangleBorder(
+                          borderRadius: BorderRadius.circular(18),
+                        ),
+                      ),
+                      child: Text(
+                        '下载',
+                        style: TextStyle(
+                          fontSize: 14,
+                          fontWeight: FontWeight.w600,
+                          color: h.bg,
+                        ),
+                      ),
+                    ),
           ],
         ),
       ),
