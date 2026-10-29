@@ -25,6 +25,8 @@ import '../widgets/bw_approval.dart';
 import 'jev_settings_screen.dart';
 import 'oss_licenses_screen.dart';
 import 'voice_settings_screen.dart';
+import '../services/sandbox_service.dart';
+import 'sandbox_screen.dart';
 
 /// 设置主页 —— 分类列表（对应参考图的侧栏结构）。
 class SettingsScreen extends StatelessWidget {
@@ -86,6 +88,12 @@ class SettingsScreen extends StatelessWidget {
                   _VoiceEntry(
                     onOpen: () =>
                         _push(context, const VoiceSettingsScreen()),
+                  ),
+                  // ★ 沙箱入口（2026-10-29 合并回补）。
+                  //   `sandbox-ui` 加过这一行，但 `jev-sheets` 重写设置页时
+                  //   是按更早的版本改的，把它覆盖掉了 —— 合并后沙箱页没了入口。
+                  _SandboxEntry(
+                    onOpen: () => _push(context, const SandboxScreen()),
                   ),
                   if (archivedCountLoader != null && onOpenArchived != null)
                     _ArchivedEntry(
@@ -959,6 +967,53 @@ Widget _iosBackLeading(BuildContext context) => IconButton(
 /// **已归档对话入口**（2026-10-27）—— 与「全局记忆」同一形态：
 /// 主页一行 + 数量徽章，列表在二级页；从二级页返回后重读一次
 /// 数量（用户可能刚取消归档或删了几条，徽章得跟着变）。
+/// **沙箱入口**（2026-10-28 新增，2026-10-29 合并回补）。
+///
+/// 副行如实显示激活状态 —— 与「设备权限」「全局记忆」同一形态：
+/// 主页一行看状态，管理面（激活/挂载/通道/重置）在二级页 [SandboxScreen]。
+///
+/// ⚠️ 为什么副行必须显示状态：沙箱没激活时，模型跑命令会被**拒绝**
+/// （不回落手机）。用户看到「未激活」才知道该点进去。
+class _SandboxEntry extends StatefulWidget {
+  const _SandboxEntry({required this.onOpen});
+
+  /// 打开二级页；**返回后**才完成（副行状态据此刷新）。
+  final Future<void> Function() onOpen;
+
+  @override
+  State<_SandboxEntry> createState() => _SandboxEntryState();
+}
+
+class _SandboxEntryState extends State<_SandboxEntry> {
+  bool? _installed;
+
+  @override
+  void initState() {
+    super.initState();
+    _refresh();
+  }
+
+  Future<void> _refresh() async {
+    final st = await SandboxService().status();
+    if (!mounted) return;
+    setState(() => _installed = st.installed);
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return _HomeRow(
+      title: '沙箱',
+      subtitle: _installed == null
+          ? '内置 Linux 环境'
+          : (_installed! ? '内置 Linux 环境 · 已激活' : '内置 Linux 环境 · 未激活'),
+      onTap: () async {
+        await widget.onOpen();
+        if (mounted) _refresh();
+      },
+    );
+  }
+}
+
 class _ArchivedEntry extends StatefulWidget {
   const _ArchivedEntry({required this.countOf, required this.onOpen});
 
