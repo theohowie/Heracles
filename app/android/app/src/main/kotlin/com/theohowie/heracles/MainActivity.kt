@@ -809,6 +809,8 @@ class MainActivity : FlutterActivity() {
 
     @Deprecated("Flutter embedding 仍走经典回调路径")
     override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
+        // ★ 2026-10-29 埋点：证明系统有没有把结果交回来（含 resultCode）
+        android.util.Log.i("HeraclesAct", "onActivityResult req=$requestCode res=$resultCode data=${data != null}")
         when (requestCode) {
             FilePickerBridge.REQUEST_CODE -> {
                 if (resultCode == RESULT_OK) filePicker.onActivityResult(data)

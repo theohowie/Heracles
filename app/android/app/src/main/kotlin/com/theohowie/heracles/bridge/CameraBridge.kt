@@ -8,6 +8,7 @@ import android.content.pm.PackageManager
 import android.graphics.Bitmap
 import android.net.Uri
 import android.os.Build
+import android.util.Log
 import android.provider.MediaStore
 import android.provider.OpenableColumns
 import java.io.File
@@ -184,6 +185,8 @@ class CameraBridge(private val activity: Activity) {
 
     /** 相机带结果返回时调这里；[data] 供缩略图模式取图。 */
     fun onActivityResult(data: Intent?) {
+        // ★ 2026-10-29 埋点：先证明"回调到底有没有到"（没日志只能猜）
+        Log.i("CameraBridge", "onActivityResult 进入: uri=$pendingUri name=$pendingName thumb=$pendingThumbnail hasResult=${pendingResult != null} data=${data != null}")
         val result = pendingResult
         val error = pendingError
         val uri = pendingUri
@@ -247,6 +250,8 @@ class CameraBridge(private val activity: Activity) {
         activity.startActivityForResult(intent, REQUEST_CODE)
         true
     } catch (e: Throwable) {
+        // ★ 2026-10-29 埋点：把真实异常打出来（第一版全压成一句话，无从判断）
+        Log.w("CameraBridge", "startActivityForResult 失败: ${e.javaClass.simpleName}: ${e.message}")
         lastStartError = "${e.javaClass.simpleName}: ${e.message ?: ""}"
             .trimEnd(':', ' ')
         false
