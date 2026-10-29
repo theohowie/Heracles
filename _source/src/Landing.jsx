@@ -1,6 +1,8 @@
 import { useEffect, useRef, useState } from 'react'
 import { motion, AnimatePresence, useReducedMotion, useMotionValue, useTransform } from 'framer-motion'
 
+// ⚠️ v0.3.1 APK 已出包（49.7 MB，台账 .dshwork/temp/release-apks/）但 GitHub Release 尚未发布
+// —— 在 Release 发出来之前不能切链接，否则下载 404。切换点：APK / 版本文案（Hero 与 Download 两处）。
 const APK = 'https://github.com/theohowie/Heracles/releases/download/v0.2.2/Heracles-v0.2.2.apk'
 const RELEASES = 'https://github.com/theohowie/Heracles/releases'
 const REPO = 'https://github.com/theohowie/Heracles'
@@ -25,15 +27,21 @@ const ICONS = {
   download: <><path d="M12 4v10" /><path d="M8 10l4 4 4-4" /><path d="M5 18h14" /></>,
   arrow: <><path d="M5 12h13" /><path d="M13 6l6 6-6 6" /></>,
   copy: <><rect x="9" y="9" width="11" height="11" rx="2" /><path d="M15 5H6a2 2 0 0 0-2 2v9" /></>,
+  terminal: <><rect x="2.5" y="4" width="19" height="16" rx="2.5" /><path d="M6.5 9l3.5 3-3.5 3" /><path d="M12.5 15h5" /></>,
+  eye: <><path d="M2.5 12S6 5.8 12 5.8 21.5 12 21.5 12 18 18.2 12 18.2 2.5 12 2.5 12z" /><circle cx="12" cy="12" r="2.8" /></>,
+  mic: <><rect x="9" y="3" width="6" height="11" rx="3" /><path d="M5.5 11.5a6.5 6.5 0 0 0 13 0" /><path d="M12 18v3" /></>,
 }
 
 const FEATURES = [
   { icon: 'folder', title: '真实工作区', desc: '用系统文件选择器授权任意目录（含 /sdcard 上的项目）。列目录、读文件、局部补丁、按文件名与按内容搜索，长文件自动分段。' },
+  { icon: 'terminal', title: '内联执行沙箱', desc: 'APK 里自带 PRoot + Alpine rootfs：命令在独立的文件系统里跑，产物与半成品都留在里面，可整块回滚。轻量面内置，编译环境按需下载。' },
   { icon: 'box', title: '在这台手机上构建 APK', desc: '工具链就绪后走 aapt2 → javac → d8 → 进程内对齐 → 签名，产出可安装的 APK。不需要 Gradle，也不需要另一台电脑。' },
   { icon: 'shield', title: '抗幻觉靠架构', desc: '工具白名单 + 参数门禁三态（允许 / 需要确认 / 拒绝）+ 解析失败绝不猜：不执行，如实回告。' },
+  { icon: 'eye', title: '执行过程看得见', desc: '长任务收进灵动岛：收起是步骤数字轨道，展开是完整待办。该问就问、该批就批，每一次工具调用都留痕可回查。' },
   { icon: 'link', title: '会话严格 append-only', desc: '从不改写历史消息，只往后追加。长会话的代价随轮次几乎不变，云端前缀缓存更稳，上下文压缩也更可预测。' },
   { icon: 'key', title: 'BYOK，Key 不出手机', desc: 'API Key 只存本地安全存储、只出现在请求头里，不进日志。任务随时可中断，也可以排队后再发。' },
-  { icon: 'code', title: '纯 Dart 内核 + Flutter 前端', desc: 'backend/ 是纯 Dart 包，269 项单测不依赖 Flutter 与 Android；设备能力由 Kotlin 桥提供，界面层是 Flutter。' },
+  { icon: 'mic', title: '语音与相机输入', desc: 'SenseVoice 本地识别，点一下把字填进输入框；拍照直接进附件，发出去的图片成图留存、可看大图——识别与成像都在手机上完成。' },
+  { icon: 'code', title: '纯 Dart 内核 + Flutter 前端', desc: 'backend/ 是纯 Dart 包，379 项单测不依赖 Flutter 与 Android；设备能力由 Kotlin 桥提供，界面层是 Flutter。' },
 ]
 
 const STEPS = [
@@ -45,7 +53,7 @@ const STEPS = [
   {
     key: 'talk', label: '说明需求', shot: '/Heracles/shots/chat-v2.webp', title: '像跟人说话一样描述任务',
     body: '说清要改什么，它自己决定调哪些工具。每次调用都是一张可展开的卡片：读了哪个文件、改了哪几行、命令输出是什么，都留在会话里可回查。',
-    points: ['工具调用可展开核对', '改文件给出行级 diff', '随时中断、排队发送'],
+    points: ['工具调用可展开核对', '改文件给出行级 diff', '语音转写、拍照即附'],
   },
   {
     key: 'model', label: '配模型', shot: '/Heracles/shots/modelsheet-v2.webp', title: '模型与思考档位随时切',
@@ -54,8 +62,8 @@ const STEPS = [
   },
   {
     key: 'build', label: '在手机上出包', shot: '/Heracles/shots/perms-v2.webp', title: '权限与构建都在本机完成',
-    body: '设备权限一页看清六项状态与当前执行路由；工具链就绪后即可在手机上完成构建、对齐与签名。手机过热会主动暂停，而不是把任务跑崩。',
-    points: ['六项权限与路由诊断', '进程内对齐并自校验', '温度熔断保护'],
+    body: '设备权限一页看清六项状态与当前执行路由；构建与脚本在沙箱 rootfs 里跑，工具链就绪后在手机上完成对齐与签名。手机过热会主动暂停，而不是把任务跑崩。',
+    points: ['六项权限与路由诊断', '沙箱环境按需下载', '进程内对齐并自校验', '温度熔断保护'],
   },
 ]
 
@@ -70,10 +78,11 @@ const GALLERY = [
   { src: '/Heracles/shots/about-v2.webp', title: '关于', desc: '版本、许可与开源信息' },
 ]
 
-const WORKS = ['会话与守卫（在途结果不串台）', '审批门禁（允许 / 需确认 / 拒绝）', '取消、排队发送、上下文压缩',
-  '设备权限六项总览', '真机宽度下无溢出条纹', '内核 269 项 Dart 单测']
-const LIMITS = ['线上字段的真 Key 验证', 'Anthropic / Responses 两条协议轨', '图片多模态',
-  '在 SAF 工作区内构建', '多机型覆盖', '正式发布签名']
+const WORKS = ['会话与守卫（在途结果不串台）', '审批门禁（允许 / 需确认 / 拒绝）', '待办 / 提问 / 审批 / 切档四面板（真机实测）',
+  '沙箱执行链路（真机端到端）', '本地语音识别、拍照即附', '取消、排队发送、上下文压缩',
+  '设备权限六项总览', '长任务缓存命中 90–96%（真机实测）', '内核 379 项 Dart 单测']
+const LIMITS = ['线上字段的真 Key 验证', 'Anthropic / Responses 两条协议轨', '模型读图（附件已就绪，读图未验）',
+  '在 SAF 工作区内构建', '多机型覆盖', '正式发布签名', '三作用域记忆（重构进行中）']
 
 function Reveal({ children, delay = 0, y = 22, className = '' }) {
   const reduce = useReducedMotion()
@@ -123,8 +132,8 @@ function Hero() {
           </motion.h1>
           <motion.p className="lede" initial={reduce ? false : { opacity: 0, y: 16 }} animate={{ opacity: 1, y: 0 }}
             transition={{ duration: 0.7, delay: 0.12 }}>
-            在 Android 手机上的真实工作区里读代码、改文件、跑命令。接上设备侧工具链后，
-            还能在这台手机上把工程构建成可安装的 APK。模型走你自己的 API Key，手机上不加载任何模型。
+            在 Android 手机上的真实工作区里读代码、改文件、跑命令——构建与脚本走内联沙箱。
+            接上设备侧工具链后，还能在这台手机上把工程构建成可安装的 APK。模型走你自己的 API Key，手机上不加载任何模型。
           </motion.p>
           <motion.div className="cta" initial={reduce ? false : { opacity: 0, y: 16 }} animate={{ opacity: 1, y: 0 }}
             transition={{ duration: 0.7, delay: 0.2 }}>
@@ -202,7 +211,7 @@ function Features() {
     <section className="section" id="features">
       <Reveal>
         <h2 className="section-title">为什么它不只是套壳</h2>
-        <p className="section-sub">该硬的地方都硬：工具门禁、会话模型、本机构建。</p>
+        <p className="section-sub">该硬的地方都硬：沙箱执行、工具门禁、会话模型、本机构建。</p>
       </Reveal>
       <div className="cards">
         {FEATURES.map((f, i) => (
@@ -426,7 +435,7 @@ function Footer() {
           <a href={GITEE} target="_blank" rel="noreferrer">Gitee</a>
           <a href={RELEASES} target="_blank" rel="noreferrer">Releases</a>
           <a href={`${REPO}/blob/master/LICENSE`} target="_blank" rel="noreferrer">License</a>
-          <a href={`${REPO}/blob/master/INTERFACE.md`} target="_blank" rel="noreferrer">接口契约</a>
+          <a href={`${REPO}/blob/master/docs/INTERFACE.md`} target="_blank" rel="noreferrer">接口契约</a>
         </div>
       </div>
       <p className="foot-copy">按「现有状态」提供，不含任何担保 · Copyright © 2026 Theohowie</p>
