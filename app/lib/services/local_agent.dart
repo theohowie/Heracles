@@ -457,7 +457,18 @@ class LocalAgentExecutor {
     if (gate is LocalAskGate) gate.attach(controller.add);
 
     // ---- 能力组装（设备侧）----
-    final caps = buildDeviceCapabilities(workspaceRoot: workspacePath);
+    // ★ 沙箱执行面（2026-10-29）：**只有 App 内才注入**。
+    //
+    // 两个语义必须分清（backend 的路由靠它决定命令去哪跑）：
+    //   · sandbox == null        ⇒ 「这个部署没有沙箱」⇒ 命令走手机 shell
+    //   · sandbox 非 null 未就绪  ⇒ 「接了但没激活」  ⇒ **拒绝执行**
+    //
+    // App 内 Kotlin 桥已注册，所以注入；纯 Dart 测试 / CLI 走默认的 `false`。
+    // 基础 rootfs 是内置的（离线、首次约 0.3 秒解包），不需要用户操作。
+    final caps = buildDeviceCapabilities(
+      workspaceRoot: workspacePath,
+      includeSandbox: true,
+    );
 
     // ---- 模型配置 ----
     final provider = settings.effectiveProvider!; // 调用方已校验非 null
@@ -958,8 +969,10 @@ class LocalAgentExecutor {
               :final toolName,
               :final arguments,
               :final id,
+              :final surface,
+              :final command,
             ):
-            tr.toolRequested(toolName, arguments);
+            tr.toolRequested(toolName, arguments, surface: surface, command: command);
             (pendingArgs[toolName] ??=
                     <({Map<String, dynamic> args, int turn, String id})>[])
                 .add((args: arguments, turn: tr.currentTurn, id: id));
@@ -982,6 +995,7 @@ class LocalAgentExecutor {
               :final isError,
               :final output,
               :final durationMs,
+              :final metadata,
               :final id,
             ):
             final bucket = pendingArgs[toolName];
@@ -996,6 +1010,7 @@ class LocalAgentExecutor {
               output,
               durationMs,
               turn: pending?.turn,
+              metadata: metadata,
             );
             // 本轮用量 + 工具信息齐了 ⇒ 结清成一条 AgentTurn
             tr.settleTurn();
@@ -1436,7 +1451,12 @@ class _Translator {
     ));
   }
 
-  void toolRequested(String toolName, Map<String, dynamic> args) {
+  void toolRequested(
+    String toolName,
+    Map<String, dynamic> args, {
+    String? surface,
+    String? command,
+  }) {
     // ★ 2026-10-22 用户要求：**模型一句话不说的纯工具轮次也要有一行摘要**
     //
     // 用户原话：「肯定要啊，可以多说两句，但不要太多，**以第一人称说**，
@@ -1464,6 +1484,11 @@ class _Translator {
       index: _turn,
       tool: toolName,
       args: args.map((k, v) => MapEntry(k.toString(), v.toString())),
+      // ★ 2026-10-29：执行面 + 命令全文（不截断）。
+      //   前端据此把卡片标题写成「在沙箱 / 在手机执行了命令」，
+      //   并在命令层完整显示命令（长行横向滑，不换行）。
+      surface: surface,
+      command: command,
     ));
   }
 
@@ -1512,6 +1537,7 @@ class _Translator {
     String output,
     int durationMs, {
     int? turn,
+    Map<String, dynamic>? metadata,
   }) {
     _toolLog.add(_ToolRecord(toolName, output, isError, durationMs));
     // 本轮的工具信息（settleTurn 写进 AgentTurn —— 用量面板的步骤回放读它）
@@ -1519,6 +1545,26 @@ class _Translator {
     _curToolArgs = args.map((k, v) => MapEntry(k.toString(), v.toString()));
     _curToolResult = output;
     _curToolOk = !isError;
+
+    // ★ 2026-10-29：工具说"需要先激活能力"（T2 编译环境）⇒ 额外发一帧
+    //   `activation_required`，让界面能弹一张引导卡。
+    //
+    //   为什么单独发一帧、而不是让 UI 从结果文本里猜：
+    //   ① 文本是给模型看的（可能被压缩/改写）；事件才是给 UI 的稳定契约；
+    //   ② UI 要结构化字段（体积、能力 id）才能画「约 415 MB」和按钮。
+    if (metadata?['needsActivation'] == true) {
+      _sink(AgentEvent(
+        type: AgentEvent.kActivationRequired,
+        ts: _now,
+        index: turn ?? _turn,
+        tool: toolName,
+        activationCapability: metadata!['capability'] as String?,
+        activationBytes: (metadata['downloadBytes'] as num?)?.toInt() ?? 0,
+        activationSummary: metadata['summary'] as String?,
+        activationBenefit: metadata['benefit'] as String?,
+      ));
+    }
+
     _sink(AgentEvent(
       type: AgentEvent.kToolFinished,
       ts: _now,
@@ -1541,6 +1587,12 @@ class _Translator {
       result: output,
       ok: !isError,
       wallMs: durationMs,
+      // ★ 2026-10-29：结构化结果字段（前端命令卡右上角要显示退出码，
+      //   截断时必须如实标注）。手机 shell 与沙箱走**同一套字段**。
+      surface: metadata?['surface'] as String?,
+      exitCode: (metadata?['exitCode'] as num?)?.toInt(),
+      truncated: (metadata?['truncated'] as bool?) ?? false,
+      command: metadata?['command'] as String?,
     ));
   }
 

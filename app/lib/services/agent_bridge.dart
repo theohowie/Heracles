@@ -1403,6 +1403,14 @@ class AgentEvent {
     this.cache,
     this.tool,
     this.args,
+    this.surface,
+    this.command,
+    this.exitCode,
+    this.truncated = false,
+    this.activationCapability,
+    this.activationBytes,
+    this.activationSummary,
+    this.activationBenefit,
     this.callId,
     this.workspaceInside,
     this.breakdown,
@@ -1452,6 +1460,44 @@ class AgentEvent {
   // ---- 工具 ----
   final String? tool;
   final Map<String, String>? args;
+
+  /// **这条命令在哪个执行面跑**（2026-10-29）：`'sandbox'` / `'device'`。
+  ///
+  /// - `tool_started`：**预判**（后端按与执行时同一张规则表算出，不是猜的）
+  /// - `tool_finished`：**实际**（执行完的权威值，以它为准）
+  /// - 其它事件 / 不涉及执行的工具：`null`
+  ///
+  /// 前端据此把卡片标题写成「在沙箱执行了命令」/「在手机执行了命令」。
+  final String? surface;
+
+  /// 命令全文（**不截断**）。前端命令层完整显示，长行横向滑。
+  final String? command;
+
+  /// 结构化退出码（`tool_finished`；手机 shell 与沙箱同口径）。
+  ///
+  /// 以前退出码混在结果文本里（`（命令退出码：1）`），前端只能正则抠 ——
+  /// 现在它是字段。`null` = 该工具没有退出码概念（读文件、git 等）。
+  final int? exitCode;
+
+  /// 输出是否被截断（前端要如实标注「输出已截断」）。
+  final bool truncated;
+
+  // ---- activation_required（2026-10-29）----
+  //
+  // 工具因为「缺 T2 编译环境」而没执行时发这一帧。**不是失败事件** ——
+  // 用户点一下激活就能继续，所以单独成一类（UI 弹引导卡，不画红色错误）。
+
+  /// 能力标识（当前只有 `'apk-build'`）。
+  final String? activationCapability;
+
+  /// 预计下载字节数（UI 如实显示，别写"约几十 MB"）。
+  final int? activationBytes;
+
+  /// 一行说明，如 `JDK 17 + Gradle`。
+  final String? activationSummary;
+
+  /// 激活后能做到什么（弹卡时给用户看的收益）。
+  final String? activationBenefit;
 
   /// `approval_required`：框架调用 id（答复 [AgentBridge.replyApproval] 必带回）。
   /// 其余事件为 null。
@@ -1602,6 +1648,9 @@ class AgentEvent {
   static const kTurnStarted = 'turn_started';
   static const kModelOutput = 'model_output';
   static const kToolStarted = 'tool_started';
+  /// **需要激活能力**（2026-10-29）：工具因为缺 T2 编译环境而没执行。
+  /// UI 据此弹引导卡（体积 / 收益 / [激活] 按钮）。
+  static const kActivationRequired = 'activation_required';
   static const kToolFinished = 'tool_finished';
   static const kBlocked = 'blocked';
   static const kFinished = 'finished';

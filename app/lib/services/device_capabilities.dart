@@ -8,6 +8,7 @@ import 'package:heracles_backend/heracles_backend.dart';
 import 'global_memory.dart';
 // 内置 git 的实现（2026-10-28）：`buildDeviceCapabilities` 要注入它。
 import 'git_service.dart';
+import 'sandbox_service.dart';
 
 // ============================================================================
 // 能力契约 —— 直接来自 `backend`（不再是镜像）
@@ -1531,6 +1532,185 @@ class ChannelHealthCapability implements DeviceHealthCapability {
 }
 
 // ============================================================================
+// 3.5 沙箱执行面（内联 PRoot rootfs）—— 2026-10-29
+// ============================================================================
+
+/// **沙箱能力**：把 `run_shell_command` 的命令交给内联 PRoot rootfs 执行。
+///
+/// ## 为什么必须注入它（三种后果都是真的，且都被测试锁住）
+///
+/// | 注入情况 | 路由行为 |
+/// |---|---|
+/// | **不注入**（`caps.sandbox == null`） | 认为「这个部署没有沙箱」⇒ 命令**全走手机 shell** |
+/// | 注入但 rootfs 未就绪 | **拒绝执行**并提示激活（用户裁定：**不回落手机**） |
+/// | 注入且就绪 | 普通命令进沙箱；只有 `pm`/`am`/`dumpsys` 等才去手机 |
+///
+/// ⚠️ 第一条是 2026-10-29 踩过的回归：不注入看着「更安全」，实际等于
+/// **关掉沙箱**，让 agent 在用户不知情下写真实文件系统。
+///
+/// ## T0 自动就绪 —— 不需要用户做任何事
+///
+/// 基础 rootfs **内置在 APK** 里（3.77 MB 压缩 → 9 MB，首次解包约 0.3 秒、**不需要网络**），
+/// 所以 [ensureReady] 直接替用户完成 T0。
+///
+/// 用户主动「激活」的是 **T2**（JDK + Gradle，≈440 MB，编 APK 才需要），与这里无关 ——
+/// 那一步由 `CapabilityNeedsActivation` 引导，不在本类职责内。
+class ChannelSandboxCapability implements SandboxCapability {
+  ChannelSandboxCapability({SandboxService? service})
+      : _sandbox = service ?? SandboxService();
+
+  final SandboxService _sandbox;
+
+  /// T0 就绪缓存（避免每条命令都打一次 IPC 查状态）。
+  bool? _ready;
+
+  /// 确保 T0 就绪：没装就用**内置** rootfs 解包（离线、幂等）。
+  ///
+  /// 为什么不是"只在构造时做一次"：构造发生在装配阶段，那时可能还没有
+  /// `filesDir`（测试/CLI 环境）；懒到此处在真正的执行链路上做更稳。
+  Future<bool> ensureReady() async {
+    if (_ready == true) return true;
+    var st = await _sandbox.status();
+    if (!st.installed) {
+      // T0：只解包内置 rootfs，不下载任何东西
+      st = await _sandbox.activate();
+    }
+    _ready = st.ready;
+    return _ready!;
+  }
+
+  @override
+  Future<bool> isReady() => ensureReady();
+
+  @override
+  Future<CapabilityResult> run(
+    String command, {
+    Duration timeout = const Duration(minutes: 5),
+    void Function(String chunk)? onOutput,
+  }) async {
+    if (!await ensureReady()) {
+      return const CapabilityFailure(
+        '沙箱基础环境未能就绪（内置 rootfs 解包失败）。'
+        '请检查设备存储空间，或在设置里重置沙箱后重试。',
+        isRetryable: true,
+      );
+    }
+
+    final stdoutBuf = StringBuffer();
+    final stderrBuf = StringBuffer();
+    final done = Completer<SandboxExecResult>();
+    final failed = Completer<SandboxExecError>();
+    final subs = <StreamSubscription<Object?>>[];
+
+    void finishIfPending() {
+      if (!done.isCompleted && !failed.isCompleted) return;
+    }
+
+    subs.add(_sandbox.outputStream.listen((c) {
+      if (c.isProgress || c.chunk.isEmpty) return;
+      if (c.isStderr) {
+        stderrBuf.write(c.chunk);
+      } else {
+        stdoutBuf.write(c.chunk);
+      }
+      onOutput?.call(c.chunk);
+      finishIfPending();
+    }));
+    subs.add(_sandbox.doneStream.listen((d) {
+      if (!done.isCompleted && !failed.isCompleted) done.complete(d.result);
+    }));
+    subs.add(_sandbox.errorStream.listen((e) {
+      if (!done.isCompleted && !failed.isCompleted) failed.complete(e);
+    }));
+
+    try {
+      final submit = await _sandbox.execute(
+        command,
+        timeoutMs: timeout.inMilliseconds,
+      );
+      if (!submit.ok) {
+        return CapabilityFailure(submit.error ?? '沙箱拒绝了这次执行', isRetryable: true);
+      }
+
+      // 两侧都不带 id 时无法配对 —— 单飞场景下这样够用，但如实记在 KDoc 里。
+      final SandboxExecResult result;
+      try {
+        result = await Future.any<SandboxExecResult>([
+          done.future,
+          failed.future.then<SandboxExecResult>(
+            (e) => throw _SandboxRunFailure(e),
+          ),
+        ]).timeout(timeout + const Duration(seconds: 30));
+      } on TimeoutException {
+        return CapabilityFailure(
+          '沙箱命令超时（${timeout.inSeconds}s）—— 已在沙箱侧取消',
+          isRetryable: true,
+        );
+      } on _SandboxRunFailure catch (e) {
+        return CapabilityFailure(
+          '沙箱执行失败（code=${e.error.code}）：${e.error.message}',
+          isRetryable: e.error.code == 2,
+        );
+      }
+
+      // 输出为空时也要给一句可读的话（模型不能收到空白）
+      final text = [
+        stdoutBuf.toString(),
+        if (stderrBuf.isNotEmpty) '[stderr]\n${stderrBuf.toString()}',
+      ].where((s) => s.isNotEmpty).join('\n');
+
+      if (result.timedOut) {
+        return CapabilityFailure(
+          '沙箱命令超时（${timeout.inSeconds}s）${text.isEmpty ? '' : '\n$text'}',
+          isRetryable: true,
+        );
+      }
+
+      return CapabilitySuccess(
+        text.isEmpty ? '（命令无输出，退出码 ${result.exitCode}）' : text,
+        metadata: {
+          'surface': 'sandbox',
+          'command': command,
+          'exitCode': result.exitCode,
+          'durationMs': result.durationMs,
+          'truncated': result.truncated,
+          'timedOut': result.timedOut,
+        },
+      );
+    } finally {
+      for (final s in subs) {
+        await s.cancel();
+      }
+    }
+  }
+
+  @override
+  Future<CapabilityResult> reset({String snapshot = ''}) async {
+    final st = await _sandbox.reset(snapshot: snapshot);
+    // ★ 判成败看 `installed`，不看 `ready`（= installed && prootReady）：
+    //   reset 的语义是"rootfs 装好了没有"，PRoot 二进制是 APK 带来的、与重置无关。
+    //   早期 Kotlin 回包不带 `prootReady`，用 ready 判会**永远报失败**（单测抓到）。
+    _ready = null; // 重置后作废缓存，下次 ensureReady 重新探测
+    if (!st.installed) {
+      return CapabilityFailure(
+        '重置后沙箱未就绪（rootfs 摘要：${st.rootfsSummary}）—— 请重试或检查存储空间',
+        isRetryable: true,
+      );
+    }
+    return CapabilitySuccess(
+      snapshot.isEmpty ? '已重置：清空并重装基础环境' : '已回滚到快照 `$snapshot`',
+      metadata: {'installed': st.installed, 'summary': st.rootfsSummary},
+    );
+  }
+}
+
+/// 包一层，把 [SandboxExecError] 变成可 `throw` 的异常（`Future.any` 需要）。
+class _SandboxRunFailure implements Exception {
+  const _SandboxRunFailure(this.error);
+  final SandboxExecError error;
+}
+
+// ============================================================================
 // 4. APK 构建 / 逆向 —— **本轮明确"未实现"**
 // ============================================================================
 
@@ -1563,7 +1743,30 @@ class ChannelHealthCapability implements DeviceHealthCapability {
 /// → ③ 这里的方法体换成 `_ch.call('apk.build', …)`。
 /// **接口签名已经对上，接线时不需要改这 5 个方法以外的任何东西。**
 class DeviceApkCapability implements ApkCapability {
-  const DeviceApkCapability();
+  const DeviceApkCapability({this.sandbox});
+
+  /// 沙箱服务（用来判断 T2 编译环境装没装）。
+  ///
+  /// 为什么要它：T2 没装时**不能**回「未实现」（用户会以为没这个功能），
+  /// 而要回 [CapabilityNeedsActivation] —— 那条会弹引导卡，用户点一下就继续。
+  final SandboxService? sandbox;
+
+  /// T2 需要的下载量（与 Kotlin `ToolchainActivation.REQUIRED_BYTES` 对齐）。
+  static const int t2Bytes = 500 * 1024 * 1024;
+
+  /// 统一入口：先看编译环境，再决定回什么。
+  Future<CapabilityResult> _gate() async {
+    final sb = sandbox;
+    if (sb == null) return _notImplemented;
+    final st = await sb.buildSuiteStatus();
+    if (st.ready) return _notImplemented; // 环境齐了，但工具接线还没做
+    return CapabilityNeedsActivation(
+      capability: 'apk-build',
+      downloadBytes: t2Bytes,
+      summary: 'JDK 17 + Gradle + android.jar',
+      benefit: '可以在沙箱内直接编译 APK（装好后编译不再需要联网）',
+    );
+  }
 
   /// 统一的原因文本。
   ///
@@ -1603,10 +1806,10 @@ class DeviceApkCapability implements ApkCapability {
   }
 
   @override
-  Future<CapabilityResult> sign(String apkPath) async => _notImplemented;
+  Future<CapabilityResult> sign(String apkPath) async => _gate();
 
   @override
-  Future<CapabilityResult> install(String apkPath) async => _notImplemented;
+  Future<CapabilityResult> install(String apkPath) async => _gate();
 }
 
 // ============================================================================
@@ -2187,6 +2390,18 @@ Capabilities buildDeviceCapabilities({
   bool includeMemory = true,
   bool includeHealth = true,
   bool includeGit = true,
+  /// 是否注入沙箱执行面（**默认关**，见下）。
+  ///
+  /// ## 为什么默认 `false`
+  ///
+  /// `caps.sandbox == null` 的语义是「**这个部署没有沙箱**」⇒ 命令走手机 shell。
+  /// 而 `sandbox != null` 但未就绪的语义是「**接了但没激活**」⇒ 命令被**拒绝**。
+  ///
+  /// 测试 / CLI / 任何拿不到 `heracles/sandbox` 通道的环境都必须保持 `false`，
+  /// 否则一条 IPC 失败就会让**所有 shell 命令被拒**（2026-10-29 实测过的回归）。
+  /// 真机上由 `local_agent` 显式传 `true`。
+  bool includeSandbox = false,
+  SandboxService? sandboxService,
 }) {
   final ch = channel ?? const DeviceChannelClient();
   return Capabilities(
@@ -2215,6 +2430,12 @@ Capabilities buildDeviceCapabilities({
     //    不传的话会按进程 CWD（Android 上是 /）解析 ⇒ 全部失败。
     //    （真机证据见 GitService.workspaceRoot 的注释）
     git: includeGit ? GitService(workspaceRoot: workspaceRoot) : null,
+    // ★ 沙箱执行面（2026-10-29）。默认不注入 —— 见 [includeSandbox] 的 KDoc：
+    //   `null` = "没有沙箱"，`非 null 未就绪` = "接了但没激活（拒绝执行）"。
+    //   这两个语义不能混，否则一条 IPC 失败会把所有 shell 命令挡死。
+    sandbox: includeSandbox
+        ? ChannelSandboxCapability(service: sandboxService)
+        : null,
   );
 }
 

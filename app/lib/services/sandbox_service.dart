@@ -1,4 +1,4 @@
-﻿// Copyright (C) 2026 The Heracles Authors
+// Copyright (C) 2026 The Heracles Authors
 // SPDX-License-Identifier: GPL-3.0
 //
 // ============================================================================
@@ -416,6 +416,42 @@ class SandboxService {
     return SandboxSubmit.submitted((raw['id'] as String?) ?? '');
   }
 
+  // -------------------------------------------------------------- T2 编译环境
+
+  /// T2 编译环境状态（**只读**，不触发下载）。
+  Future<SandboxBuildSuiteStatus> buildSuiteStatus() async {
+    final raw = await _client.call('buildSuiteStatus');
+    return SandboxBuildSuiteStatus(
+      ready: (raw['ready'] as bool?) ?? false,
+      version: (raw['version'] as String?) ?? '',
+      parts: ((raw['parts'] as Map?) ?? const {}).map(
+        (k, v) => MapEntry(k.toString(), v == true),
+      ),
+      error: raw['ok'] == true ? null : (raw['error'] as String?) ?? '查询失败',
+    );
+  }
+
+  /// **激活 T2 编译环境**（≈415 MB，幂等 + 单飞 + 断点续传）。
+  ///
+  /// 进度走 [outputStream]（`isProgress` 的帧），所以调用前先进监听。
+  /// 这是**用户主动**操作：UI 必须先说明体积并二次确认。
+  Future<SandboxActivationResult> activateBuildSuite() async {
+    attachOutputChannel();
+    final raw = await _client.call('activateBuildSuite');
+    return SandboxActivationResult(
+      ok: raw['ok'] == true,
+      message: (raw['message'] as String?) ?? '',
+      alreadyReady: (raw['alreadyReady'] as bool?) ?? false,
+      ready: (raw['ready'] as bool?) ?? false,
+    );
+  }
+
+  /// 清掉 T2（只动编译环境，不碰 T0 基础环境 / T1 工具）。
+  Future<bool> resetBuildSuite() async {
+    final raw = await _client.call('resetBuildSuite');
+    return raw['ok'] == true;
+  }
+
   // -------------------------------------------------------------- 文件
 
   /// 读文件。`path` 可以是 `@name/...`，也可以是宿主绝对路径。
@@ -620,4 +656,48 @@ class SandboxSnapshotResult {
   final String? error;
 
   bool get ok => error == null;
+}
+
+/// T2 编译环境状态。
+class SandboxBuildSuiteStatus {
+  const SandboxBuildSuiteStatus({
+    required this.ready,
+    required this.version,
+    required this.parts,
+    required this.error,
+  });
+
+  /// 三项（jdk / gradle / androidJar）都齐了才为 true。
+  final bool ready;
+
+  /// 内容版本标记（改了组件会变，据此提示"需重新激活"）。
+  final String version;
+
+  /// 分项状态，如 `{jdk: true, gradle: false, androidJar: false}`。
+  final Map<String, bool> parts;
+
+  final String? error;
+
+  bool get ok => error == null;
+
+  /// 缺哪一项（UI 要如实说"缺 Gradle"，而不是笼统说"未就绪"）。
+  List<String> get missing => parts.entries.where((e) => !e.value).map((e) => e.key).toList();
+}
+
+/// T2 激活结果。
+class SandboxActivationResult {
+  const SandboxActivationResult({
+    required this.ok,
+    required this.message,
+    required this.alreadyReady,
+    required this.ready,
+  });
+
+  final bool ok;
+  final String message;
+
+  /// 已经装过、直接复用的（不是本次装的）。
+  final bool alreadyReady;
+
+  final bool ready;
 }

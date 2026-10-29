@@ -331,4 +331,56 @@ void main() {
       }
     });
   });
+  group('T2 编译环境（≈415 MB，用户主动激活）', () {
+    test('★ 状态解码：缺哪项要说清（不能笼统说"未就绪"）', () async {
+      mockSandbox((call) async {
+        expect(call.method, 'buildSuiteStatus');
+        return <String, Object?>{
+          'ok': true,
+          'ready': false,
+          'version': '',
+          'installDir': '/data/x/opt/t2',
+          'parts': <String, Object?>{'jdk': false, 'gradle': false, 'androidJar': false},
+        };
+      });
+      final s = SandboxService();
+      final st = await s.buildSuiteStatus();
+
+      expect(st.ready, isFalse);
+      expect(st.missing, containsAll(<String>['jdk', 'gradle', 'androidJar']));
+      expect(st.ok, isTrue, reason: '查询成功但未就绪 ≠ 查询失败');
+    });
+
+    test('★ 激活结果解码（alreadyReady 要与本次安装区分）', () async {
+      mockSandbox((call) async {
+        expect(call.method, 'activateBuildSuite');
+        return <String, Object?>{
+          'ok': true,
+          'message': '编译环境已就绪（无需重复安装）',
+          'alreadyReady': true,
+          'ready': true,
+        };
+      });
+      final s = SandboxService();
+      final r = await s.activateBuildSuite();
+
+      expect(r.ok, isTrue);
+      expect(r.ready, isTrue);
+      expect(r.alreadyReady, isTrue, reason: 'UI 据此显示"已安装"而不是"安装成功"');
+    });
+
+    test('★ 激活失败时 message 原样带回（不吞掉原因）', () async {
+      mockSandbox((call) async => <String, Object?>{
+            'ok': false,
+            'message': '存储空间不足：需要约 500 MB，当前可用 120 MB',
+            'alreadyReady': false,
+            'ready': false,
+          });
+      final s = SandboxService();
+      final r = await s.activateBuildSuite();
+
+      expect(r.ok, isFalse);
+      expect(r.message, contains('存储空间不足'));
+    });
+  });
 }

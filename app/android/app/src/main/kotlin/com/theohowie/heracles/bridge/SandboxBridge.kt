@@ -136,6 +136,81 @@ class SandboxBridge(
     private var outputChannel: MethodChannel? = null
     private var executionCounter = 0
 
+    /**
+     * **T2 编译环境**（≈415 MB）的激活器（2026-10-29）。
+     *
+     * 直接基于 `core` 构建 —— 本桥只持有 `SandboxServiceCore`，没有
+     * `SandboxFacade`。与沙箱 demo 的 Facade 用的是**同一个**
+     * `ToolchainActivation` 实现，行为一致。
+     */
+    private val toolchain: com.heracles.sandbox.runtime.ToolchainActivation by lazy {
+        com.heracles.sandbox.runtime.ToolchainActivation(
+            rootfsHostRoot = File(
+                core.rootfs.rootfsHostPath() ?: File(baseDir, "rootfs").absolutePath,
+            ),
+            runInSandbox = { command, timeoutMs ->
+                val out = StringBuilder()
+                val err = StringBuilder()
+                val res = runBlocking {
+                    core.executeAndWait(
+                        ExecutionRequest(
+                            command = command,
+                            workingDirectory = "/",
+                            timeoutMillis = timeoutMs,
+                        ),
+                        object : com.heracles.sandbox.runtime.ExecutionSink {
+                            override fun onOutput(stream: Int, chunk: String, sequence: Long) {
+                                if (stream ==
+                                    com.heracles.sandbox.runtime.ExecutionSink.STREAM_STDERR
+                                ) {
+                                    err.append(chunk)
+                                } else {
+                                    out.append(chunk)
+                                }
+                            }
+
+                            override fun onProgress(percent: Int, message: String) = Unit
+                            override fun onExit(result: ExecutionResult) = Unit
+                            override fun onError(code: Int, message: String) = Unit
+                            override fun isCancelled(): Boolean = false
+                        },
+                    )
+                }
+                com.heracles.sandbox.runtime.ToolchainActivation.CommandOutcome(
+                    exitCode = res.exitCode,
+                    stdout = out.toString().ifBlank { res.stdout },
+                    stderr = err.toString().ifBlank { res.stderr },
+                )
+            },
+        )
+    }
+
+    /** 生成一个新的流式任务 id（执行与 T2 激活共用同一命名空间，避免混淆）。 */
+    private fun nextExecutionId(): String = "sbx-${++executionCounter}"
+
+    /**
+     * 推一帧进度到流式通道（T2 下载用）。
+     *
+     * Dart 侧按 `percent` + `message` 读（见 `SandboxOutputChunk`）。
+     * `total <= 0` 时传 `percent = -1`（不确定进度）—— 界面应显示不确定态，
+     * **不要**画一个假的百分比。
+     */
+    private fun emitProgress(id: String, done: Long, total: Long, stage: String) {
+        val percent = if (total > 0) ((done * 100) / total).toInt() else -1
+        val mb = { b: Long -> "%.1f".format(b / 1024.0 / 1024.0) }
+        val message = if (total > 0) {
+            "$stage ${mb(done)} / ${mb(total)} MB"
+        } else {
+            "$stage ${mb(done)} MB"
+        }
+        mainHandler.post {
+            outputChannel?.invokeMethod(
+                "progress",
+                mapOf("id" to id, "percent" to percent, "message" to message),
+            )
+        }
+    }
+
     init {
         // ★ rootfs 已经装过时（比如上次运行装好的），`activateRootfs()` 会提前返回，
         //   默认挂载点就永远不会注册 —— 真机上表现为 `@workspace` 报「未注册」。
@@ -359,6 +434,14 @@ class SandboxBridge(
                                 "ok" to true,
                                 "installed" to st.installed,
                                 "rootfsSummary" to rootfsSummary(),
+                                // ★ 必须带上：Dart 侧 `_statusFrom` 用 installed && prootReady
+                                //   判「就绪」，少了它重置后会被误判成未就绪
+                                //   （2026-10-29 单测抓到）。
+                                "prootReady" to File(
+                                    context.applicationInfo.nativeLibraryDir,
+                                    "libproot.so",
+                                ).isFile,
+                                "channels" to channelsMaps(),
                             )
                         },
                         onFailure = { e -> failure(e.message ?: e.javaClass.simpleName) },
@@ -384,6 +467,64 @@ class SandboxBridge(
                         onFailure = { e -> failure(e.message ?: e.javaClass.simpleName) },
                     ))
                 }
+            }
+
+            // ---- T2 编译环境（≈415 MB，用户主动激活）—— 2026-10-29 ----
+            //
+            // ⚠️ 这三条**不在 AIDL 契约里**：沙箱的 AIDL 只允许新增
+            //    registerMount / listMounts（用户 2026-10-28 裁定）。
+            //    这里是 Heracles 自己的桥，通过 Kotlin 直调 `SandboxFacade` 完成，
+            //    Dart 侧只负责「触发 + 收进度」。
+            "buildSuiteStatus" -> scope.launch {
+                val st = withContext(Dispatchers.IO) {
+                    runCatching { toolchain.status() }
+                }
+                reply(result, st.fold(
+                    onSuccess = { s ->
+                        mapOf(
+                            "ok" to true,
+                            "ready" to s.ready,
+                            "version" to s.version,
+                            "installDir" to s.installDir,
+                            "parts" to s.parts,
+                        )
+                    },
+                    onFailure = { e -> failure(e.message ?: e.javaClass.simpleName) },
+                ))
+            }
+
+            "activateBuildSuite" -> {
+                // 进度推到流式通道，UI 才能画进度条（415 MB 不能干等）
+                val progressId = nextExecutionId()
+                scope.launch {
+                    val r = withContext(Dispatchers.IO) {
+                        runCatching {
+                            toolchain.activate { done, total, stage ->
+                                emitProgress(progressId, done, total, stage)
+                            }
+                        }
+                    }
+                    reply(result, r.fold(
+                        onSuccess = { a ->
+                            mapOf(
+                                "ok" to a.success,
+                                "message" to a.message,
+                                "alreadyReady" to a.alreadyReady,
+                                "ready" to (a.status?.ready ?: false),
+                                "parts" to (a.status?.parts ?: emptyMap<String, Boolean>()),
+                            )
+                        },
+                        onFailure = { e -> failure(e.message ?: e.javaClass.simpleName) },
+                    ))
+                }
+            }
+
+            "resetBuildSuite" -> scope.launch {
+                val r = withContext(Dispatchers.IO) { runCatching { toolchain.reset() } }
+                reply(result, r.fold(
+                    onSuccess = { ok -> mapOf("ok" to true, "cleared" to ok) },
+                    onFailure = { e -> failure(e.message ?: e.javaClass.simpleName) },
+                ))
             }
 
             else -> reply(result, failure("未知方法：${call.method}"))
@@ -442,7 +583,7 @@ class SandboxBridge(
         usePty: Boolean,
         result: MethodChannel.Result,
     ) {
-        val id = "sbx-${++executionCounter}"
+        val id = nextExecutionId()
         // 立即回一个 id，真正的结果走 output 通道 + 最后的 done 通知
         reply(result, mapOf("ok" to true, "id" to id))
 
