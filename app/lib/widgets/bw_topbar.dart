@@ -181,11 +181,26 @@ class _DynamicIslandState extends State<DynamicIsland>
                     ),
                   ),
                   const SizedBox(width: 7),
-                  // ★ 收起态不放步骤文字（2026-10-26 用户令「灵动岛
-                  // 要短的」+ HTML 预览拍板）：那句话最长能把胶囊撑
-                  // 到 280，收起时只留呼吸点 + 进度，胶囊约 62 宽、
-                  // 一颗短药丸；步骤文字只在展开面板的标题行里出现。
-                  if (!widget.collapsed) ...[
+                  // ★ 收起态 = **步骤数字轨道**（2026-10-29 用户重定义）。
+                  //
+                  // 用户原话：「收起来了，这么长的灵动岛就一个几分之几，
+                  // 然后其他的全是黑色，很丑好吗，那我要灵动岛干什么呢？」
+                  //
+                  // 旧的收起态只写「2/5」⇒ 168dp 的胶囊里大半是空黑底。
+                  // 现在把 1→2→3→…→N 铺在收起态里：
+                  //   · 当前步：**变大 + 黄色**    · 已完成：**绿色**    · 未到：暗灰
+                  //   · 放不下时**自动横向滚动**；滚出视口的部分由 ListView 自己裁切，
+                  //     数字绝不会画到胶囊外面（用户明确要求）。
+                  if (widget.collapsed)
+                    _StepTrack(
+                      steps: widget.steps.length,
+                      doneCount: widget.doneCount,
+                      activeIndex: widget.activeIndex,
+                      cancelled: widget.cancelledIndices,
+                      color: fg,
+                      dim: dim,
+                    )
+                  else ...[
                     Flexible(
                       child: Text(
                         _current,
@@ -199,12 +214,10 @@ class _DynamicIslandState extends State<DynamicIsland>
                       ),
                     ),
                     const SizedBox(width: 6),
-                  ],
-                  Text(
-                    '${widget.doneCount}/${widget.steps.length}',
-                    style: TextStyle(fontSize: 11, color: dim),
-                  ),
-                  if (!widget.collapsed) ...[
+                    Text(
+                      '${widget.doneCount}/${widget.steps.length}',
+                      style: TextStyle(fontSize: 11, color: dim),
+                    ),
                     const SizedBox(width: 4),
                     Icon(Icons.keyboard_arrow_up, size: 14, color: dim),
                   ],
@@ -619,3 +632,152 @@ class _PlainToolLineState extends State<PlainToolLine> {
     );
   }
 }
+
+/// **收起态步骤轨道**（2026-10-29 用户重定义）。
+///
+/// ## 用户要的效果（原话）
+///
+/// > 「我现在想在收起的状态上，上面做好 1，2，3，4……最后一步。
+/// >  当进行第一步的时候，1 数字变大，且变为黄色，做完了第一步，1 就变成绿色，
+/// >  随之 2 变大且变成黄色，以此类推。数字和数字之间有 -> 来连接。
+/// >  如果溢出了，那就有自动滚动的效果…… 把 1 向左移出灵动岛隐藏
+/// >  （不能出现在灵动岛外面），然后把 5 展示出来。」
+///
+/// ## 为什么用固定步宽（[kStepSlotExtent]）
+///
+/// 自动滚动要算"当前步应该滚到哪"。若每项宽度随字号/位数变化，就得先布局再测量，
+/// 会闪一帧。固定步宽让偏移量可以直接算：`active * extent - 居中修正`，
+/// 配合 `animateTo` 就是丝滑滑动。
+///
+/// ## 裁切
+///
+/// `ListView` 默认 `clipBehavior: Clip.hardEdge` ⇒ 滚出视口的数字**不会**画到胶囊外。
+class _StepTrack extends StatefulWidget {
+  const _StepTrack({
+    required this.steps,
+    required this.doneCount,
+    required this.activeIndex,
+    required this.cancelled,
+    required this.color,
+    required this.dim,
+  });
+
+  final int steps;
+  final int doneCount;
+  final int activeIndex;
+  final Set<int> cancelled;
+  final Color color;
+  final Color dim;
+
+  @override
+  State<_StepTrack> createState() => _StepTrackState();
+}
+
+/// 每一步占的宽度（含箭头）。
+const double kStepSlotExtent = 36;
+
+/// 收起态轨道视口宽度：约 4.4 步 ⇒ 用户说的"只可以放下 4 个数字"。
+const double kStepTrackWidth = 144;
+
+/// 当前步：黄色；已完成：绿色。
+const _kActiveYellow = Color(0xFFF59E0B);
+const _kDoneGreen = Color(0xFF22C55E);
+
+class _StepTrackState extends State<_StepTrack> {
+  final _ctrl = ScrollController();
+
+  @override
+  void initState() {
+    super.initState();
+    WidgetsBinding.instance.addPostFrameCallback((_) => _scrollToActive(animate: false));
+  }
+
+  @override
+  void didUpdateWidget(_StepTrack old) {
+    super.didUpdateWidget(old);
+    if (old.activeIndex != widget.activeIndex || old.steps != widget.steps) {
+      _scrollToActive(animate: true);
+    }
+  }
+
+  @override
+  void dispose() {
+    _ctrl.dispose();
+    super.dispose();
+  }
+
+  /// 把当前步滚到视口**中间**（首尾自动夹紧，不会滚过头）。
+  void _scrollToActive({required bool animate}) {
+    if (!_ctrl.hasClients) return;
+    final max = _ctrl.position.maxScrollExtent;
+    final target = (widget.activeIndex * kStepSlotExtent -
+            (kStepTrackWidth - kStepSlotExtent) / 2)
+        .clamp(0.0, max);
+    if (animate) {
+      _ctrl.animateTo(target,
+          duration: const Duration(milliseconds: 320), curve: _kFluidSizeCurve);
+    } else {
+      _ctrl.jumpTo(target);
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return SizedBox(
+      width: kStepTrackWidth,
+      height: 24,
+      child: ListView.builder(
+        controller: _ctrl,
+        scrollDirection: Axis.horizontal,
+        physics: const NeverScrollableScrollPhysics(), // 只自动滚，不许用户拖
+        itemExtent: kStepSlotExtent,
+        itemCount: widget.steps,
+        itemBuilder: (context, i) {
+          final isActive = i == widget.activeIndex;
+          final isDone = i < widget.doneCount;
+          final isCancelled = widget.cancelled.contains(i);
+          final color = isCancelled
+              ? widget.dim
+              : isActive
+                  ? _kActiveYellow
+                  : isDone
+                      ? _kDoneGreen
+                      : widget.dim.withValues(alpha: 0.45);
+          return Row(
+            mainAxisAlignment: MainAxisAlignment.center,
+            children: [
+              // 数字：当前步**变大**（15 vs 12），其余保持小号，避免整行跳动
+              Text(
+                '${i + 1}',
+                style: TextStyle(
+                  // ★ 两位数步号（≥10 步）自动缩字号：否则 1 格放不下，会 RenderFlex 溢出（真机 6.3px）
+                  fontSize: isActive
+                      ? (widget.steps >= 10 ? 12.5 : 14)
+                      : (widget.steps >= 10 ? 9.5 : 11),
+                  fontWeight: isActive ? FontWeight.w800 : FontWeight.w600,
+                  color: color,
+                  height: 1.0,
+                  decoration: isCancelled ? TextDecoration.lineThrough : null,
+                ),
+              ),
+              // 步骤之间用 → 连接（最后一个不加）
+              if (i != widget.steps - 1)
+                Padding(
+                  padding: const EdgeInsets.only(left: 1),
+                  child: Text(
+                    '→',
+                    style: TextStyle(
+                      fontSize: widget.steps >= 10 ? 7.5 : 8.5,
+                      color: widget.dim.withValues(alpha: 0.5),
+                      height: 1.0,
+                    ),
+                  ),
+                ),
+            ],
+          );
+        },
+      ),
+    );
+  }
+}
+
