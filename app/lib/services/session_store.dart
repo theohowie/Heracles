@@ -198,6 +198,11 @@ class SessionStore {
     _dirsEnsured = true;
     await _ch.call('fs.mkdir', <String, Object?>{'path': '$_root/$_storeRel'});
     await _ch.call('fs.mkdir', <String, Object?>{'path': '$_root/$_dirRel'});
+    // 2026-10-29（记忆三作用域）：记忆目录也由 App 预建。
+    // 不建的话「第一次写记忆」会依赖宿主顺手建父目录 —— 会话目录踩过
+    // 同一个坑（真机上静默失败，见上）。
+    await _ch.call('fs.mkdir', <String, Object?>{'path': memoryDirPath});
+    await _ch.call('fs.mkdir', <String, Object?>{'path': '$_root/$_memorySessionDirRel'});
   }
 
   /// **长会话只加载最近这么多条**（2026-10-23）。
@@ -247,7 +252,57 @@ class SessionStore {
   String get indexPath => '$_root/$_indexRel';
 
   /// 某个会话的消息文件绝对路径。
-  String messagesPath(String sessionId) => '$_root/$_dirRel/$sessionId.jsonl';
+  ///
+  /// ⚠️ id 非法（空 / 含路径分隔符 / 含 `..` / NUL / 绝对路径）⇒ 抛
+  /// [ArgumentError]（**拒绝拼路径**，防目录穿越）。
+  String messagesPath(String sessionId) =>
+      '$_root/$_dirRel/${_checkedSessionId(sessionId)}.jsonl';
+
+  /// 记忆目录（三作用域重设计，2026-10-29）。
+  ///
+  /// 记忆**绝不写进会话正文**（那是 append-only 的历史，见文件头纪律）；
+  /// workspace/session 作用域在 `<工作区>/.heracles/memory/` 下单独成文件，
+  /// 可以安全 compact（墓碑折叠）。
+  static const String _memoryDirRel = '.heracles/memory';
+
+  /// 会话私有记忆目录（相对 `_memoryDirRel`）。
+  static const String _memorySessionDirRel = '$_memoryDirRel/session';
+
+  /// 记忆目录绝对路径。
+  String get memoryDirPath => '$_root/$_memoryDirRel';
+
+  /// 某会话的私有记忆文件绝对路径（`<ws>/.heracles/memory/session/<sid>.jsonl`）。
+  ///
+  /// ⚠️ id 非法 ⇒ 抛 [ArgumentError]（**拒绝拼路径**）：本方法会被
+  /// 「删会话时清记忆」调用，路径穿越在这里必须挡住。
+  String sessionMemoryPath(String sessionId) =>
+      '$_root/$_memorySessionDirRel/${_checkedSessionId(sessionId)}.jsonl';
+
+  /// 记忆派生索引（可重建，绝不当真源；见 INTERFACE §N12.3）。
+  String get memoryIndexPath => '$_root/$_memoryDirRel/index.json';
+
+  /// **宽松穿越闸**（2026-10-29 用户裁定）：只拒绝**会改变路径语义**的 id。
+  ///
+  /// 为什么**不用**严格 `^s[0-9]{10,16}$`：`_newId()` 在 1000 次撞号后会生成
+  /// `s<毫秒>-<5位>` 这类**合法**兜底 id —— 严格正则会把它们误伤成"永远删不掉
+  /// 记忆/消息文件"。所以只拦真正危险的东西：
+  /// 空串、路径分隔符（`/` `\`）、`..`、NUL、绝对路径。
+  static String _checkedSessionId(String sessionId) {
+    final sid = sessionId.trim();
+    final illegal = sid.isEmpty ||
+        sid.startsWith('/') ||
+        sid.contains('/') ||
+        sid.contains('\\') ||
+        sid.contains('..') ||
+        sid.contains('\u0000');
+    if (illegal) {
+      throw ArgumentError(
+        '会话 id 非法（空串 / 含路径分隔符 / 含 `..` / NUL / 绝对路径）：'
+        '`$sessionId` —— 拒绝拼文件路径（防目录穿越）。',
+      );
+    }
+    return sid;
+  }
 
   static String _normalizeRoot(String raw) {
     final t = raw.trim().replaceAll('\\', '/');
@@ -276,6 +331,27 @@ class SessionStore {
   Future<List<SessionMeta>> listSessions() async {
     final read = await _readIndex();
     return _sorted(read.items);
+  }
+
+  /// **会话是否存在**（2026-10-29，记忆寻址第 3 步的锚点）。
+  ///
+  /// `ScopedMemoryService` 的 `hasSession` 回调就接这里（它只拿到
+  /// `(workspacePath, sessionId)`，不 import 本类 —— 避免循环依赖）。
+  /// 索引损坏/读不出来 ⇒ `false`（fail-closed：宁可不读会话记忆，
+  /// 也不把"读不出索引"当成"会话存在"而张冠李戴）。
+  Future<bool> hasSession(String sessionId) async {
+    final String sid;
+    try {
+      sid = _checkedSessionId(sessionId);
+    } on ArgumentError {
+      // 非法 id 直接 false（fail-closed；绝不拿它去查/拼）
+      return false;
+    }
+    final list = await listSessions();
+    for (final m in list) {
+      if (m.id == sid) return true;
+    }
+    return false;
   }
 
   /// 列出会话并**带失败原因**（给"索引读不出来"要如实告警的场合）。
@@ -385,17 +461,89 @@ class SessionStore {
       return false;
     }
     final ok = await _writeIndex(remaining);
-    // 删文件（`recursive: false`：它是文件，不是目录）
-    final del = await _ch.call('fs.delete', <String, Object?>{
-      'path': messagesPath(sessionId),
-      'recursive': false,
-    });
-    final delErr = errorOf(del);
-    if (delErr != null && !delErr.contains('不存在')) {
-      lastError = '会话索引已更新，但消息文件删不掉：$delErr '
-          '（残留文件：${messagesPath(sessionId)}）';
+    // 删文件（`recursive: false`：它是文件，不是目录）。
+    //
+    // ★ 防穿越：`sessions.json` 若被污染成 `../evil`，messagesPath 会抛
+    //   ArgumentError。这里**不拼路径、不删任何文件**，只记错误继续往下走
+    //   （索引已改；"少删一个坏 id 的文件"远好于"删到会话目录外"）。
+    String messagesFile = '';
+    try {
+      messagesFile = messagesPath(sessionId);
+    } on ArgumentError catch (e) {
+      lastError = '会话索引已更新，但会话 id 非法，消息文件未删除：$e';
     }
+    if (messagesFile.isNotEmpty) {
+      final del = await _ch.call('fs.delete', <String, Object?>{
+        'path': messagesFile,
+        'recursive': false,
+      });
+      final delErr = errorOf(del);
+      if (delErr != null && !delErr.contains('不存在')) {
+        lastError = '会话索引已更新，但消息文件删不掉：$delErr '
+            '（残留文件：$messagesFile）';
+      }
+    }
+    // 2026-10-29（记忆三作用域）：**会话删除 ⇒ 私有记忆一起删**
+    // （会话私有的语义；也避免孤儿文件）。best-effort：失败不阻断删除
+    // —— "残留几 KB 记忆" vs "让用户以为删除没成功"，后者更糟。
+    await _deleteSessionMemory(sessionId);
     return ok;
+  }
+
+  /// 删某会话的私有记忆文件 + 从记忆索引里摘掉该会话（best-effort）。
+  ///
+  /// 与 [deleteSession] 同一取舍：索引已改，记忆残留不阻断；失败记
+  /// [lastError] 供排障。**不碰 global**（全局记忆与会话无关）。
+  Future<void> _deleteSessionMemory(String sessionId) async {
+    try {
+      // ★ 防穿越：非法 sid 在这里抛 ArgumentError（被下面 catch 住），
+      //   绝不会拼出 `/ws/.heracles/memory/session/../evil.jsonl` 去删。
+      final path = sessionMemoryPath(sessionId);
+      final del = await _ch.call('fs.delete', <String, Object?>{
+        'path': path,
+        'recursive': false,
+      });
+      final err = errorOf(del);
+      if (err != null && !err.contains('不存在')) {
+        lastError = '${lastError == null ? "" : "$lastError；"}'
+            '会话记忆文件删不掉：$err（残留：$path）';
+      }
+    } catch (e) {
+      lastError = '${lastError == null ? "" : "$lastError；"}'
+          '会话记忆文件删除异常：$e';
+    }
+    await _removeSessionFromMemoryIndex(sessionId);
+  }
+
+  /// 从 `memory/index.json` 的派生 `sessions` 子表里摘掉一个会话。
+  ///
+  /// 索引是**派生缓存**（INTERFACE §N12.3：可重建，绝不当真源）⇒
+  /// 读/改/写失败都只影响统计，不影响读写；因此全部静默忽略。
+  Future<void> _removeSessionFromMemoryIndex(String sessionId) async {
+    try {
+      final raw = await _ch.call('fs.readText', <String, Object?>{
+        'path': memoryIndexPath,
+        'offsetLine': 1,
+        'maxLines': 0,
+      });
+      if (errorOf(raw) != null) return;
+      final text = (raw['text'] as String?) ?? '';
+      if (text.trim().isEmpty) return;
+      final decoded = jsonDecode(text);
+      if (decoded is! Map) return;
+      final sessions = decoded['sessions'];
+      if (sessions is! Map || !sessions.containsKey(sessionId)) return;
+      final nextSessions = Map<String, dynamic>.from(sessions);
+      nextSessions.remove(sessionId);
+      final next = Map<String, dynamic>.from(decoded)
+        ..['sessions'] = nextSessions;
+      await _ch.call('fs.writeText', <String, Object?>{
+        'path': memoryIndexPath,
+        'text': jsonEncode(next),
+      });
+    } catch (_) {
+      // 派生索引：失败不报（下次读时因不一致而重建）。
+    }
   }
 
   /// 切换收藏，返回**新状态**（旧实现同款语义）。
@@ -570,14 +718,25 @@ class SessionStore {
     final want = limit <= 0 ? 0 : limit.clamp(1, _hardMaxLines);
     final skip = offset < 0 ? 0 : offset;
 
+    // ★ 防穿越：非法 id 不拼路径（返回一条 system 说明，而不是抛给 UI）
+    final String path;
+    try {
+      path = messagesPath(sessionId);
+    } on ArgumentError catch (e) {
+      lastError = '会话 id 非法，拒绝读取会话记录：$e';
+      return <Map<String, dynamic>>[
+        <String, dynamic>{'role': 'system', 'text': lastError!, 'ts': 0},
+      ];
+    }
+
     final raw = want == 0
         ? await _ch.call('fs.readText', <String, Object?>{
-            'path': messagesPath(sessionId),
+            'path': path,
             'offsetLine': 1,
             'maxLines': 0,
           })
         : await _ch.call('fs.readTailLines', <String, Object?>{
-            'path': messagesPath(sessionId),
+            'path': path,
             // ★ 多要一点余量（want + skip + 缓冲）。
             //
             // 为什么要缓冲：.jsonl 末尾有换行、历史里也可能有空行/坏行，
@@ -595,7 +754,7 @@ class SessionStore {
       //    所以这条回落路径自己读全文，然后走**同一套**窗口逻辑。
       if (want > 0 && err.contains('未知方法')) {
         final full = await _ch.call('fs.readText', <String, Object?>{
-          'path': messagesPath(sessionId),
+          'path': path,
           'offsetLine': 1,
           'maxLines': 0,
         });
@@ -772,7 +931,14 @@ class SessionStore {
     Map<String, dynamic> message,
   ) async {
     lastError = null;
-    final path = messagesPath(sessionId);
+    // ★ 防穿越：非法 id 不拼路径（如实失败，不抛给调用方）
+    final String path;
+    try {
+      path = messagesPath(sessionId);
+    } on ArgumentError catch (e) {
+      lastError = '会话 id 非法，拒绝写入会话记录：$e';
+      return false;
+    }
 
     if (_appending) {
       // 检测到并发：如实失败比悄悄丢一行好
@@ -943,7 +1109,19 @@ class SessionStore {
     String? sessionId,
   }) async {
     lastError = null;
-    final id = sessionId ?? await _newId();
+    final newId = sessionId ?? await _newId();
+
+    // ★ 防穿越：调用方显式指定的 id 非法 ⇒ 直接失败，不先写索引（否则
+    //   索引里会留一条永远删不掉的坏会话）。
+    final String? probe;
+    try {
+      probe = messagesPath(newId);
+    } on ArgumentError catch (e) {
+      lastError = '会话 id 非法，拒绝创建分支：$e';
+      return null;
+    }
+    final id = newId;
+    final pathHint = probe;
 
     // ---- 先落索引（索引成功、消息失败 ⇒ 用户看到空会话；反过来更糟：
     //      消息在但索引没有 ⇒ UI 根本列不出它，等于数据隐身）----
@@ -965,7 +1143,7 @@ class SessionStore {
       buf.writeln(line);
     }
     final raw = await _ch.call('fs.writeText', <String, Object?>{
-      'path': messagesPath(id),
+      'path': pathHint,
       'text': buf.toString(),
     });
     final err = errorOf(raw);
@@ -1018,10 +1196,14 @@ String? _encodeLine(Map<String, dynamic> entry) {
 ///
 /// | 字段 | 目标类型 |
 /// |---|---|
-/// | `ts` / `i` / `ms` / `cached` / `prompt` / `out` / `turns` | int |
+/// | `ts` / `i` / `ms` / `cached` / `prompt` / `out` / `turns` / `exitCode` | int |
 /// | `ok` / `truncated` / `starred` / `archived` | bool |
-/// | `text` / `think` / `tool` / `result` / `reason` / `stage` / `stepId` / `title` / `role` / `attach` | String |
+/// | `text` / `think` / `tool` / `result` / `reason` / `stage` / `stepId` / `title` / `role` / `attach` / `surface` / `command` | String |
 /// | `args` | Map（值原样，读方自己 `toString()`） |
+///
+/// `exitCode` / `surface` / `command` 是 **D6（2026-10-29）只增** 的历史命令卡
+/// 字段（`docs/接口.md` §7.2）：旧文件缺它们照常解析；写入方取不到真实值就
+/// **不写键**（不写假 0 / 不猜执行面），所以这里只做类型规整、不补默认值。
 ///
 /// 未知键**保留**（`.jsonl` 是长期数据，将来加字段时旧版本也要能带着它）
 /// —— 但 `null` 值会被去掉（省字节，且 `containsKey` 判断更干净）。
@@ -1072,6 +1254,8 @@ const Set<String> _intKeys = <String>{
   'prompt',
   'out',
   'turns',
+  // ★ D6（2026-10-29）：历史命令卡的真实退出码（只增；缺失时调用方不写键）
+  'exitCode',
 };
 
 const Set<String> _boolKeys = <String>{
@@ -1092,6 +1276,14 @@ const Set<String> _stringKeys = <String>{
   'stepId',
   'title',
   'attach',
+  // ★ D6（2026-10-29）：历史命令卡的真实执行面/实际命令（只增）
+  'surface', // sandbox / mobileShell / unknown
+  'command',
+  // ★ JSONL 记账（2026-10-29）：审批/提问结果行的字符串字段（只增；
+  //   `questions`/`answers` 是 Map/List，走"未知键原样保留"那条路）
+  'callId',
+  'decision', // once / always / deny
+  'outcome', // allowed/denied/timeout/cancelled/auto_allowed/answered
 };
 
 // ============================================================================

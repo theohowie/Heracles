@@ -172,7 +172,12 @@ String _clip(String s, int n) => s.length <= n ? s : '${s.substring(0, n)}…';
 
 /// 文件记忆（Headless 形态）：工作区 `.heracles/cli-memory.md`，
 /// append-only + 256KB 上限 —— 与 App 的 GlobalMemory 同语义，存储换成本地文件。
-class _FileMemory implements MemoryCapability {
+///
+/// ⚠️ 2026-10-29 记忆三作用域重设计后：`MemoryCapability` 新增了带默认实现的
+/// 作用域方法，只有 `extends` 才能继承那些默认实现（`implements` 必须全部手写）
+/// —— 所以这里从 `implements` 改为 `extends`。CLI 仍是"单份本地文件"的老语义，
+/// 尚未接入 global/workspace/session 三层（不在本轮 P1-①a 范围）。
+class _FileMemory extends MemoryCapability {
   _FileMemory(this.root);
 
   final String root;
@@ -180,7 +185,9 @@ class _FileMemory implements MemoryCapability {
   File get _file => File('$root${Platform.pathSeparator}'
       '.heracles${Platform.pathSeparator}cli-memory.md');
 
-  static const _maxBytes = 256 * 1024; // ContractMemory.maxBytes 同数
+  /// CLI 本地文件自身的旧上限（**不是**契约常量：记忆重设计已删
+  /// `ContractMemory.maxBytes`，CLI 的这份单文件上限待后续随 CLI 一起统一）。
+  static const _maxBytes = 256 * 1024;
 
   @override
   Future<String> read() async {

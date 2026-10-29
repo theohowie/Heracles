@@ -142,14 +142,111 @@ void main() {
           reason: '没有 shell 能力时必须明说，否则模型会调用它然后失败');
     });
 
-    test('★ 有 shell 能力时说法要变', () {
+    test('★ 有 shell 能力时说法要变（不许再说"在工作区里执行 shell"）', () {
       // 用一个假的 shell 能力
       final withShell = defaultSystemPrompt(Capabilities(
         shell: _FakeShell(),
       ));
-      expect(withShell.contains('你可以在工作区里执行 shell 命令'), isTrue);
       expect(withShell.contains('不能**执行 shell'), isFalse,
           reason: '有 shell 能力时不该出现"不能"');
+      expect(withShell.contains('手机 shell'), isTrue,
+          reason: '只有手机 shell 的宿主也要如实说命令跑在哪');
+      expect(withShell.contains('在工作区里执行'), isFalse,
+          reason: '★ 说反话：shell 不在用户工作区里跑');
+    });
+  });
+
+  // ==========================================================================
+  // ★ 执行面事实（2026-10-29 P1-③）
+  //
+  // 根因：system_prompt 与 run_shell_command 的 description 说
+  //   「你可以在工作区里执行 shell 命令」「相对路径以工作区为基准」，
+  // 但 guest 的 cwd 恒为沙箱 /workspace（ProotEngine.kt:931 /
+  // SandboxBridge.kt:366），模型用 pwd/ls/find 探测用户工作区必然扑空
+  // （真机实测白烧 3 轮）。
+  //
+  // 这些断言钉住「提示词是事实句」，而不是把执行逻辑改掉：
+  //   · 两个执行面 = 两套文件系统（文件工具 ↔ 用户工作区；shell ↔ 沙箱）
+  //   · 禁止用 shell 探测用户工作区，改用文件工具
+  //   · 两种 shell 的事实各一行（沙箱 Alpine/ash；手机 Android mksh）
+  // ==========================================================================
+  group('★ 执行面事实 — 提示词不许说反话', () {
+    final capsBoth = Capabilities(shell: _FakeShell(), sandbox: _FakeSandbox());
+    final promptBoth = defaultSystemPrompt(capsBoth);
+
+    test('★★★ system prompt：必须说清"两套文件系统"（沙箱 /workspace ≠ 用户工作区）', () {
+      expect(promptBoth.contains('两套文件系统'), isTrue,
+          reason: '不说清的话模型会拿 shell 的 pwd/ls 探测用户工作区（实测白烧 3 轮）');
+      expect(promptBoth.contains('沙箱'), isTrue);
+      expect(promptBoth.contains('/workspace'), isTrue);
+      expect(promptBoth.contains('不是用户工作区'), isTrue);
+    });
+
+    test('★★★ system prompt：两种 shell 的事实各一行（Alpine / mksh）', () {
+      expect(promptBoth.contains('Alpine'), isTrue,
+          reason: '沙箱内是 Alpine Linux（ash），不是 Ubuntu');
+      expect(promptBoth.contains('ash'), isTrue);
+      expect(promptBoth.contains('mksh'), isTrue,
+          reason: '手机上的 shell 是 Android mksh（toybox 风格）');
+      expect(promptBoth.contains('由系统'), isTrue,
+          reason: '命令实际在哪跑由系统决定 —— 模型不要假设');
+    });
+
+    test('★★★ system prompt：禁止用 shell 探测用户工作区，并给出替代工具', () {
+      expect(promptBoth.contains('pwd'), isTrue);
+      expect(promptBoth.contains('不要用 shell'), isTrue);
+      expect(promptBoth.contains('grep_files'), isTrue);
+      expect(promptBoth.contains('read_file'), isTrue);
+      expect(promptBoth.contains('find_files'), isTrue);
+    });
+
+    test('★★★ system prompt：不许出现"说反话"的旧句', () {
+      for (final wrong in [
+        '你可以在工作区里执行 shell 命令',
+        '在工作区里执行',
+        '所有路径都相对于它',
+        '工作区为基准',
+      ]) {
+        expect(promptBoth.contains(wrong), isFalse,
+            reason: '★ 不许再说：「$wrong」');
+      }
+    });
+
+    test('★★★ run_shell_command：description 必须说清沙箱 / @workspace ≠ 用户工作区', () {
+      final t = buildShellTools(ToolFactory(capsBoth), capsBoth)
+          .firstWhere((t) => t.name == 'run_shell_command');
+      final d = t.description;
+      expect(d.contains('沙箱'), isTrue);
+      expect(d.contains('/workspace'), isTrue);
+      expect(d.contains('两套文件系统'), isTrue);
+      expect(d.contains('Alpine'), isTrue);
+      expect(d.contains('mksh'), isTrue);
+      expect(d.contains('@workspace'), isTrue);
+      expect(d.contains('不是用户工作区'), isTrue);
+      expect(d.contains('工作区为基准'), isFalse, reason: '旧文案说反话，必须删');
+      // 不许写物理路径（宿主的 /data/... 之类模型也用不上）
+      expect(RegExp(r'[A-Za-z]:\\|/data/|/storage/').hasMatch(d), isFalse,
+          reason: '提示词里不许出现宿主物理路径');
+
+      final props =
+          (t.parameters['properties'] as Map).cast<String, dynamic>();
+      final cmdDesc = (props['command'] as Map)['description'] as String;
+      expect(cmdDesc.contains('工作区为基准'), isFalse,
+          reason: '★ 参数说明里的旧句也要删');
+      expect(cmdDesc.contains('/workspace'), isTrue,
+          reason: '要说明沙箱内的相对路径以 /workspace（沙箱目录）为基准');
+      expect(cmdDesc.contains('@workspace'), isTrue,
+          reason: '保留 @name 命名挂载的说明');
+      expect(cmdDesc.contains('不是用户工作区'), isTrue);
+      expect(RegExp(r'[A-Za-z]:\\|/data/|/storage/').hasMatch(cmdDesc), isFalse);
+    });
+
+    test('★ 没有 shell 也没有沙箱时，仍然不许说"在工作区里执行 shell"', () {
+      final p = defaultSystemPrompt(const Capabilities());
+      expect(p.contains('不能**执行 shell'), isTrue);
+      expect(p.contains('两套文件系统'), isFalse,
+          reason: '连 shell 执行面都没有时，不必谈两套文件系统（会误导）');
+      expect(p.contains('在工作区里执行'), isFalse);
     });
   });
 }
@@ -168,5 +265,22 @@ class _FakeShell implements ShellCapability {
     Duration timeout = const Duration(minutes: 5),
     void Function(String chunk)? onOutput,
   }) async =>
+      const CapabilitySuccess('ok');
+}
+
+class _FakeSandbox implements SandboxCapability {
+  @override
+  Future<bool> isReady() async => true;
+
+  @override
+  Future<CapabilityResult> run(
+    String command, {
+    Duration timeout = const Duration(minutes: 5),
+    void Function(String chunk)? onOutput,
+  }) async =>
+      const CapabilitySuccess('ok');
+
+  @override
+  Future<CapabilityResult> reset({String snapshot = ''}) async =>
       const CapabilitySuccess('ok');
 }

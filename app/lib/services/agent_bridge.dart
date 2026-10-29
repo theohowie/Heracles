@@ -14,6 +14,7 @@ import '../models/settings.dart';
 import '../models/workspace.dart';
 import 'local_agent.dart';
 import 'global_memory.dart';
+import 'memory_service.dart';
 import 'session_store.dart';
 
 /// Flutter → Kotlin 的桥（`15-前端选型与通道协议.md` §3.1）。
@@ -32,9 +33,35 @@ import 'session_store.dart';
 ///    └── 会话 ⋯重命名 / 🗑删除 / ⭐收藏
 /// ```
 class AgentBridge {
-  AgentBridge() {
+  AgentBridge({ScopedMemoryService? memoryService})
+      : _memory = memoryService ?? ScopedMemoryService() {
     _installOpenSessionHandler();
   }
+
+  /// **三作用域记忆服务**（2026-10-29）。
+  ///
+  /// ## 为什么这里持有一个实例而不是每次 `const GlobalMemory()`
+  ///
+  /// 旧 N7 五个方法固定全局、走 `memory.read/append/clear` 三个原语；
+  /// 现在要能按 scope 读写，且增删改必须走 `memory.userEdit`（Kotlin 是唯一
+  /// 写者）。[ScopedMemoryService] 内部有**按路径的写队列**（同一路径的
+  /// "读-判-淘汰-追加"事务必须串行），每次新建实例会丢这层串行保证 ——
+  /// 所以桥里持有一个。
+  ///
+  /// 测试可注入假服务（`AgentBridge(memoryService: ...)`）。
+  final ScopedMemoryService _memory;
+
+  /// 按 scope 组装寻址（session 才带 sid；global 两者都不带）。
+  static hb.MemoryAddress _addressOf({
+    required hb.MemoryScope scope,
+    String? sessionId,
+    String? workspacePath,
+  }) =>
+      hb.MemoryAddress(
+        scope: scope,
+        sessionId: scope == hb.MemoryScope.session ? sessionId : null,
+        workspacePath: scope == hb.MemoryScope.global ? null : workspacePath,
+      );
 
   static const _channel = MethodChannel('heracles/command');
 
@@ -957,28 +984,215 @@ class AgentBridge {
   }
 
   // ==========================================================================
-  // N7 结构化记忆（2026-10-24）—— 前端记忆页数据源
+  // N7 / N12 结构化记忆（2026-10-24 起 / 2026-10-29 三作用域）
+  //                      —— 前端记忆页数据源
+  //
+  // ★★ 过渡期数据风险修复（2026-10-29，本区块最重要的一条）★★
+  //
+  // 旧实现 update/delete = `GlobalMemory._rewrite` = `clear()` + 逐条 `append()`。
+  // 而 Kotlin 的 `memory.append` 现在**永久只读**（`E_SCOPE_READONLY`）⇒
+  // 那条路径会「先清空 global，再回写失败」= **丢掉整份全局记忆**。
+  // 所以 update/delete/clear 全部切到 `memory.userEdit`
+  // （`ScopedMemoryService.userUpdate/userDelete/userClear`）：Kotlin 侧追加
+  // 墓碑/原子重写，只有"成功"或"明确失败"，**不存在半清空状态**。
+  //
+  // 兼容纪律（INTERFACE §N12.6）：旧五方法签名保留、默认 `global` ⇒
+  // 前端不改也能编译；新增能力全部用命名参数追加。
   // ==========================================================================
 
-  /// 列出全部记忆条目（含旧格式迁移：纯文本行 = kind:other/source:legacy）。
-  Future<List<MemoryEntry>> listMemory() => const GlobalMemory().listEntries();
+  /// 列出某作用域的存活条目（旧无参调用 = global）。
+  ///
+  /// ⚠️ 旧签名 `List<MemoryEntry>` **没有失败通道**（读失败与"没有记忆"同形）。
+  /// 想区分就用 [listMemoryResult]。
+  Future<List<MemoryEntry>> listMemory({
+    hb.MemoryScope scope = hb.MemoryScope.global,
+    String? sessionId,
+    String? workspacePath,
+    bool includeExpired = false,
+  }) async =>
+      (await listMemoryResult(
+        scope: scope,
+        sessionId: sessionId,
+        workspacePath: workspacePath,
+        includeExpired: includeExpired,
+      ))
+          .entries;
 
-  /// 新增一条（kind 词表：preference/background/habit/other，后端定）。
-  /// SEC4：疑似密钥/令牌拒收。
-  Future<MemoryWriteResult> addMemory(String text, {String kind = 'other'}) =>
-      const GlobalMemory().addEntry(text, kind: kind, source: 'user');
+  /// 带失败原因的列出（"空"与"错"不同形）。
+  Future<({List<MemoryEntry> entries, String? error})> listMemoryResult({
+    hb.MemoryScope scope = hb.MemoryScope.global,
+    String? sessionId,
+    String? workspacePath,
+    bool includeExpired = false,
+  }) async {
+    try {
+      final r = await _memory.read(
+        _addressOf(scope: scope, sessionId: sessionId, workspacePath: workspacePath),
+        includeExpired: includeExpired,
+      );
+      return (
+        entries: r.entries.map(GlobalMemory.entryOf).toList(growable: false),
+        error: null,
+      );
+    } on MemoryServiceError catch (e) {
+      return (entries: const <MemoryEntry>[], error: e.message);
+    } catch (e) {
+      return (entries: const <MemoryEntry>[], error: '读取记忆失败：$e');
+    }
+  }
 
-  /// 更新一条（按 id）。
-  Future<MemoryWriteResult> updateMemory(String id, String text) =>
-      const GlobalMemory().updateEntry(id, text);
+  /// 用户新增一条（SEC4 疑似密钥/超长由服务统一拒收）。
+  Future<MemoryWriteResult> addMemory(
+    String text, {
+    hb.MemoryScope scope = hb.MemoryScope.global,
+    String? sessionId,
+    String? workspacePath,
+    String kind = 'other',
+  }) =>
+      _writeMemory(() => _memory.userAdd(
+            _addressOf(scope: scope, sessionId: sessionId, workspacePath: workspacePath),
+            text,
+            kind: kind,
+          ));
 
-  /// 删除一条（按 id）。
-  Future<MemoryWriteResult> deleteMemory(String id) =>
-      const GlobalMemory().deleteEntry(id);
+  /// 用户更新一条（global ⇒ `memory.userEdit{action:"update"}`）。
+  Future<MemoryWriteResult> updateMemory(
+    String id,
+    String text, {
+    hb.MemoryScope scope = hb.MemoryScope.global,
+    String? sessionId,
+    String? workspacePath,
+  }) =>
+      _writeMemory(() => _memory.userUpdate(
+            _addressOf(scope: scope, sessionId: sessionId, workspacePath: workspacePath),
+            id,
+            text,
+          ));
 
-  /// 容量：usedBytes / maxBytes（maxBytes = ContractMemory.maxBytes）。
-  Future<({int usedBytes, int maxBytes})> memoryCapacity() =>
-      const GlobalMemory().capacity();
+  /// 用户删除一条（global ⇒ `memory.userEdit{action:"delete"}`）。
+  Future<MemoryWriteResult> deleteMemory(
+    String id, {
+    hb.MemoryScope scope = hb.MemoryScope.global,
+    String? sessionId,
+    String? workspacePath,
+  }) =>
+      _writeMemory(() => _memory.userDelete(
+            _addressOf(scope: scope, sessionId: sessionId, workspacePath: workspacePath),
+            <String>[id],
+          ));
+
+  /// 用户清空某作用域（global ⇒ `memory.userEdit{action:"clear"}`）。
+  Future<MemoryWriteResult> clearMemory({
+    hb.MemoryScope scope = hb.MemoryScope.global,
+    String? sessionId,
+    String? workspacePath,
+  }) =>
+      _writeMemory(() => _memory.userClear(
+            _addressOf(scope: scope, sessionId: sessionId, workspacePath: workspacePath),
+          ));
+
+  /// 关键词检索（与注入同一分词/打分口径；**不注入**）。
+  ///
+  /// 失败返回空列表（检索是增强，不阻断界面）；要原因请直接用
+  /// `ScopedMemoryService.search`（它会抛 `MemoryServiceError`）。
+  Future<List<MemoryEntry>> searchMemory(
+    String query, {
+    hb.MemoryScope scope = hb.MemoryScope.global,
+    String? sessionId,
+    String? workspacePath,
+    int limit = 20,
+  }) async {
+    try {
+      final list = await _memory.search(
+        _addressOf(scope: scope, sessionId: sessionId, workspacePath: workspacePath),
+        query,
+        limit: limit,
+      );
+      return list.map(GlobalMemory.entryOf).toList(growable: false);
+    } on MemoryServiceError {
+      return const <MemoryEntry>[];
+    } catch (_) {
+      return const <MemoryEntry>[];
+    }
+  }
+
+  /// 存储统计（存储侧；注入侧预算数字由 backend `ContractMemory` 给）。
+  ///
+  /// 校验失败会抛 `MemoryServiceError`（fail-closed）—— UI 应显示错误态，
+  /// 而不是把"引擎不可用"画成"0 条记忆"。
+  Future<MemoryStats> memoryStats({
+    hb.MemoryScope scope = hb.MemoryScope.global,
+    String? sessionId,
+    String? workspacePath,
+  }) async =>
+      MemoryStats.of(await _memory.stats(
+        _addressOf(scope: scope, sessionId: sessionId, workspacePath: workspacePath),
+      ));
+
+  /// **agent 提议一条全局记忆**（agent 写 global 的唯一通道；用户确认后才生效）。
+  Future<MemoryWriteResult> proposeGlobalMemory(String note, {String kind = 'other'}) =>
+      _writeMemory(() => _memory.proposeGlobal(note, kind: kind));
+
+  /// 列出待用户确认的提议（默认 `pending`；读失败返回空列表）。
+  Future<List<MemoryProposal>> listMemoryProposals({String? status = 'pending'}) async {
+    try {
+      final list = await _memory.listProposals(status: status);
+      return list.map(MemoryProposal.of).toList(growable: false);
+    } on MemoryServiceError {
+      return const <MemoryProposal>[];
+    } catch (_) {
+      return const <MemoryProposal>[];
+    }
+  }
+
+  /// 晋升 / 忽略一条提议（**用户动作**；agent 不可触发）。
+  Future<MemoryWriteResult> resolveMemoryProposal(String id, {required bool promote}) =>
+      _writeMemory(() => _memory.resolveProposal(id, promote: promote));
+
+  /// 容量：`usedBytes / maxBytes`。
+  ///
+  /// 2026-10-29：`maxBytes` 语义改为**该作用域的存储软预算**
+  /// （global = 8 MB；超限只淘汰、不拒写）。形状不变，旧 UI 零改动。
+  Future<({int usedBytes, int maxBytes})> memoryCapacity({
+    hb.MemoryScope scope = hb.MemoryScope.global,
+    String? sessionId,
+    String? workspacePath,
+  }) async {
+    try {
+      final s = await _memory.stats(
+        _addressOf(scope: scope, sessionId: sessionId, workspacePath: workspacePath),
+      );
+      return (usedBytes: s.bytes, maxBytes: s.storageSoftMaxBytes);
+    } on MemoryServiceError {
+      // 读不到统计时**不假装成功**：用量 0 + 软预算常量（UI 显示 0%），
+      // 与旧行为一致（旧 capacity 也只有这个形状）。
+      return (
+        usedBytes: 0,
+        maxBytes: hb.ContractMemory.storageGlobalSoftMaxBytes,
+      );
+    }
+  }
+
+  /// **旧 `memory.md` → `global.jsonl` 迁移**（INTERFACE §N12.5 `memory.migrate`）。
+  ///
+  /// 记忆页「重新迁移」按钮 / 排障用。**幂等**：
+  /// `alreadyMigrated` / `noLegacyFile` 都是正常返回，不是错误。
+  /// 与首轮自动触发（`runMemoryMigrationOnce`）共用同一套解析/日志。
+  Future<MemoryMigrationResult> migrateMemory() => migrateLegacyMemory();
+
+  /// 写操作统一翻译：`MemoryWriteOutcome` / `MemoryServiceError` → 旧结果类型。
+  Future<MemoryWriteResult> _writeMemory(
+    Future<MemoryWriteOutcome> Function() op,
+  ) async {
+    try {
+      final out = await op();
+      return MemoryWriteResult(ok: true, bytes: out.bytes);
+    } on MemoryServiceError catch (e) {
+      return MemoryWriteResult.failure(e.message);
+    } catch (e) {
+      return MemoryWriteResult.failure('记忆写入失败：$e');
+    }
+  }
 
   /// **N8 设备权限统一查询**（2026-10-25，INTERFACE.md §4.N8）。
   ///
@@ -1093,6 +1307,50 @@ class AgentBridge {
     } on PlatformException {
       return null;
     }
+  }
+
+  // ------------------------------------------------------ 流式语音（§N13）
+  //
+  // 契约：docs/INTERFACE.md §N13。
+  // · Kotlin → Dart：`EventChannel('heracles/voice')` 发 PCM 粗片；
+  // · Dart 进程内：解码后按 200–300ms 节流发 [VoicePartial]（累积草稿）；
+  // · 旧包没有这条 EventChannel ⇒ 订阅报错/收不到片 ⇒ 调用方回退整段识别。
+
+  static const _voiceEventChannel = EventChannel('heracles/voice');
+
+  /// 音频事件源注入点（测试用假流；null = 真的 `EventChannel`）。
+  static Stream<dynamic> Function()? voiceEventSourceForTest;
+
+  /// 订阅 Kotlin 的 PCM 分片事件流（`{type:"chunk"/"end", ...}`）。
+  ///
+  /// ⚠️ 每次调用都会**新建一条平台订阅**（`receiveBroadcastStream` 的语义），
+  /// 调用方只订阅一次并保存 `StreamSubscription`。旧包/通道未实现时，
+  /// 错误以 **stream error**（`MissingPluginException`）形式出现，不抛同步异常。
+  Stream<dynamic> voiceAudioEvents() {
+    final fake = voiceEventSourceForTest;
+    if (fake != null) return fake();
+    return _voiceEventChannel.receiveBroadcastStream();
+  }
+
+  /// **流式语音的累积草稿事件**（进程内广播流）。
+  ///
+  /// 与 [events] 同理，控制器必须是**静态**的：`AgentBridge` 会被多处置新，
+  /// 生产端（voice_input 的解码泵）与消费端（UI）可能不是同一个实例。
+  static final StreamController<VoicePartial> _voicePartials =
+      StreamController<VoicePartial>.broadcast();
+
+  static Stream<VoicePartial> get voicePartials => _voicePartials.stream;
+
+  /// 是否已有 UI 在监听草稿事件。
+  ///
+  /// 用途：前端还没接草稿展示时，语音输入要**继续把最终文本填进输入框**
+  /// （否则用户点了麦克风什么都不会发生）；前端接了展示后就不再代填
+  /// （避免"草稿 UI 一份 + 输入框再插一份"的双写）。
+  static bool get hasVoicePartialListener => _voicePartials.hasListener;
+
+  /// 推一段累积草稿给所有订阅者（由流式语音泵调用）。
+  static void emitVoicePartial(VoicePartial partial) {
+    if (!_voicePartials.isClosed) _voicePartials.add(partial);
   }
 
   /// **本机画像**（2026-10-27，JEV 决策引擎的本机检测用）——
@@ -1422,6 +1680,66 @@ class AgentBridgeException implements Exception {
 
   @override
   String toString() => message;
+}
+
+/// **一段流式语音的累积草稿**（契约 `docs/INTERFACE.md` §N13.3）。
+///
+/// 由流式语音泵在**主 isolate** 里按 200–300ms 节流发出：
+/// · [text] 是**累积整段草稿**（不是增量片段），只增不减；
+/// · [isFinal] = 本轮识别定稿（静音断句 ~800ms / 停止 / 60 秒上限）；
+/// · [seq] 是该会话内的序号（从 0 开始），[tsMs] 是发出时刻（epoch ms）。
+///
+/// 与 `widgets/voice_draft.dart` 里前端阶段的**同名占位类**不同：那个
+/// 只有 3 个字段、是 UI 自己的形状；本类是**契约形状**（前端接展示时用本类，
+/// 记得 `import ... hide` 或删掉占位类，别让两个 `VoicePartial` 同时可见）。
+class VoicePartial {
+  const VoicePartial({
+    required this.sessionId,
+    required this.text,
+    required this.isFinal,
+    required this.seq,
+    required this.tsMs,
+  });
+
+  /// 一次录音会话的标识（旧会话的迟到事件据此丢弃）。
+  final String sessionId;
+
+  /// 目前为止的**累积整段草稿**。
+  final String text;
+
+  /// 是否本轮定稿（之后同一会话可能还有新句子，但本次识别已定稿）。
+  final bool isFinal;
+
+  /// 该会话内的序号（从 0 递增）。
+  final int seq;
+
+  /// 发出时刻（epoch 毫秒）。
+  final int tsMs;
+
+  Map<String, dynamic> toMap() => {
+        'sessionId': sessionId,
+        'text': text,
+        'isFinal': isFinal,
+        'seq': seq,
+        'tsMs': tsMs,
+      };
+
+  @override
+  bool operator ==(Object other) =>
+      other is VoicePartial &&
+      other.sessionId == sessionId &&
+      other.text == text &&
+      other.isFinal == isFinal &&
+      other.seq == seq &&
+      other.tsMs == tsMs;
+
+  @override
+  int get hashCode => Object.hash(sessionId, text, isFinal, seq, tsMs);
+
+  @override
+  String toString() =>
+      'VoicePartial(session: $sessionId, seq: $seq, final: $isFinal, '
+      'text: "$text")';
 }
 
 /// agent 运行过程中的**实时事件**（对应 Kotlin 侧 `AgentEvent`）。

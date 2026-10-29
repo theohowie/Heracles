@@ -31,9 +31,56 @@ import '../capability/capabilities.dart';
 /// "教练式"条款之一。它是**提示词约束，不是架构保证**：模型仍可能只调工具
 /// 不说话。别把"每轮一定有汇报"当成契约写进 UI 逻辑或测试断言。
 String defaultSystemPrompt(Capabilities caps) {
-  final hasShell = caps.shell != null;
+  final hasSandbox = caps.sandbox != null;
+  final hasDeviceShell = caps.shell != null;
+  final hasShellTool = hasSandbox || hasDeviceShell;
   final hasApk = caps.apk != null;
   final hasHealth = caps.deviceHealth != null;
+
+  // ★ 2026-10-29 P1-③：**提示词必须说事实，不许说反话**。
+  //
+  // 病根（真机实测）：旧提示词写「你可以在工作区里执行 shell 命令」「路径一律用工作区内的
+  // 相对路径」，但 guest 的 cwd 恒为沙箱 `/workspace`（ProotEngine.kt:931 /
+  // SandboxBridge.kt:366）—— 模型信了提示词，就用 shell 的 pwd/ls/find 探测用户工作区，
+  // 必然扑空，白烧 3 轮。
+  //
+  // 事实是：**两个执行面 = 两套文件系统**。
+  // · 文件工具（read_file/write_file/edit/grep_files…）↔ 用户工作区
+  // · shell（run_shell_command）↔ 沙箱（或手机 shell），沙箱 `/workspace` 不是用户工作区
+  //
+  // 只改提示词文案；执行逻辑 / 路由 / 审批一行不动。
+  final shellFactLines = <String>[
+    if (hasSandbox)
+      '- 沙箱里是 **Alpine Linux（ash + busybox）**：装包用 `apk`，**没有** `apt`/`yum`；'
+          '内置 rootfs 只有 busybox，`gcc`/`python3`/`git` 不保证有。',
+    if (hasDeviceShell)
+      '- 手机上的是 **Android mksh（toybox 风格）**：**没有** `apt`/`yum`/`pacman`；'
+          '**没有 `/tmp`**；系统命令在 `/system/bin/` 下；`find` 不支持 `-printf`、'
+          '`grep` 不支持 `-P`（用 `-E`）。',
+  ].join('\n');
+
+  final surfaceRouting = hasSandbox && hasDeviceShell
+      ? '- 命令实际在哪个执行面跑**由系统按固定规则决定**：默认**沙箱**；'
+          '`pm`/`am`/`dumpsys`/截图/改系统设置/装包等需要动 Android 本身的命令'
+          '自动改到**手机 shell**。你没有参数能指定它，也**不要假设**它在哪跑。'
+      : hasSandbox
+          ? '- 命令实际在哪个执行面跑**由系统按固定规则决定**：本宿主只有**沙箱**执行面。'
+              '你没有参数能指定它，也**不要假设**它在哪跑。'
+          : '- 命令实际在哪个执行面跑**由系统按固定规则决定**：本宿主只有**手机 shell**执行面。'
+              '你没有参数能指定它，也**不要假设**它在哪跑。';
+
+  final shellSurfaceFacts = hasShellTool
+      ? '''
+- shell 命令（`run_shell_command`）**不在用户工作区里跑**：它跑在另一个执行面上，
+  沙箱里的 `/workspace` 是**沙箱自己的目录**，不是用户工作区 —— **沙箱与用户工作区是两套文件系统**，
+  一边写的文件，另一边看不到。
+- ★ **不要用 shell 的 `pwd` / `ls` / `find` / `wc` 去探测用户工作区**：你探的是沙箱（或手机 shell）的
+  文件系统，必然扑空，白跑一轮。要列目录、查找、统计用户工作区的文件，用 `list_files` / `find_files` /
+  `grep_files` / `read_file` 这些**文件工具**。
+$surfaceRouting
+- shell 的事实（按执行面各一条）：
+$shellFactLines'''
+      : '- ⚠️ 当前环境**不能**执行 shell 命令';
 
   return '''
 你是 Heracles，一个运行在 Android 手机上的开发智能体。
@@ -46,23 +93,23 @@ String defaultSystemPrompt(Capabilities caps) {
 即使用户用英文提问，也**必须用中文**思考与回答。代码、命令、文件路径、标识符保持原样（不要翻译）。
 
 ## 你的环境
-- 你有一个**工作区**（用户选定的文件夹），所有路径都相对于它
-${hasShell ? '- 你可以在工作区里执行 shell 命令' : '- ⚠️ 当前环境**不能**执行 shell 命令'}
+- 文件工具（`read_file` / `write_file` / `edit` / `apply_patch` / `mkdir` / `list_files` /
+  `find_files` / `grep_files` 等）读写**用户工作区**（用户选定的那个文件夹）；
+  这些工具的路径都是**相对工作区**的。
+$shellSurfaceFacts
 ${hasApk ? '- 你可以构建、逆向、签名 Android APK' : '- ⚠️ 当前环境**不能**构建 APK'}
 ${hasHealth ? '- 你能读取设备电量与温度' : ''}
 - 部分操作需要用户批准；被拒时你会收到明确告知
 
 ## 设备与环境（**这是手机，不是 Linux 桌面**）
-你跑在 **Android** 上，shell 是 **sh（mksh / toybox 风格）** —— 不是 bash，更不是 Ubuntu。
-
-- **没有** `apt` / `yum` / `pacman`（装不了包）；**没有 `/tmp`**（临时文件写到工作区里）；
-  **没有 `zipalign`**（对齐由 APK 能力在进程内做）。系统命令在 `/system/bin/` 下。
-- 常见坑：`find` **不支持 `-printf`**；`grep` **不支持 `-P`**（用 `-E`）；
-  `curl` 可能不存在（抓网页优先用 `web_fetch` 工具）；`python` 不保证有（别假设 `python3` 可用）。
-- 路径一律用**工作区内的相对路径**，不要假设 `~/`、`/home/xxx` 这类桌面路径存在。
-- ★ **硬规矩：执行任何命令之前，先想"安卓上到底有没有这个命令"。不确定就先 `command -v xxx` 探测，
-  再决定要不要用 —— 不要拿桌面 Linux 的习惯硬跑。** 探测不存在的命令时，换一条安卓上真有的路
-  （如用工作区的 Dart/工具能力），或如实告诉用户这条做不了。
+- 这个 App 跑在 **Android** 上${hasShellTool ? '；你有「文件工具」和「shell」两个执行面 —— 它们是两套文件系统（见上）' : '；文件工具直接读写用户工作区'}。
+- 文件工具的路径：**相对用户工作区**，不要假设 `~/`、`/home/xxx` 这类桌面路径存在。
+- shell 的路径：属于**执行面自己的**文件系统${hasSandbox ? '；沙箱里的相对路径以沙箱的 `/workspace` 为基准（那是沙箱目录，**不是用户工作区**）' : ''}。
+- **不保证**有 `zipalign`（APK 对齐由 APK 能力在进程内做）、`curl`、`python`；
+  抓网页优先用 `web_fetch` 工具。
+- ★ **硬规矩：执行任何命令之前，先想"这个执行面上到底有没有这个命令"。不确定就先 `command -v xxx` 探测，
+  再决定要不要用 —— 不要拿桌面 Linux 的习惯硬跑。** 探测不存在的命令时，换一条该执行面上真有的路
+  （如改用文件工具），或如实告诉用户这条做不了。
 
 ## 你的工作方式
 你拥有完整的规划与执行能力，请**自主决定**怎么做：

@@ -234,12 +234,138 @@ abstract final class ContractWeb {
   static const int maxResponseBytes = 5 * 1024 * 1024;
 }
 
-/// **长期记忆能力**（`FileMemoryCapability`）。
+/// **长期记忆（三作用域记忆系统）** —— 2026-10-29 重设计后唯一的数值来源。
+///
+/// ## 为什么不再有 `maxBytes = 256 KB`
+///
+/// 旧实现把那一个数**同时**当成「写闸」与「每轮固定开销」，于是
+/// 「用户能记多少事」和「每一轮付多少 token」被焊在同一个旋钮上
+/// （旧注释自己承认："记忆会整段进 system prompt ⇒ 它的大小直接等于每轮固定开销"）。
+/// 结果是两头都不成立：写满 256 KB ≈ 6–10 万 token，任何窗口都装不下；
+/// 而条目一多又必须停写。**`maxBytes` 已删除**（有意破坏性变更，
+/// 同步改了 `contract_test.dart` / `memory_injection_test.dart` 的旧断言）。
+///
+/// ## 两族常量，互不推导（不变量 I3）
+///
+/// | 族 | 回答的问题 | 花什么 | 消费方 |
+/// |---|---|---|---|
+/// | `storage*SoftMaxBytes` / `*EntriesSoftMax` | 能存多少 | 磁盘 | Kotlin `MemoryStore`、App `ScopedMemoryService` |
+/// | `*InjectMaxChars` / `injectMaxEntriesPerScope` / `windowRatioCap` | 每轮最多注入多少 | 上下文窗口 | backend `memory_prompt.dart`（纯 Dart，可单测） |
+///
+/// ⚠️ **存储侧没有"到顶就拒写"的硬闸**：超软预算时按
+/// 「过期 → 最旧 agent → 最旧 user」淘汰后再写，淘汰结果回报调用方
+/// （不变量 I6：不静默丢条目）。拒写只发生在"单条超 [entryMaxChars]"
+/// 或"淘汰后仍放不下"这两条兜底路径上。
+///
+/// ## 全部数值可调
+///
+/// 改数值不改结构；Kotlin / App / backend 三侧必须是**同一组数**
+/// （INTERFACE.md §N12 记账，注释互指）。依据见各常量的 KDoc。
 abstract final class ContractMemory {
-  /// 记忆文件大小上限（256 KB）。
+  // ---------------------------------------------------------------------
+  // 注入侧（每轮最多花多少上下文）
+  // ---------------------------------------------------------------------
+
+  /// 单条记忆正文的字符上限（8000）。**可调**。
   ///
-  /// 记忆会整段进 system prompt ⇒ 它的大小直接等于每轮固定开销。
-  static const int maxBytes = 256 * 1024;
+  /// 依据：CJK 口径 ≈2–4K token —— 够写清一条项目约定（构建命令/目录习惯/
+  /// 用户偏好）；再长就该用笔记文件（`write_file`），而不是塞进每轮注入的记忆。
+  /// 消费方：backend `save_memory` / `propose_global_memory` 的长度门禁、
+  /// Kotlin `MemoryStore` 的 `ENTRY_MAX_CHARS`、App `ScopedMemoryService`。
+  static const int entryMaxChars = 8000;
+
+  /// **global + workspace 两段共享的注入预算**（6000 字符/轮）。**可调**。
+  ///
+  /// 依据：CJK ≈4–6K token，约占 128K 窗口的 4–5%。两段都是"稳定段"
+  /// （变化少），共享一个上限能保住前缀缓存；global 先占，workspace 吃剩余。
+  /// 消费方：`memory_prompt.dart` 的 `renderMemoryContext`。
+  static const int globalWorkspaceInjectMaxChars = 6000;
+
+  /// **session 段的独立注入预算**（4000 字符/轮）。**可调**。
+  ///
+  /// 依据：会话私有记忆是草稿类、易变、生命周期短，4000 足够；
+  /// 独立预算避免会话段把稳定段（global/workspace）挤掉。
+  /// 必须 `< globalWorkspaceInjectMaxChars`（`contract_test.dart` 钉住该关系）。
+  /// 消费方：`renderMemoryContext`。
+  static const int sessionInjectMaxChars = 4000;
+
+  /// 每个作用域最多注入多少条（40）。**可调**。
+  ///
+  /// 依据：防"很多极短条目"把段头与行前缀撑爆（每行前缀 ≈8 字符）；
+  /// 也限制选择算法的循环次数。
+  /// 消费方：`selectForInjection` 的 `maxEntries`。
+  static const int injectMaxEntriesPerScope = 40;
+
+  /// 每作用域参与排序的候选窗（64 KB）。**可调**。
+  ///
+  /// 依据：上千条全排序在手机上不现实；超出窗的条目**只存不注**
+  /// （用户可在记忆页/检索里显式查）。
+  /// 消费方：宿主读取层（读 JSONL 时最多取 64 KB）+
+  /// `memory_prompt.dart` 的条数窗（`retrievalMaxCandidates`）。
+  static const int injectCandidateMaxBytes = 64 * 1024;
+
+  /// 注入预算的窗口自适应比例（5%）。**可调**。
+  ///
+  /// 依据：小窗口模型（8K/32K）下 6000 字符会把人设/工具定义挤出窗口，
+  /// 必须按比例缩。实际预算 = `min(常量, floor(windowTokens * 本比例))`，
+  /// 该 `min` **是真实现**（`memory_prompt.dart` 的 `injectBudgetChars`，有单测）。
+  /// 消费方：`memory_prompt.dart`。
+  static const double windowRatioCap = 0.05;
+
+  /// 未命中关键词的条目压成的摘要长度（40 字符）。**可调**（沿用旧实现）。
+  ///
+  /// 依据：摘要只用来"提示存在这么一条"，40 字足够辨识；全文留给命中项与
+  /// 记忆页。消费方：`selectForInjection` / `renderMemoryContext`。
+  static const int summaryMaxChars = 40;
+
+  /// 选择算法最多对多少条候选排序（200 条）。**可调**。
+  ///
+  /// 依据：排序成本上限；再多的条目也在 [injectCandidateMaxBytes] 窗口之外。
+  /// 消费方：`memory_prompt.dart`。
+  static const int retrievalMaxCandidates = 200;
+
+  // ---------------------------------------------------------------------
+  // 存储侧（能存多少；软预算 ⇒ 超限淘汰，不拒写）
+  // ---------------------------------------------------------------------
+
+  /// global 作用域的存储软预算（8 MB）。**可调**。
+  ///
+  /// 依据：磁盘便宜，但备份/清理成本要可控；手机场景人工可读的记忆
+  /// 远小于这个量级。消费方：Kotlin `MemoryStore`、App 存储层。
+  static const int storageGlobalSoftMaxBytes = 8 * 1024 * 1024;
+
+  /// workspace 作用域的存储软预算（16 MB，**每个工作区**）。**可调**。
+  ///
+  /// 依据：工作区记忆跨会话共享、量比全局大；但工作区可能多个，
+  /// 所以单工作区不宜再放大。消费方：App `ScopedMemoryService`。
+  static const int storageWorkspaceSoftMaxBytes = 16 * 1024 * 1024;
+
+  /// session 作用域的存储软预算（512 KB，**每个会话**）。**可调**。
+  ///
+  /// 依据：会话私有记忆生命周期随会话结束，512 KB 已远超人工可读量；
+  /// 小预算让会话删除/清理成本可忽略。消费方：App `ScopedMemoryService`。
+  static const int storageSessionSoftMaxBytes = 512 * 1024;
+
+  /// 三作用域存储软预算**合计**（≈24.5 MB）。
+  ///
+  /// ⚠️ 实现说明：设计稿附录 A 写"合计 ≈32 MB"，但
+  /// 8 + 16 + 0.5 = **24.5 MB** —— 本常量以三个具名常量之和为唯一真相
+  /// （只是汇总，**不许单独调**；要改就改上面三个）。
+  static const int storageSoftMaxBytes = storageGlobalSoftMaxBytes +
+      storageWorkspaceSoftMaxBytes +
+      storageSessionSoftMaxBytes;
+
+  /// global / workspace 每个作用域的条目软上限（5000 条）。**可调**。
+  ///
+  /// 依据：手机场景下人工能读的记忆条目远小于此；超限按淘汰顺序清理。
+  /// 消费方：Kotlin `MemoryStore`、App 存储层。
+  static const int entriesSoftMax = 5000;
+
+  /// session 作用域（**每会话**）条目软上限（300 条）。**可调**。
+  ///
+  /// 依据：会话私有记忆是短期草稿；300 条足够装下一次长任务的约定。
+  /// 消费方：App 存储层。
+  static const int sessionEntriesSoftMax = 300;
 }
 
 /// **内置 git**（`GitCapability` / `git_tools.dart`，2026-10-27）。

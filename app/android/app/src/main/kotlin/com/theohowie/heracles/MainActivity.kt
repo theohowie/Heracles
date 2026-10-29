@@ -32,6 +32,7 @@ import com.theohowie.heracles.bridge.SandboxBridge
 import com.theohowie.heracles.bridge.WorkspaceRegistry
 import io.flutter.embedding.android.FlutterActivity
 import io.flutter.embedding.engine.FlutterEngine
+import io.flutter.plugin.common.EventChannel
 import io.flutter.plugin.common.MethodCall
 import io.flutter.plugin.common.MethodChannel
 import kotlinx.coroutines.CoroutineScope
@@ -66,12 +67,13 @@ import java.io.File
  * **保留的是"只有原生才能做"的部分**（见 [DeviceChannel] 的表格）：
  * 文件 IO、shell、健康读数、系统选择器、前台服务通知。
  *
- * ## 两个通道，分工明确
+ * ## 两个通道 + 一条事件流，分工明确
  *
  * | 通道 | 方向 | 内容 |
  * |---|---|---|
  * | `heracles/device`（[DeviceChannel]） | Dart → Kotlin 请求 / 响应 | 设备能力全协议 |
  * | `heracles/command`（本类） | Dart → Kotlin 请求 / 响应 | **工作区登记** + 设备权限引导 + 通知回跳 |
+ * | EventChannel `heracles/voice`（[VoiceRecorder]） | Kotlin → Dart 事件流 | 流式语音 PCM 分片（§N13.2，2026-10-29 新增） |
  *
  * 为什么工作区登记留在 `heracles/command` 而没并进 `heracles/device`：
  * 它是**旧的、已验证的**接口，Dart 侧现有代码已经在用（`pickWorkspace` /
@@ -184,7 +186,10 @@ class MainActivity : FlutterActivity() {
             shell = DeviceShell(),
             health = DeviceHealth(ctx),
             build = BuildTaskProgress(ctx),
-            // ★ 长期记忆（App 全局，与工作区无关）—— `memory.read/append/clear`
+            // ★ 长期记忆（App 全局，与工作区无关）—— `memory.*` 共 12 个方法：
+            //   read / append / clear / list / search / delete / userEdit /
+            //   propose / proposals / resolveProposal / stats / migrate
+            //   （实现见 [MemoryStore]，契约见 docs/INTERFACE.md §N12）
             memory = MemoryStore(ctx),
             filePicker = filePicker,
             folderPicker = folderPicker,
@@ -208,6 +213,25 @@ class MainActivity : FlutterActivity() {
             flutterEngine.dartExecutor.binaryMessenger,
             CHANNEL,
         ).also { commandChannel = it }.setMethodCallHandler { call, result -> handle(call, result) }
+
+        // ★ 流式语音事件流（`heracles/voice`）—— Kotlin → Dart，契约 §N13.2
+        //   只增不改：旧包没有这条通道 ⇒ Dart 订阅失败/收不到 chunk。
+        //   StreamHandler 的 onListen/onCancel 都在主线程，直接把 sink 交给录音器；
+        //   没订阅时 sink 为 null ⇒ [VoiceRecorder] 退化为"只写文件"的旧行为。
+        EventChannel(
+            flutterEngine.dartExecutor.binaryMessenger,
+            VoiceRecorder.EVENT_CHANNEL,
+        ).setStreamHandler(
+            object : EventChannel.StreamHandler {
+                override fun onListen(arguments: Any?, events: EventChannel.EventSink?) {
+                    voiceRecorder.setEventSink(events)
+                }
+
+                override fun onCancel(arguments: Any?) {
+                    voiceRecorder.setEventSink(null)
+                }
+            },
+        )
     }
 
     private fun handle(call: MethodCall, result: MethodChannel.Result) {

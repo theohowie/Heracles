@@ -21,6 +21,8 @@ library;
 import 'package:dart_agent_core/dart_agent_core.dart';
 
 import '../../capability/capabilities.dart';
+import '../../context/memory_context.dart';
+import '../../prompt/memory_prompt.dart';
 import '../../tools/tool_factory.dart';
 
 /// 提问门禁 —— 由宿主（UI）实现。
@@ -179,15 +181,24 @@ List<Tool> buildInteractionTools(
     // ----------------------------------------------------------- 长期记忆
     f.build(
       name: 'save_memory',
-      description: '把一条**跨会话有用**的信息记进长期记忆。返回：写入确认或失败原因（含敏感内容拒收）。'
-          '适合：项目约定（构建命令、代码风格）、用户偏好、踩过的坑。'
-          '⚠️ 不适合记任务进度（那属于当前对话）；也不适合记一次性信息。',
+      description: '把一条**以后有用**的信息记进长期记忆。返回：写入确认或失败原因（含敏感内容拒收）。'
+          '默认写「本会话」（scope 省略 = session，换会话看不到）；'
+          'scope=workspace 则本工作区的所有会话共享。'
+          '⚠️ 全局记忆对模型只读：**不能**直接写 global，想让用户长期记住请用 '
+          'propose_global_memory（进入待用户确认列表）。'
+          '也不适合记任务进度（那属于当前对话）与一次性信息。',
       parameters: {
         'type': 'object',
         'properties': {
           'note': {
             'type': 'string',
             'description': '要记住的一句话。要具体、可复用，不要写"用户喜欢简洁"。',
+          },
+          'scope': {
+            'type': 'string',
+            'enum': ['session', 'workspace'],
+            'description': '写哪个作用域：session = 只在本会话（默认）；'
+                'workspace = 本工作区所有会话共享。全局只能提议，不在此列。',
           },
         },
         'required': ['note'],
@@ -213,7 +224,79 @@ List<Tool> buildInteractionTools(
             isRetryable: false,
           );
         }
-        return memory!.append(note);
+        // ★ 作用域（2026-10-29）：**不静默纠正** —— 模型写 global 时给明确
+        //   拒因并指路 propose_global_memory；老宿主没升级时由能力的
+        //   `defaultWriteScope` 决定默认值（默认 session）。
+        final rawScope = optionalString(args, 'scope');
+        final MemoryScope scope;
+        if (rawScope == null) {
+          scope = memory!.defaultWriteScope;
+        } else {
+          final parsed = MemoryScope.tryParse(rawScope);
+          if (parsed == null) {
+            return CapabilityFailure(
+              '未执行：scope 只能是 session 或 workspace，收到 "$rawScope"。',
+              isRetryable: true,
+            );
+          }
+          scope = parsed;
+        }
+        if (scope == MemoryScope.global) {
+          return const CapabilityFailure(
+            '未执行：全局记忆只读，模型不能直接写。'
+            '若要建议用户长期记住（跨工作区），请调用 propose_global_memory '
+            '（会进入待用户确认的候选列表，用户确认后才生效）。',
+            isRetryable: false,
+          );
+        }
+        return memory!.appendScoped(scope, note);
+      },
+    ),
+
+    // ----------------------------------------------- 全局记忆提议（只读通道）
+    f.build(
+      name: 'propose_global_memory',
+      description: '向用户**提议**一条全局长期记忆（跨工作区共享）。'
+          '全局记忆对模型只读：这里不会直接生效，只把候选放进「待用户确认」列表，'
+          '用户在记忆页确认后才成为全局记忆。'
+          '返回：已记录为候选（或失败原因）。'
+          '适合：跨项目都成立的用户偏好/环境事实；项目内的约定请用 save_memory。',
+      parameters: {
+        'type': 'object',
+        'properties': {
+          'note': {
+            'type': 'string',
+            'description': '要提议记住的一句话。要具体、可复用。',
+          },
+          'kind': {
+            'type': 'string',
+            'enum': ['preference', 'background', 'habit', 'other'],
+            'description': '条目类型，默认 other。',
+          },
+        },
+        'required': ['note'],
+      },
+      isAvailable: () => memory != null,
+      unavailableReason: '当前环境不支持长期记忆',
+      run: (args) async {
+        final note = requireString(args, 'note');
+        if (note.trim().length < 4) {
+          return const CapabilityFailure(
+            '记忆内容太短，至少写一句完整的话',
+            isRetryable: true,
+          );
+        }
+        // 不变量 I8：SEC4 对**每条写入路径**都生效（提议也是落盘的明文）。
+        final secret = _secretPattern.firstMatch(note);
+        if (secret != null) {
+          return const CapabilityFailure(
+            '未执行：内容疑似包含密钥/令牌（API Key、token 类字符串）。'
+            '提议也会落盘并在用户确认后进入上下文，绝不写入凭据。',
+            isRetryable: false,
+          );
+        }
+        final kind = optionalString(args, 'kind') ?? 'other';
+        return memory!.proposeGlobal(note, kind: kind);
       },
     ),
   ];
@@ -221,11 +304,18 @@ List<Tool> buildInteractionTools(
 
 /// 读取长期记忆的渲染格式（由装配层在 system prompt 里注入）。
 ///
-/// ## 谁在调它（2026-10-23 接通）
+/// ## 谁在调它
 ///
-/// `HeraclesAgent._buildSystemPrompts()`。接通之前这个函数
-/// **全仓 0 处调用** —— 记忆只能靠 `save_memory` 写进去，却从来没被读出来
-/// 进上下文 ⇒ 换一个会话就"失忆"，写了等于没写。
+/// `HeraclesAgent._buildSystemPrompts()` 的**旧路径**（`RunOptions.memoryNote`）。
+/// 2026-10-29 起新路径（三作用域 `RunOptions.memory`）走
+/// `prompt/memory_prompt.dart` 的 `renderMemoryContext`。
+///
+/// ## 为什么现在只是转调
+///
+/// 格式定义**只能有一份**。2026-10-29 重设计把标题/尾注常量与拼装逻辑
+/// 都搬进了 `memory_prompt.dart`（`renderMemorySingleScope`）—— 本函数保留
+/// 只是为了**不破坏既有调用方与测试**，实现体是转调（输出逐字节不变）。
+/// 将来改文案只改 `memory_prompt.dart` 一处，不会出现"新渲染改了、旧的没改"。
 ///
 /// ## 为什么带一段行为约束（不是光贴原文）
 ///
@@ -237,17 +327,4 @@ List<Tool> buildInteractionTools(
 ///    此时若盲信记忆，就会按过时的约定办事。
 ///
 /// 所以标题里点明"越早越旧"，并明确"冲突时以当前对话为准"。
-///
-/// ## 为什么只说一句、不写成手册
-///
-/// 与 `system_prompt.dart` 的原则一致：**给事实，不给教练**。
-/// 这里只交代两件模型自己无法从环境推断的事（要不要复述、冲突听谁的），
-/// 其余交给它自己判断。
-String renderMemory(String raw) {
-  if (raw.trim().isEmpty) return '';
-  return '\n\n## 长期记忆（跨会话沉淀，越早越旧）\n'
-      '$raw\n'
-      '\n'
-      '记忆是**事实沉淀**，不用复述给用户看，只在需要时使用；'
-      '若与当前对话冲突，**以当前对话为准**。';
-}
+String renderMemory(String raw) => renderMemorySingleScope(raw);

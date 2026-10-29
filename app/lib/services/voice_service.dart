@@ -44,6 +44,48 @@ const kVoiceModelFiles = <VoiceModelFile>[
 int get kVoiceModelTotalBytes =>
     kVoiceModelFiles.fold(0, (sum, f) => sum + f.bytes);
 
+// ------------------------------------------------------- 流式识别模型（§N13.4）
+//
+// **流式模型 = sherpa-onnx 的 streaming zipformer 中英双语 int8**
+// （HF 仓库 `csukuangfj/sherpa-onnx-streaming-zipformer-bilingual-zh-en-2023-02-20`）。
+//
+// 2026-10-29 本机**实测**（不假装）：
+// · `https://huggingface.co/...` HEAD 200，四个文件字节数逐个拿到（写死在
+//   [kStreamingVoiceModelFiles]；one 个 190MB 量级）；
+// · `hf-mirror.com` / `www.modelscope.cn` / GitHub release 本机均
+//   `无法连接到远程服务器`（同一时刻 HF 却通）⇒ **先只配 HF 源**；
+//   镜像等镜像可用再加（source 列表化留待有实据时做，不写死假地址）。
+//
+// 目录与 SenseVoice **分开**：`<appFilesDir>/voice_models/streaming-zipformer/`
+// ⇒ 两套模型的 `.complete` / 字节校验互不覆盖。下载、校验、完成标记
+// 全部走 [VoiceModelController] 同一套 [_downloadInto]（不新写下载器）。
+
+/// 流式模型来源（HF 仓库根，下载时拼 `/resolve/main/<name>`）。
+const kStreamingVoiceModelRepoUrl =
+    'https://huggingface.co/csukuangfj/sherpa-onnx-streaming-zipformer-bilingual-zh-en-2023-02-20';
+
+/// 流式子目录名（与 `sensevoice-small` 平级、互不覆盖）。
+const kStreamingVoiceDirName = 'streaming-zipformer';
+
+/// `.complete` 里写的模型标识（与 SenseVoice 区分）。
+const kStreamingVoiceMarker = 'streaming-zipformer-bilingual-zh-en-int8';
+
+const kStreamingEncoderName = 'encoder-epoch-99-avg-1.int8.onnx';
+const kStreamingDecoderName = 'decoder-epoch-99-avg-1.onnx';
+const kStreamingJoinerName = 'joiner-epoch-99-avg-1.int8.onnx';
+const kStreamingTokensName = 'tokens.txt';
+
+const kStreamingVoiceModelFiles = <VoiceModelFile>[
+  VoiceModelFile(kStreamingEncoderName, 181895032),
+  VoiceModelFile(kStreamingDecoderName, 13876452),
+  VoiceModelFile(kStreamingJoinerName, 3228404),
+  VoiceModelFile(kStreamingTokensName, 56317),
+];
+
+int get kStreamingVoiceModelTotalBytes =>
+    kStreamingVoiceModelFiles.fold(0, (sum, f) => sum + f.bytes);
+
+
 // ------------------------------------------------------------ 引擎准备
 //
 // **识别引擎 = sherpa-onnx**（2026-10-29 实测定的路线）。官方
@@ -215,9 +257,18 @@ class VoiceModelController extends ChangeNotifier {
   String? prepareError;
   VoiceDownloadState download = const VoiceDownloadState();
 
+  /// **流式模型**（§N13.4）是否已下载完整（`.complete` + 逐文件字节）。
+  bool streamingInstalled = false;
+
+  /// 流式模型下载状态（与整段模型的 [download] 互不干扰）。
+  VoiceDownloadState streamingDownload = const VoiceDownloadState();
+
   CancelToken? _cancelToken;
 
   bool get downloading => download.phase == VoiceModelPhase.downloading;
+
+  bool get streamingDownloading =>
+      streamingDownload.phase == VoiceModelPhase.downloading;
 
   /// sherpa-onnx 要加载的两个产物路径（引擎准备完成后才存在）。
   String? get sherpaModelPath {
@@ -235,6 +286,23 @@ class VoiceModelController extends ChangeNotifier {
     if (root.isEmpty) return null;
     return '$root/voice_models/sensevoice-small';
   }
+
+  /// 流式模型目录（与 [modelDir] **平级、互不覆盖**）。
+  String? get streamingModelDir {
+    final root = profile?.appFilesDir ?? '';
+    if (root.isEmpty) return null;
+    return '$root/voice_models/$kStreamingVoiceDirName';
+  }
+
+  String? _streamingFile(String name) {
+    final dir = streamingModelDir;
+    return dir == null ? null : '$dir/$name';
+  }
+
+  String? get streamingEncoderPath => _streamingFile(kStreamingEncoderName);
+  String? get streamingDecoderPath => _streamingFile(kStreamingDecoderName);
+  String? get streamingJoinerPath => _streamingFile(kStreamingJoinerName);
+  String? get streamingTokensPath => _streamingFile(kStreamingTokensName);
 
   Future<void> load() async {
     profile ??= await AgentBridge().deviceProfile();
@@ -256,28 +324,19 @@ class VoiceModelController extends ChangeNotifier {
   /// 已安装 = 完成标记在，且每个文件都在、字节数精确对上。
   void refreshInstalled() {
     final dir = modelDir;
-    if (dir == null) {
-      installed = false;
-      return;
-    }
-    var ok = File('$dir/.complete').existsSync();
-    if (ok) {
-      for (final f in kVoiceModelFiles) {
-        final file = File('$dir/${f.name}');
-        if (!file.existsSync() || file.lengthSync() != f.bytes) {
-          ok = false;
-          break;
-        }
-      }
-    }
-    installed = ok;
+    installed = _dirComplete(dir, kVoiceModelFiles);
+    streamingInstalled = _dirComplete(streamingModelDir, kStreamingVoiceModelFiles);
     if (installed && download.phase != VoiceModelPhase.downloading) {
       download = const VoiceDownloadState(phase: VoiceModelPhase.done);
+    }
+    if (streamingInstalled &&
+        streamingDownload.phase != VoiceModelPhase.downloading) {
+      streamingDownload = const VoiceDownloadState(phase: VoiceModelPhase.done);
     }
     // 引擎产物：两个文件都在、且补完的模型比裸文件大（metadata
     // 追加了约 11KB）才算真备好 —— 只看存在会被半成品骗过去。
     engineReady = false;
-    if (ok) {
+    if (installed) {
       final raw = File('$dir/model_quant.onnx');
       final patched = File('$dir/$kVoiceSherpaModelName');
       final tokens = File('$dir/$kVoiceTokensTxtName');
@@ -285,6 +344,16 @@ class VoiceModelController extends ChangeNotifier {
           tokens.existsSync() &&
           patched.lengthSync() > raw.lengthSync();
     }
+  }
+
+  /// 目录里是否「`.complete` 在 + 每个文件字节数精确对上」。
+  bool _dirComplete(String? dir, List<VoiceModelFile> files) {
+    if (dir == null || !File('$dir/.complete').existsSync()) return false;
+    for (final f in files) {
+      final file = File('$dir/${f.name}');
+      if (!file.existsSync() || file.lengthSync() != f.bytes) return false;
+    }
+    return true;
   }
 
   /// **引擎准备**：tokens.json → tokens.txt；model_quant.onnx
@@ -349,15 +418,81 @@ class VoiceModelController extends ChangeNotifier {
       return;
     }
     if (downloading) return;
+    final ok = await _downloadInto(
+      dir: dir,
+      files: kVoiceModelFiles,
+      totalBytes: kVoiceModelTotalBytes,
+      completeMarker: 'sensevoice-small-onnx',
+      // ModelScope 的原始仓库路径（旧实现口径，保持不动）。
+      urlOf: (name) => '$kVoiceModelRepoUrl/resolve/master/$name',
+      onState: (s) {
+        download = s;
+        notifyListeners();
+      },
+    );
+    if (!ok) return;
+    installed = true;
+    download = const VoiceDownloadState(phase: VoiceModelPhase.done);
+    notifyListeners();
+    // 下完立刻把引擎产物备好，用户点麦克风时不用等。
+    await prepareEngine();
+  }
+
+  /// **流式模型下载**（§N13.4）：与整段模型同一套下载 + 字节校验 +
+  /// `.complete`，只是落在独立子目录。失败/取消 ⇒ 只影响
+  /// [streamingInstalled]，整段识别照旧可用（回退由调用方决定）。
+  Future<void> startStreamingDownload() async {
+    final dir = streamingModelDir;
+    if (dir == null) {
+      streamingDownload = const VoiceDownloadState(
+        phase: VoiceModelPhase.error,
+        error: '拿不到本机存储目录（宿主未返回 deviceProfile）。',
+      );
+      notifyListeners();
+      return;
+    }
+    if (streamingDownloading) return;
+    final ok = await _downloadInto(
+      dir: dir,
+      files: kStreamingVoiceModelFiles,
+      totalBytes: kStreamingVoiceModelTotalBytes,
+      completeMarker: kStreamingVoiceMarker,
+      urlOf: (name) => '$kStreamingVoiceModelRepoUrl/resolve/main/$name',
+      onState: (s) {
+        streamingDownload = s;
+        notifyListeners();
+      },
+    );
+    if (!ok) return;
+    streamingInstalled = true;
+    streamingDownload = const VoiceDownloadState(phase: VoiceModelPhase.done);
+    notifyListeners();
+  }
+
+  /// 两个模型共用的下载流程：逐文件下载 → 按字节数校验（对不上就删并
+  /// 报错）→ 写 `.complete`。返回 true = 全部下完并标记成功。
+  ///
+  /// 已存在且字节数精确对上的文件跳过（粗粒度断点续传）；取消/失败时
+  /// 只清状态，已完整下好的文件保留。**只有一个下载在跑**（共享
+  /// [_cancelToken]）：另一个模型正在下载时再点会返回 false 之外的状态，
+  /// 不并发抢带宽。
+  Future<bool> _downloadInto({
+    required String dir,
+    required List<VoiceModelFile> files,
+    required int totalBytes,
+    required String completeMarker,
+    required String Function(String name) urlOf,
+    required void Function(VoiceDownloadState state) onState,
+  }) async {
     final token = CancelToken();
     _cancelToken = token;
-    download = VoiceDownloadState(
-      phase: VoiceModelPhase.downloading,
-      total: kVoiceModelTotalBytes,
-      note: '正在下载模型文件',
+    onState(
+      VoiceDownloadState(
+        phase: VoiceModelPhase.downloading,
+        total: totalBytes,
+        note: '正在下载模型文件',
+      ),
     );
-    notifyListeners();
-
     final dio = Dio(
       BaseOptions(
         connectTimeout: const Duration(seconds: 15),
@@ -367,35 +502,35 @@ class VoiceModelController extends ChangeNotifier {
     try {
       await Directory(dir).create(recursive: true);
       var doneBytes = 0;
-      for (final f in kVoiceModelFiles) {
+      for (final f in files) {
         final savePath = '$dir/${f.name}';
-        // 已有且字节数对上的文件直接跳过（断点续传的粗粒度版：
-        // 按文件续，不按字节续）。
         final existing = File(savePath);
         if (existing.existsSync() && existing.lengthSync() == f.bytes) {
           doneBytes += f.bytes;
           continue;
         }
-        download = VoiceDownloadState(
-          phase: VoiceModelPhase.downloading,
-          received: doneBytes,
-          total: kVoiceModelTotalBytes,
-          note: '正在下载 ${f.name}',
+        onState(
+          VoiceDownloadState(
+            phase: VoiceModelPhase.downloading,
+            received: doneBytes,
+            total: totalBytes,
+            note: '正在下载 ${f.name}',
+          ),
         );
-        notifyListeners();
         final base = doneBytes;
         await dio.download(
-          '$kVoiceModelRepoUrl/resolve/master/${f.name}',
+          urlOf(f.name),
           savePath,
           cancelToken: token,
           onReceiveProgress: (received, _) {
-            download = VoiceDownloadState(
-              phase: VoiceModelPhase.downloading,
-              received: base + received,
-              total: kVoiceModelTotalBytes,
-              note: '正在下载 ${f.name}',
+            onState(
+              VoiceDownloadState(
+                phase: VoiceModelPhase.downloading,
+                received: base + received,
+                total: totalBytes,
+                note: '正在下载 ${f.name}',
+              ),
             );
-            notifyListeners();
           },
         );
         // 逐个校验：字节数对不上 = 坏文件，删掉并报错，不继续。
@@ -408,34 +543,29 @@ class VoiceModelController extends ChangeNotifier {
         }
         doneBytes += f.bytes;
       }
-      await File(
-        '$dir/.complete',
-      ).writeAsString('sensevoice-small-onnx\n${DateTime.now().toIso8601String()}');
-      installed = true;
-      download = const VoiceDownloadState(phase: VoiceModelPhase.done);
-      notifyListeners();
-      // 下完立刻把引擎产物备好，用户点麦克风时不用等。
-      await prepareEngine();
+      await File('$dir/.complete').writeAsString(
+        '$completeMarker\n${DateTime.now().toIso8601String()}',
+      );
+      return true;
     } on DioException catch (e) {
       if (CancelToken.isCancel(e)) {
-        download = const VoiceDownloadState();
-        // 半截文件留着会被下次按大小跳过的逻辑误判 —— 大小对不上
-        // 本来就不会跳过，但占空间，清掉当前下了一半的那个。
-        // （已完整下好的文件保留，下次续传跳过。）
+        onState(const VoiceDownloadState());
       } else {
-        download = VoiceDownloadState(
-          phase: VoiceModelPhase.error,
-          error: '下载失败：${e.message ?? e.type.name}',
+        onState(
+          VoiceDownloadState(
+            phase: VoiceModelPhase.error,
+            error: '下载失败：${e.message ?? e.type.name}',
+          ),
         );
       }
+      return false;
     } catch (e) {
-      download = VoiceDownloadState(
-        phase: VoiceModelPhase.error,
-        error: '下载失败：$e',
+      onState(
+        VoiceDownloadState(phase: VoiceModelPhase.error, error: '下载失败：$e'),
       );
+      return false;
     } finally {
       _cancelToken = null;
-      notifyListeners();
     }
   }
 
@@ -452,6 +582,17 @@ class VoiceModelController extends ChangeNotifier {
     engineReady = false;
     prepareError = null;
     download = const VoiceDownloadState();
+    notifyListeners();
+  }
+
+  /// 删除流式模型（与整段模型互不影响）。
+  Future<void> deleteStreamingModel() async {
+    final dir = streamingModelDir;
+    if (dir != null && Directory(dir).existsSync()) {
+      await Directory(dir).delete(recursive: true);
+    }
+    streamingInstalled = false;
+    streamingDownload = const VoiceDownloadState();
     notifyListeners();
   }
 }

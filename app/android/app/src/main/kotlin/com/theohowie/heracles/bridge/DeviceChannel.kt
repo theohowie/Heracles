@@ -74,9 +74,19 @@ class DeviceChannel(
         }
     }
 
-    /** 统一的失败形状。 */
+    /** 统一的失败形状（兼容旧分支：没有 code）。 */
     private fun failure(reason: String): Map<String, Any?> =
         mapOf("ok" to false, "error" to reason)
+
+    /**
+     * **带错误码**的失败形状（2026-10-29 起，`memory.*` 与未知方法用它）。
+     *
+     * 为什么要有 code：`error` 是给人看的人话，Dart 侧要**分支处理**就得有
+     * 稳定的机器可读标识（例如 `E_SCOPE_READONLY` ⇒ 引导用户去提议列表，
+     * 而不是重试）。§N12.5 的错误码全集是契约。
+     */
+    private fun codedFailure(code: String, reason: String): Map<String, Any?> =
+        mapOf("ok" to false, "code" to code, "error" to reason)
 
     /** 挂到 Flutter 引擎上。 */
     fun register(engine: FlutterEngine) {
@@ -226,21 +236,94 @@ class DeviceChannel(
 
             // ---------------------------------------------------------- 长期记忆
             //
-            // ★ 2026-10-23：记忆搬到 **App 全局**（不再放工作区里）。
-            //   路径 `<externalFilesDir>/heracles/memory.md`，与工作区无关 ⇒
-            //   跨工作区共享；且不受 SAF 限制（不用授权、不用 MANAGE_EXTERNAL_STORAGE）。
+            // ★ 2026-10-29：记忆拆成**三作用域**（`docs/INTERFACE.md` §N12）。
+            //   **Kotlin 只负责 global + 提议 + 迁移**；workspace/session 两作用域
+            //   在工作区目录里、由 Dart 经 `fs.*` 读写（Kotlin 不碰，才不串台）。
+            //   global 的目录是 `<externalFilesDir>/heracles/memory/` ——
+            //   为什么不让 Dart 用 `fs.*` 自己拼：它拿不到 `getExternalFilesDir`
+            //   的值，只有原生知道。
             //
-            //   为什么不让 Dart 用 `fs.*` 自己拼路径：那要 Dart 知道
-            //   `getExternalFilesDir` 的值，而它拿不到 —— 只有原生知道。
+            //   12 个方法照 §N12.5 的表实现；未知方法/缺参一律回明确 code
+            //   （Dart 侧靠 code 分支，靠 error 文本给人看）。
             "memory.read" -> scope.launch { reply(result, memory.read()) }
 
+            // ★ 全局**只读**（§N12.1）：agent 没有直写 global 的通道，只能提议。
+            //   方法名保留 ⇒ 旧记忆页的"新增/编辑"拿到明确 code（E_SCOPE_READONLY）
+            //   而不是"未知方法"（§N12.10 的有意过渡态）。
+            //
+            //   ⚠️ `note` **不强制**：追加无论如何都会被拒，缺参时报"缺参"只会
+            //   掩盖真正的结论（§N12.5 对这一条写的就是"恒定返回 E_SCOPE_READONLY"）。
             "memory.append" -> {
-                val note = call.argument<String>("note")
-                    ?: return reply(result, failure("memory.append 缺少参数 note"))
+                val note = call.argument<String>("note").orEmpty()
                 scope.launch { reply(result, memory.append(note)) }
             }
 
             "memory.clear" -> scope.launch { reply(result, memory.clear()) }
+
+            "memory.list" -> {
+                val includeExpired = call.argument<Boolean>("includeExpired") ?: false
+                val limit = call.argument<Number>("limit")?.toInt() ?: MemoryStore.LIMIT_UNLIMITED
+                scope.launch { reply(result, memory.list(includeExpired, limit)) }
+            }
+
+            "memory.search" -> {
+                val query = call.argument<String>("query")
+                    ?: return reply(result, codedFailure("E_BAD_ARG", "memory.search 缺少参数 query"))
+                val limit = call.argument<Number>("limit")?.toInt()
+                    ?: MemoryStore.SEARCH_DEFAULT_LIMIT
+                scope.launch { reply(result, memory.search(query, limit)) }
+            }
+
+            "memory.delete" -> {
+                val all = call.argument<Boolean>("all") ?: false
+                val ids = call.stringListArg("ids")
+                if (!all && ids == null) {
+                    return reply(
+                        result,
+                        codedFailure("E_BAD_ARG", "memory.delete 需要 ids（字符串数组）或 all:true"),
+                    )
+                }
+                scope.launch { reply(result, memory.delete(ids ?: emptyList(), all)) }
+            }
+
+            "memory.userEdit" -> {
+                val action = call.argument<String>("action")
+                    ?: return reply(result, codedFailure("E_BAD_ARG", "memory.userEdit 缺少参数 action"))
+                val id = call.argument<String>("id")
+                val text = call.argument<String>("text")
+                val kind = call.argument<String>("kind")
+                scope.launch { reply(result, memory.userEdit(action, id, text, kind)) }
+            }
+
+            "memory.propose" -> {
+                val note = call.argument<String>("note")
+                    ?: return reply(result, codedFailure("E_BAD_ARG", "memory.propose 缺少参数 note"))
+                val kind = call.argument<String>("kind")
+                scope.launch { reply(result, memory.propose(note, kind)) }
+            }
+
+            "memory.proposals" -> {
+                val status = call.argument<String>("status") ?: "pending"
+                scope.launch { reply(result, memory.proposals(status)) }
+            }
+
+            "memory.resolveProposal" -> {
+                val id = call.argument<String>("id")
+                    ?: return reply(
+                        result,
+                        codedFailure("E_BAD_ARG", "memory.resolveProposal 缺少参数 id"),
+                    )
+                val action = call.argument<String>("action")
+                    ?: return reply(
+                        result,
+                        codedFailure("E_BAD_ARG", "memory.resolveProposal 缺少参数 action"),
+                    )
+                scope.launch { reply(result, memory.resolveProposal(id, action)) }
+            }
+
+            "memory.stats" -> scope.launch { reply(result, memory.stats()) }
+
+            "memory.migrate" -> scope.launch { reply(result, memory.migrate()) }
 
             // ---------------------------------------------------------- 选择器
             "picker.folder" -> launchFolderPicker(result)
@@ -269,7 +352,10 @@ class DeviceChannel(
                 reply(result, mapOf("ok" to true))
             }
 
-            else -> reply(result, failure("未知方法：${call.method}"))
+            else -> reply(
+                result,
+                codedFailure("E_UNKNOWN_METHOD", "未知方法：${call.method}"),
+            )
         }
     }
 
@@ -493,6 +579,21 @@ class DeviceChannel(
                 return out
             }
             else -> return null
+        }
+    }
+
+    /**
+     * 取字符串数组参数（`memory.delete {ids:[…]}` 用）。
+     *
+     * 返回 null = **根本没给**（与"给了空数组"区分开：后者是调用方错误，
+     * 但要由 MemoryStore 统一报 `E_BAD_ARG`，这里不做业务判断）。
+     * 元素不是字符串、或 trim 后为空 ⇒ 丢弃（不猜类型，也不把数字转字符串）。
+     */
+    private fun MethodCall.stringListArg(name: String): List<String>? {
+        val raw = argument<Any>(name) ?: return null
+        val list = raw as? List<*> ?: return null
+        return list.mapNotNull { item ->
+            (item as? String)?.trim()?.takeIf { s -> s.isNotEmpty() }
         }
     }
 }

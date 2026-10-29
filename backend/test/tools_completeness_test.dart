@@ -2,13 +2,16 @@ import 'package:heracles_backend/heracles_backend.dart';
 import 'package:test/test.dart';
 import 'support/tool_result.dart';
 
-/// **工具完整性门禁** —— 32 个工具都要在、Schema 都要对。
+/// **工具完整性门禁** —— 33 个工具都要在、Schema 都要对。
 ///
 /// ## 为什么这条测试重要
 ///
 /// 工具是智能体唯一的"手"。少一个工具，模型就有一类任务做不了；
 /// Schema 写错，模型填的参数会被拒。这类错误**不会崩溃**，
 /// 只会表现为"模型好像有点笨" —— 所以必须有断言。
+///
+/// 32 → 33 的来源（2026-10-29 记忆三作用域重设计）：新增
+/// `propose_global_memory`（全局记忆只读，agent 只能提议）。
 void main() {
   /// 全能力版（模拟真机环境）
   final fullCaps = Capabilities(
@@ -35,8 +38,8 @@ void main() {
   final byName = {for (final t in allTools) t.name: t};
 
   group('工具数量与覆盖', () {
-    test('★★★ 必须恰好 32 个工具（少一个就是一类任务做不了）', () {
-      expect(allTools.length, 32,
+    test('★★★ 必须恰好 33 个工具（少一个就是一类任务做不了）', () {
+      expect(allTools.length, 33,
           reason: '实际：${allTools.map((t) => t.name).join(", ")}');
     });
 
@@ -53,8 +56,8 @@ void main() {
         'web_fetch', 'check_device_state',
         // APK
         'build_apk', 'apk_decompile', 'apk_recompile', 'apk_sign', 'install_apk',
-        // 交互
-        'ask_user', 'save_memory',
+        // 交互（2026-10-29：propose_global_memory 是 agent 写全局的唯一通道）
+        'ask_user', 'save_memory', 'propose_global_memory',
         // git（2026-10-27）：5 只读 + 4 改本地 + push + init
         'git_status', 'git_log', 'git_diff', 'git_branches', 'git_show_commit',
         'git_stage', 'git_unstage', 'git_commit', 'git_checkout',
@@ -298,7 +301,9 @@ class _FakeWeb implements WebCapability {
       const CapabilitySuccess('page');
 }
 
-class _FakeMemory implements MemoryCapability {
+/// 测试替身：**extends** 而不是 implements —— 记忆能力新增的作用域方法有默认
+/// 实现，只有 `extends` 才能继承（2026-10-29 记忆重设计）。
+class _FakeMemory extends MemoryCapability {
   @override
   Future<String> read() async => '';
   @override

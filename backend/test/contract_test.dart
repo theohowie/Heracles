@@ -133,10 +133,62 @@ void main() {
     });
   });
 
-  group('ContractMemory — 长期记忆', () {
-    test('★★★ maxBytes = 256 KB', () {
-      expect(ContractMemory.maxBytes, 256 * 1024);
-      expect(ContractMemory.maxBytes, 262144);
+  group('ContractMemory — 长期记忆（2026-10-29 三作用域重设计）', () {
+    // ⚠️ **旧断言为什么不再成立**（有意破坏性变更）：
+    //
+    // 旧断言是 `ContractMemory.maxBytes == 256*1024` —— 那个数同时被当成
+    // "写闸"与"每轮固定开销"，把「能存多少」和「每轮付多少 token」焊死
+    // （设计稿 §二）。重设计把两族常量拆开并**删除 maxBytes**，所以旧断言
+    // 在语义上已无对象：继续断言它只会挡住正确的结构。
+    // 现在改断言**新常量值与它们之间的关系**（关系比字面值更能抓漂移）。
+
+    test('★★★ 注入预算：global+workspace 共享 6000，session 独立 4000', () {
+      expect(ContractMemory.globalWorkspaceInjectMaxChars, 6000);
+      expect(ContractMemory.sessionInjectMaxChars, 4000);
+      expect(ContractMemory.sessionInjectMaxChars,
+          lessThan(ContractMemory.globalWorkspaceInjectMaxChars),
+          reason: '会话段是易变段，预算必须小于稳定段合计 —— 否则会话记忆会把'
+              '全局/工作区的稳定前缀挤掉');
+    });
+
+    test('★★★ 存储软预算：8 MB / 16 MB / 512 KB，合计远大于注入预算', () {
+      expect(ContractMemory.storageGlobalSoftMaxBytes, 8 * 1024 * 1024);
+      expect(ContractMemory.storageWorkspaceSoftMaxBytes, 16 * 1024 * 1024);
+      expect(ContractMemory.storageSessionSoftMaxBytes, 512 * 1024);
+      expect(
+        ContractMemory.storageSoftMaxBytes,
+        ContractMemory.storageGlobalSoftMaxBytes +
+            ContractMemory.storageWorkspaceSoftMaxBytes +
+            ContractMemory.storageSessionSoftMaxBytes,
+        reason: '合计常量必须等于三个分 scope 常量之和（不许单独调）',
+      );
+      expect(ContractMemory.storageSoftMaxBytes,
+          greaterThan(1000 * ContractMemory.globalWorkspaceInjectMaxChars),
+          reason: '存储预算必须远大于注入预算 —— 两者不是同一个旋钮（不变量 I3）');
+    });
+
+    test('★★★ 单条/条数/候选/摘要常量的量级关系', () {
+      expect(ContractMemory.entryMaxChars, 8000);
+      expect(ContractMemory.entryMaxChars,
+          greaterThan(ContractMemory.globalWorkspaceInjectMaxChars),
+          reason: '单条上限（存储）允许比一轮注入预算大 —— 一条长记忆可以「存得下、'
+              '本轮不一定注入」');
+      expect(ContractMemory.injectMaxEntriesPerScope, 40);
+      expect(ContractMemory.injectCandidateMaxBytes, 64 * 1024);
+      expect(ContractMemory.retrievalMaxCandidates, 200);
+      expect(ContractMemory.summaryMaxChars, 40);
+      expect(ContractMemory.entriesSoftMax, 5000);
+      expect(ContractMemory.sessionEntriesSoftMax, 300);
+      expect(ContractMemory.sessionEntriesSoftMax,
+          lessThan(ContractMemory.entriesSoftMax));
+    });
+
+    test('★★★ 窗口自适应比例 5%，且常量值可被 min 截住', () {
+      expect(ContractMemory.windowRatioCap, 0.05);
+      // 128K 窗口 × 5% = 6400 > 6000 ⇒ 常量生效（小窗口才收缩，见 memory_prompt_test）
+      expect(ContractModel.defaultWindowTokens * ContractMemory.windowRatioCap,
+          greaterThan(ContractMemory.globalWorkspaceInjectMaxChars),
+          reason: '默认窗口下常量应当先生效，否则 6000 这个数白写');
     });
   });
 

@@ -199,7 +199,10 @@ class _TwoLineClient implements LLMClient {
   }
 }
 
-class _Mem implements MemoryCapability {
+/// 测试替身：**extends** 而不是 implements —— 记忆能力新增的作用域方法
+/// （defaultWriteScope/appendScoped/readScope/proposeGlobal）有默认实现，
+/// 只有 `extends` 才能继承（2026-10-29 记忆重设计）。
+class _Mem extends MemoryCapability {
   final appended = <String>[];
 
   @override

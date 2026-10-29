@@ -567,6 +567,8 @@ class AppSettings {
     this.accentHex = 0xFFFF7A45,
     this.glassEffect = true,
     this.maxTurns = 0,
+    this.memoryGlobalEnabled = true,
+    this.memoryPooling = false,
     this.providers = defaultProviders,
     this.activeProviderId,
   });
@@ -614,6 +616,21 @@ class AppSettings {
   /// 不需要枚举的类型安全。读回时的**容错**（脏值 → 0）在
   /// `SettingsController` 里做。
   final int maxTurns;
+
+  /// **全局记忆开关**（2026-10-29，三作用域重设计；默认 `true`）。
+  ///
+  /// 关掉 ⇒ 宿主**不读** global 段（也不注入），但**数据保留**
+  /// （Kotlin/存储层不需要知道这个开关 —— 存储与注入解耦）。
+  /// 键名 `memoryGlobalEnabled`（INTERFACE §N12.9）。
+  final bool memoryGlobalEnabled;
+
+  /// **记忆解析池化**（2026-10-29；默认 `false`）。
+  ///
+  /// 开池化时只缓存**解析结果**（不缓存写事务），实例 key 必须是
+  /// `(scope, scopeId)` 二元组并在每次取用前重新校验（防串台）。
+  /// 默认关 = 与旧行为一致；当前 P1-①c-2 只落设置项，池化实现留给后续
+  /// （开启也不会改变行为，如实记账）。
+  final bool memoryPooling;
 
   final List<ModelProviderConfig> providers;
 
@@ -760,6 +777,8 @@ class AppSettings {
     int? accentHex,
     bool? glassEffect,
     int? maxTurns,
+    bool? memoryGlobalEnabled,
+    bool? memoryPooling,
     List<ModelProviderConfig>? providers,
     String? activeProviderId,
   }) =>
@@ -775,6 +794,9 @@ class AppSettings {
         accentHex: accentHex ?? this.accentHex,
         glassEffect: glassEffect ?? this.glassEffect,
         maxTurns: maxTurns ?? this.maxTurns,
+        memoryGlobalEnabled:
+            memoryGlobalEnabled ?? this.memoryGlobalEnabled,
+        memoryPooling: memoryPooling ?? this.memoryPooling,
         providers: providers ?? this.providers,
         // ★ 显式传 null = 清除选中（回自动选择）；不传 = 保持原值
         activeProviderId:
