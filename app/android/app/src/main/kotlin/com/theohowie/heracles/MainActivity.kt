@@ -818,8 +818,19 @@ class MainActivity : FlutterActivity() {
                 return
             }
             CameraBridge.REQUEST_CODE -> {
-                if (resultCode == RESULT_OK) cameraBridge.onActivityResult(data)
-                else cameraBridge.onCancelled()
+                // ★★ 2026-10-29 真机证据：**不能相信 resultCode** ★★
+                //
+                // 实测日志（用户点完相机里的 ✓ 之后）：
+                //     HeraclesAct: onActivityResult req=18499 res=0 data=false
+                //                                        ↑ 0 = RESULT_CANCELED
+                //
+                // MIUI 系统相机把照片写进了 MediaStore，却回了"取消"。
+                // 旧代码见 res != OK 就 `onCancelled()` ⇒ 清掉待处理状态 ⇒
+                // 照片被静默丢弃（用户报的「拍照没有附件」正是这个）。
+                //
+                // 现在一律交给 `onActivityResult`，由它**按"目标 URI 里到底有没有
+                // 内容"**判定成功/取消 —— 这是各家 ROM 相机兼容的通行做法。
+                cameraBridge.onActivityResult(data)
                 return
             }
             FolderPickerBridge.REQUEST_CODE -> {

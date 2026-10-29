@@ -220,11 +220,31 @@ class CameraBridge(private val activity: Activity) {
             return
         }
         try {
+            // ★ 2026-10-29：**按"URI 里到底有没有内容"判定**，不看 resultCode。
+            //
+            // 真机日志证明 MIUI 相机拍完后回 RESULT_CANCELED（res=0），
+            // 所以"取消"与"拍到"必须靠内容区分：
+            //   · 有内容 → 就是拍到了，照常交付
+            //   · 空/读不到 → 才算用户取消（`result(null)`，不报错）
+            //
+            // 判定同时做一次 IS_PENDING 归零：否则照片只在 App 里能看，
+            // 相册里永远"还在处理中"。
+            val size = runCatching {
+                activity.contentResolver.openAssetFileDescriptor(uri, "r")?.use { it.length }
+            }.getOrNull() ?: -1L
+            Log.i("CameraBridge", "结果 URI 内容长度=$size (uri=$uri)")
+
+            if (size <= 0L) {
+                // 真的没拍到（用户按了 ✗ / 相机没写文件）—— 静默取消，不报错
+                Log.i("CameraBridge", "按取消处理：URI 无内容")
+                runCatching { activity.contentResolver.delete(uri, null, null) }
+                result(null)
+                return
+            }
+
             val copied = copyToCache(uri, name)
             if (copied == null) {
-                // 相机声称成功却读不到内容 —— 当失败报，不假装拍到了
-                activity.contentResolver.delete(uri, null, null)
-                error?.invoke("拍到的照片读取失败")
+                error?.invoke("拍到了照片，但读取失败（大小 $size 字节）")
                 return
             }
             result(copied)
