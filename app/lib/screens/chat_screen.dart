@@ -4417,7 +4417,9 @@ class _ChatScreenState extends State<ChatScreen> {
             }
             _messages.add(HAssistantMessage(
               id: _nextId(),
-              text: '已停止。你可以继续发消息。',
+              // ★ 2026-10-29 用户要求：明确写出**是用户选择停止**的 ——
+              //   只写「已停止」会让人以为是运行自己挂了（故障感）。
+              text: '用户选择停止。你可以继续发消息。',
               bare: true,
             ));
           });

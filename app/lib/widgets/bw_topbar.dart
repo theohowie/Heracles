@@ -21,6 +21,39 @@ import '../theme/app_theme.dart';
 /// 高阻尼、不弹跳。展开/收起与圆角变化共用这一条曲线才同步。
 const _kFluidCurve = Cubic(0.22, 1.18, 0.36, 1.0);
 
+/// **钳制版**流体曲线（2026-10-29 真机崩溃后加）。
+///
+/// ## 为什么要它（红屏复现）
+///
+/// 用户点开待办再收起时弹红屏：
+///
+/// ```
+/// BoxConstraints has a negative minimum width.
+/// The offending constraints were:
+/// BoxConstraints(-0.7<=w<=280.0, 0.0<=h<=Infinity; NOT NORMALIZED)
+/// ```
+///
+/// 根因：`_kFluidCurve` 的 y1=1.18 会**过冲到 1 以上**，而
+/// `AnimatedContainer` 会给 `constraints` 做 `BoxConstraints.lerp`。
+/// 收起时 `minWidth: 168 → 0`，在 t≈1.004 处插值出 `168 + (0-168)×1.004 ≈ -0.7`
+/// ⇒ 负 minWidth ⇒ 断言崩溃。`-0.7` 这个数字正好对得上过冲量。
+///
+/// 修法两层：
+/// 1. **`constraints` 里不再放 `minWidth`**（只留 `maxWidth`），从根上避免
+///    "会过冲的量" 参与 lerp；
+/// 2. 尺寸类动画（`AnimatedSize`）用这条**钳制到 [0,1]** 的曲线 ——
+///    视觉上的过冲只保留在圆角这类不会产生非法值的地方。
+///
+/// 圆角/内边距仍用原始 `_kFluidCurve`，流体手感不变。
+class _ClampedFluidCurve extends Curve {
+  const _ClampedFluidCurve();
+
+  @override
+  double transformInternal(double t) => _kFluidCurve.transform(t).clamp(0.0, 1.0);
+}
+
+const _kFluidSizeCurve = _ClampedFluidCurve();
+
 class DynamicIsland extends StatefulWidget {
   const DynamicIsland({
     super.key,
@@ -85,7 +118,8 @@ class _DynamicIslandState extends State<DynamicIsland>
       onTap: widget.onToggle,
       child: AnimatedSize(
         duration: const Duration(milliseconds: 520),
-        curve: _kFluidCurve,
+        // ★ 钳制曲线：尺寸过冲到负值会直接崩（见 _ClampedFluidCurve 注释）
+        curve: _kFluidSizeCurve,
         alignment: Alignment.topCenter,
         child: AnimatedContainer(
           duration: const Duration(milliseconds: 520),
@@ -94,10 +128,11 @@ class _DynamicIslandState extends State<DynamicIsland>
           // 撑（只有「● 5/5」时短短一截，不好看）—— 给 168 的
           // 最小宽度拉长，同时纵向内边距压到 6 让胶囊更扁，
           // 不靠增高占地方。展开形态维持原尺寸。
-          constraints: BoxConstraints(
-            maxWidth: 280,
-            minWidth: widget.collapsed ? 168 : 0,
-          ),
+          //
+          // ⚠️ **minWidth 不许放这里**：它会参与 BoxConstraints.lerp，
+          //   而过冲曲线会把 168→0 的插值推成负数（真机 -0.7 直接红屏）。
+          //   最小宽度改由内层 ConstrainedBox 提供（见下方 child）。
+          constraints: const BoxConstraints(maxWidth: 280),
           padding: EdgeInsets.symmetric(
             horizontal: 13,
             vertical: widget.collapsed ? 6 : 9,
@@ -113,11 +148,18 @@ class _DynamicIslandState extends State<DynamicIsland>
               ),
             ],
           ),
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Row(
+          // ★ 收起态的 168 最小宽度放在**这里**（不参与 BoxConstraints.lerp）：
+          //   外层的 AnimatedSize 仍会把尺寸变化做平滑过渡，
+          //   但不会再出现"插值出负 minWidth"的崩溃（2026-10-29 真机）。
+          child: ConstrainedBox(
+            constraints: BoxConstraints(
+              minWidth: widget.collapsed ? 168 : 0,
+            ),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Row(
                 mainAxisSize: MainAxisSize.min,
                 children: [
                   AnimatedBuilder(
@@ -236,6 +278,7 @@ class _DynamicIslandState extends State<DynamicIsland>
                   ),
               ],
             ],
+          ),
           ),
         ),
       ),
@@ -460,12 +503,21 @@ class TopMetricLine extends StatelessWidget {
           ),
         ),
         const SizedBox(width: 5),
-        Text(
-          '$label $valueText',
-          style: TextStyle(
-            fontSize: 11.5,
-            fontWeight: FontWeight.w600,
-            color: color,
+        // ★ 2026-10-29 修溢出：以前这里是裸 `Text`（无 Flexible、无省略），
+        //   而右列只有 108dp 宽 —— 「状态 待填密钥」这类文案把 Row 撑出去，
+        //   真机决策页右上角出现「RIGHT OVERFLOWED」黄黑条。
+        //   现在：可伸缩 + 单行省略，永不越界。
+        Flexible(
+          child: Text(
+            '$label $valueText',
+            maxLines: 1,
+            softWrap: false,
+            overflow: TextOverflow.ellipsis,
+            style: TextStyle(
+              fontSize: 11.5,
+              fontWeight: FontWeight.w600,
+              color: color,
+            ),
           ),
         ),
       ],

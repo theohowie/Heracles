@@ -224,15 +224,15 @@ void main() {
       expect(find.byIcon(AppIcons.copy), findsOneWidget);
     });
 
-    testWidgets('bare 系统提示（已停止）不带操作行', (tester) async {
+    testWidgets('bare 系统提示（用户选择停止）不带操作行', (tester) async {
       const msg = HAssistantMessage(
         id: 'a2',
-        text: '已停止。你可以继续发消息。',
+        text: '用户选择停止。你可以继续发消息。',
         bare: true,
       );
       await tester.pumpWidget(wrap(ListView(children: const [MessageRow(message: msg)])));
       await tester.pump(const Duration(milliseconds: 300));
-      expect(find.text('已停止。你可以继续发消息。'), findsOneWidget);
+      expect(find.text('用户选择停止。你可以继续发消息。'), findsOneWidget);
       expect(find.byIcon(AppIcons.copy), findsNothing);
       expect(find.byIcon(AppIcons.thumbUpOutline), findsNothing);
     });

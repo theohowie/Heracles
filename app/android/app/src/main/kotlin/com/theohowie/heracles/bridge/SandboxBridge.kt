@@ -343,7 +343,14 @@ class SandboxBridge(
 
     private fun dispatch(call: MethodCall, result: MethodChannel.Result) {
         when (call.method) {
-            "status" -> scope.launch { reply(result, statusMap()) }
+            // ★ 2026-10-29 卡顿修复：`statusMap()` 会统计 rootfs 体积（遍历几万个文件），
+            //   以前直接在 `scope`（Main）上跑 ⇒ 打开设置/沙箱页时主线程被卡住，
+            //   用户实测「打开设置界面卡了很久」。
+            //   现在切到 IO 线程，主线程只等回调。
+            "status" -> scope.launch {
+                val m = withContext(Dispatchers.IO) { statusMap() }
+                reply(result, m)
+            }
 
             "activate" -> {
                 val ociRef = call.argument<String>("ociRef")

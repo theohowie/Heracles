@@ -204,7 +204,7 @@ class RootfsManager(
             source = meta?.source ?: RootfsStatus.SOURCE_NONE,
             label = meta?.label.orEmpty(),
             ociRef = meta?.ociRef.orEmpty(),
-            sizeBytes = directorySize(root),
+            sizeBytes = cachedSizeBytes(root),
             snapshotName = "",
             snapshotCount = snapshots.list().size,
             rootfsPath = root.absolutePath,
@@ -232,6 +232,7 @@ class RootfsManager(
         ociRef: String,
         onProgress: RootfsInstallProgress = RootfsInstallProgress { _, _ -> },
     ): RootfsStatus = mutationLock.withLock {
+        invalidateSizeCache() // ★ 体积变了：作废缓存（2026-10-29）
         eventSink.onEvent(
             EventSink.CATEGORY_ROOTFS,
             "开始安装 OCI rootfs",
@@ -265,6 +266,7 @@ class RootfsManager(
      * 需要「内置 rootfs 是硬性要求」语义时用 [useBundledOrThrow]。
      */
     suspend fun useBundledRootfs(): BundledRootfsResult = mutationLock.withLock {
+        invalidateSizeCache() // ★ 体积变了：作废缓存（2026-10-29）
         eventSink.onEvent(EventSink.CATEGORY_ROOTFS, "开始安装内置 rootfs", emptyMap())
         val result = bundled.tryInstall(rootfsDir)
         when (result.outcome) {
@@ -362,6 +364,7 @@ class RootfsManager(
      * @throws SandboxException CODE_INVALID_ARGUMENT 快照不存在
      */
     suspend fun resetRootfs(snapshotName: String): RootfsStatus = mutationLock.withLock {
+        invalidateSizeCache() // ★ 体积变了：作废缓存（2026-10-29）
         if (snapshotName.isNotBlank()) {
             val root = rootfsDir
             snapshots.restore(snapshotName, root)
@@ -485,6 +488,41 @@ class RootfsManager(
      * 链接本身不计入 → 与 `du` 口径一致。
      */
     /** 统计目录体积 —— 实现见 [directorySizeNoFollowLinks]（顶层函数，便于 JVM 单测）。 */
+    /**
+     * **带缓存的体积统计**（2026-10-29 卡顿修复）。
+     *
+     * ## 为什么需要
+     *
+     * `status()` 每次都会 `directorySize()` —— 遍历 rootfs 里几万个文件。
+     * 真机装上 T2 后 rootfs 约 578 MB / 数万文件，一次要几百毫秒到数秒。
+     * 而 UI 每次打开设置页 / 沙箱页都会查一次状态 ⇒ 用户实测「打开设置卡了很久」。
+     *
+     * ## 折中
+     *
+     * 体积显示不是实时指标（差几十 MB 用户也看不出来），所以缓存 [SIZE_CACHE_TTL_MS]：
+     * 期间重复查询直接返回；过了 TTL 才重算。安装/重置/回滚会显式 `invalidateSizeCache()`。
+     */
+    private fun cachedSizeBytes(root: File): Long {
+        val now = System.currentTimeMillis()
+        val c = sizeCache
+        if (c != null && c.first == root.absolutePath && now - c.third < SIZE_CACHE_TTL_MS) {
+            return c.second
+        }
+        val size = directorySize(root)
+        sizeCache = Triple(root.absolutePath, size, now)
+        return size
+    }
+
+    /** 作废体积缓存（安装 / 重置 / 回滚后必须调用）。 */
+    internal fun invalidateSizeCache() {
+        sizeCache = null
+    }
+
+    /** `(rootfs 路径, 字节数, 计算时刻)`；null = 还没算过。 */
+    @Volatile
+    private var sizeCache: Triple<String, Long, Long>? = null
+
+
     internal fun directorySize(dir: File): Long = directorySizeNoFollowLinks(dir)
 
     private fun deleteTree(file: File) {
@@ -529,3 +567,6 @@ class RootfsManager(
         const val RECOMMENDED_OCI_REF = "docker.io/library/alpine:3.20"
     }
 }
+
+/** rootfs 体积缓存有效期（60 秒）：体积不是实时指标，但不能永久陈旧。 */
+private const val SIZE_CACHE_TTL_MS = 60_000L
