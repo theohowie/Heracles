@@ -2646,6 +2646,8 @@ class _ChatScreenState extends State<ChatScreen> {
             rawOutput: _pendingRaw.remove(e.index ?? -1),
               // ★ 2026-10-29：执行面（预判）——卡片标题据此写「在沙箱/在手机执行」
               surface: e.surface,
+              exitCode: e.exitCode,
+              command: e.command,
           ));
         });
         // ★ 跟随时才滚（2026-10-23）—— 用户上滑回看时不许被拽回底部
@@ -2666,6 +2668,8 @@ class _ChatScreenState extends State<ChatScreen> {
                 status: e.ok == true ? ToolStatus.success : ToolStatus.failure,
               // ★ 执行面以**实际**为准（预判可能因并发/状态变化而不同）
               surface: e.surface,
+              exitCode: e.exitCode,
+              command: e.command,
               );
             }
           }

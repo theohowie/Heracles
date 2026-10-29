@@ -138,6 +138,8 @@ class HToolCall extends HMessage {
     this.status = ToolStatus.running,
     this.rawOutput,
     this.surface,
+    this.exitCode,
+    this.command,
   });
 
   @override
@@ -170,8 +172,23 @@ class HToolCall extends HMessage {
   /// 为空时回退到按工具名猜测（见 `tool_call_card.dart` 的 `commandSurfaceOf`）。
   final String? surface;
 
-  HToolCall copyWith(
-          {String? result, ToolStatus? status, String? rawOutput, String? surface}) =>
+  /// **结构化退出码**（2026-10-29）：来自 `AgentEvent.exitCode`（后端 metadata）。
+  ///
+  /// ⚠️ **不许用"成功就当作 0"去编造** —— 命令可能"工具调用成功"但退出码非 0
+  /// （`grep` 没匹配到、`javac` 编译失败都是）。拿不到就传 null，UI 不显示 chip。
+  final int? exitCode;
+
+  /// 命令全文（来自 `AgentEvent.command`，不截断）。
+  final String? command;
+
+  HToolCall copyWith({
+    String? result,
+    ToolStatus? status,
+    String? rawOutput,
+    String? surface,
+    int? exitCode,
+    String? command,
+  }) =>
       HToolCall(
         id: id,
         tool: tool,
@@ -180,6 +197,8 @@ class HToolCall extends HMessage {
         status: status ?? this.status,
         rawOutput: rawOutput ?? this.rawOutput,
         surface: surface ?? this.surface,
+        exitCode: exitCode ?? this.exitCode,
+        command: command ?? this.command,
       );
 }
 

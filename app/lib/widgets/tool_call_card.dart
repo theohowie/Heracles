@@ -476,6 +476,11 @@ CommandSurface? commandSurfaceOf(HToolCall call) {
   if (call.tool.toLowerCase().contains('sandbox')) {
     return CommandSurface.sandbox;
   }
+  // ★ 第三条兜底：后端失败文案带「（执行面：sandbox）」——
+  //   结构化 surface 没拿到时从它解析（成功文案没有这个前缀，所以只救失败场景）。
+  final fromText = surfaceFromResultText(call.result);
+  if (fromText != null) return fromText;
+
   if (call.tool == 'run_shell_command') return CommandSurface.shell;
   return null;
 }
@@ -497,13 +502,74 @@ String commandRowTitle(CommandSurface surface, ToolStatus status) {
 ///   的 `DeviceShellCapability` 与后端 `ProcessShellCapability`
 ///   都是这个格式）；解析不到就不显示 —— 等后端把退出码给成
 ///   结构化字段后，这里换成直读。
+/// 取命令的退出码 —— **结构化优先，绝不编造**。
+///
+/// ## 取值顺序（规格 2026-10-29）
+/// 1. `call.exitCode`：后端 metadata 里的结构化值（`AgentEvent.exitCode`）
+/// 2. 结果文本里的 `命令退出码：N`（老路径兜底）
+/// 3. 都没有 → `null`（UI 不显示 chip）
+///
+/// ⚠️ **旧实现是错的**：它写 `if (status == success) return 0` ——
+/// 把"工具调用成功"当成"命令退出码 0"。但两者不是一回事：
+/// `grep` 没匹配到、`javac` 编译失败都会让命令退出码非 0，
+/// 而工具调用本身是成功返回的。编造出来的 0 会让用户以为跑通了。
 int? commandExitCodeOf(HToolCall call) {
-  if (call.status == ToolStatus.success) return 0;
-  if (call.status != ToolStatus.failure) return null;
+  // ① 结构化（唯一可信来源）
+  if (call.exitCode != null) return call.exitCode;
+
+  // ② 兜底：从结果文本里解析（后端失败文案带「命令退出码：N」）
   final r = call.result;
-  if (r == null) return null;
-  final m = RegExp(r'命令退出码：\s*(-?\d+)').firstMatch(r);
-  return m == null ? null : int.tryParse(m.group(1)!);
+  if (r != null) {
+    final m = RegExp(r'命令退出码：\s*(-?\d+)').firstMatch(r);
+    if (m != null) return int.tryParse(m.group(1)!);
+  }
+
+  // ③ 拿不到就不显示 —— 不猜、不编造
+  return null;
+}
+
+/// 成功结果外层包的「【命令输出开始】…【命令输出结束】」两行标记。
+///
+/// 后端为了防提示注入会无条件包裹命令输出（SEC1）。**卡片里不该出现这两行** ——
+/// 那是给模型看的边界标记，不是给用户看的正文。
+const _kOutputStartMarker = '【命令输出开始】';
+const _kOutputEndMarker = '【命令输出结束】';
+
+/// 失败文案前面的「（执行面：sandbox）」前缀（后端 2026-10-29 加的）。
+final _kSurfacePrefix = RegExp(r'^\s*（执行面：\s*(sandbox|device|shell)\s*）\s*');
+
+/// 把结果文本清理成**可展示**的样子：
+/// - 剥掉输出包裹标记（首尾各一行）
+/// - 剥掉「（执行面：xxx）」前缀
+String cleanCommandOutput(String raw) {
+  var s = raw;
+  // 前缀（可能出现在包裹标记之后，也可能在最前）
+  s = s.replaceFirst(_kSurfacePrefix, '');
+  // 只剥**独立成行**的标记，避免误伤正文里的同名字符串
+  final lines = s.split('\n');
+  while (lines.isNotEmpty && lines.first.trim() == _kOutputStartMarker) {
+    lines.removeAt(0);
+  }
+  while (lines.isNotEmpty && lines.last.trim() == _kOutputEndMarker) {
+    lines.removeLast();
+  }
+  s = lines.join('\n');
+  // 包裹标记剥完可能留下前导空行
+  s = s.replaceFirst(RegExp(r'^\n+'), '');
+  // 再试一次前缀（有些失败文案是"标记在前、前缀在后"）
+  s = s.replaceFirst(_kSurfacePrefix, '');
+  return s.trimRight();
+}
+
+/// 从失败文案里解析执行面（后端「（执行面：sandbox）」前缀）。
+///
+/// 只在**没有结构化 surface** 时兜底用；结构化值永远优先。
+CommandSurface? surfaceFromResultText(String? raw) {
+  if (raw == null || raw.isEmpty) return null;
+  final m = _kSurfacePrefix.firstMatch(raw);
+  if (m == null) return null;
+  final v = m.group(1)!.toLowerCase();
+  return v == 'sandbox' ? CommandSurface.sandbox : CommandSurface.shell;
 }
 
 /// 把改动统计成 `+N −M`（2026-10-21，BUG-4）。
@@ -1142,6 +1208,10 @@ class _ToolCallCardState extends State<ToolCallCard> {
 
   /// 结果层：纵向限高 112、横向不换行滚动，末尾同样让位。
   Widget _resultLayer(Hue h, HToolCall call) {
+    // ★ 2026-10-29：渲染前先清洗 ——
+    //   · 剥掉「【命令输出开始】/【命令输出结束】」包裹标记（给模型的边界，不是正文）
+    //   · 剥掉「（执行面：xxx）」前缀（已转成结构化数据，不该露在正文里）
+    final text = cleanCommandOutput(call.result!);
     return ConstrainedBox(
       constraints: const BoxConstraints(maxHeight: kResultLayerMaxHeight),
       child: Scrollbar(
@@ -1161,7 +1231,7 @@ class _ToolCallCardState extends State<ToolCallCard> {
                 padding: const EdgeInsets.fromLTRB(
                     12, 8, kCommandEndClearance, 10),
                 child: Text(
-                  call.result!,
+                  text,
                   softWrap: false,
                   style: TextStyle(
                     fontFamily: kMonoFontFamily,
