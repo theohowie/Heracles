@@ -6,7 +6,7 @@
 接上内置沙箱或设备工具链之后，它还能**直接在这台手机上**编译、重打包、签名并安装 APK。
 模型用**你自己的 API Key**（BYOK）跑在云端，手机上不加载聊天模型；本地只跑语音识别与（可选的）JEV 小模型文件。
 
-> **版本 v0.3.1**（2026-10-30 发布） · **Android 12（API 31）+** · **arm64** · **GPL-3.0** · 内核 `backend/` 为纯 Dart（417 项单测）
+> **版本 v0.3.2**（2026-10-30 发布） · **Android 12（API 31）+** · **arm64** · **GPL-3.0** · 内核 `backend/` 为纯 Dart（417 项单测）
 >
 > 📖 图文简介与快速开始：**https://theohowie.github.io/Heracles/**
 > ｜ ⬇️ [**Releases（APK 下载）**](https://github.com/theohowie/Heracles/releases)
@@ -456,10 +456,10 @@ flowchart LR
 
 ### 6.1 安装
 
-从 [Releases](https://github.com/theohowie/Heracles/releases) 下载 APK，当前版本 **v0.3.1**（2026-10-30）：
+从 [Releases](https://github.com/theohowie/Heracles/releases) 下载 APK，当前版本 **v0.3.2**（2026-10-30）：
 
-- 直链：[`Heracles-v0.3.1.apk`](https://github.com/theohowie/Heracles/releases/download/v0.3.1/Heracles-v0.3.1.apk) · **67.5 MB**（70,802,143 字节）· `versionCode 5`
-- 校验：`sha256 = DC4603F9200D81F2C070F55356BFA6FFEF331BF301F85FF51F58AE5BFDA4200D`
+- 直链：[`Heracles-v0.3.2.apk`](https://github.com/theohowie/Heracles/releases/download/v0.3.2/Heracles-v0.3.2.apk) · **67.5 MB**（70,802,147 字节）· `versionCode 6`
+- 校验：`sha256 = 6CD4673686EA2C260605D388433048DFDF8BD9A9209D16E661FDD3D956F436B8`
 
 要求 **Android 12（API 31）及以上**、**arm64（arm64-v8a）** 手机。
 当前 release 包使用 debug 密钥签名，安装时需要允许「未知来源」；换正式密钥前不能覆盖升级。
