@@ -287,16 +287,14 @@ export const WORKS = [
   '内核 417 项 Dart 单测（cd backend && dart test）',
 ]
 
+/* 2026-10-30 用户裁定：debug 签名（即将转正式）、真 Key 验证、图片多模态、arm64 死重
+   这四条已不成立/已处理，从「尚未验证」里去掉（签名状态仍在下载区如实披露）。 */
 export const LIMITS = [
-  'release 用 debug 密钥签名（换正式密钥需卸载重装）',
-  '线上字段的真 Key 验证（含 JEV 云端决策）',
   'Anthropic / Responses 两条协议轨（无真 Key 证据）',
-  '模型读图 / 图片多模态（重构后未复验）',
   'JEV 本地推理（档位只能下模型，引擎未接入）',
   'APK 构建 / 逆向五件套未接线（build_apk、apk_* 会明确回「尚未接线」）',
   '记忆三作用域的真机验收台账仍待补',
   '流式语音质量未系统评测（长句 / 强噪声 / 方言）',
-  '只支持 arm64：包内 armeabi-v7a / x86_64 是第三方插件库的死重，那两个 ABI 跑不起来',
   '英文界面暂不支持（选 English 会如实提示）',
   '测试环境：flutter test 并发偶发加载失败，门禁以 backend dart test 为准',
 ]

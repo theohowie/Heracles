@@ -70,7 +70,7 @@ export default function Download() {
             </ul>
 
             <p className="receipt-note">
-              使用 debug 密钥签名，安装时需允许「未知来源」；只支持 arm64 机型。
+              当前用 debug 密钥签名（正式签名即将切换），安装时需允许「未知来源」；只支持 arm64 机型。
             </p>
 
             <div className="receipt-warn">
