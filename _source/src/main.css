@@ -56,6 +56,8 @@ html {
   scroll-padding-top: 88px;
   -webkit-text-size-adjust: 100%;
 }
+/* 锚点被 sticky 导航压住的问题，用 scroll-margin 兜底（比 scroll-padding 更可靠） */
+section[id], div[id="root"] { scroll-margin-top: 84px; }
 
 body {
   margin: 0;
@@ -318,10 +320,11 @@ ol, ul { margin: 0; padding: 0; list-style: none; }
   padding: 20px; display: flex; flex-direction: column; gap: 15px;
   height: clamp(420px, 52vh, 540px); overflow-y: auto; overscroll-behavior: contain;
   border-right: 1px solid var(--term-line);
-  scrollbar-width: thin; scrollbar-color: rgba(255, 255, 255, 0.18) transparent;
+  scrollbar-width: thin; scrollbar-color: rgba(255, 255, 255, 0.28) transparent;
 }
-.stream::-webkit-scrollbar { width: 6px; }
-.stream::-webkit-scrollbar-thumb { background: rgba(255, 255, 255, 0.16); border-radius: 3px; }
+.stream::-webkit-scrollbar { width: 8px; }
+.stream::-webkit-scrollbar-thumb { background: rgba(255, 255, 255, 0.26); border-radius: 4px; }
+.stream::-webkit-scrollbar-track { background: rgba(255, 255, 255, 0.04); }
 .ev-wrap { min-width: 0; position: relative; }
 /* 「还没走到」的条目不用整体透明（那会把小字压到 3:1 以下）：
    改成「卡片底色与边框变淡 + 强调色收起」，文字保持满对比度。
@@ -365,6 +368,7 @@ ol, ul { margin: 0; padding: 0; list-style: none; }
 .tool-out {
   margin: 9px 0 0; padding: 8px 10px; border-radius: 7px; background: rgba(0, 0, 0, 0.32);
   font-size: 11.5px; color: rgba(236, 233, 224, 0.62); overflow-x: auto; line-height: 1.7;
+  white-space: pre-wrap; overflow-wrap: anywhere;
 }
 .patch-stat { margin-left: auto; font-family: var(--mono); font-size: 11px; color: var(--term-ok); }
 .diff {
@@ -375,7 +379,7 @@ ol, ul { margin: 0; padding: 0; list-style: none; }
 .diff-sign { display: inline-block; width: 10px; opacity: 0.75; }
 .diff-add { color: #93dcaa; background: rgba(99, 201, 138, 0.1); }
 .diff-del { color: #eda3a3; background: rgba(237, 120, 120, 0.1); }
-.diff-ctx { color: rgba(236, 233, 224, 0.56); }
+.diff-ctx { color: rgba(236, 233, 224, 0.62); }
 
 .ev--gate { border: 1px solid rgba(224, 164, 68, 0.42); background: rgba(224, 164, 68, 0.07); border-radius: 11px; padding: 13px; }
 .gate-head { display: flex; align-items: center; gap: 9px; flex-wrap: wrap; }
@@ -580,7 +584,7 @@ ol, ul { margin: 0; padding: 0; list-style: none; }
   transition: border-color 0.2s, transform 0.2s;
 }
 .thumb img { width: 100%; aspect-ratio: 0.484; object-fit: cover; object-position: top; opacity: 0.7; transition: opacity 0.2s; }
-.thumb-name { font-size: 10px; color: var(--ink-2); padding: 4px 2px 5px; text-align: center; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.thumb-name { font-size: 10.5px; color: var(--ink-2); padding: 4px 2px 5px; text-align: center; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .thumb:hover { transform: translateY(-2px); }
 .thumb:hover img { opacity: 0.92; }
 .thumb.on { border-color: var(--ink); }
@@ -614,7 +618,7 @@ ol, ul { margin: 0; padding: 0; list-style: none; }
 .run { display: grid; grid-template-columns: 84px minmax(0, 1fr) auto; gap: 12px; align-items: baseline; }
 .run-date { font-size: 10.5px; color: var(--ink-3); }
 .run-text { font-size: 13px; color: var(--ink-2); }
-.run-tag { font-size: 9.5px; color: var(--ok); border: 1px solid rgba(27, 122, 69, 0.32); border-radius: 4px; padding: 1px 5px; white-space: nowrap; }
+.run-tag { font-size: 10.5px; color: var(--ok); border: 1px solid rgba(27, 122, 69, 0.32); border-radius: 4px; padding: 1px 5px; white-space: nowrap; }
 
 .ledger { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
 .ledger-card { padding: 20px 22px; border: 1px solid var(--hair-2); border-radius: var(--radius); background: var(--surface); }
@@ -667,12 +671,12 @@ ol, ul { margin: 0; padding: 0; list-style: none; }
 .spec-row dd { margin: 0; text-align: right; overflow-wrap: anywhere; }
 
 .sha { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
-.sha-k { font-size: 10px; letter-spacing: 0.12em; color: rgba(246, 243, 234, 0.56); flex: 0 0 auto; }
-.sha-v { flex: 1 1 100%; order: 2; font-size: 10px; line-height: 1.8; color: rgba(246, 243, 234, 0.7); background: rgba(0, 0, 0, 0.32); border-radius: 8px; padding: 8px 11px; overflow-wrap: anywhere; }
+.sha-k { font-size: 10.5px; letter-spacing: 0.12em; color: rgba(246, 243, 234, 0.56); flex: 0 0 auto; }
+.sha-v { flex: 1 1 100%; order: 2; font-size: 11px; line-height: 1.8; color: rgba(246, 243, 234, 0.7); background: rgba(0, 0, 0, 0.32); border-radius: 8px; padding: 8px 11px; overflow-wrap: anywhere; }
 .sha-v span { display: block; letter-spacing: 0.04em; }
 .copy-btn {
-  display: inline-flex; align-items: center; gap: 5px; cursor: pointer;
-  padding: 4px 11px; border-radius: 999px; font-size: 11.5px;
+  display: inline-flex; align-items: center; gap: 5px; cursor: pointer; min-height: 40px;
+  padding: 4px 13px; border-radius: 999px; font-size: 11.5px;
   border: 1px solid rgba(255, 255, 255, 0.2); background: transparent; color: #f6f3ea;
   transition: background 0.18s, border-color 0.18s;
 }

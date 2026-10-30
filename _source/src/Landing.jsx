@@ -1,5 +1,5 @@
-import { useEffect, useState } from 'react'
-import { motion, useReducedMotion, useScroll, useSpring } from 'framer-motion'
+import { useEffect, useRef, useState } from 'react'
+import { motion, useInView, useReducedMotion, useScroll, useSpring } from 'framer-motion'
 import { Icon, ICONS, HandStroke, Reveal, SectionHead } from './ui.jsx'
 import { APK, APK_SIZE, BAND, GITEE, HERO_SPECS, REPO, RELEASES, SHOT, SHOT_DATE, VERSION } from './data.js'
 import Transcript from './parts/Transcript.jsx'
@@ -184,8 +184,11 @@ function Band() {
 
 function Film() {
   const reduce = useReducedMotion()
+  const ref = useRef(null)
+  // 1.8 MB 的录屏不该和首屏抢带宽：进到视口附近才挂 src
+  const near = useInView(ref, { once: true, margin: '0px' })
   return (
-    <section className="section section--film" id="film">
+    <section className="section section--film" id="film" ref={ref}>
       <div className="wrap">
         <div className="film-head">
           <span className="eyebrow"><span className="eyebrow-num">15s</span>真机录屏</span>
@@ -195,8 +198,8 @@ function Film() {
           </p>
         </div>
         <Reveal className="film">
-          <video src="/Heracles/video/hero-loop.mp4" poster={SHOT('home-v2')}
-            autoPlay={!reduce} muted loop playsInline preload="metadata"
+          <video src={near ? '/Heracles/video/hero-loop.mp4' : undefined} poster={SHOT('home-v2')}
+            autoPlay={!reduce} muted loop playsInline preload="none"
             aria-label="Heracles 真机操作录屏（无声，15 秒循环）" />
         </Reveal>
       </div>
@@ -252,7 +255,7 @@ export default function Landing() {
     <div className="page">
       <a className="skip" href="#main">跳到正文</a>
       <Nav />
-      <main id="main">
+      <main id="main" tabIndex={-1}>
         <Hero />
         <Band />
         <Film />

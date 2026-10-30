@@ -94,9 +94,10 @@ export default function Reel() {
               </motion.div>
             </AnimatePresence>
 
-            <div className="thumbs" role="tablist" aria-label="界面截图">
+            {/* 缩略图就是普通按钮：aria-pressed 比不完整的 tablist 更诚实 */}
+            <div className="thumbs" aria-label="界面截图">
               {GALLERY.map((g, n) => (
-                <button type="button" key={g.src} role="tab" aria-selected={n === i}
+                <button type="button" key={g.src} aria-pressed={n === i}
                   className={`thumb${n === i ? ' on' : ''}`} onClick={() => setI(n)} title={g.title}>
                   <img src={g.src} alt="" loading="lazy" />
                   <span className="thumb-name">{g.title}</span>

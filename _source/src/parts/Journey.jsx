@@ -1,14 +1,17 @@
 import { useEffect, useRef, useState } from 'react'
-import { motion, useReducedMotion } from 'framer-motion'
+import { motion, useInView, useReducedMotion } from 'framer-motion'
 import { Icon, ICONS, SectionHead } from '../ui.jsx'
 import { STEPS } from '../data.js'
 
-/* 从上手到出包：真序列（所以有 01–04 编号）。
-   桌面端左侧滚动、右侧手机贴在视口里切换；小于 1000px 时每步自带截图。 */
+/* 上手路径：真序列（所以有 01–04 编号）。
+   桌面端左侧滚动、右侧手机贴在视口里切换；小于 1000px 时每步自带截图。
+   截图延后到本节快进入视口才挂 src —— 首屏不该为这 4 张图付流量。 */
 export default function Journey() {
   const [active, setActive] = useState(0)
   const listRef = useRef(null)
+  const sectionRef = useRef(null)
   const reduce = useReducedMotion()
+  const near = useInView(sectionRef, { once: true, margin: '300px 0px' })
 
   useEffect(() => {
     const root = listRef.current
@@ -27,7 +30,7 @@ export default function Journey() {
   const step = STEPS[active]
 
   return (
-    <section className="section section--journey" id="journey">
+    <section className="section section--journey" id="journey" ref={sectionRef}>
       <div className="wrap">
         <SectionHead
           index="02" eyebrow="上手路径"
@@ -51,7 +54,7 @@ export default function Journey() {
                   {s.points.map((p) => <li key={p}><Icon d={ICONS.check} size={14} />{p}</li>)}
                 </ul>
                 <figure className="step-shot-inline">
-                  <img src={s.shot} alt={`${s.label}：${s.title}`} loading="lazy" />
+                  {near && <img src={s.shot} alt={`${s.label}：${s.title}`} loading="lazy" />}
                 </figure>
               </article>
             ))}
@@ -63,7 +66,7 @@ export default function Journey() {
                 <div className="phone-frame">
                   {/* 四张图叠在一起做交叉淡入淡出：不卸载，所以滚动时不会闪白 */}
                   {STEPS.map((s, i) => (
-                    <motion.img key={s.key} src={s.shot} alt=""
+                    <motion.img key={s.key} src={near ? s.shot : undefined} alt=""
                       className={`phone-img${i === active ? ' on' : ''}`}
                       animate={reduce ? undefined : { opacity: i === active ? 1 : 0, scale: i === active ? 1 : 0.99 }}
                       initial={false}
