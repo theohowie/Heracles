@@ -8,13 +8,25 @@
    ⚠️ 切换点：发布新包后要同时改 APK / VERSION / APK_SIZE / SHA / 版本对照文案，
       并按新包重拍截图（现在这 8 张是 2026-10-26 的界面）。 */
 
-export const APK = 'https://github.com/theohowie/Heracles/releases/download/v0.2.2/Heracles-v0.2.2.apk'
+export const APK_GITHUB = 'https://github.com/theohowie/Heracles/releases/download/v0.3.2/Heracles-v0.3.2.apk'
+export const APK_GITEE = 'https://gitee.com/theohowie/heracles/releases/download/v0.3.2/Heracles-v0.3.2.apk'
+/* ⚠️ Gitee 附件传好之后把这里改成 true：主按钮会自动切成国内线路，
+   GitHub 变成「源站」备选（文案会跟着变，不用动别的）。 */
+export const GITEE_READY = false
+export const APK_ROUTES = [
+  { key: 'gitee', label: 'Gitee', hint: '国内线路', url: APK_GITEE, ready: GITEE_READY },
+  { key: 'github', label: 'GitHub', hint: '源站', url: APK_GITHUB, ready: true },
+]
+export const APK_PRIMARY = GITEE_READY ? APK_ROUTES[0] : APK_ROUTES[1]
+export const APK_ALT = GITEE_READY ? APK_ROUTES[1] : null
+export const APK = APK_PRIMARY.url
 export const RELEASES = 'https://github.com/theohowie/Heracles/releases'
 export const REPO = 'https://github.com/theohowie/Heracles'
 export const GITEE = 'https://gitee.com/theohowie/heracles'
-export const SHA = '3530158C4319917419B3307401DD36214F391472578D7B83E4FDDF230765FDD2'
-export const VERSION = 'v0.2.2'
-export const APK_SIZE = '20.9 MiB'
+export const SHA = '6CD4673686EA2C260605D388433048DFDF8BD9A9209D16E661FDD3D956F436B8'
+export const VERSION = 'v0.3.2'
+export const APK_SIZE = '67.5 MiB'
+export const APK_VERSION_CODE = '6'
 export const PKG = 'com.theohowie.heracles'
 export const SHOT_DATE = '2026-10-26'
 
@@ -22,7 +34,7 @@ export const SHOT = (name) => `/Heracles/shots/${name}.webp`
 
 /* ---------- 首屏规格条（三个都能复算） ---------- */
 export const HERO_SPECS = [
-  { value: '412', unit: '项', label: '内核 Dart 单测', note: 'backend/ 纯 Dart，可复跑' },
+  { value: '417', unit: '项', label: '内核 Dart 单测', note: 'backend/ 纯 Dart，可复跑' },
   { value: '90–99%', unit: '', label: '长任务缓存命中', note: '真机实测，累计/稳态' },
   { value: '33', unit: '个', label: '受控工具', note: '白名单 + 门禁三态' },
 ]
@@ -59,7 +71,7 @@ export const SESSION = {
       kind: 'tool',
       tool: 'read_file',
       arg: 'app/lib/screens/appearance_screen.dart',
-      meta: '412 行 · 12 ms',
+      meta: '417 行 · 12 ms',
       surface: '工作区内',
     },
     {
@@ -229,7 +241,7 @@ export const FEATURES = [
   {
     icon: 'code', span: 3,
     title: '纯 Dart 内核 + Flutter 前端',
-    desc: 'backend/ 是纯 Dart 包，412 项单测不依赖 Flutter 与 Android；设备能力由 Kotlin 桥提供，界面层是 Flutter。',
+    desc: 'backend/ 是纯 Dart 包，417 项单测不依赖 Flutter 与 Android；设备能力由 Kotlin 桥提供，界面层是 Flutter。',
     spec: 'backend/ 可 dart test',
   },
 ]
@@ -246,35 +258,32 @@ export const GALLERY = [
   { src: SHOT('about-v2'), title: '关于', desc: '版本、许可与开源信息', spec: 'GPL-3.0' },
 ]
 
-/* ---------- 状态台账 ---------- */
+/* ---------- 状态台账（基线 = README §10「已知限制与未验证」+ 头部数字） ---------- */
 export const WORKS = [
   '文件工具写工作区 → 沙箱 /opt/ws-real（真机，读回一致）',
-  '沙箱执行链路：激活 / 执行 / 挂载 / 边界（真机端到端）',
+  '沙箱执行链路：T0 rootfs / T1 工具内置 / T2 按需下载',
   '待办 / 提问 / 审批 / 切档四面板（真机逐项）',
   '三作用域记忆（会话私有 / 工作区共享 / 全局只读）',
   '本地语音：内置 14M 流式模型，断网可用（真机）',
+  '轮间插话与排队发送（v0.3.2 修复后可用）',
   '会话严格 append-only（写前断言前缀、并发拒写）',
-  '审批门禁：答复落盘 once / always / deny',
-  '取消、排队发送、上下文压缩三级',
-  'SAF 真实工作区：授权、原地读写、按名与按内容搜索（搜索为单测覆盖）',
-  '内核 412 项 Dart 单测（cd backend && dart test）',
+  '审批 fail-closed：答复落盘 once / always / deny',
+  '取消、上下文压缩三级（40% / 60% / 80%）',
+  '内核 417 项 Dart 单测（cd backend && dart test）',
 ]
 
 export const LIMITS = [
+  'release 用 debug 密钥签名（换正式密钥需卸载重装）',
   '线上字段的真 Key 验证（含 JEV 云端决策）',
-  'APK 五件套（build / decompile / recompile / sign / install 全部未接线；沙箱内可手动跑构建命令）',
-  'JEV 本地推理引擎（档位可下载，引擎未接入）',
   'Anthropic / Responses 两条协议轨（无真 Key 证据）',
-  '模型读图（重构后未复验；跨轮历史图不重放）',
-  '沙箱 T2 构建套件（加固后未复验；guest /proc 为空）',
-  '在 SAF 工作区内构建（无物理路径 ⇒ 不能挂进沙箱）',
-  '设备 shell 通道（Shizuku 等只有代码，无真机证据）',
-  '通知权限三步、语音取消入口',
-  '拍照进附件的最终版复验（只有代码，无验收台账）',
-  '记忆四个边界项（双工作区同 sid / 注入顺序 / 淘汰 compact / 失败不阻断）',
-  '多机型 / 多 provider（1 机型 1 模型；>100 轮未测）',
-  '正式发布签名（当前 debug keystore）',
-  'v0.3.1 尚未发布（可下载的仍是 v0.2.2）',
+  '模型读图 / 图片多模态（重构后未复验）',
+  'JEV 本地推理（档位只能下模型，引擎未接入）',
+  'APK 构建 / 逆向五件套未接线（build_apk、apk_* 会明确回「尚未接线」）',
+  '记忆三作用域的真机验收台账仍待补',
+  '流式语音质量未系统评测（长句 / 强噪声 / 方言）',
+  '只支持 arm64：包内 armeabi-v7a / x86_64 是第三方插件库的死重，那两个 ABI 跑不起来',
+  '英文界面暂不支持（选 English 会如实提示）',
+  '测试环境：flutter test 并发偶发加载失败，门禁以 backend dart test 为准',
 ]
 
 /* ---------- 最近实测（带日期，能回查台账） ---------- */

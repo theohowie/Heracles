@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import { motion, useInView, useReducedMotion, useScroll, useSpring } from 'framer-motion'
 import { Icon, ICONS, HandStroke, Reveal, SectionHead } from './ui.jsx'
-import { APK, APK_SIZE, BAND, GITEE, HERO_SPECS, REPO, RELEASES, SHOT, SHOT_DATE, VERSION } from './data.js'
+import { APK, APK_PRIMARY, APK_SIZE, BAND, GITEE, HERO_SPECS, REPO, RELEASES, SHOT, SHOT_DATE, VERSION } from './data.js'
 import Transcript from './parts/Transcript.jsx'
 import Journey from './parts/Journey.jsx'
 import Bento from './parts/Bento.jsx'
@@ -129,6 +129,8 @@ function Hero() {
             <a href={GITEE} target="_blank" rel="noreferrer">Gitee</a>
             <span className="sep">·</span>
             <a href={RELEASES} target="_blank" rel="noreferrer">校验值</a>
+            <span className="sep">·</span>
+            下载走 {APK_PRIMARY.label} {APK_PRIMARY.hint}
           </p>
 
           <ul className="specs">

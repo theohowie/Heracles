@@ -1,8 +1,12 @@
 import { useState } from 'react'
 import { Icon, ICONS, Reveal } from '../ui.jsx'
-import { APK, APK_SIZE, PKG, RELEASES, SHA, SHOT_DATE, VERSION } from '../data.js'
+import {
+  APK_ALT, APK_PRIMARY, APK_ROUTES, APK_SIZE, APK_VERSION_CODE,
+  PKG, RELEASES, SHA, VERSION,
+} from '../data.js'
 
-/* 下载区做成一张「构建回执」：左边给你装，右边是这次产物的规格与校验值。 */
+/* 下载区做成一张「构建回执」：左边给你装，右边是这次产物的规格与校验值。
+   两条线路都是「点一下就开始下载」的直链：默认国内走 Gitee，源站走 GitHub。 */
 export default function Download() {
   const [copied, setCopied] = useState(false)
   const copy = async () => {
@@ -15,12 +19,17 @@ export default function Download() {
 
   const specs = [
     ['版本', VERSION],
+    ['版本码', APK_VERSION_CODE],
     ['体积', APK_SIZE],
     ['包名', PKG],
     ['系统', 'Android 12+ · arm64'],
     ['许可', 'GPL-3.0'],
     ['签名', 'debug 密钥（alpha）'],
   ]
+
+  const primary = APK_PRIMARY
+  const alt = APK_ALT
+  const primaryIsGitee = primary.key === 'gitee'
 
   return (
     <section className="section section--download" id="download">
@@ -33,23 +42,42 @@ export default function Download() {
               首个会话只需要三件事：一个 API Key、一个能授权的目录、一句你想改什么。
               聊天模型在云端（BYOK），Key 只存本机、只进请求头。
             </p>
+
             <div className="cta-row">
-              <a className="btn btn--ink btn--lg" href={APK} download>
+              <a className="btn btn--ink btn--lg" href={primary.url} download>
                 <Icon d={ICONS.download} size={18} /> 下载 {VERSION}（{APK_SIZE}）
               </a>
-              <a className="btn btn--ghost btn--lg" href={RELEASES} target="_blank" rel="noreferrer">
-                其它版本 <Icon d={ICONS.external} size={16} />
-              </a>
+              {alt && (
+                <a className="btn btn--ghost btn--lg" href={alt.url} download>
+                  从 {alt.label} {alt.hint}下载 <Icon d={ICONS.download} size={16} />
+                </a>
+              )}
             </div>
+
+            <ul className="routes">
+              {APK_ROUTES.filter((r) => r.ready).map((r) => (
+                <li key={r.key} className={r.key === primary.key ? 'is-primary' : ''}>
+                  <span className="route-dot" aria-hidden="true" />
+                  <a href={r.url} download>{r.label} {r.hint}</a>
+                  {r.key === primary.key && <span className="route-tag mono">默认</span>}
+                </li>
+              ))}
+              <li className="routes-note">
+                两条都是直链：点一下就开始下载，不经过任何中间页。
+                {primaryIsGitee ? '国内默认走 Gitee，海外或想核对源站就走 GitHub。' : 'Gitee 国内线路附件上传中，上线后主按钮会自动切过去。'}
+              </li>
+            </ul>
+
             <p className="receipt-note">
-              使用 debug 密钥签名，安装时需允许「未知来源」；32 位机型不受支持。
+              使用 debug 密钥签名，安装时需允许「未知来源」；只支持 arm64 机型。
             </p>
+
             <div className="receipt-warn">
-              <span className="warn-k mono">版本对照</span>
+              <span className="warn-k mono">为什么有 67.5 MiB</span>
               <p>
-                这个包是 {VERSION}（{SHOT_DATE} 构建）：沙箱、流式语音、三作用域记忆、JEV、git
-                都不在里面（工具 21 个，权限页 6 行）。想用这些主线能力，照 README 从源码构建 ——
-                其中尚未验证的部分仍待验证。
+                包内三套原生库（armeabi-v7a / arm64-v8a / x86_64）来自第三方插件，其中
+                v7a 与 x86_64 目录缺 Flutter 引擎、在那两个 ABI 上跑不起来 —— 约 20 MiB 是死重。
+                安装时系统只会取 arm64，实际占用小于下载体积；更小的 arm64-only 包在评估中。
               </p>
             </div>
           </div>
@@ -60,10 +88,13 @@ export default function Download() {
               {specs.map(([k, v]) => (
                 <div className="spec-row" key={k}>
                   <dt>{k}</dt>
-                  <dd className={k === '包名' ? 'mono' : ''}>{v}</dd>
+                  <dd className={k === '包名' || k === '版本码' ? 'mono' : ''}>{v}</dd>
                 </div>
               ))}
             </dl>
+            <a className="spec-link" href={RELEASES} target="_blank" rel="noreferrer">
+              全部版本与 Release 说明 <Icon d={ICONS.external} size={13} />
+            </a>
             <div className="sha">
               <span className="sha-k mono">sha256</span>
               <button type="button" className="copy-btn" onClick={copy}>

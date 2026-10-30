@@ -654,6 +654,22 @@ ol, ul { margin: 0; padding: 0; list-style: none; }
 .receipt :focus-visible { outline-color: #f6f3ea; }
 .receipt-note { margin: 16px 0 0; font-size: 11.5px; color: rgba(246, 243, 234, 0.56); }
 
+/* 两条直链：主线路带绿点与「默认」标，另一条并排；说明写清「点一下就开始下」 */
+.routes { margin: 14px 0 0; display: grid; gap: 6px; font-size: 12px; }
+.routes li { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.route-dot { width: 6px; height: 6px; border-radius: 50%; border: 1px solid rgba(246, 243, 234, 0.5); flex: none; }
+.routes li.is-primary .route-dot { background: var(--term-ok); border-color: var(--term-ok); }
+.routes a { color: rgba(246, 243, 234, 0.8); border-bottom: 1px solid rgba(255, 255, 255, 0.2); padding-bottom: 1px; }
+.routes a:hover { color: #fff; border-bottom-color: #fff; }
+.route-tag { font-size: 10px; letter-spacing: 0.1em; color: var(--term-ok); border: 1px solid rgba(99, 201, 138, 0.35); border-radius: 4px; padding: 1px 5px; }
+.routes-note { display: block; color: rgba(246, 243, 234, 0.58); font-size: 11.5px; line-height: 1.65; margin-top: 2px; }
+.spec-link {
+  font-size: 11.5px; color: rgba(246, 243, 234, 0.64); width: fit-content;
+  display: inline-flex; align-items: center; gap: 4px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.18); padding: 3px 0 2px;
+}
+.spec-link:hover { color: #fff; border-bottom-color: rgba(255, 255, 255, 0.42); }
+
 /* 版本对照：可下载的包与页面描述的主线能力不是同一个东西 —— 这条必须显眼但别吼 */
 .receipt-warn {
   margin-top: 18px; padding: 12px 14px; border-radius: 12px;
