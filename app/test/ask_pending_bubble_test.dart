@@ -1,4 +1,4 @@
-﻿// Copyright (C) 2026 The Heracles Authors
+// Copyright (C) 2026 The Heracles Authors
 // SPDX-License-Identifier: GPL-3.0
 //
 // **P0：提问面板"点掉 ≠ 未回答"**（2026-10-30）。
@@ -245,11 +245,13 @@ void main() {
 
     // 后端判超时（契约：ask_closed{outcome: timeout}）
     AgentBridge.emitLocalEvent(
-        AgentEvent(type: 'ask_closed', ts: 2, status: 'timeout'));
-    await settle(tester);
+        AgentEvent(type: AgentEvent.kAskClosed, ts: 2, outcome: 'timeout'));
+    await settle(tester, times: 8);
 
     expect(find.text('等待您的回答'), findsNothing,
         reason: '后端说提问结束了 ⇒ 气泡必须消失');
+    expect(find.text('等待超时，已按「未回答」继续'), findsOneWidget,
+        reason: '超时要有交代，但**不是**前端提交的"未回答"');
     expect(gate.hasPendingAsk, isTrue,
         reason: '前端不许替后端提交"未回答"—— 语义归后端');
 

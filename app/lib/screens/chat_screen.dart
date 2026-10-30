@@ -3017,12 +3017,11 @@ class _ChatScreenState extends State<ChatScreen> {
         //   第三参数 `message` 只作**降级**用（老版本 Kotlin 没有 questions）。
         unawaited(_showAskDialog(context, e.questions, e.message ?? ''));
 
-      // ★ 2026-10-30 P0（后端契约仅增）：后端判定提问结束（超时/中止）。
+      // ★ 2026-10-30 P0（后端已落地 `8e6d496`）：后端判定提问结束
       //   `ask_closed{outcome: timeout|aborted}` —— 清气泡与待答，
       //   **绝不提交假答案**（超时由后端按"未回答"回传，前端不掺和）。
-      //   ⚠️ 这里按**字符串**匹配：新事件常量由后端线落地，前端先兼容。
-      case 'ask_closed':
-        _onAskClosed();
+      case AgentEvent.kAskClosed:
+        _onAskClosed(e.outcome);
 
       // ---- ★ 危险工具审批（2026-10-19）----
       //
@@ -3798,15 +3797,13 @@ class _ChatScreenState extends State<ChatScreen> {
   /// append 进会话。模型在下一轮自行比对原任务与插话
   /// （是修改、追加还是删除），重新调整接下来的任务。
   ///
-  /// ## 两个分支
+  /// ## 分支（2026-10-30 P0：后端 `8e6d496` 起真生效）
   ///
   /// | 状态 | 行为 |
   /// |---|---|
-  /// | 正在跑 | `interruptRun` → 队列移除这条 → UI 等下一轮的 `interrupted` 事件渲染它 |
+  /// | 正在跑 | accepted=true ⇒ 队列移除 + 轻提示；后端立刻发 `interrupted`，UI 渲染成用户消息 |
+  /// | 正在跑但被拒 | accepted=false（插话队列满 / 任务刚好收尾 / 空文本）⇒ 退回队首 + **明确 Toast**，绝不静默 |
   /// | 没在跑 | 从队列取出，走**正常发送**（"插话"与"发送"本就是一件事） |
-  ///
-  /// 失败兜底：`interruptRun` 返回 false（竞态：刚好跑完）→
-  /// 消息退回队首，等 `_drainQueue` 正常发出 —— **绝不静默丢失**。
   void _sendQueuedNow(int index) {
     if (index < 0 || index >= _queue.length) return;
     final item = _queue.removeAt(index);
@@ -3819,16 +3816,16 @@ class _ChatScreenState extends State<ChatScreen> {
         final accepted = await _bridge.interruptRun(item.text);
         if (!mounted) return;
         if (accepted) {
-          // ★ 2026-10-30 P0：后端已收下（轮间注入）—— 必须明确告诉用户：
-          //   这句**不是现在就跑**，而是本轮结束时模型才会看到。
+          // ★ 2026-10-30 P0：后端已收下（轮间注入，`8e6d496` 起真生效）——
+          //   必须明确告诉用户：这句**不是现在就跑**，而是本轮结束时模型才会看到。
           showIosToast(context, '已插队，模型将在本轮结束时看到');
           return;
         }
-        // ★ 2026-10-30 P0：不接受（后端未接线 / 刚好跑完 / 队列满）——
+        // ★ 2026-10-30 P0：不接受（插话队列满 / 任务刚好收尾 / 空文本）——
         //   **绝不许静默重排队**。旧实现只 `insert(0)` 不吭声，
         //   用户看到的就是"点了没用"。
         setState(() => _queue.insert(0, item));
-        showIosToast(context, '当前任务暂不支持插队，已保留在排队');
+        showIosToast(context, '插话未成功（队列已满或任务刚结束），已保留在排队');
         return;
       }
       // 没在跑：正常发送（把附件放回，走 _runAgent 全路径）
@@ -5693,11 +5690,17 @@ class _ChatScreenState extends State<ChatScreen> {
   /// 后端判提问结束（`ask_closed{outcome: timeout|aborted}`）或 run 收尾。
   ///
   /// 只清界面，**不 replyAsk** —— 超时/中止的"未回答"语义由后端负责。
-  void _onAskClosed() {
+  /// [outcome] 只用来给用户一句人话（等待超时 ≠ 用户主动中止）。
+  void _onAskClosed(String? outcome) {
     if (_pendingAsk == null || !mounted) return;
     setState(() => _pendingAsk = null);
     // 面板还开着 ⇒ 直接关（`pop` 不受 PopScope 限制；maybePop 会走二次确认）
     if (_askSheetOpen) Navigator.of(context).pop();
+    if (outcome == 'timeout') {
+      showIosToast(context, '等待超时，已按「未回答」继续');
+    } else if (outcome == 'aborted') {
+      showIosToast(context, '本次提问已中止');
+    }
   }
 
   /// 点常驻气泡 ⇒ 重新呼出同一个提问抽屉（草稿原样还原）。
