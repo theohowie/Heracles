@@ -636,6 +636,13 @@ class AgentBridge {
         // 所以照旧调用 `cancel()`（订阅确实被摘掉），只是不让它挡住返回。
         // ⚠️ 这不是"为了测试放宽生产行为"：生产（真 async）里它本来就是
         //    立即完成的（对照实测），改动后生产可观测行为**不变**。
+        //
+        // ★ 2026-10-30（P0 插队发送）：**先让已排队的事件投递完再退订**。
+        //   `StreamController` 的投递是异步的；`handle.result` 完成那一刻可能
+        //   还有"收尾事件"排在队列里（例：插话未送达提示）。直接 `cancel()`
+        //   会把它们丢掉 —— UI 看不到最后一条提示。让出一个事件循环即可清空
+        //   已排队投递，代价是 run 返回晚一个微任务（可忽略）。
+        await Future<void>.delayed(Duration.zero);
         unawaited(pump.cancel());
         _currentHandle = null;
       }
@@ -745,24 +752,32 @@ class AgentBridge {
   /// Kotlin 侧如实回 `accepted: false`，这里透传；
   /// **不要**在这里代发第二条，避免同一句话跑两遍。
   Future<bool> interruptRun(String text) async {
-    // ★ 2026-10-22：插话本轮**降级为"不可用"**，如实回 false。
+    // ★ 2026-10-30（P0 接线）：**真的入队**，不再恒 false。
     //
-    // ## 为什么不做（而不是假装做了）
+    // 语义（与"停止"完全不同）：
+    // · 有在途 run ⇒ 把这句话放进该 run 的插话队列（≤4 条、trim 空忽略、
+    //   重复去重、满则**拒绝**并返回 false 让调用方走正常发送 —— 绝不静默丢）；
+    //   同时向事件流发一条 `interrupted` 让 UI 立刻渲染成一条用户消息；
+    // · 没有在途 run ⇒ `false`（"插话"与"发送"本就是一件事，调用方正常发）。
     //
-    // 旧语义：AgentLoop 在当前轮结束后、下一轮开始前把这句话 append 进会话。
-    // 今天编排在框架的 `StatefulAgent` 里，**没有"轮间注入"的挂载点** ——
-    // `AgentHook.onTurnCompletion` 只能接受/拒绝一轮，不能插消息。
-    //
-    // 硬凑的两种做法都更糟：
-    //   · 在 Dart 侧缓存文本、等 run 结束后再发一轮 ⇒ 用户看到"插话了但模型
-    //     还在按原任务跑"，**语义撒谎**；
-    //   · 直接把"插话"当成"取消" ⇒ 用户点引导、任务被停，比不实现危险得多。
-    //
-    // ⇒ 如实回 `false`。调用方（`chat_screen`）对 `false` 的既定处理是
-    //   **走正常发送**（把这句话当新任务发出去），这是可接受的降级。
-    //   详见 `docs/nextwork.md` 的「插话（interrupt）未接线」。
-    if (_currentHandle == null) return false;
-    return false;
+    // backend 侧由 `RunOptions.takeSteerMessage` + `_SteerHook` 在**当前轮完整
+    // 结束之后**注入成 `UserMessage`（不打断在途模型流/工具；ask/审批挂起时
+    // 轮不结束，插话自动排到恢复后的下一轮）。
+    final h = _currentHandle;
+    final t = text.trim();
+    if (h == null || t.isEmpty) return false;
+    final r = h.enqueueSteer(t);
+    if (!r.accepted) return false; // 队列满/被拒 ⇒ 调用方正常发送
+    if (r.added) {
+      // 只有**真的新增**才发事件（重复插话不再多渲染一条用户气泡）。
+      emitLocalEvent(AgentEvent(
+        type: AgentEvent.kInterrupted,
+        ts: DateTime.now().millisecondsSinceEpoch,
+        // UI 读 `e.message` 渲染这条用户消息（见 chat_screen kInterrupted 分支）。
+        message: t,
+      ));
+    }
+    return true;
   }
 
   /// **设备权限状态**（2026-10-16，无线调试/Shizuku/adb 授权引导）。
@@ -1887,6 +1902,7 @@ class AgentEvent {
     this.activeIndex,
     this.reachedGoal,
     this.planClosedReason,
+    this.outcome,
     this.questions,
     this.changeFiles,
     this.beforeMessages,
@@ -2046,6 +2062,12 @@ class AgentEvent {
   /// `plan_closed`：收尾原因（中断时显示给用户，如"检测到循环，已强制停止"）
   final String? planClosedReason;
 
+  /// `ask_closed`（P0，2026-10-30）：提问气泡为什么被关闭。
+  ///
+  /// `timeout` = 300s 未回答；`aborted` = 用户停止/取消解挂。
+  /// 其它事件恒 `null`（**不要默认成 timeout** —— 正常提交不发本事件）。
+  final String? outcome;
+
   /// **`ask_user`：模型提的题目列表**（2026-10-21 选项式）。
   ///
   /// 每项形状：`{"id","question","multi","options":[{"label","description"}]}`。
@@ -2135,6 +2157,15 @@ class AgentEvent {
   /// 到达时机：`ask_user` 工具**已挂起等待** —— UI 收到后弹窗，
   /// 用户提交回答走 [replyAsk]。
   static const kAskUser = 'ask_user';
+
+  /// **ask 已关闭**（P0，2026-10-30；只增事件）—— 提问气泡该收了。
+  ///
+  /// 载荷：`{type:"ask_closed", outcome:"timeout"|"aborted"}`。
+  /// · `timeout`：超时（**300s / 5 分钟**）未回答 —— 模型收到的是"未回答"，
+  ///   绝不编答案；UI 收掉提问气泡；
+  /// · `aborted`：用户点停止/取消解挂；
+  /// · 用户**正常提交或跳过**走 [replyAsk]，**不发**本事件（UI 自己已收）。
+  static const kAskClosed = 'ask_closed';
 
   /// **危险工具需要用户确认**（2026-10-19，三态门禁的 UI 闭环）。
   ///
@@ -2226,6 +2257,7 @@ class AgentEvent {
     kPlanAdvanced,
     kPlanClosed,
     kAskUser,
+    kAskClosed,
     kApprovalRequest,
     kApprovalRequired,
     kContextUpdated,
@@ -2293,6 +2325,9 @@ class AgentEvent {
       //   （按"未知"处理，不改画法），false = 明确的中断。
       reachedGoal: m['reachedGoal'] as bool?,
       planClosedReason: m['reason'] as String?,
+      // ★ ask_closed（P0，2026-10-30）：outcome ∈ timeout/aborted；
+      //   缺失 = 老版本/非该事件（按 null，不猜）。
+      outcome: m['outcome'] as String?,
       // ★ ask_user 的题目结构（2026-10-21）：Kotlin 已解析好，这里只做类型转换。
       //   缺失 = 老版本 Kotlin（只会带 `text`）⇒ 返回 null，UI 走"降级为纯文本"分支。
       questions: (m['questions'] as List?)

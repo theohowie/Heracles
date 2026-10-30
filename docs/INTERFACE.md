@@ -34,7 +34,7 @@
 | `PermissionMode`（manual / workspace / full） | 每次 `run` 必须带入并**真实生效**（见 N1） | ~~现状：未映射进后端~~ **✅ 后端回复：已映射**（2026-10-24，`local_agent.dart` 显式传入 `RunOptions.approvalMode`，三档真实生效） |
 | `ReasoningLevel`（auto / off / low / high / max） | wire 名 = 枚举名小写，**必须与 Kotlin 侧逐字符一致** | **✅ 后端回复：已接线**（`BackendConfig.reasoningEffort` → 框架 `ModelConfig.extra` → OpenAI 轨 `reasoning_effort`；⚠️ Anthropic/Responses 轨的 client 不读 extra，暂不生效 —— 如实记录） |
 | 最大轮次 | 后端常量 `ContractAgent.maxTurns = 40` 为上限来源 | ✅ 一致（`kMaxTurnsOptions` 上限 80 是用户可选档；超出契约值的校验在后端 `RunOptions` 层，超限按契约值截断不报错） |
-| `BusySendBehavior`（queue / interrupt） | 纯前端行为：排队 = 前端队列；插队 = 调 `interruptRun` | 后端无感知（注：`interruptRun` 今天恒返 false —— 框架无轮间注入挂载点，插队=停止+重发是当前唯一可用语义，前端勿依赖插队不中断） |
+| `BusySendBehavior`（queue / interrupt） | 纯前端行为：排队 = 前端队列；插队 = 调 `interruptRun` | ✅ **2026-10-30 起 `interruptRun` 真实生效**：在途 run ⇒ 文本入**轮间插话队列**并在 `onTurnCompletion` 时以 `continueWith([UserMessage])` 注入下一轮（**不打断在途模型流/工具**；accepted 语义返回 true）+ 发 `interrupted` 事件（文本走 `text` 字段，UI 渲染为用户消息）；无在途 run ⇒ false（调用方走正常发送）。run 收尾清空队列，未消费项按实现说明处理（不得静默丢）。框架旧限制（"恒 false"）已过时 |
 | `StepDetail`（精简 / 标准 / 详细 / 完全展开） | **纯前端渲染密度**，后端无感知 | ✅ 四档以枚举为准 |
 | 界面语言 / 外观 / 字号 | 纯前端 | — |
 | **流式输出** | **无开关**（产品决策 2026-10-24） | ✅ 后端保持 `step_delta / reasoning_delta` 增量事件 |
@@ -122,7 +122,8 @@
 
 ### N10 提问（ask_user） —— ✅ 登记为正式契约
 
-- `questions` 结构不变；补充：提问超时 10 分钟（与审批的 5 分钟独立）、超时按"未回答"如实回给模型（绝不编答案）。
+- `questions` 结构不变；补充：提问超时 **300 秒（5 分钟）**（2026-10-30 由 10 分钟改；与审批的 5 分钟**各自独立**）、超时按"未回答"如实回给模型（绝不编答案）。
+- **2026-10-30 新增（只增事件）**：`ask_closed` —— `{type:"ask_closed", outcome:"timeout"|"aborted"}`：`timeout` = 300s 未回答；`aborted` = 用户停止/取消导致解挂；用户正常提交/跳过**不发**此事件（前端自己清气泡）。旧读者忽略未知事件即可；若前端尚未接，超时后气泡可能多留一会儿，但后端语义以本契约为准。
 
 ### N11 JEV 决策引擎 —— 前端已落地（2026-10-27），本地推理待后端/宿主接入
 

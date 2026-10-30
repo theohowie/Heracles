@@ -50,6 +50,7 @@
 library;
 
 import 'dart:async';
+import 'dart:collection';
 
 import 'package:dio/dio.dart' show CancelToken;
 import 'package:heracles_backend/heracles_backend.dart';
@@ -187,11 +188,20 @@ class LocalRunHandle {
     required this.events,
     required this.result,
     required this.cancel,
+    this.enqueueSteer = _rejectSteer,
   });
 
   final Stream<AgentEvent> events;
   final Future<AgentRunResult> result;
   final Future<bool> Function() cancel;
+
+  /// **插队发送入队**（P0，2026-10-30）：`accepted`/`added` 语义见
+  /// `LocalAgentExecutor.steerEnqueue`。默认**拒绝** —— 假执行器（测试替身）
+  /// 或未接插队的宿主调 `interruptRun` 会如实返回 false，调用方走正常发送。
+  final ({bool accepted, bool added}) Function(String text) enqueueSteer;
+
+  static ({bool accepted, bool added}) _rejectSteer(String text) =>
+      (accepted: false, added: false);
 }
 
 /// **App 侧的提问门禁**（`AskGate` 实现，2026-10-23 修「提问现在不可用」）。
@@ -318,12 +328,34 @@ class LocalAskGate implements AskGate {
   /// 用户**点停止**后置位：之后到达的提问/审批一律按"没答案/拒绝"处理。
   bool _aborted = false;
 
-  /// 等用户回答的**上限**（默认 10 分钟；测试可注入更短值）。
+  /// 等用户回答的**上限**（默认 **5 分钟 / 300s**；测试可注入更短值）。
   ///
-  /// 10 分钟：用户可能在处理别的事、切走了、或锁屏。不能永远挂住整个 run ——
-  /// 超时后按"未回答"返回 null，由 backend 如实告诉模型并继续（绝不编答案）。
-  static const defaultAnswerTimeout = Duration(minutes: 10);
+  /// 为什么是 5 分钟（2026-10-30 从 10 分钟收窄到 300s，P0）：
+  /// · 提问挂起时**整个 run 都在等**（工具不返回、轮次不推进）—— 10 分钟太长，
+  ///   用户离开一下就以为"卡死"；
+  /// · 与**审批**超时对齐（审批也是 5 分钟，N1 契约）—— 两个交互超时同口径，
+  ///   UI 说明不用分两套。
+  ///
+  /// 超时后仍按"未回答"返回 null（backend 如实告诉模型，**绝不编答案**），
+  /// 并发一条 `ask_closed{outcome:"timeout"}` 让 UI 把气泡收掉（只增事件）。
+  static const defaultAnswerTimeout = Duration(minutes: 5);
   Duration answerTimeout;
+
+  /// **提问已关闭**事件（P0，2026-10-30；只增）。
+  ///
+  /// `outcome` ∈ `timeout`（300s 未回答）/ `aborted`（用户停止/取消解挂）。
+  /// 用户**正常提交/跳过**走 [replyAsk]，**不发**这个事件（UI 自己已经收掉）。
+  /// 为什么需要：没有它，超时/停止后 UI 的提问气泡只能靠"下一轮事件"顺带
+  /// 清掉 —— 任务恰好在那时结束的话，气泡会**永远留在界面上**。
+  void _pushAskClosed(String outcome) {
+    final emit = _emit;
+    if (emit == null) return;
+    emit(AgentEvent(
+      type: AgentEvent.kAskClosed,
+      ts: DateTime.now().millisecondsSinceEpoch,
+      outcome: outcome,
+    ));
+  }
 
   /// 把本 run 的事件出口接上（每个 run 一个 gate 实例，只接一次）。
   void attach(void Function(AgentEvent) emit) => _emit = emit;
@@ -338,6 +370,9 @@ class LocalAskGate implements AskGate {
     if (c != null && !c.isCompleted) {
       _pending = null;
       c.complete(null);
+      // ★ P0（2026-10-30）：用户停止解挂的提问 ⇒ 发一次 ask_closed{aborted}。
+      //   （正常提交走 replyAsk，不发；超时走 onTimeout，不发这条。）
+      _pushAskClosed('aborted');
     }
     final a = _pendingApproval;
     if (a != null && !a.isCompleted) {
@@ -403,6 +438,9 @@ class LocalAskGate implements AskGate {
         // "用户没答，请自行合理决定并说明假设"。
         onTimeout: () {
           _pending = null;
+          // ★ P0（2026-10-30）：超时仍返回 null（不编答案），并发一次
+          //   ask_closed{timeout} 让 UI 收掉气泡（只增事件；正常提交不发）。
+          _pushAskClosed('timeout');
           // ignore: avoid_print
           print('[heracles][ask] 提问超时（${answerTimeout.inMinutes} 分钟）未回答');
           return null;
@@ -684,6 +722,61 @@ class LocalAgentExecutor {
   /// **测试缝：整套能力**（`null` ⇒ 按 `buildDeviceCapabilities` 组装）。
   /// 让 `_drive` 的端到端测试不必 mock MethodChannel。
   final Capabilities? capabilitiesForTest;
+
+  // ==========================================================================
+  // 插队发送队列（P0，2026-10-30）
+  // ==========================================================================
+
+  /// 队列上限（超过就**拒绝**第 5 条，不丢最旧 —— 见 [steerEnqueue]）。
+  static const int steerQueueMax = 4;
+
+  /// 待注入的插话（**只在本 run 内有效**；run 收尾清空）。
+  ///
+  /// ## 为什么是同步 `ListQueue` 而不是 Stream/锁
+  ///
+  /// Dart 是单 isolate 事件循环：`enqueueSteer`（UI 线程调）与 `takeSteer`
+  /// （`_drive` 的 hook 回调）都跑在同一 isolate，同步读改写之间**没有
+  /// await 缝隙** ⇒ 天然原子。真正要防的是"跨 run 串台"，靠"每 run 一个
+  /// executor 实例"隔离（run 收尾清空）。
+  final ListQueue<String> _steerQueue = ListQueue<String>();
+
+  /// 插话入队的完整结果（内部/桥接用）。
+  ///
+  /// · `accepted`：本次调用被接受（新增 **或** 重复 —— 重复视为已接受，不再
+  ///   多渲染一条用户消息）；
+  /// · `added`：真的新增了一条（只有新增才该发 `interrupted` 事件给 UI）。
+  ({bool accepted, bool added}) steerEnqueue(String text) {
+    final t = text.trim();
+    if (t.isEmpty) return (accepted: false, added: false);
+    // 去重：同一句重复插话只保留一条，避免模型看到两遍。
+    if (_steerQueue.contains(t)) return (accepted: true, added: false);
+    if (_steerQueue.length >= steerQueueMax) {
+      // 满了 ⇒ **拒绝**（返回 false，调用方走正常发送，消息不会丢）。
+      return (accepted: false, added: false);
+    }
+    _steerQueue.add(t);
+    return (accepted: true, added: true);
+  }
+
+  /// 插话入队（对外布尔口径）：`true` = 已接受。
+  bool enqueueSteer(String text) => steerEnqueue(text).accepted;
+
+  /// backend `_SteerHook` 的取件回调：每次轮结束取一条，空 ⇒ `null`。
+  String? takeSteer() => _steerQueue.isEmpty ? null : _steerQueue.removeFirst();
+
+  /// 清空队列（run 收尾/取消/失败）。
+  void clearSteer() => _steerQueue.clear();
+
+  /// 取走**全部**剩余插话（run 收尾时用于"未消费项不得静默丢"的提示）。
+  List<String> takeAllSteer() {
+    if (_steerQueue.isEmpty) return const <String>[];
+    final list = _steerQueue.toList(growable: false);
+    _steerQueue.clear();
+    return list;
+  }
+
+  /// 当前队列长度（测试/排障用）。
+  int get steerQueueLength => _steerQueue.length;
 
   /// 当前在跑的取消令牌（`null` = 没有 run 在跑）。
   ///
@@ -1026,6 +1119,9 @@ class LocalAgentExecutor {
         // ★ 三作用域记忆（2026-10-29）：结构化传入，排序/预算/渲染在 backend。
         //   非空即优先（即使三段都空也不回落旧 memoryNote —— 旧字段已 @Deprecated）。
         memory: memoryContext,
+        // ★ 插队发送（P0，2026-10-30）：轮结束取一条插话 ⇒ backend `_SteerHook`
+        //   注入成 UserMessage；不打断在途流/工具。队列在本实例（每 run 一个）。
+        takeSteerMessage: takeSteer,
         // ★ 工作区宪法（H4，2026-10-24）：注入 system prompt
         //  （默认提示之后、长期记忆之前 —— 两段稳定字节之间的新段，
         //   只有宪法内容本身变化时才动前缀）。
@@ -1072,6 +1168,8 @@ class LocalAgentExecutor {
     return LocalRunHandle(
       events: controller.stream,
       result: done,
+      // 插队发送：桥接层 `interruptRun` 用它把用户插话放进本轮队列。
+      enqueueSteer: steerEnqueue,
       cancel: () async {
         if (_cancelled) return false;
         // 标记"这是用户取消"，让收尾措辞正确
@@ -1637,6 +1735,19 @@ class LocalAgentExecutor {
       } catch (_) {
         // 收尾记账失败不该把一次已经成功的 run 变成失败。
       }
+      // ★ P0 插队发送（2026-10-30）：**run 收尾清队列，但未消费项不静默丢**。
+      //
+      // 取舍（二选一，选了"② 失败提示"）：executor 是**每 run 一个实例**，
+      // "留到同一会话下一次 run 继续注入"需要把队列提升到桥接层并跨 run
+      // 存活（还要处理删会话/切工作区的清理）——本轮不做。改为：收尾前把
+      // 剩余插话**汇总成一条 `interrupted` 提示**（文案带"未送达/请重新发送"
+      // 前缀，与用户原话不同 ⇒ 不会被误认成"已送达那条"而重复渲染）。
+      try {
+        final leftovers = takeAllSteer();
+        if (leftovers.isNotEmpty) tr.steerDropped(leftovers);
+      } catch (_) {
+        // 提示事件发不出去也不能让 run 失败（丢失事实已在文案层尽力）。
+      }
       if (_cancelled && !failed) {
         cancelled = true;
         tr.failed('任务已取消。');
@@ -2201,6 +2312,25 @@ class _Translator {
       ts: _now,
       reachedGoal: reachedGoal,
       planClosedReason: reason,
+    ));
+  }
+
+  /// **插话未送达的失败提示**（P0，2026-10-30）—— 未消费项**不得静默丢**。
+  ///
+  /// ## 为什么用 `kInterrupted` + 前缀文案
+  ///
+  /// UI 对 `kInterrupted` 的既有渲染是"用户在跑动中补的一条消息"（`e.message`
+  /// 进用户气泡）。run 已经收尾时队列里还剩的插话，不能悄悄清掉 —— 用同一
+  /// 事件类型发一条**带前缀的系统提示**，用户看得见"哪句没送到"，且文本与
+  /// 他原话**不同**（前缀 + "请重新发送"），不会被误认为已送达的那条
+  /// （避免重复渲染同一句话）。
+  void steerDropped(List<String> texts) {
+    if (texts.isEmpty) return;
+    _sink(AgentEvent(
+      type: AgentEvent.kInterrupted,
+      ts: _now,
+      message: '（插话未送达：本轮已结束，未发送 —— 请重新发送：'
+          '${texts.join("；")}）',
     ));
   }
 

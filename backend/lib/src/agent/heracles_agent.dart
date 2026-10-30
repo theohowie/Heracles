@@ -160,6 +160,7 @@ class RunOptions {
     this.requirePlan = false,
     this.reflectOnFailures = 0,
     this.verifyGateCompletion = false,
+    this.takeSteerMessage,
   });
 
   final int maxTurns;
@@ -337,6 +338,30 @@ class RunOptions {
   /// **失败**时，拒绝任务收尾（onTurnCompletion continueRun），模型必须
   /// 回到修复循环 —— "带病收尾"被架构拦下。默认关（无 verifyCommand 无意义）。
   final bool verifyGateCompletion;
+
+  /// **插队发送的取件回调**（P0，2026-10-30；默认 `null` = 不启用）。
+  ///
+  /// ## 语义（与"停止"完全不同）
+  ///
+  /// 用户在一轮**跑着的时候**补一句话（"改用 B 方案"）：不打断在途模型流/
+  /// 工具，只在本轮**完整结束之后**、下一轮开始之前把这句话作为一条
+  /// `UserMessage` 注入历史 —— 模型下一轮自己比对原任务与插话。
+  ///
+  /// ## 调用时机与约定
+  ///
+  /// · 每次**轮结束**（`onTurnCompletion`）调用**一次**；
+  /// · 返回 `null` 或纯空白 ⇒ 无插话，正常收尾（`accept`）；
+  /// · 返回非空 ⇒ `continueWith([UserMessage.text(text)])`，**本轮不结束**、
+  ///   带着插话进入下一轮（注入发生在当前轮完整结束之后，不打断在途流/工具；
+  ///   ask/审批挂起时轮不会结束，插话自然排到恢复后的下一轮）；
+  /// · 回调应由宿主保证**线程安全**、取一条少一条（同一句不会重复注入）。
+  ///
+  /// ## 为什么是回调而不是 `List<String>`
+  ///
+  /// 宿主（App）侧的队列可能在 run 期间被 UI 线程追加；backend 是纯 Dart、
+  /// 不该持有可变队列。回调让"谁来取、什么时候取、取完怎么清"都留在宿主层。
+  /// 空 `null`（默认）= 不装 hook ⇒ 行为与加这个字段之前**完全一致**。
+  final String? Function()? takeSteerMessage;
 }
 
 /// **组装好的 Agent**。
@@ -1209,6 +1234,10 @@ class HeraclesAgent {
       planMode: _options.enablePlan ? PlanMode.auto : PlanMode.none,
       maxTurns: _options.maxTurns,
       hooks: [
+        // ★ P0 插队发送（2026-10-30）：轮结束取一条插话 ⇒ continueWith。
+        //   放最前：用户显式插话优先于"完成门禁/反思"这类自动注入。
+        if (_options.takeSteerMessage != null)
+          _SteerHook(_options.takeSteerMessage!),
         budgetHook,
         approvalHook,
 
@@ -1406,6 +1435,9 @@ class HeraclesAgent {
           planMode: _options.enablePlan ? _options.planMode : PlanMode.none,
           maxTurns: _options.maxTurns,
           hooks: [
+            // ★ P0 插队发送：降级重跑后仍然生效（用户插话不因换模型丢失）。
+            if (_options.takeSteerMessage != null)
+              _SteerHook(_options.takeSteerMessage!),
             budgetHook,
             approvalHook,
           ],
@@ -1459,7 +1491,13 @@ class HeraclesAgent {
           compressor: compressor,
           planMode: _options.enablePlan ? _options.planMode : PlanMode.none,
           maxTurns: _options.maxTurns,
-          hooks: [budgetHook, approvalHook],
+          hooks: [
+            // ★ P0 插队发送：通用异常降级重跑后同样生效。
+            if (_options.takeSteerMessage != null)
+              _SteerHook(_options.takeSteerMessage!),
+            budgetHook,
+            approvalHook,
+          ],
           loopDetector: DefaultLoopDetector(
             state: _state!,
             client: client,
@@ -1885,6 +1923,38 @@ class _ReflectionHook extends AgentHook {
       _consecutiveFailures = 0;
     }
     return Future.value(ToolResultHookResult.proceed());
+  }
+}
+
+/// **插队发送 hook**（P0，2026-10-30）—— 轮间注入用户插话。
+///
+/// ## 为什么挂在 `onTurnCompletion`
+///
+/// 这是框架唯一"当前轮完整结束、下一轮尚未开始"的挂载点：
+/// · 不打断在途的模型流 / 工具执行（用户要的是"补一句"，不是"停下来"）；
+/// · `continueWith([UserMessage.text(...)])` 会把这句话作为**用户消息**
+///   追加进历史，模型下一轮自然看到；
+/// · ask/审批挂起时轮不会结束 ⇒ 插话自动排到恢复后的下一轮（不会插到
+///   一个"还没结束"的轮中间）。
+///
+/// ## 与"停止"的边界（不许混淆）
+///
+/// 停止 = `CancelToken`（立刻掐断在途请求）；插话 = 本 hook（只等轮结束）。
+/// 两者代码路径完全独立 —— 拿插话去 cancel 是产品事故。
+class _SteerHook extends AgentHook {
+  _SteerHook(this._take);
+
+  /// 取一条插话（宿主保证线程安全、取一条少一条）。返回 null/空白 = 没有。
+  final String? Function() _take;
+
+  @override
+  Future<TurnCompletionHookResult> onTurnCompletion(
+    TurnCompletionHookContext context,
+  ) async {
+    final raw = _take();
+    final text = raw?.trim() ?? '';
+    if (text.isEmpty) return const TurnCompletionHookResult.accept();
+    return TurnCompletionHookResult.continueWith([UserMessage.text(text)]);
   }
 }
 
