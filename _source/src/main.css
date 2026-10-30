@@ -67,7 +67,7 @@ img { max-width: 100%; display: block; }
   position: absolute; inset: -20% -10% auto; height: 720px; pointer-events: none;
   background:
     radial-gradient(760px 420px at 18% 10%, rgba(0, 113, 227, .10), transparent 70%),
-    radial-gradient(680px 400px at 88% 0%, rgba(124, 92, 255, .10), transparent 70%);
+    radial-gradient(680px 400px at 88% 0%, rgba(0, 98, 196, .08), transparent 70%);
 }
 .hero-inner {
   position: relative; z-index: 2; max-width: var(--max); margin: 0 auto; padding: 0 22px;
@@ -154,8 +154,9 @@ img { max-width: 100%; display: block; }
 .card-row .card-icon { grid-area: icon; margin-bottom: 0; width: 44px; height: 44px; }
 .card-row h3 { grid-area: title; }
 .card-row p { grid-area: desc; max-width: 760px; }
-/* 旗舰卡：黑底（呼应黑白主题）；亮点卡：accent 描边 */
-.tone-hero .card { background: #0a0a0d; border-color: rgba(255, 255, 255, .14); }
+/* 旗舰卡：黑底 —— 直接用全站文字黑 --fg，不再造新黑；亮点卡：accent 描边
+   （--accent = rgb(0 113 227)，下面所有蓝色淡色都与它同源） */
+.tone-hero .card { background: var(--fg); border-color: rgba(255, 255, 255, .14); }
 .tone-hero .card:hover { border-color: rgba(255, 255, 255, .32); }
 .tone-hero .card h3 { color: #fff; }
 .tone-hero .card p { color: rgba(255, 255, 255, .66); }
