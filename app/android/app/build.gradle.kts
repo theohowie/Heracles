@@ -82,6 +82,21 @@ android {
         targetSdk = flutter.targetSdkVersion
         versionCode = flutter.versionCode
         versionName = flutter.versionName
+
+        // ★ ABI 白名单：只打 arm64-v8a（2026-10-30 用户要求，说明见 gradle.properties）。
+        //
+        // 原因：Flutter 引擎只为 arm64 提供 libflutter.so / libapp.so；插件 AAR
+        // （onnxruntime / sherpa-onnx / 沙箱 proot）却把 armeabi-v7a、x86_64 的
+        // 原生库也带进来 —— 那两个 ABI 上 App 根本起不来（缺引擎），纯属白占体积
+        // （实测 0.3.2：三 ABI 67.5 MB → 仅 arm64 见 apk-info 实测值）。
+        //
+        // ⚠️ 单靠这一行不生效：Flutter 插件会在 afterEvaluate 里 clear() 掉它，
+        //    必须同时有 android/gradle.properties 的 `disable-abi-filtering=true`。
+        // ⚠️ 不要改用 `--split-per-abi`：它会把 versionCode 改写成 2000+N，
+        //    与 pubspec 的 +N 不一致，后续普通包会变成"降级安装"被拒。
+        ndk {
+            abiFilters += listOf("arm64-v8a")
+        }
     }
 
     buildTypes {
