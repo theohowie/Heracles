@@ -10,22 +10,37 @@
 
 export const APK_GITHUB = 'https://github.com/theohowie/Heracles/releases/download/v0.3.2/Heracles-v0.3.2.apk'
 export const APK_GITEE = 'https://gitee.com/theohowie/heracles/releases/download/v0.3.2/Heracles-v0.3.2.apk'
-/* ⚠️ Gitee 附件传好之后把这里改成 true：主按钮会自动切成国内线路，
-   GitHub 变成「源站」备选（文案会跟着变，不用动别的）。 */
-export const GITEE_READY = false
+
+/* ⚠️ 两条线路的产物**不是同一个文件**（2026-10-30 实测核对）：
+   · Gitee  ：arm64-only，50,453,248 B = 48.1 MiB，versionCode 6，sha A7C2AD5D…
+   · GitHub ：三 ABI 胖包，67.5 MiB，versionCode 6，sha 6CD46736…
+   v7a/x86_64 那两套原生库缺 Flutter 引擎、跑不起来，所以 arm64-only 才是推荐包。
+   换版本时：两条线路各自的体积/sha256 都要跟着更新，别只改一个。 */
+export const GITEE_READY = true // 国内线路已就绪 → 默认走 Gitee
 export const APK_ROUTES = [
-  { key: 'gitee', label: 'Gitee', hint: '国内线路', url: APK_GITEE, ready: GITEE_READY },
-  { key: 'github', label: 'GitHub', hint: '源站', url: APK_GITHUB, ready: true },
+  {
+    key: 'gitee', label: 'Gitee', hint: '国内线路', url: APK_GITEE, ready: GITEE_READY,
+    size: '48.1 MiB', sha: 'A7C2AD5DB88663CE9BCDC59C0857CA041692D5867DE747C3D3E52B9EC817F6C5',
+    build: 'arm64-only', note: '只含 arm64 原生库（推荐）',
+  },
+  {
+    key: 'github', label: 'GitHub', hint: '源站', url: APK_GITHUB, ready: true,
+    size: '67.5 MiB', sha: '6CD4673686EA2C260605D388433048DFDF8BD9A9209D16E661FDD3D956F436B8',
+    build: '三 ABI', note: '含 v7a / x86_64 死重',
+  },
 ]
 export const APK_PRIMARY = GITEE_READY ? APK_ROUTES[0] : APK_ROUTES[1]
 export const APK_ALT = GITEE_READY ? APK_ROUTES[1] : null
 export const APK = APK_PRIMARY.url
-export const RELEASES = 'https://github.com/theohowie/Heracles/releases'
+
+/* 「更多版本 / 校验值」优先跳码云（用户裁定 2026-10-30） */
+export const RELEASES = 'https://gitee.com/theohowie/heracles/releases'
+export const RELEASES_GITHUB = 'https://github.com/theohowie/Heracles/releases'
 export const REPO = 'https://github.com/theohowie/Heracles'
 export const GITEE = 'https://gitee.com/theohowie/heracles'
-export const SHA = '6CD4673686EA2C260605D388433048DFDF8BD9A9209D16E661FDD3D956F436B8'
+export const SHA = APK_PRIMARY.sha
 export const VERSION = 'v0.3.2'
-export const APK_SIZE = '67.5 MiB'
+export const APK_SIZE = APK_PRIMARY.size
 export const APK_VERSION_CODE = '6'
 export const PKG = 'com.theohowie.heracles'
 export const SHOT_DATE = '2026-10-26'
