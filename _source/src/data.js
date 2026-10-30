@@ -34,7 +34,9 @@ export const RELEASES = 'https://gitee.com/theohowie/heracles/releases'
 export const RELEASES_GITHUB = 'https://github.com/theohowie/Heracles/releases'
 export const REPO = 'https://github.com/theohowie/Heracles'
 export const GITEE = 'https://gitee.com/theohowie/heracles'
-/* sha256 是 2026-10-30 从码云那份**下载后实算**的（A7C2AD5D…）；GitHub 那份字节数与之完全一致 */
+/* sha256 双向核对过（2026-10-30）：码云那份下载后实算 = A7C2AD5D…；
+   GitHub API 的 asset.digest 也是 sha256:a7c2ad5d…，字节数同为 50,453,248 B
+   ⇒ 两条线路确实是同一个文件。 */
 export const SHA = 'A7C2AD5DB88663CE9BCDC59C0857CA041692D5867DE747C3D3E52B9EC817F6C5'
 export const SHA_SOURCE = 'Gitee / GitHub 同一份文件'
 export const VERSION = 'v0.3.2'
