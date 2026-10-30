@@ -58,13 +58,12 @@ class _VoiceSettingsScreenState extends State<VoiceSettingsScreen> {
               _card(h, [_modelRow(h)]),
               const SizedBox(height: HSpace.lg),
               Text(
-                'SenseVoiceSmall（阿里 FunASR）多语言语音识别模型，'
-                '支持中文、英文、粤语、日语、韩语，量化版约 231 MB，'
-                '经 ModelScope 官方仓库下载。下载完成后 App 会自动'
-                '备好识别引擎（补元数据、转词表）；点输入框旁的'
-                '麦克风按钮即可把语音转成文字，识别全程在本机离线'
-                '完成，录音不上传。麦克风权限在「设置 → 设备权限」'
-                '里统一开启。',
+                '流式识别（内置）：14M 中文 streaming zipformer 已随 App 打包，'
+                '约 24 MB，无需下载；点麦克风说话时会边说边出字，全程本机离线。\n\n'
+                '整段识别（可选）：SenseVoiceSmall（阿里 FunASR）多语言模型，'
+                '量化版约 231 MB，经 ModelScope 官方仓库下载，适合长句高精度转写。\n\n'
+                '两套模型都存放在 App 私有目录，卸载 App 会一并删除；录音不上传。'
+                '麦克风权限在「设置 → 设备权限」里统一开启。',
                 style: HTxt.caption.copyWith(color: h.textFaint, height: 1.55),
               ),
             ],

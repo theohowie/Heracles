@@ -8,7 +8,6 @@ import '../models/jev.dart';
 import '../services/jev_service.dart';
 import '../theme/app_theme.dart';
 import '../theme/cupertino_kit.dart';
-import '../theme/elastic_switch.dart';
 import '../theme/pressable.dart';
 import 'jev_local_settings_screen.dart';
 
@@ -520,7 +519,6 @@ class _JevSettingsScreenState extends State<JevSettingsScreen> {
       body: AnimatedBuilder(
         animation: jev,
         builder: (context, _) {
-          final config = jev.config;
           return ListView(
             padding: const EdgeInsets.fromLTRB(
               HSpace.lg,
@@ -689,42 +687,11 @@ class _JevSettingsScreenState extends State<JevSettingsScreen> {
                 '当前填的值，不用先保存。',
                 style: HTxt.caption.copyWith(color: h.textFaint, height: 1.55),
               ),
-              const SizedBox(height: HSpace.lg),
-              _card(h, [
-                Row(
-                  children: [
-                    Expanded(
-                      child: Column(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: [
-                          Text(
-                            '生成理由',
-                            style: HTxt.body.copyWith(
-                              fontWeight: FontWeight.w600,
-                            ),
-                          ),
-                          const SizedBox(height: 3),
-                          Text(
-                            '决策模型只给结论和概率；开启后由当前对话模型'
-                            '补写一两句理由（云端模型自带的思考会优先用）。',
-                            style: HTxt.caption.copyWith(
-                              color: h.textFaint,
-                              height: 1.5,
-                            ),
-                          ),
-                        ],
-                      ),
-                    ),
-                    const SizedBox(width: HSpace.md),
-                    ElasticSwitch(
-                      value: config.reasonEnabled,
-                      onChanged: (v) => unawaited(
-                        jev.updateConfig(config.copyWith(reasonEnabled: v)),
-                      ),
-                    ),
-                  ],
-                ),
-              ]),
+              const SizedBox(height: HSpace.sm),
+              Text(
+                '理由生成暂不支持（后续版本提供）：决策只给结论与概率。',
+                style: HTxt.caption.copyWith(color: h.textFaint, height: 1.55),
+              ),
               const SizedBox(height: HSpace.lg),
               _groupLabel(h, '本地'),
               _localEntry(h),
@@ -1089,20 +1056,6 @@ class _JevSettingsScreenState extends State<JevSettingsScreen> {
     return Padding(
       padding: const EdgeInsets.only(left: 4, bottom: 8),
       child: Text(text, style: HTxt.sectionTitle.copyWith(color: h.textDim)),
-    );
-  }
-
-  Widget _card(Hue h, List<Widget> children) {
-    return Container(
-      decoration: BoxDecoration(
-        color: h.surfaceAlt,
-        borderRadius: BorderRadius.circular(HRadius.xl),
-      ),
-      padding: const EdgeInsets.all(16),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.stretch,
-        children: children,
-      ),
     );
   }
 }

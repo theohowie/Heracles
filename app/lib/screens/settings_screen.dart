@@ -209,7 +209,6 @@ class _DevicePermissionEntryState extends State<_DevicePermissionEntry> {
       if (perms.isNotEmpty) {
         const keys = [
           'shizuku',
-          'files',
           'notifications',
           'accessibility',
           'overlay',
@@ -415,7 +414,6 @@ class _DevicePermissionPageState extends State<DevicePermissionPage>
   Widget _permOverview(Hue h) {
     const rows = [
       ('shizuku', 'Shizuku', '执行系统级命令与设备操作'),
-      ('files', '文件夹访问', '读写已授权的工作区文件夹'),
       ('allFiles', '所有文件访问', '按设计不申请，文件经授权目录访问'),
       ('media', '图片与视频', '读取相册，用于发送图片、视频附件'),
       ('camera', '相机', '拍照后直接作为附件发送'),
@@ -473,7 +471,6 @@ class _DevicePermissionPageState extends State<DevicePermissionPage>
       // allFiles / install / automation 本来就是胶囊（声明而非开关）。
       if (v == 'unknown' &&
           const {
-            'files',
             'media',
             'camera',
             'microphone',
@@ -500,20 +497,6 @@ class _DevicePermissionPageState extends State<DevicePermissionPage>
           return pill('未开启 · 按设计', false);
         case ('allFiles', _):
           return pill(v == 'granted' ? '已授权' : '未知', v == 'granted');
-        case ('files', _):
-          // 文件夹访问的「申请」= 走一次工作区文件夹授权（SAF
-          // 选择器，选中即授权 + 登记）—— 这就是本 App 的文件夹
-          // 权限模型；取消授权 = 在工作区列表移除该文件夹。
-          return toggle(
-            value: v == 'granted',
-            onChanged: (want) {
-              if (want) {
-                unawaited(_grantFolder());
-              } else {
-                showIosToast(context, '取消授权请在工作区列表移除该文件夹');
-              }
-            },
-          );
         case ('media', _):
           return runtimePerm('图片与视频');
         case ('camera', _):
@@ -609,28 +592,6 @@ class _DevicePermissionPageState extends State<DevicePermissionPage>
     );
   }
 
-  /// **文件夹访问开关拨开** = 走一次工作区文件夹授权
-  /// （[AgentBridge.pickWorkspace]：系统选择器，选中即 SAF 授权 +
-  /// 登记为工作区）。受限目录等失败原因由桥如实带回，直接展示。
-  Future<void> _grantFolder() async {
-    if (_openingSystemPage) return;
-    setState(() => _openingSystemPage = true);
-    try {
-      try {
-        final r = await AgentBridge().pickWorkspace();
-        if (!mounted) return;
-        if (r != null && r['ok'] == false) {
-          showIosToast(context, (r['error'] as String?) ?? '这个位置无法授权');
-        }
-      } on AgentBridgeException catch (e) {
-        if (mounted) showIosToast(context, e.message);
-      }
-      if (mounted) await _refresh();
-    } finally {
-      if (mounted) setState(() => _openingSystemPage = false);
-    }
-  }
-
   /// **开关拨动 → 拉起系统授权流程**（通知/无障碍/悬浮窗共用）。
   /// 结果不猜：回到前台时 [didChangeAppLifecycleState] 会重查；
   /// 这里再补一次延时重查，覆盖运行时弹窗那种不切生命周期的情况。
@@ -638,11 +599,18 @@ class _DevicePermissionPageState extends State<DevicePermissionPage>
     if (_openingSystemPage) return;
     setState(() => _openingSystemPage = true);
     try {
-      final ok = await AgentBridge().requestPermission(kind);
+      final r = await AgentBridge().requestPermissionDetailed(kind);
       if (!mounted) return;
-      if (!ok) {
-        showIosToast(context, '没能打开系统授权界面');
+      if (!r.ok) {
+        showIosToast(context, r.error ?? '没能打开系统授权界面');
         return;
+      }
+      if (r.action == PermissionAction.settingsOpened) {
+        // 系统不再弹授权框（永久拒绝/通知总开关关闭等）—— 已把用户送到设置页，
+        // 回来重查才是权威；这里明确告诉用户接下来要做什么。
+        showIosToast(context, '系统不再弹授权框，已打开设置页；请在那里开启');
+      } else if (r.action == PermissionAction.alreadyGranted) {
+        showIosToast(context, '该权限已经开启');
       }
       await Future<void>.delayed(const Duration(milliseconds: 700));
       if (mounted) await _refresh();
@@ -2413,12 +2381,18 @@ class GeneralSettingsPage extends StatelessWidget {
             const _SectionLabel('显示'),
             _SettingsCard(
               title: '界面语言',
-              subtitle: '界面与回复使用的语言',
+              subtitle: '目前仅支持中文；English 暂未提供',
               child: _SegControl<AppLanguage>(
                 value: s.language,
                 options: AppLanguage.values,
                 labelOf: (v) => v.label,
-                onChanged: controller.setLanguage,
+                onChanged: (v) {
+                  if (v == AppLanguage.en) {
+                    showIosToast(context, '暂不支持英文，后续版本提供');
+                    return;
+                  }
+                  unawaited(controller.setLanguage(v));
+                },
               ),
             ),
             _SettingsCard(
