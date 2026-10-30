@@ -10,6 +10,7 @@
 >
 > 📖 图文简介与快速开始：**https://theohowie.github.io/Heracles/**
 > ｜ ⬇️ [**Releases（APK 下载）**](https://github.com/theohowie/Heracles/releases)
+> ｜ 🇨🇳 Gitee 镜像：[theohowie/heracles](https://gitee.com/theohowie/heracles)（只保留 `master`，国内 clone 更快）
 > ｜ 📄 接口契约：[docs/INTERFACE.md](docs/INTERFACE.md) · [docs/接口.md](docs/接口.md) · 设计语言：[docs/DESIGN.md](docs/DESIGN.md)
 >
 > **alpha 阶段**：接口、UI、工具面都还会变。能用的与还不能用的，见 [已知限制与未验证](#10-已知限制与未验证)。
@@ -460,6 +461,7 @@ flowchart LR
 
 - 直链：[`Heracles-v0.3.2.apk`](https://github.com/theohowie/Heracles/releases/download/v0.3.2/Heracles-v0.3.2.apk) · **48.1 MB**（50,453,248 字节）· `versionCode 6` · **仅 arm64-v8a**
 - 校验：`sha256 = A7C2AD5DB88663CE9BCDC59C0857CA041692D5867DE747C3D3E52B9EC817F6C5`
+- 国内镜像：`git clone https://gitee.com/theohowie/heracles.git`（Gitee 仓库**只保留 `master` 分支**）；APK 发行版上传后会补到 [Gitee Releases](https://gitee.com/theohowie/heracles/releases)，此前请用上面的 GitHub 直链或按 §7 自建
 
 要求 **Android 12（API 31）及以上**、**arm64（arm64-v8a）** 手机。
 当前 release 包使用 debug 密钥签名，安装时需要允许「未知来源」；换正式密钥前不能覆盖升级。
