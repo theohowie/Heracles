@@ -104,6 +104,10 @@ flutter:
   uses-material-design: true
   assets:
     - assets/branding/app_icon_source.png
+    # 内置流式语音模型（B1，2026-10-30）：14M 中文 streaming zipformer，
+    # 首次点麦克风幂等解压到 App 私有目录（断网可用；卸载即删）。
+    # 文件清单/字节数见 lib/services/voice_service.dart 的 kBundledStreaming*。
+    - assets/voice/streaming-zipformer-zh-14m/
 
   # To add assets to your application, add an assets section, like this:
   # assets:

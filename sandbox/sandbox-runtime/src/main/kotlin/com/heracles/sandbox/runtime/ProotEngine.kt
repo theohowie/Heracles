@@ -292,6 +292,16 @@ class ProotEngine(
         // PRoot 需要知道宿主 linker config（Android 专有布局）。
         // 注意：**不**提供 PROOT_LOADER_32 —— 本沙箱只跑 arm64-v8a，
         // 设成空串会让 proot 尝试加载空路径，比不设更坏。
+    }.also { env ->
+        // 加固（B6）：宿主进程环境**最小化**的运行时兜底 —— 只允许白名单键。
+        // 为什么用 check 而不是只写注释：PRoot 会把自己的 environ **原样透传**
+        // 给 guest（这正是 TZ 能生效的机制，也是泄漏机制）。所以这里多一个键
+        // 就等于多一条泄漏路径（比如谁把 ANDROID_* 或凭据塞进来）。
+        // 白名单见 [HOST_ALLOWED_ENV_KEYS]；单测锁死（变异：加一个键 ⇒ 必须红）。
+        val unexpected = env.keys - HOST_ALLOWED_ENV_KEYS
+        check(unexpected.isEmpty()) {
+            "宿主环境出现白名单外的键（可能把宿主敏感变量带进沙箱）：$unexpected"
+        }
     }
 
     /**
@@ -366,15 +376,21 @@ class ProotEngine(
         add("-r")
         add(rootfsHostRoot.absolutePath)
 
-        // ---- 标准绑定：/dev /proc /sys 是 proot 自己会处理的伪文件系统，
-        //      这里显式绑定的目的是「让 guest 看得见宿主的」（Android 专有布局）。----
-        HOST_SYSTEM_BINDINGS
-            .filter { path -> File(path).let { it.exists() && it.canRead() } }
-            .forEach { path ->
-                add("-b")
-                add(path)
-            }
-
+        // ---- 设备节点绑定（**加固后唯一**允许的宿主侧绑定）----
+        // 加固（B6，task-20）：以前这里还会绑 /proc /sys /system /system_ext /vendor
+        // /product /odm /apex /data/app /data/dalvik-cache /linkerconfig /property_contexts，
+        // 那是**真实的宿主文件系统泄漏面**。真机实测（.docs/实测-20-沙箱边界.md）：
+        //   - 绑了 /system 之后，guest 里 `ls /system` 能看到宿主 build.prop/app/bin/apex；
+        //   - 绑了 /data/app + /data/dalvik-cache 之后，`ls /data` 能看到宿主 app/dalvik-cache；
+        //   - 绑了 /proc 之后，`head /proc/self/maps` 能读到宿主进程的映射
+        //     （含 /data/app/... 绝对路径），`/proc/1` 也暴露宿主进程表。
+        // 现在**只绑设备节点**：/dev（/dev/null 等；PTY 的 isatty 也依赖它）、
+        // /dev/pts（PTY 会话）。其余一律不绑 —— guest 的 /proc /sys 是 rootfs 里的
+        // 空目录，不再指向宿主；宿主 /system、/data 在 guest 里根本不存在。
+        hostDeviceBinds().forEach { path ->
+            add("-b")
+            add(path)
+        }
         // ---- 沙箱自有绑定：/tmp /workspace /root /attachments ----
         add("-b")
         add("${tmpHostRoot.absolutePath}:/tmp")
@@ -1024,45 +1040,60 @@ class ProotEngine(
         private val SAFE_EXTRA_FLAG = Regex("--[a-z0-9][a-z0-9-]*(=[A-Za-z0-9_./:@+-]+)?")
 
         /**
-         * 宿主侧系统路径，用于让 guest 能执行 Android 二进制 / 读 linker 配置。
-         *
-         * 移植自 taixu ProotMountLayout.hostSystemPaths，去掉了 `/data/misc/apexdata/...`
-         * （需要更高权限，普通 App 身份读不到，绑了只会让 proot 报错）。
+         * 宿主侧**设备节点**绑定 —— 加固（B6）后这是**唯一**允许的宿主系统绑定。
          *
          * ====================================================================
-         * ★ `/dev` `/proc` `/sys` 必须绑 —— 真机踩过的坑
+         * 为什么只有 /dev、/dev/pts（以及为什么曾经的清单全部删掉）
          * ====================================================================
-         * 不加 `/dev` 时，PTY 路径下 guest 内的 `tty` 会回答 **"not a tty"**：
-         * fork 出来的 shell 确实挂在 slave PTY 上（fd 0/1/2 都对），
-         * 但 guest 里**看不到 `/dev/pts/N`**，于是 `isatty()` 找不到对应设备节点、
-         * 判定失败。这会让所有交互式工具（`apt`、`vim`、带颜色的构建输出）
-         * 静默退化成非交互模式 —— 很难排查，因为命令本身是"成功"的。
+         * `/dev`：不给它，PTY 路径下 guest 内的 `tty` 会回答 **"not a tty"** ——
+         * fork 出来的 shell 确实挂在 slave PTY 上（fd 0/1/2 都对），但 guest 里
+         * **看不到 `/dev/pts/N`**，于是 `isatty()` 找不到设备节点、判定失败，
+         * 所有交互式工具（带颜色的输出、需要 TTY 的构建工具）会静默退化成非交互。
+         * 这条坑是真机踩过的（见 porting-log）。`/dev/null` 同理是日常必需。
          *
-         * `/proc` `/sys` 同理：很多程序靠它们判断环境，缺了会走错分支。
-         * 这也是 proot-distro 等成熟方案的标准做法。
+         * 曾经的清单里还有 `/proc`、`/sys`、`/system`、`/system_ext`、`/vendor`、
+         * `/product`、`/odm`、`/apex`、`/data/app`、`/data/dalvik-cache`、
+         * `/linkerconfig/...`、`/property_contexts`，理由是「让 guest 能执行
+         * Android 二进制 / 读 linker 配置」。**加固后全部删掉**：
+         *   - 沙箱内跑的是 **Alpine/musl** 二进制（自带 loader，在 rootfs 里），
+         *     不需要宿主 linker 配置；宿主 Android 二进制**本来就不该在 guest 里跑**；
+         *   - 这些绑定是**宿主文件系统泄漏面**：真机实测（.docs/实测-20-沙箱边界.md）
+         *     绑了之后 guest 里 `ls /system` 能看到宿主 build.prop、`ls /data` 能看到
+         *     app/dalvik-cache、`head /proc/self/maps` 能读到宿主进程映射。
+         *   - 反向需求（T2 构建套件 JDK/Gradle）装的是 **linux-aarch64** 产物
+         *     （BuildSuiteInstaller 明确拒收 bionic），也不需要这些绑定。
+         *
+         * ⚠️ 代价：guest 的 `/proc`、`/sys` 现在是 rootfs 里的**空目录**
+         * （不是挂载点，也拿不到宿主 proc）。依赖 `/proc` 的工具（`ps`/`free`/
+         * `top`、某些 JVM 探测）在沙箱里会读到空目录 —— 这是**有意的取舍**：
+         * 「能读宿主进程表」正是要堵掉的泄漏面。需要 proc 的正确做法是给 guest
+         * 自己造一个（本工程暂无该能力，ADR-041 已记录）。
          */
-        val HOST_SYSTEM_BINDINGS = listOf(
-            // PTY 与设备节点（缺了 `tty`/`isatty()` 会判非终端）
+        val HOST_DEVICE_BINDINGS = listOf(
+            // 设备节点：/dev/null 等；PTY 的 isatty 依赖 /dev/pts
             "/dev",
             "/dev/pts",
-            // 伪文件系统
-            "/proc",
-            "/sys",
-            "/apex",
-            "/data/app",
-            "/data/dalvik-cache",
-            "/system",
-            "/system_ext",
-            "/vendor",
-            "/product",
-            "/odm",
-            "/linkerconfig/com.android.art/ld.config.txt",
-            "/linkerconfig/ld.config.txt",
-            "/plat_property_contexts",
-            "/property_contexts",
         )
 
-        /** 宿主侧 linker 配置文件候选（诊断用）。 */
+        /**
+         * 本次实际要 bind 的设备节点（只保留宿主上真实存在且可读的）。
+         *
+         * 抽成函数的原因**不是为了复用**，是为了**可测**：`/dev` 在跑单测的
+         * Windows/JVM 上不存在；如果测试只能看 [buildCommandLine] 的 argv，
+         * 那么「有人往 [HOST_DEVICE_BINDINGS] 里加回 /proc」这类回归在
+         * Windows 上会被 exists 过滤掉、**静默通过**。单测用
+         * `hostDeviceBindsFor { true }` 模拟「都真实存在」，把这条锁死。
+         */
+        internal fun hostDeviceBindsFor(exists: (String) -> Boolean): List<String> =
+            HOST_DEVICE_BINDINGS.filter(exists)
+
+        /** 生产用：只 bind 宿主上真实存在且可读的设备节点。 */
+        internal fun hostDeviceBinds(): List<String> =
+            hostDeviceBindsFor { path -> File(path).let { it.exists() && it.canRead() } }
+
+        /**
+         * 宿主侧 linker 配置文件候选（**仅诊断用**，不再 bind 进沙箱）。
+         */
         val LINKER_CONFIG_PATHS = listOf(
             "/linkerconfig/com.android.art/ld.config.txt",
             "/linkerconfig/ld.config.txt",
@@ -1072,6 +1103,9 @@ class ProotEngine(
          * 允许作为 `-b` 目标的 guest 路径白名单（含其子路径）。
          *
          * 这条列表是**安全边界**：不在其中的 guest 路径一律拒绝绑定。
+         * 注意它**不包含** `/proc`、`/sys`、`/dev`、`/data`、`/system` ——
+         * 这些路径一旦被调用方绑进来，就等于把宿主或宿主的伪文件系统
+         * 塞进 guest（B6 加固点）。
          */
         val ALLOWED_BIND_TARGETS = listOf(
             "/workspace",
@@ -1202,6 +1236,30 @@ fun ProotPathResolver.resolveFor(path: String, pathView: PathView): String = whe
     PathView.SANDBOX -> sandboxToHost(path)
     PathView.HOST -> path
 }
+
+// ============================================================================
+// 宿主环境白名单（B6 加固：环境最小化）
+// ============================================================================
+// PRoot 把**自己的 environ 原样透传**给 guest 子进程（TZ 就是靠这个生效的），
+// 所以 hostEnvironment() 里每多一个键，guest 就多看到一条宿主信息。这里的白名单
+// 是「唯一允许的集合」：
+//   - PROOT_L2S_DIR / PROOT_LOADER / PROOT_TMP_DIR / TMPDIR / TMP / TEMP
+//     —— proot 自己要用（loader 解包、link2symlink 的 backing store、tmp）；
+//   - TZ —— 设备时区的 POSIX 串（ADR-039）；
+//   - LD_LIBRARY_PATH —— proot 二进制要找到 libtalloc（见 hostEnvironment 注释）。
+// 注意**没有** HOME / PATH / ANDROID_* / 代理变量 / 任何凭据；guest 侧的
+// HOME/PATH 由 guest 自己的 /etc/profile 决定（登录 shell -l 会读）。
+// 单测：ProotEngineBoundaryTest 锁死；hostEnvironment() 末尾还有 check 兜底。
+internal val HOST_ALLOWED_ENV_KEYS: Set<String> = setOf(
+    "PROOT_L2S_DIR",
+    "PROOT_LOADER",
+    "PROOT_TMP_DIR",
+    "TMPDIR",
+    "TMP",
+    "TEMP",
+    "TZ",
+    "LD_LIBRARY_PATH",
+)
 
 // ============================================================================
 // 时区：POSIX TZ 串（D5 = A，ADR-039）

@@ -17,6 +17,67 @@ import 'global_memory.dart';
 import 'memory_service.dart';
 import 'session_store.dart';
 
+/// **权限拉起的去向**（B2，2026-10-30）—— 宿主 `requestPermission` 的
+/// `action` 字段（只增字段，旧调用点仍只读 `ok`）。
+enum PermissionAction {
+  /// 已弹/已发起系统授权框（结果要等回前台重新查）。
+  requested,
+
+  /// 系统不再弹框（永久拒绝 / 只能手动开）⇒ 打开了对应的系统设置页。
+  settingsOpened,
+
+  /// 拉起前就已经授予/可用，没有上系统界面。
+  alreadyGranted,
+
+  /// 宿主没回 action（旧版宿主 / 测试通道）—— 如实标未知，不猜。
+  unknown;
+
+  static PermissionAction parse(String? raw) => switch (raw) {
+    'requested' => PermissionAction.requested,
+    'settings_opened' => PermissionAction.settingsOpened,
+    'already_granted' => PermissionAction.alreadyGranted,
+    _ => PermissionAction.unknown,
+  };
+
+  /// 落盘/日志用的稳定标识（只许往后加，不许改名 —— 与全仓枚举铁律一致）。
+  String get wireName => switch (this) {
+    PermissionAction.requested => 'requested',
+    PermissionAction.settingsOpened => 'settings_opened',
+    PermissionAction.alreadyGranted => 'already_granted',
+    PermissionAction.unknown => 'unknown',
+  };
+}
+
+/// **一次权限拉起的结果**（B2，2026-10-30）。
+///
+/// `{ok, action, granted}` 的可诊断形态：`ok=false` 时 [error] 给宿主
+/// 人话原因（如「厂商专属权限」）；[granted] 是**拉起前**的真实状态，
+/// 用户点完回到 App 后要重新查 [AgentBridge.devicePermissions] 才是权威。
+class PermissionLaunchResult {
+  const PermissionLaunchResult({
+    required this.ok,
+    required this.action,
+    required this.granted,
+    this.error,
+  });
+
+  const PermissionLaunchResult.notSupported([String? error])
+    : ok = false,
+      action = PermissionAction.unknown,
+      granted = false,
+      error = error ?? '宿主未实现 requestPermission';
+
+  final bool ok;
+  final PermissionAction action;
+  final bool granted;
+  final String? error;
+
+  @override
+  String toString() =>
+      'PermissionLaunchResult(ok: $ok, action: ${action.wireName}, '
+      'granted: $granted${error == null ? '' : ', error: $error'})';
+}
+
 /// Flutter → Kotlin 的桥（`15-前端选型与通道协议.md` §3.1）。
 ///
 /// ## 为什么核心逻辑不在这里
@@ -1240,17 +1301,42 @@ class AgentBridge {
   ///
   /// 返回 true = 已拉起。**结果不在这里回** —— 用户在系统界面里点完
   /// 回到 App，页面重新查 [devicePermissions] 才是权威状态。
-  Future<bool> requestPermission(String kind) async {
+  ///
+  /// ★ 2026-10-30（B2）：想区分「弹了系统框 / 去了设置页 / 本来就开着」
+  /// 请用 [requestPermissionDetailed]；本方法保留旧语义（只看 `ok`），
+  /// 现有调用点零改动。
+  Future<bool> requestPermission(String kind) async =>
+      (await requestPermissionDetailed(kind)).ok;
+
+  /// **拉起权限并拿到去向**（B2，2026-10-30）。
+  ///
+  /// 宿主返回**只增**结构 `{ok, action, granted}`：
+  /// · `action == requested` —— 系统授权框已拉起（首次 / 还能再问）；
+  /// · `action == settingsOpened` —— 系统不再弹框（永久拒绝 / 关通知 /
+  ///   低版本），已打开通知（或对应）设置页；
+  /// · `action == alreadyGranted` —— 拉起前就可用，没上系统界面。
+  ///
+  /// [granted] 是**拉起前**的真实状态；用户回到 App 后必须重新查
+  /// [devicePermissions] 才是权威（不要在 Dart 侧猜点了允许还是拒绝）。
+  /// 通道不可用（测试环境/旧宿主）⇒ [PermissionLaunchResult.notSupported]，
+  /// 不假装成功。
+  Future<PermissionLaunchResult> requestPermissionDetailed(String kind) async {
     try {
       final m = await _channel.invokeMapMethod<String, dynamic>(
         'requestPermission',
         <String, Object?>{'kind': kind},
       );
-      return (m?['ok'] as bool?) ?? false;
+      if (m == null) return const PermissionLaunchResult.notSupported();
+      return PermissionLaunchResult(
+        ok: (m['ok'] as bool?) ?? false,
+        action: PermissionAction.parse(m['action'] as String?),
+        granted: (m['granted'] as bool?) ?? false,
+        error: m['error'] as String?,
+      );
     } on MissingPluginException {
-      return false;
-    } on PlatformException {
-      return false;
+      return const PermissionLaunchResult.notSupported();
+    } on PlatformException catch (e) {
+      return PermissionLaunchResult.notSupported(e.message);
     }
   }
 

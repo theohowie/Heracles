@@ -76,7 +76,7 @@ class JevConfig {
     this.source = JevSource.cloud,
     this.cloudBaseUrl = kJevDefaultBaseUrl,
     this.cloudModel = kJevDefaultModel,
-    this.reasonEnabled = true,
+    this.reasonEnabled = false,
   });
 
   final JevSource source;
@@ -88,7 +88,14 @@ class JevConfig {
   /// 云端模型名（基元律动平台固定 `NeoHorse-Jev-4B`）。
   final String cloudModel;
 
-  /// 决策出来后是否让对话模型补写理由。
+  /// ~~决策出来后是否让对话模型补写理由~~ —— **2026-10-30（B3）起恒为
+  /// false，字段只为兼容旧存档/旧调用点保留**。
+  ///
+  /// 理由（借对话模型补写）已关闭：多一次云端调用、耗 token、还会把
+  /// 决策问题原文再发给另一个模型。`fromJson` **忽略旧值**（旧存档里
+  /// 存着 true 也按 false 处理）、`toJson` 恒写 false，`JevController.ask`
+  /// 也不再调用 `JevReasoner` —— 旧开关的 UI 由前端删除，这里不再驱动行为。
+  /// 构造参数 `reasonEnabled:` 同理只为让旧调用点继续编译。
   final bool reasonEnabled;
 
   bool get cloudReady => cloudBaseUrl.trim().isNotEmpty;
@@ -109,7 +116,9 @@ class JevConfig {
     'source': source.name,
     'cloudBaseUrl': cloudBaseUrl,
     'cloudModel': cloudModel,
-    'reasonEnabled': reasonEnabled,
+    // ★ B3（2026-10-30）：落盘**恒 false** —— 旧配置里的 true 不会被写回，
+    // 下次 `fromJson` 读到的也是 false（行为不复活）。
+    'reasonEnabled': false,
   };
 
   factory JevConfig.fromJson(Map<String, dynamic> j) => JevConfig(
@@ -119,7 +128,9 @@ class JevConfig {
     // 清空密钥（decide 时会拦），不靠清空地址。
     cloudBaseUrl: _orDefault(j['cloudBaseUrl'] as String?, kJevDefaultBaseUrl),
     cloudModel: _orDefault(j['cloudModel'] as String?, kJevDefaultModel),
-    reasonEnabled: j['reasonEnabled'] as bool? ?? true,
+    // ★ B3（2026-10-30）：忽略旧存档里的 true —— 理由补写已关闭。
+    // 字段保留只为兼容读写形状（toJson 仍写 false），不让老配置复活行为。
+    reasonEnabled: false,
   );
 
   static String _orDefault(String? v, String fallback) =>

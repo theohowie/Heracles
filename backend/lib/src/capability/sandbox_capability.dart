@@ -41,7 +41,12 @@ enum ExecutionSurface {
 
 /// 一次路由决策的结果。
 class SurfaceDecision {
-  const SurfaceDecision(this.surface, this.reason, {this.matchedRule});
+  const SurfaceDecision(
+    this.surface,
+    this.reason, {
+    this.matchedRule,
+    this.sandboxNotReady = false,
+  });
 
   final ExecutionSurface surface;
 
@@ -50,6 +55,17 @@ class SurfaceDecision {
 
   /// 命中的规则名（`null` = 走默认的沙箱）。
   final String? matchedRule;
+
+  /// **沙箱未就绪**（2026-10-30 B4）：`true` ⇒ 调用方必须**拒绝执行**，
+  /// 绝不能改在手机 shell 上跑。
+  ///
+  /// 为什么要有独立布尔字段（而不是只认 matchedRule 字符串）：
+  /// · 字符串是**排障信息**，执行分支的判定不该依赖它（改文案就静默失效）；
+  /// · 执行分支一眼可读：`if (decision.sandboxNotReady) return 明确错误`；
+  /// · 测试可以直接钉"不可回落"语义，不必猜规则名。
+  ///
+  /// 与 `matchedRule == 'sandbox-not-ready'` 完全等价（同一次构造同时设置）。
+  final bool sandboxNotReady;
 }
 
 /// **必须落手机 shell 的命令前缀表**（唯一真相）。
@@ -161,6 +177,7 @@ SurfaceDecision decideSurface(String command, {required bool sandboxReady}) {
       '沙箱未激活（或不可用）—— 本命令需要沙箱，未激活时**拒绝执行**'
           '（不会改在手机 shell 上跑：那会让 agent 在用户不知情下动真实系统）',
       matchedRule: 'sandbox-not-ready',
+      sandboxNotReady: true,
     );
   }
 

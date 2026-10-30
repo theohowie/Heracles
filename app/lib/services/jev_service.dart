@@ -918,16 +918,28 @@ abstract final class JevCloudClient {
   }
 }
 
-/// **理由补写** —— 决策模型只给结论与概率，理由由当前对话模型
-/// 写一到两句。没有可用的对话模型时返回 null（界面只显示概率，
-/// 不编理由）。
+/// **理由补写（B3 起停用）** —— 决策模型只给结论与概率，旧版借当前
+/// 对话模型补写一两句理由。
+///
+/// ★ 2026-10-30（B3）：**产品决定关掉理由**。理由多一次云端调用、耗
+/// token，还会把用户的私事原文再发给另一个模型。`JevController.ask`
+/// 已不再调用本类（只有决策模型自己的 `thought` 会被采用）；类保留是
+/// 为了不破坏契约形状与将来可选的显式开关，**零调用**由
+/// [debugInvocations] 在测试里钉住。
 abstract final class JevReasoner {
+  /// **测试用调用计数**（B3 验收：`JevController.ask` 不得调用本类）。
+  /// 进入 [reason] 就 +1（无论之后返回什么），测试据此断言零调用；
+  /// 生产代码不读它。
+  @visibleForTesting
+  static int debugInvocations = 0;
+
   static Future<String?> reason({
     required AppSettings settings,
     required String question,
     required bool recommended,
     required double confidence,
   }) async {
+    debugInvocations += 1;
     final p = settings.effectiveProvider;
     if (p == null || p.baseUrl.trim().isEmpty || p.model.trim().isEmpty) {
       return null;
@@ -1361,7 +1373,18 @@ class JevController extends ChangeNotifier {
 
   /// 问一次决策。成功返回记录；失败把原因写进 [lastError] 并返回
   /// null —— **绝不假装给出了决策**。
-  Future<JevDecision?> ask(String question, AppSettings settings) async {
+  ///
+  /// ★ B3（2026-10-30）：**不再调用 [JevReasoner] 补写理由** ——
+  /// 理由只可能来自决策模型自己的 `thought`（`JevReasonSource.modelThought`），
+  /// 否则为空（`JevReasonSource.none`）。旧配置里的 `reasonEnabled=true`
+  /// 也不再复活该行为（见 `JevConfig.reasonEnabled`）。
+  ///
+  /// [client] 只给测试注入假 HTTP 适配器（生产不传，走默认 Dio）。
+  Future<JevDecision?> ask(
+    String question,
+    AppSettings settings, {
+    Dio? client,
+  }) async {
     if (busy) return null;
     busy = true;
     lastError = null;
@@ -1383,6 +1406,7 @@ class JevController extends ChangeNotifier {
             apiKey: key,
             model: config.cloudModel,
             question: question,
+            client: client,
           );
           lastDiagnostics = r.diagnostics;
           yesProb = r.yesProb;
@@ -1410,19 +1434,10 @@ class JevController extends ChangeNotifier {
       }
       sw.stop();
 
-      var reason = thought;
-      var reasonSource = thought != null
+      final reason = thought;
+      final reasonSource = thought != null
           ? JevReasonSource.modelThought
           : JevReasonSource.none;
-      if (reason == null && config.reasonEnabled) {
-        reason = await JevReasoner.reason(
-          settings: settings,
-          question: question,
-          recommended: yesProb >= 0.5,
-          confidence: yesProb >= 0.5 ? yesProb : 1 - yesProb,
-        );
-        if (reason != null) reasonSource = JevReasonSource.llm;
-      }
 
       final decision = JevDecision(
         id: 'j${DateTime.now().millisecondsSinceEpoch}',

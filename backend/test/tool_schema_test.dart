@@ -248,6 +248,37 @@ void main() {
           reason: '连 shell 执行面都没有时，不必谈两套文件系统（会误导）');
       expect(p.contains('在工作区里执行'), isFalse);
     });
+
+    // ★ B4（2026-10-30）：沙箱优先 + 未就绪不可静默回落 —— 提示词必须是事实句
+    test('★★★ system prompt：沙箱优先 + 未就绪明确报错、不偷换执行面（B4）', () {
+      expect(promptBoth.contains('沙箱优先'), isTrue,
+          reason: '★ 产品语义：沙箱就绪时默认且优先走沙箱（构建类也在沙箱）');
+      expect(promptBoth.contains('构建类任务同样在沙箱'), isTrue,
+          reason: 'T2：构建类任务优先沙箱，设备工具链只作显式回退');
+      expect(promptBoth.contains('明确报错'), isTrue,
+          reason: '★ 未就绪要如实报错，不是静默降级');
+      expect(promptBoth.contains('不会偷偷改在手机 shell 上跑'), isTrue,
+          reason: '★★ 这句话是"不可静默回落"对模型的事实交代');
+    });
+
+    test('★★★ run_shell_command：description 写明未就绪会报错、不偷换到手机（B4）', () {
+      final t = buildShellTools(ToolFactory(capsBoth), capsBoth)
+          .firstWhere((t) => t.name == 'run_shell_command');
+      expect(t.description.contains('沙箱未激活'), isTrue);
+      expect(t.description.contains('明确报错'), isTrue);
+      expect(t.description.contains('不会偷偷改在手机 shell 上跑'), isTrue);
+      // 旧事实句不许被这次改动挤掉（不弱化既有断言的对象）
+      expect(t.description.contains('两套文件系统'), isTrue);
+      expect(t.description.contains('@workspace'), isTrue);
+    });
+
+    test('★★ 只有手机 shell 的宿主：不许承诺"沙箱优先/激活沙箱"', () {
+      final p = defaultSystemPrompt(Capabilities(shell: _FakeShell()));
+      expect(p.contains('沙箱优先'), isFalse,
+          reason: '宿主没接沙箱时承诺"沙箱优先"就是假话');
+      expect(p.contains('沙箱未激活'), isFalse);
+      expect(p.contains('只有**手机 shell**执行面'), isTrue);
+    });
   });
 }
 

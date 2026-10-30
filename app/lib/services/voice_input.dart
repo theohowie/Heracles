@@ -49,6 +49,12 @@ class VoiceInputController extends ChangeNotifier {
   /// 本次/上次录音是否走了流式（诊断与提示用）。
   bool get streamingActive => _stream != null;
 
+  /// 测试注入：替换真实 sherpa 解码器（生产 null = 用 isolate + OnlineRecognizer）。
+  /// 测试里注入"必失败/假"解码器，避免在 flutter_tester 里起真 isolate。
+  @visibleForTesting
+  static VoiceStreamDecoder? Function(VoiceModelController voice)?
+      decoderFactoryForTest;
+
   /// 麦克风按钮点按入口。[target] 是要点完往里填字的输入框，
   /// [toast] 是调用方的轻提示出口（各页自己的 showIosToast）。
   Future<void> onMicTap({
@@ -67,10 +73,18 @@ class VoiceInputController extends ChangeNotifier {
     // 删除/改名（§N13.4 的回退判定必须即时，不能吃启动时的缓存）。只做
     // 几个 `File.existsSync/lengthSync`，主 isolate 开销可忽略。
     voice.refreshInstalled();
+    // ★ B1（2026-10-30）：内置 14M 中文流式模型**开箱即用** —— 第一次点
+    // 麦克风时幂等解压（≈24MB，断网也可用，普通用户无需下载任何东西）。
+    // ★ 即使设备上还留着"可选下载的 200MB 双语模型"，也优先把**内置模型**
+    // 备好（默认用内置；老模型只有在用户明确需要高精度时才被 `activeStreamingModel`
+    // 在 bundled 不可用时选中）。解压失败不崩，照旧走整段回退。
+    if (!voice.bundledStreamingReady) {
+      await voice.ensureStreamingReady();
+    }
     // 两条路径的模型门槛分开算（§N13.4）：
-    // · 流式：只要流式模型下好就能录（边说边出字）；
+    // · 流式：内置解压完成（或可选下载完整）即可录（边说边出字）；
     // · 整段回退：需要 SenseVoice 的引擎产物（补完 metadata + 词表）。
-    // 流式模型在 ⇒ 不为整段路径的准备状态挡路；整段只作后台兜底。
+    // 流式可用 ⇒ 不为整段路径的准备状态挡路；整段只作后台兜底。
     final streamingReady = voice.streamingInstalled;
     final wholeReady = voice.installed && voice.engineReady;
     if (!streamingReady && !wholeReady) {
@@ -134,12 +148,13 @@ class VoiceInputController extends ChangeNotifier {
     void Function(String message) toast,
   ) async {
     final voice = VoiceModelController.shared();
-    // 流式模型没下完 ⇒ 不下载、不报错，直接回退（§N13.4）。
+    // 流式模型仍不可用（内置解压失败且没下载过）⇒ 不报错，回退整段（§N13.4）。
     if (!voice.streamingInstalled) return false;
     final sessionId = (started['sessionId'] as String?) ?? '';
     // 旧包 start 不回 sessionId：拿不到会话就只能整段识别。
     if (sessionId.isEmpty) return false;
-    final decoder = createSherpaStreamDecoder(voice);
+    final decoder =
+        decoderFactoryForTest?.call(voice) ?? createSherpaStreamDecoder(voice);
     if (decoder == null) return false;
     final runner = VoiceStreamRunner(
       sessionId: sessionId,

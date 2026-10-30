@@ -439,6 +439,10 @@ Float32List _pcm16ToFloat32(Uint8List bytes) {
 /// `'query_head_dims' does not exist in the metadata`，17ms 后**整个进程
 /// 死亡**（native abort，Dart 侧 try/catch 救不了）。analyze/单测/构建都
 /// 发现不了，只有真机能撞出来 —— 别改回 zipformer2。
+///
+/// ★ 2026-10-30（B1）：默认模型换成**内置 14M 中文 streaming zipformer**
+/// （`streaming-zipformer-zh-14M-2023-02-23`，同样 zipformer v1，同 model
+/// type）；旧的 200MB 中英双语模型降级为可选高精度模型，两者共用本配置。
 const kStreamingModelType = 'zipformer';
 
 /// **流式识别器配置**（纯数据构造，不触发 native；单测可锁）。
@@ -471,24 +475,17 @@ sherpa.OnlineRecognizerConfig buildStreamingRecognizerConfig({
   );
 }
 
-/// 按 [VoiceModelController] 的流式模型路径建解码器；模型没备好返回 null
-/// （调用方据此回退整段识别，不报错）。
+/// 按 [VoiceModelController] 当前可用的流式模型建解码器：
+/// **内置 14M 中文模型优先**（`activeStreamingModel`），其次可选下载的
+/// 200MB 中英双语模型；都不可用返回 null（调用方回退整段识别，不报错）。
 VoiceStreamDecoder? createSherpaStreamDecoder(VoiceModelController voice) {
-  final encoder = voice.streamingEncoderPath;
-  final decoder = voice.streamingDecoderPath;
-  final joiner = voice.streamingJoinerPath;
-  final tokens = voice.streamingTokensPath;
-  if (encoder == null ||
-      decoder == null ||
-      joiner == null ||
-      tokens == null) {
-    return null;
-  }
+  final model = voice.activeStreamingModel;
+  if (model == null) return null;
   return SherpaVoiceStreamDecoder(
-    encoder: encoder,
-    decoder: decoder,
-    joiner: joiner,
-    tokens: tokens,
+    encoder: model.encoder,
+    decoder: model.decoder,
+    joiner: model.joiner,
+    tokens: model.tokens,
   );
 }
 
@@ -676,6 +673,9 @@ class VoiceStreamRunner {
   int _endpoints = 0;
   String _text = '';
 
+  /// 上一次以 isFinal 发出去的文本（相同文本的静音端点不再重复发）。
+  String _lastFinalText = '';
+
   /// 当前累积草稿（最近一次解码结果）。
   String get text => _text;
 
@@ -763,8 +763,15 @@ class VoiceStreamRunner {
     }
     if (update.endpoint) {
       // 静音断句：立即发 isFinal（不节流），然后继续听下一句。
+      // ⚠️ 真机实测：没人说话时 VAD 会**每秒**报一次 endpoint，且文本与上次
+      // 完全一样。空文本 / 与上次定稿相同的文本都不发 —— 否则 UI 会被
+      // 一串 chars 不变的 final 刷屏（2026-10-30 e35e48c6 证据）。
       _endpoints++;
-      _emitFinal(text);
+      final trimmed = text.trim();
+      if (trimmed.isNotEmpty && text != _lastFinalText) {
+        _lastFinalText = text;
+        _emitFinal(text);
+      }
       return;
     }
     _pacer.onSubmit(text);

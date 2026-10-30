@@ -78,6 +78,8 @@ List<Tool> buildShellTools(ToolFactory f, Capabilities caps) {
           '涉及 Android 本身的命令（pm/am/dumpsys/截图/改系统设置/装包等）会自动改在'
           '**手机 shell**（Android mksh）上执行 —— **命令实际在哪跑由系统决定，'
           '你不要也没有办法自己指定**。'
+          '⚠️ **沙箱未激活/不可用时，命令会明确报错（提示先去设置激活），'
+          '不会偷偷改在手机 shell 上跑** —— 若看到该错误，请如实告诉用户去激活沙箱。'
           '可用 `@name/...` 引用沙箱内的命名挂载点（如 @workspace/dist）—— '
           '注意 `@workspace` 是沙箱内的挂载名，**不是用户工作区**。'
           '⚠️ 要读写/查找/统计**用户工作区**的文件，用 read_file / list_files / find_files / '
@@ -142,7 +144,9 @@ List<Tool> buildShellTools(ToolFactory f, Capabilities caps) {
               );
 
         // ★ 沙箱**接了但没就绪** ⇒ 拒绝执行（用户裁定：不静默回落手机）。
-        if (decision.matchedRule == 'sandbox-not-ready') {
+        //   判定用 `sandboxNotReady` 布尔字段（不认 matchedRule 字符串：
+        //   排障文案改动不该改变执行语义）。
+        if (decision.sandboxNotReady) {
           return CapabilityFailure(
             '这条命令需要在沙箱里执行，但沙箱还没激活。\n'
                 '请在设置里激活沙箱（内置基础环境约 9 MB，无需下载）；\n'

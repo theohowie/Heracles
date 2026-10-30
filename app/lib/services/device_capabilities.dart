@@ -1555,14 +1555,154 @@ class ChannelHealthCapability implements DeviceHealthCapability {
 ///
 /// 用户主动「激活」的是 **T2**（JDK + Gradle，≈440 MB，编 APK 才需要），与这里无关 ——
 /// 那一步由 `CapabilityNeedsActivation` 引导，不在本类职责内。
+///
+/// ## B5（2026-10-30）用户工作区打通：`userws` 命名挂载
+///
+/// 病根：App 工作区（`…/files/app-workspace`）与 guest `/workspace` 是**两套 FS**；
+/// 模型在 shell 里 `ls` 看到的是沙箱自己的目录，永远看不到用户文件。
+///
+/// 修法（只加一层「显式挂载」，不改 guest `/workspace` 语义）：
+/// - 工作区**有宿主物理路径**（App 私有外部目录 / `/data/…`）⇒ 幂等注册
+///   `userws` = `HOST_PRIVATE_DIR(hostPath=工作区)` + `bindTo=/opt/ws-real`
+///   （`/opt` 在 `ProotEngine.ALLOWED_BIND_TARGETS` 白名单内），
+///   执行默认 `workdir=/opt/ws-real`；
+/// - **SAF 工作区没有物理路径**（只有 `treeUri`，见 `models/workspace.dart`）⇒
+///   **不挂载**，保持 `/workspace`，并在结果里**如实说明"两套 FS"**（绝不假装看到用户文件）；
+/// - 挂载失败 ⇒ 如实报错（继续以 `/workspace` 跑），不静默当成功；
+/// - 只挂**工作区根**：不额外挂 sessions/keys/memory 等任何私有目录；
+/// - `reset`（重置沙箱）只动 rootfs，**绝不删用户工作区**。
 class ChannelSandboxCapability implements SandboxCapability {
-  ChannelSandboxCapability({SandboxService? service})
-      : _sandbox = service ?? SandboxService();
+  ChannelSandboxCapability({
+    SandboxService? service,
+    this.workspacePath,
+    bool? workspaceIsSaf,
+  })  : _sandbox = service ?? SandboxService(),
+        _workspaceIsSafOverride = workspaceIsSaf;
 
   final SandboxService _sandbox;
 
+  /// 用户工作区绝对路径（`null`/空 ⇒ 不挂载；CLI / 纯 Dart 测试）。
+  final String? workspacePath;
+
+  /// 显式覆盖「是否 SAF」（`null` ⇒ 按 [isPhysicalWorkspacePath] 推断）。
+  ///
+  /// 生产由路径形状推断（App 私有外部目录是物理路径；用户选的 SAF 目录不是）；
+  /// 测试用它直接覆盖两种分支。
+  final bool? _workspaceIsSafOverride;
+
   /// T0 就绪缓存（避免每条命令都打一次 IPC 查状态）。
   bool? _ready;
+
+  /// `userws` 命名挂载的注册结果（每实例只尝试一次，避免每条命令打 IPC）。
+  _UserWorkspaceMount? _userws;
+
+  /// 本实例是否已尝试过挂载（失败也**只试一次**，不每条命令重试）。
+  bool _userwsTried = false;
+
+  /// SAF 提示是否已经给过（每实例只提示一次，避免污染每条命令输出）。
+  bool _safNoteShown = false;
+
+  /// 命名挂载名（模型侧写 `@userws/...`）。
+  static const String userWorkspaceMountName = 'userws';
+
+  /// 挂进 guest 的挂载点（`/opt` 在沙箱 bind 白名单内）。
+  static const String userWorkspaceGuestPath = '/opt/ws-real';
+
+  /// 判定「工作区是否有宿主物理路径」。
+  ///
+  /// 当前部署只有两种工作区：
+  /// · **App 私有外部目录**（`ensureAppWorkspace` 建的 `…/Android/data/<pkg>/files/…`）
+  ///   —— App 自己能读写 ⇒ 可 bind；
+  /// · **SAF 用户目录**（用户从系统选择器选的 `/storage/emulated/…`）
+  ///   —— 只有 `treeUri` 授权，App 进程没有 POSIX 写权限，**没有可 bind 的物理路径**
+  ///   （`HWorkspace.isSaf`，见 `models/workspace.dart`）。
+  ///
+  /// 这里按路径形状判断，**不猜**：无法确认是 App 私有目录的一律按 SAF 处理
+  /// （安全侧：宁可不挂载 + 如实提示，也不把错误目录塞给模型）。
+  static bool isPhysicalWorkspacePath(String path) {
+    final p = path.trim().replaceAll('\\', '/');
+    if (!p.startsWith('/')) return false;
+    // App 私有外部目录（Android/data/<pkg>/files/**）或 App 内部 data 目录。
+    // SAF picker 在 Android 11+ 不允许浏览 Android/data，所以这两类不会混。
+    return p.contains('/Android/data/') || p.startsWith('/data/');
+  }
+
+  /// 挂载点的**派生指纹**（写进 description 用于跨实例幂等判断）。
+  ///
+  /// 故意不写完整物理路径：只留目录名 + 长度（同一个工作区稳定；
+  /// 切到另一个同名同长目录的概率可忽略，且 kotlin `register` 覆盖同名为幂等）。
+  static String _userWorkspaceFingerprint(String workspacePath) {
+    final p = workspacePath.trim().replaceAll('\\', '/');
+    final parts = p.split('/').where((s) => s.isNotEmpty).toList();
+    final base = parts.isEmpty ? '' : parts.last;
+    return '用户工作区（读写；$base；len=${p.length}）';
+  }
+
+  /// 确保 `userws` 挂载（幂等；每实例一次）。
+  Future<_UserWorkspaceMount> _ensureUserWorkspace() async {
+    final cached = _userws;
+    if (cached != null) return cached;
+
+    final ws = workspacePath?.trim() ?? '';
+    if (ws.isEmpty) {
+      return _userws = const _UserWorkspaceMount.none();
+    }
+    final isSaf = _workspaceIsSafOverride ?? !isPhysicalWorkspacePath(ws);
+    if (isSaf) {
+      return _userws = const _UserWorkspaceMount.saf();
+    }
+    if (_userwsTried) {
+      return _userws ?? _UserWorkspaceMount.failed('挂载状态未知（未注册成功）');
+    }
+    _userwsTried = true;
+
+    try {
+      final desc = _userWorkspaceFingerprint(ws);
+      // ---- 幂等：已注册同形状挂载点就不再重复 register ----
+      final mounts = await _sandbox.listMounts();
+      for (final m in mounts) {
+        if (m.name == userWorkspaceMountName &&
+            m.backend == SandboxMountBackend.hostPrivateDir &&
+            m.bindTo == userWorkspaceGuestPath &&
+            m.description == desc) {
+          return _userws = _UserWorkspaceMount.mounted(skippedRegister: true);
+        }
+      }
+      final r = await _sandbox.registerMount(
+        name: userWorkspaceMountName,
+        backend: SandboxMountBackend.hostPrivateDir,
+        hostPath: ws,
+        bindTo: userWorkspaceGuestPath,
+        description: desc,
+      );
+      if (!r.ok) {
+        return _userws = _UserWorkspaceMount.failed(
+          r.error.trim().isEmpty ? '挂载注册失败（宿主未给出原因）' : r.error,
+        );
+      }
+      return _userws = _UserWorkspaceMount.mounted();
+    } catch (e) {
+      // 通道不可用等：如实失败，不假装挂上了
+      return _userws = _UserWorkspaceMount.failed('$e');
+    }
+  }
+
+  /// 给模型看的一句执行面提示（`null` = 不需要提示）。
+  String? _userWorkspaceNote(_UserWorkspaceMount m) {
+    if (m.failedReason != null) {
+      return '【执行面提示】用户工作区挂载失败（${m.failedReason}）——'
+          '本命令在沙箱 `/workspace` 执行，**看不到用户工作区文件**；'
+          '用户工作区请用 read_file / list_files / grep_files 等文件工具。';
+    }
+    if (m.isSaf && !_safNoteShown) {
+      _safNoteShown = true;
+      return '【执行面提示】当前工作区是 **SAF 授权目录（没有物理路径，无法 bind 进沙箱）**，'
+          'shell 在沙箱 `/workspace` 执行 —— 那是沙箱自己的文件系统，'
+          '**与用户工作区是两套 FS**；用户工作区文件请用 read_file / list_files 等文件工具，'
+          '不要在 shell 里找它们。';
+    }
+    return null;
+  }
 
   /// 确保 T0 就绪：没装就用**内置** rootfs 解包（离线、幂等）。
   ///
@@ -1595,6 +1735,12 @@ class ChannelSandboxCapability implements SandboxCapability {
         isRetryable: true,
       );
     }
+
+    // ★ B5：用户工作区打通。有物理路径 ⇒ 幂等注册 `userws` 且 workdir 指过去；
+    //   SAF（无物理路径）⇒ 不挂载，保持 `/workspace` 并如实提示"两套 FS"。
+    final userws = await _ensureUserWorkspace();
+    final workdir =
+        userws.isMounted ? userWorkspaceGuestPath : '/workspace';
 
     final stdoutBuf = StringBuffer();
     final stderrBuf = StringBuffer();
@@ -1644,6 +1790,9 @@ class ChannelSandboxCapability implements SandboxCapability {
     try {
       final submit = await _sandbox.execute(
         command,
+        // ★ B5：有 userws 挂载时默认在 `/opt/ws-real`（= 用户工作区）跑；
+        //   SAF/无工作区 ⇒ 保持 guest `/workspace`（沙箱自己的 FS）。
+        workdir: workdir,
         timeoutMs: timeout.inMilliseconds,
       );
       if (!submit.ok) {
@@ -1681,20 +1830,26 @@ class ChannelSandboxCapability implements SandboxCapability {
       }
 
       // 输出为空时也要给一句可读的话（模型不能收到空白）
-      final text = [
+      final rawText = [
         stdoutBuf.toString(),
         if (stderrBuf.isNotEmpty) '[stderr]\n${stderrBuf.toString()}',
       ].where((s) => s.isNotEmpty).join('\n');
+      final body = rawText.isEmpty
+          ? '（命令无输出，退出码 ${result.exitCode}）'
+          : rawText;
+      // ★ B5：SAF / 挂载失败时把"两套 FS"的事实说在输出最前面（每条实例只提示一次）
+      final note = _userWorkspaceNote(userws);
+      final text = note == null ? body : '$note\n$body';
 
       if (result.timedOut) {
         return CapabilityFailure(
-          '沙箱命令超时（${timeout.inSeconds}s）${text.isEmpty ? '' : '\n$text'}',
+          '沙箱命令超时（${timeout.inSeconds}s）${body.isEmpty ? '' : '\n$body'}',
           isRetryable: true,
         );
       }
 
       return CapabilitySuccess(
-        text.isEmpty ? '（命令无输出，退出码 ${result.exitCode}）' : text,
+        text,
         metadata: {
           'surface': 'sandbox',
           'command': command,
@@ -1702,6 +1857,9 @@ class ChannelSandboxCapability implements SandboxCapability {
           'durationMs': result.durationMs,
           'truncated': result.truncated,
           'timedOut': result.timedOut,
+          // ★ B5：前端/排障要能看出命令到底在哪个目录跑、userws 挂没挂上
+          'workdir': workdir,
+          'userwsMount': userws.wireState,
         },
       );
     } finally {
@@ -1718,6 +1876,12 @@ class ChannelSandboxCapability implements SandboxCapability {
     //   reset 的语义是"rootfs 装好了没有"，PRoot 二进制是 APK 带来的、与重置无关。
     //   早期 Kotlin 回包不带 `prootReady`，用 ready 判会**永远报失败**（单测抓到）。
     _ready = null; // 重置后作废缓存，下次 ensureReady 重新探测
+    // ★ B5：reset 只回滚 rootfs（**绝不删用户工作区** —— bind 的宿主目录在
+    //   rootfs 之外，reset 碰不到它）。挂载注册可能随 rootfs 换目录失效 ⇒
+    //   作废缓存，下次执行重新注册一次（幂等）。
+    _userws = null;
+    _userwsTried = false;
+    _safNoteShown = false;
     if (!st.installed) {
       return CapabilityFailure(
         '重置后沙箱未就绪（rootfs 摘要：${st.rootfsSummary}）—— 请重试或检查存储空间',
@@ -1735,6 +1899,41 @@ class ChannelSandboxCapability implements SandboxCapability {
 class _SandboxRunFailure implements Exception {
   const _SandboxRunFailure(this.error);
   final SandboxExecError error;
+}
+
+/// `userws` 命名挂载的注册结果（B5，内部）。
+///
+/// [wireState] 会进工具结果 metadata（前端/排障可见），取值：
+/// `mounted` / `mounted(already)` / `saf-no-physical-path` / `failed` / `none`。
+class _UserWorkspaceMount {
+  const _UserWorkspaceMount._({
+    required this.wireState,
+    this.failedReason,
+    this.skippedRegister = false,
+  });
+
+  const _UserWorkspaceMount.none() : this._(wireState: 'none');
+
+  const _UserWorkspaceMount.saf()
+      : this._(wireState: 'saf-no-physical-path');
+
+  const _UserWorkspaceMount.failed(String reason)
+      : this._(wireState: 'failed', failedReason: reason);
+
+  const _UserWorkspaceMount.mounted({bool skippedRegister = false})
+      : this._(
+          wireState: skippedRegister ? 'mounted(already)' : 'mounted',
+          skippedRegister: skippedRegister,
+        );
+
+  final String wireState;
+  final String? failedReason;
+  final bool skippedRegister;
+
+  bool get isMounted =>
+      wireState == 'mounted' || wireState == 'mounted(already)';
+
+  bool get isSaf => wireState == 'saf-no-physical-path';
 }
 
 // ============================================================================
@@ -2556,8 +2755,17 @@ Capabilities buildDeviceCapabilities({
     // ★ 沙箱执行面（2026-10-29）。默认不注入 —— 见 [includeSandbox] 的 KDoc：
     //   `null` = "没有沙箱"，`非 null 未就绪` = "接了但没激活（拒绝执行）"。
     //   这两个语义不能混，否则一条 IPC 失败会把所有 shell 命令挡死。
+    //
+    // ★ B5（2026-10-30）：把**用户工作区**传进去（同一 `workspaceRoot`）——
+    //   沙箱能力据此幂等注册 `userws` 挂载并把 workdir 指到 `/opt/ws-real`；
+    //   SAF 工作区（无物理路径）由能力内按路径形状识别并如实回退到 `/workspace`。
+    //   ⚠️ 这里必须传：漏传会退化成"永远看不到用户工作区"（装配层回归，
+    //   与 git 那次漏传同类）。
     sandbox: includeSandbox
-        ? ChannelSandboxCapability(service: sandboxService)
+        ? ChannelSandboxCapability(
+            service: sandboxService,
+            workspacePath: workspaceRoot,
+          )
         : null,
   );
 }

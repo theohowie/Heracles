@@ -62,6 +62,20 @@ PRoot **做不到**：
   PRoot 的路径重写是**可以绕过的**（如通过 `/proc/self/fd`、硬链接、
   或直接对已打开的目录 fd 用 `openat`）
 
+> **2026-10-30 边界加固（ADR-041）**：宿主系统目录（`/proc /sys /system /system_ext
+> /vendor /product /odm /apex /data/app /data/dalvik-cache` 等）**已不再 bind**，
+> 只保留 `/dev`、`/dev/pts`；guest 的 `/proc`、`/sys` 是 rootfs 内的**空目录**
+> （不再是宿主伪文件系统）；环境变量走 `HOST_ALLOWED_ENV_KEYS` 白名单 +
+> `hostEnvironment()` 末尾 `check` 兜底；PRoot 带 `--kill-on-exit`。
+> 真机实测（App 进程内）：读 `/data/data/<pkg>/files/...`、`shared_prefs`、
+> `sessions/*.jsonl`、`memory/*.jsonl`、`/proc/self/root/...`、`..` 穿越 **全部
+> `No such file`**；`ls /` 只有 rootfs 目录 + 沙箱挂载点。
+> **但边界本质不变**：没有 seccomp（PRoot 靠 ptrace 工作，外部预装过滤器会连
+> proot 自己的 ptrace 一起禁掉）、没有 namespace/cgroup、网络与宿主共享、
+> `/dev` 与显式挂载由宿主决定 ⇒ **仍然不是强隔离，不得宣称内核级隔离**。
+> 可得结论只到：「本 App 可读的宿主私有数据不再被默认暴露给沙箱」。详见
+> `.docs/09-决策记录.md` ADR-041、`.docs/实测-20-沙箱边界.md`。
+
 ---
 
 ## 2. 那么它能防什么、不能防什么（决策表）
@@ -73,7 +87,7 @@ PRoot **做不到**：
 | 装错依赖导致环境坏掉 | ✅ 能 | `resetRootfs()` 一键恢复 |
 | 不同项目依赖冲突 | ✅ 能 | 不同 rootfs 互不干扰 |
 | **模型幻觉写出的破坏性命令** | ⚠️ **部分** | 毁不了宿主系统，但**能毁宿主 App 可写的所有文件**（含 `/sdcard`） |
-| **不受信任的第三方脚本恶意读宿主数据** | ❌ **不能** | 它能看到宿主进程能看的一切 |
+| **不受信任的第三方脚本恶意读宿主数据** | ⚠️ **部分（2026-10-30 加固后）** | 宿主系统目录已不 bind、guest `/proc`/`/sys` 为空目录、读宿主私有路径实测全 `No such file`；但**仍无 seccomp/namespace/cgroup**，App 自身可读的文件（含显式挂载）、网络、CPU/内存资源仍暴露 —— 不是强隔离（ADR-041） |
 | **fork 炸弹 / 内存耗尽** | ❌ **不能** | 无 cgroup，只有应用层软限制 |
 | **提权到真实 root** | ❌ 不能（这是好事） | 假 root 不改变内核判定 |
 | **提权到 shell（uid 2000）** | ❌ 不能 | 需要 Shizuku/ADB 通道 |
@@ -140,6 +154,10 @@ PRoot **做不到**：
 | **执行超时 + 进程组 SIGKILL** | `PtySession` / `ProcessRegistry` | 超时后 `kill(-pid)` 杀整个会话组 |
 | **rootfs 层 sha256 校验** | `OciRootfsInstaller` | 防层被篡改；**不防恶意镜像**（恶意镜像里可以有恶意二进制） |
 | **内置 rootfs 只用可信源** | `BundledRootfs` | 打包进 APK 的 rootfs 必须来自可信构建 |
+| **宿主系统目录不 bind**（2026-10-30） | `ProotEngine.HOST_DEVICE_BINDINGS` | 只保留 `/dev`、`/dev/pts`；`/proc /sys /system /data/app ...` 不再暴露给 guest；纯函数 `hostDeviceBindsFor(exists)` 有单测锁住 |
+| **环境变量白名单**（2026-10-30） | `ProotEngine.HOST_ALLOWED_ENV_KEYS` | PRoot 透传 environ ⇒ 白名单 + `check` 兜底，防止宿主敏感 env 泄漏 |
+| **`--kill-on-exit`**（2026-10-30） | `ProotEngine.buildCommandLine` | 宿主进程退出时清掉 tracee |
+| **`..` / 相对路径拒绝**（既有） | `PathResolver` / bind 校验 | 已由单测 + 真机越权用例锁住（ADR-041） |
 
 **再次强调**：这些缓解的目标是「少出事故」，不是「防住攻击者」。
 表里最后两条尤其容易被误读：sha256 校验只能证明「你拉到的层和你请求的层一致」，

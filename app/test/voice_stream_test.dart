@@ -401,6 +401,60 @@ void main() {
       await runner.dispose();
     });
 
+    test('空文本的静音端点**不发** partial（否则 UI 被 chars=0 final 刷屏）', () async {
+      final runner = build();
+      await runner.start();
+      // 先给一片，避免 1.5s "等不到第一片"回退抢先触发。
+      events.add(chunkEvent(0));
+      await settle();
+      // 真机实测过：没人说话时 VAD 每秒报一次 endpoint，text 为空。
+      for (var i = 0; i < 5; i++) {
+        timeline.advance(const Duration(seconds: 1));
+        decoder.emit('', endpoint: true);
+        await settle();
+      }
+      expect(partials, isEmpty, reason: '空断句不得产生 partial');
+      expect(runner.endpointCount, 5, reason: '端点本身仍计数（诊断用）');
+      // 真有字时才断句。
+      decoder.emit('你好', endpoint: true);
+      await settle();
+      expect(partials.single.isFinal, isTrue);
+      expect(partials.single.text, '你好');
+      await runner.dispose();
+    });
+
+    test('同一文本的静音端点只发一次 final（真机 VAD 每秒重复报）', () async {
+      final runner = build();
+      await runner.start();
+      events.add(chunkEvent(0));
+      await settle();
+      decoder.emit('你好');
+      await settle();
+      // 有字 ⇒ 断句一次。
+      decoder.emit('你好', endpoint: true);
+      await settle();
+      expect(partials.where((p) => p.isFinal), hasLength(1));
+      // 接着每秒重复同一文本的端点 ⇒ 不得再发 final。
+      for (var i = 0; i < 4; i++) {
+        timeline.advance(const Duration(seconds: 1));
+        decoder.emit('你好', endpoint: true);
+        await settle();
+      }
+      expect(
+        partials.where((p) => p.isFinal),
+        hasLength(1),
+        reason: '文本没变时不得重复发 final（真机上会每秒一条）',
+      );
+      expect(runner.endpointCount, 5);
+      // 真有新文本才再定稿。
+      timeline.advance(const Duration(milliseconds: 300));
+      decoder.emit('你好世界', endpoint: true);
+      await settle();
+      expect(partials.where((p) => p.isFinal), hasLength(2));
+      expect(partials.last.text, '你好世界');
+      await runner.dispose();
+    });
+
     test('end 事件 ⇒ 解码收尾后发最终结果并关流', () async {
       final runner = build();
       decoder.closeOnDispose = false; // 收尾后还要喂一条"迟到结果"验证被忽略
@@ -657,14 +711,22 @@ void main() {
       modelRoot = await Directory.systemTemp.createTemp('voice_stream_');
       await seedSenseVoice(modelRoot.path);
       await seedStreaming(modelRoot.path);
+      // B1（2026-10-30）：内置 14M 模型现在会真的存在，本文件只想测"回退/
+      // 降级"，所以把内置资产加载器替换成**必然失败**的假加载器（不会读
+      // 24MB 真资产）：`ensureStreamingReady()` 立即失败 ⇒ 走整段回退。
+      VoiceModelController.bundledAssetLoaderForTest =
+          (String assetKey) async => throw StateError('测试不读真内置资产');
     });
 
     tearDownAll(() async {
       messenger.setMockMethodCallHandler(commandChannel, null);
       await VoiceInputController.shared().cancelIfRecording();
+      VoiceModelController.bundledAssetLoaderForTest = null;
       voice.loaded = false;
       voice.installed = false;
       voice.engineReady = false;
+      voice.bundledStreamingReady = false;
+      voice.bundledStreamingError = null;
       voice.streamingInstalled = false;
       voice.profile = null;
       if (modelRoot.existsSync()) await modelRoot.delete(recursive: true);
@@ -680,7 +742,20 @@ void main() {
       if (!marker.existsSync()) {
         marker.writeAsStringSync(kStreamingVoiceMarker);
       }
+      // 内置模型默认"不可解压"（测试不读 24MB 真资产）；个别用例自行覆盖。
+      VoiceModelController.bundledModelFilesForTest = null;
+      VoiceModelController.bundledAssetDirForTest = null;
+      VoiceModelController.bundledAssetLoaderForTest =
+          (String assetKey) async => throw StateError('测试不读真内置资产');
+      VoiceInputController.decoderFactoryForTest = null;
+      // 上一个用例若解压过内置模型，清掉（模拟"内置还没解压"的冷开）。
+      final bundledDir = Directory(
+        '${modelRoot.path}/voice_models/$kBundledStreamingDirName',
+      );
+      if (bundledDir.existsSync()) bundledDir.deleteSync(recursive: true);
       voice.loaded = true;
+      voice.bundledStreamingReady = false;
+      voice.bundledStreamingError = null;
       voice.profile = JevDeviceProfile(
         model: 'test',
         totalRamMb: 8192,
@@ -688,6 +763,44 @@ void main() {
         appFilesDir: modelRoot.path,
       );
       voice.refreshInstalled();
+    });
+
+    test('老双语模型在、内置未解压 ⇒ 点麦克风仍先解压内置模型（默认内置）', () async {
+      // 老模型完整已在 setUp 里 seed（streamingInstalled == true）。
+      expect(voice.streamingInstalled, isTrue);
+      expect(voice.bundledStreamingReady, isFalse);
+      // 注入"小号内置资产 + 必失败的解码器"：这条只验"解压是否被尝试/完成"，
+      // 绝不在 flutter_tester 里起真 isolate / 真模型。
+      VoiceModelController.bundledModelFilesForTest = const <VoiceModelFile>[
+        VoiceModelFile('encoder.onnx', 4),
+        VoiceModelFile('decoder.onnx', 2),
+      ];
+      VoiceModelController.bundledAssetDirForTest = 'fake/assets';
+      VoiceModelController.bundledAssetLoaderForTest =
+          (String assetKey) async =>
+              Uint8List(assetKey.endsWith('encoder.onnx') ? 4 : 2);
+      VoiceInputController.decoderFactoryForTest = (voice) =>
+          FakeDecoder()..startError = StateError('测试注入：解码器加载失败');
+
+      final target = TextEditingController();
+      addTearDown(target.dispose);
+      await VoiceInputController.shared().onMicTap(
+        target: target,
+        toast: toasts.add,
+      );
+      expect(
+        voice.bundledStreamingReady,
+        isTrue,
+        reason: '即使老双语模型在，也要把内置 14M 备好（B1：默认用内置）',
+      );
+      // 解码器加载失败 ⇒ 不崩，如实回退（本用例的 decoder 是注入的必失败假件）。
+      expect(VoiceInputController.shared().streamingActive, isFalse);
+      expect(
+        toasts.any((t) => t.contains('流式不可用，用整段识别')),
+        isTrue,
+        reason: '应如实提示回退；实际 toasts=$toasts',
+      );
+      await VoiceInputController.shared().cancelIfRecording();
     });
 
     test('无麦克风权限 ⇒ 拒绝开录并提示（不启动流式/不调 start）', () async {
@@ -699,6 +812,11 @@ void main() {
         toast: toasts.add,
       );
       expect(calls.contains('startVoiceRecord'), isFalse);
+      expect(
+        toasts,
+        isNotEmpty,
+        reason: '至少要有提示；实际 toasts=$toasts calls=$calls',
+      );
       expect(calls.contains('requestPermission'), isTrue);
       expect(toasts.single, contains('麦克风权限'));
       expect(VoiceInputController.shared().streamingActive, isFalse);
@@ -709,6 +827,7 @@ void main() {
       File(streamingMarkerPath()).deleteSync();
       voice.refreshInstalled();
       expect(voice.streamingInstalled, isFalse);
+      expect(voice.bundledStreamingError, isNull, reason: '还没尝试解压内置模型');
       final target = TextEditingController();
       addTearDown(target.dispose);
       await VoiceInputController.shared().onMicTap(
@@ -718,6 +837,13 @@ void main() {
       expect(VoiceInputController.shared().recording, isTrue);
       expect(VoiceInputController.shared().streamingActive, isFalse);
       expect(toasts.single, contains('流式不可用，用整段识别'));
+      // ★ B1：不可用时**必须真的去试过内置模型解压**（失败可重试），
+      // 而不是直接放弃流式（老实现的"下载前置"就是这条的根因）。
+      expect(
+        voice.bundledStreamingError,
+        isNotNull,
+        reason: '点麦克风时应先尝试 ensureStreamingReady()',
+      );
       await VoiceInputController.shared().cancelIfRecording();
     });
 

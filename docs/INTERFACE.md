@@ -104,6 +104,10 @@
 - API：`AgentBridge.devicePermissions() -> Map<String, String>`（每项 `granted/denied/unknown`）
 - 权限项（新增先登记）：`shizuku`（提权通道：binder 活且已授权；未启动=unknown）/ `files`（文件夹访问：有 ≥1 个 SAF 授权文件夹/工作区 = granted；2026-10-27 起不再恒 granted）/ `allFiles`（Android 11+ 所有文件访问——**我们按设计不申请，denied 是正常态，前端别渲染红色警告**）/ `notifications` / `accessibility` / `overlay` / `media`（图片与视频，2026-10-27 新增）/ `camera`（相机，拍摄接口 `takePhoto` 预留）/ `calendar`（日历读写，后续自动化预留）/ `automation`（屏幕自动化：厂商专属如小米「后台弹出界面」，无平台 API，恒 unknown，接口预留）/ `install`（安装未知应用：状态只读，申请动作在安装 APK 的流程里触发，不在权限页）
 - 状态查询只读；拉起授权走命令通道 `requestPermission{kind}`（2026-10-27）：运行时权限（notifications/media/camera/calendar）直接弹系统授权框，无障碍/悬浮窗跳系统设置页，`appSettings` 去本 App 详情页撤销权限，`installPackages` 跳未知来源授权页（**供安装流程调用**），`automation` 如实回未实现；文件夹访问的申请 = 走既有 `pickWorkspace`（SAF 选择器，选中即授权+登记工作区）
+- **2026-10-30 修订（B2，只增不改）**：
+  - `requestPermission` 返回结构升级为 `{ok, action: "requested" \| "settings_opened" \| "already_granted", granted: bool, error?}`；旧调用方把它当 bool 读时仍按"是否发起/已授权"语义兼容。Dart 新增 `AgentBridge.requestPermissionDetailed(...)` 返回该结构，旧 `requestPermission` 保留。
+  - `notifications` 专项：Android 13+ 未授予先弹系统框；若系统已"不再询问"（`shouldShowRequestPermissionRationale==false` 且此前请求过，宿主用 SharedPreferences 记一次性 requested 标记）⇒ **打开 `Settings.ACTION_APP_NOTIFICATION_SETTINGS`（`EXTRA_APP_PACKAGE`）**，返回 `action:"settings_opened"`；`notificationsOff` 继续用同一系统通知设置页。
+  - `devicePermissions` 的 `notifications` 判定改为 **`NotificationManagerCompat.areNotificationsEnabled()` + `POST_NOTIFICATIONS` 权限双条件**（总开关关闭时不显示 granted）。
 - Kotlin 侧 `MainActivity.handleDevicePermissions`（全本地同步查询，无 binder 阻塞）
 
 ### N9 取消真生效 —— ✅ 已实现
@@ -361,20 +365,23 @@ class VoicePartial {
 - 语义：`text` 只增不减（定稿后新一句从空白或续接由 VAD 决定）；**绝不每 100ms 重发整段录音**（那不是流式，是把旧结果刷新一遍）。
 - 取消：`voice.cancel` 后立即停发 partial；已发出的 partial 保留（UI 决定是否清除）。
 
-#### N13.4 模型与回退
+#### N13.4 模型与回退（2026-10-30 修订：内置小模型，开箱即用）
 
 | 项 | 规则 |
 |---|---|
-| 流式模型 | streaming zipformer **中英双语 int8**（约 100–300MB），放 `VoiceModelController` 管理的独立子目录（`.../streaming/`），完成标记 `.complete`（与 SenseVoice 模型**互不覆盖**） |
-| 下载 | 复用 `VoiceModelController` 的下载 + 字节校验 + `.complete` 流程；**下载失败/未完成 ⇒ 回退整段识别**，并给用户如实提示（"流式不可用，用整段识别"） |
+| **内置流式模型（默认）** | **14M 中文 streaming zipformer int8 随 APK assets 内置**（encoder int8 21,621,684 / decoder int8 1,888,682 / joiner int8 1,795,562 / tokens 48,697，合计 **≈24.2 MiB**；来源 HF `csukuangfj/sherpa-onnx-streaming-zipformer-zh-14M-2023-02-23`）。首次启动/首次点麦克风时**幂等解压**到 `<filesDir>/voice_models/streaming-zipformer-zh-14m/`（逐文件字节校验 + `.complete`），**用户无需下载、无网可用**；模型在 filesDir ⇒ **卸载即删** |
+| 可选高精度模型 | 旧的 ~200MB 中英双语流式模型降级为**可选**（设置页手动下载），**绝不作使用前提**；API 保留 |
+| 回退 | **仅**在内置解压失败 / 模型加载失败 / 旧包无 `heracles/voice` 事件流时回退现有整段识别，并如实提示「流式不可用，用整段识别」 |
 | 加载失败 | 回退整段识别（不阻断语音输入） |
-| 旧包 | 无 `heracles/voice` 事件流 ⇒ 回退 |
-| 识别质量 | 流式结果与离线结果可能不一致（流式模型更小）；**不承诺逐字一致**，以"边说边出草稿、结束后以最终结果为准"为语义 |
+| 识别质量 | 流式结果与离线结果可能不一致（内置模型更小，中文优先）；**不承诺逐字一致**，语义 = "边说边出草稿、结束后以最终结果为准" |
+| 状态 | ⚠️ 实现中；真机（全新安装/断网）未验证 —— 完成前标"未验证" |
 
 #### N13.5 验收（真机，未完成前标"未验证"）
 
 1) 边说边出字（partial 间隔 200–300ms，文本单调增长）；2) 静音 ~800ms 断句出 `isFinal`；3) 取消后不再收 partial；
-4) 60 秒上限仍生效；5) 无权限时降级正确；6) 流式模型未下载/加载失败 ⇒ 回退整段识别且提示如实；7) 模型下载复用 `.complete` 不被破坏。
+4) 60 秒上限仍生效；5) 无权限时降级正确；6) **内置模型解压/加载失败才回退**整段识别且提示如实（正常情况用户无需下载任何模型）；7) `.complete` 幂等不被破坏；8) **全新安装/清除数据 + 断网**下也能流式出字。
+
+> **2026-10-30 真机验收（B1）**：断网首次点麦克风 ⇒ 私有目录幂等解压出 4 文件 + `.complete`（字节与 assets 一致）；`[voice] partial` seq 0→14、chars 0→15、语音期间间隔 **200–300ms**；`isFinal=true` 只在真断句（2 次）与停止收尾（1 次）出现（VAD 静音期重复 final 已修）；停止后文本提交到输入框（截图留档，日志不含正文）。**未验证**：取消（前端无入口，仅单测）、整段 SenseVoice 回退出字（非本轮验收项）、逐字准确度（不承诺）。
 
 ## 5. 流式与渲染约定 —— ✅ 无异议
 
@@ -452,6 +459,8 @@ final result = await done.future;     // result.exitCode / stdout / stderr / dur
 
 > `execute` 会**自动挂上流式通道**，前端不用手工接线；但页面销毁时请 `dispose()`。
 
+> **2026-10-30（B5，只增）**：工作区打通的语义 —— **宿主 agent 的 shell 执行路径**在 App 工作区有物理路径时默认 `workdir=/opt/ws-real`（工作区经 `@userws` 挂载到该路径；见 `device_capabilities` 的 `userws.isMounted ? '/opt/ws-real' : '/workspace'`）；⚠️ `SandboxService.execute` 的**默认参数仍是 `/workspace`**（前端直接调 `execute()` 时未变）。SAF 工作区无物理路径 ⇒ 不 bind、保持 `/workspace`，并在结果/提示里**如实说明"沙箱与用户工作区是两套文件系统"**。`@userws` 注册是**应用层幂等**（先 `listMounts` 命中同名+bindTo 则跳过）；底层 `registerMount` 本身是"注册或覆盖"。通道参数只增（`workdir` 已存在）。
+
 ### 8.3 错误码（可直接据此给用户明确提示，不要笼统说"失败了"）
 
 | 常量 | 值 | 含义 | UI 建议 |
@@ -477,6 +486,8 @@ final result = await done.future;     // result.exitCode / stdout / stderr / dur
 三种 `backend`（`SandboxMountBackend`）：`rootfsRelative`(0) / `hostPrivateDir`(1) / `safTree`(2)。
 一般 UI 不需要区分，只要**如实显示 `readOnly`**。
 
+> **2026-10-30（B5）新增 `@userws`**：App 工作区（`.../files/app-workspace`）的读写挂载，guest 侧绑定到 `/opt/ws-real`（`/opt` 在 `ALLOWED_BIND_TARGETS` 白名单内）。**SAF 工作区没有物理路径 ⇒ 不可 bind**：此时不出现 `@userws`，UI/模型提示里如实说"两套文件系统、用文件工具读写工作区"。guest 只能看到工作区与显式挂载（不得看到 sessions/keys/memory）。
+
 ### 8.5 建议的 UI（最小可用）
 
 1. **沙箱卡片**：`已激活 / 未激活` + `rootfsSummary` 一行 + `激活` 按钮（调 `activate()`）
@@ -501,6 +512,8 @@ final result = await done.future;     // result.exitCode / stdout / stderr / dur
 | SAF 目录（`@pc_shared`） | ⚠️ 代码已实现，**真实授权流程未真机验证** |
 | Shizuku / Root / 无线 ADB 通道 | ⚠️ 代码与单测有，**真机未验证**（Shizuku 未运行 / 设备无 root / 需 `adb pair`） |
 | 沙箱内跑 `aapt2`/`javac`/`gradle` | ✅ 已验证（含签出 APK）；**AGP 完整构建未验证** |
+| 工作区打通（`@userws` → `/opt/ws-real`，默认 workdir） | ✅ 2026-10-30 真机验证：文件工具写工作区 → 沙箱 `pwd=/opt/ws-real`、`ls/cat/wc -l` 正确、写回后文件工具可见；SAF 工作区 `workdir=/workspace` + 如实提示"两套 FS" |
+| 边界加固（越权读全失败 / `--kill-on-exit` / 最小 bind / seccomp 评估） | ✅ 2026-10-30 真机验证：读 `/data/data/<pkg>/files`、`shared_prefs`、`sessions`、`memory`、`/proc/self/root`、`..` 穿越**全部 No such file**；正常 `echo/ls/date/tar` 未受影响；单测 83/83。**seccomp 不可行**（PRoot 依赖 ptrace），ADR-041。⚠️ **不得**对外宣称"内核级强隔离"——真实边界 = Android 应用沙箱 + PRoot 文件系统视图；T2 构建套件加固后**未复验** |
 
 ### 8.8 验收方式（前端自测）
 

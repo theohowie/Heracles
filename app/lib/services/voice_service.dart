@@ -5,6 +5,7 @@ import 'dart:typed_data';
 
 import 'package:dio/dio.dart';
 import 'package:flutter/foundation.dart';
+import 'package:flutter/services.dart' show rootBundle;
 
 import '../models/jev.dart';
 import 'agent_bridge.dart';
@@ -84,6 +85,119 @@ const kStreamingVoiceModelFiles = <VoiceModelFile>[
 
 int get kStreamingVoiceModelTotalBytes =>
     kStreamingVoiceModelFiles.fold(0, (sum, f) => sum + f.bytes);
+
+// ------------------------------------------ 内置流式模型（B1，2026-10-30）
+//
+// ★ **流式语音开箱即用的默认模型 = 内置的 14M 中文 streaming zipformer**
+// （HF 仓库 `csukuangfj/sherpa-onnx-streaming-zipformer-zh-14M-2023-02-23`，
+// Apache-2.0；体积 ≈24.2MiB，打进 APK assets，**无需下载**）。
+//
+// 为什么换成内置小模型（2026-10-30 用户拍板 B1）：
+// 上一版默认用 200MB 中英双语模型 + `startStreamingDownload()`，但设置页
+// 从来没有流式模型的下载入口 ⇒ `streamingInstalled` 永远是 false ⇒ 语音
+// 永远回退整段识别，"边说边出字"形同不存在。内置 14M 中文模型后，全新安装
+// **第一次点麦克风**即自动解压可用（断网也可用；音频仍绝不上云）。
+//
+// 旧的 200MB 中英双语模型**降级为可选高精度模型**：下载 API 保留、绝不作为
+// 使用前提（默认用内置；老用户已下载过的仍可被选中，见
+// [VoiceModelController.activeStreamingModel]）。
+//
+// 卸载即删：模型解压到 `<appFilesDir>/voice_models/...`（App 私有目录），
+// 卸载 App 时随数据一起删除，不会在用户存储里留垃圾。
+//
+// 资产校验：下面四个字节数是 2026-10-30 从上面 HF 仓库**实测下载**后写死的；
+// 运行期按字节数逐个校验（不一致就重试解压，不崩）。下载时 sha256（留档）：
+// · encoder-epoch-99-avg-1.int8.onnx 21,621,684  1C556EA5…126487B1
+// · decoder-epoch-99-avg-1.int8.onnx  1,888,682  22F123BB…8C468BBF
+// · joiner-epoch-99-avg-1.int8.onnx   1,795,562  A7CF9D82…75C36169
+// · tokens.txt                           48,697  8B294DB9…8FF966AC
+
+/// 内置模型的 asset 目录（pubspec 声明的这一整个目录）。
+const kBundledStreamingAssetDir =
+    'assets/voice/streaming-zipformer-zh-14m';
+
+/// 内置模型解压到的子目录名（与 SenseVoice / 旧双语模型都分开）。
+const kBundledStreamingDirName = 'streaming-zipformer-zh-14m';
+
+/// 内置模型的 `.complete` 标识。
+const kBundledStreamingMarker = 'streaming-zipformer-zh-14m-int8';
+
+const kBundledStreamingEncoderName = 'encoder-epoch-99-avg-1.int8.onnx';
+const kBundledStreamingDecoderName = 'decoder-epoch-99-avg-1.int8.onnx';
+const kBundledStreamingJoinerName = 'joiner-epoch-99-avg-1.int8.onnx';
+const kBundledStreamingTokensName = 'tokens.txt';
+
+const kBundledStreamingModelFiles = <VoiceModelFile>[
+  VoiceModelFile(kBundledStreamingEncoderName, 21621684),
+  VoiceModelFile(kBundledStreamingDecoderName, 1888682),
+  VoiceModelFile(kBundledStreamingJoinerName, 1795562),
+  VoiceModelFile(kBundledStreamingTokensName, 48697),
+];
+
+int get kBundledStreamingModelTotalBytes =>
+    kBundledStreamingModelFiles.fold(0, (sum, f) => sum + f.bytes);
+
+/// 目录里是否「`.complete` 在 + 每个文件字节数精确对上」。
+bool voiceModelDirComplete(String? dir, List<VoiceModelFile> files) {
+  if (dir == null || !File('$dir/.complete').existsSync()) return false;
+  for (final f in files) {
+    final file = File('$dir/${f.name}');
+    if (!file.existsSync() || file.lengthSync() != f.bytes) return false;
+  }
+  return true;
+}
+
+/// 把内置资产模型**幂等**解压（拷贝）到 [dir]。
+///
+/// · 目录已完整 ⇒ 直接返回，**不读资产**（二次调用零 IO）；
+/// · 逐文件先写 `<name>.tmp` 再 rename ⇒ 半成品不会被当成完整；
+/// · 已存在且字节正确的文件**跳过**（失败重试只补缺的）；
+/// · 任一资产字节数不符/读不到 ⇒ 抛 [StateError]（调用方 catch 后置错误、
+///   允许重试），并清掉本次的 `.tmp`，不留半个"完成标记"。
+///
+/// 纯文件 + 加载器逻辑（不碰 Flutter 状态），便于单测注入小文件。
+Future<void> extractBundledModel({
+  required String dir,
+  required List<VoiceModelFile> files,
+  required String completeMarker,
+  required String assetDir,
+  required Future<Uint8List> Function(String assetKey) loadAsset,
+}) async {
+  if (voiceModelDirComplete(dir, files)) return;
+  final directory = Directory(dir);
+  if (!directory.existsSync()) await directory.create(recursive: true);
+  // 标记在但字节不对（半成品/旧版本残留）⇒ 先删标记，避免被误判完整。
+  final marker = File('$dir/.complete');
+  if (marker.existsSync()) await marker.delete();
+  final tmpFiles = <File>[];
+  try {
+    for (final f in files) {
+      final existing = File('$dir/${f.name}');
+      if (existing.existsSync() && existing.lengthSync() == f.bytes) continue;
+      final bytes = await loadAsset('$assetDir/${f.name}');
+      if (bytes.length != f.bytes) {
+        throw StateError(
+          '${f.name} 内置资产字节数不对（应为 ${f.bytes}，实际 ${bytes.length}）',
+        );
+      }
+      final tmp = File('$dir/${f.name}.tmp');
+      tmpFiles.add(tmp);
+      await tmp.writeAsBytes(bytes, flush: true);
+      await tmp.rename('$dir/${f.name}');
+    }
+    await marker.writeAsString(
+      '$completeMarker\n${DateTime.now().toIso8601String()}',
+    );
+  } catch (_) {
+    for (final tmp in tmpFiles) {
+      try {
+        if (tmp.existsSync()) await tmp.delete();
+      } catch (_) {}
+    }
+    rethrow;
+  }
+}
+
 
 
 // ------------------------------------------------------------ 引擎准备
@@ -222,6 +336,27 @@ String tokensTxtFromJson(String jsonText) {
 
 enum VoiceModelPhase { idle, downloading, done, error }
 
+/// 一套**可用的流式模型**路径（[bundled] = 内置 14M 中文模型；
+/// false = 用户手动下载的可选 200MB 中英双语模型）。
+class StreamingModelPaths {
+  const StreamingModelPaths({
+    required this.encoder,
+    required this.decoder,
+    required this.joiner,
+    required this.tokens,
+    required this.bundled,
+  });
+
+  final String encoder;
+  final String decoder;
+  final String joiner;
+  final String tokens;
+  final bool bundled;
+
+  /// 人话标签（诊断/日志用，不打印识别正文）。
+  String get label => bundled ? '内置 14M 中文流式模型' : '可选下载的中英双语流式模型';
+}
+
 class VoiceDownloadState {
   const VoiceDownloadState({
     this.phase = VoiceModelPhase.idle,
@@ -257,8 +392,25 @@ class VoiceModelController extends ChangeNotifier {
   String? prepareError;
   VoiceDownloadState download = const VoiceDownloadState();
 
-  /// **流式模型**（§N13.4）是否已下载完整（`.complete` + 逐文件字节）。
+  /// **流式模型**（§N13.4）是否可用（内置 14M 已解压 **或** 可选下载已完整）。
   bool streamingInstalled = false;
+
+  /// **内置 14M 中文流式模型**是否已解压到 filesDir（首次使用自动解压）。
+  bool bundledStreamingReady = false;
+
+  /// 内置模型解压失败的人话原因（null = 没失败过；失败可重试）。
+  String? bundledStreamingError;
+
+  /// 并发保护：同一时刻只解压一次；完成后置回 null（失败允许重试）。
+  Future<bool>? _ensureFuture;
+
+  /// 测试注入（生产 = `rootBundle` + 常量）：资产加载器 / 文件清单 / 资产目录。
+  @visibleForTesting
+  static Future<Uint8List> Function(String assetKey)? bundledAssetLoaderForTest;
+  @visibleForTesting
+  static List<VoiceModelFile>? bundledModelFilesForTest;
+  @visibleForTesting
+  static String? bundledAssetDirForTest;
 
   /// 流式模型下载状态（与整段模型的 [download] 互不干扰）。
   VoiceDownloadState streamingDownload = const VoiceDownloadState();
@@ -304,6 +456,115 @@ class VoiceModelController extends ChangeNotifier {
   String? get streamingJoinerPath => _streamingFile(kStreamingJoinerName);
   String? get streamingTokensPath => _streamingFile(kStreamingTokensName);
 
+  // ------------------------------------------------ 内置 14M 中文流式模型
+
+  List<VoiceModelFile> get _bundledFiles =>
+      bundledModelFilesForTest ?? kBundledStreamingModelFiles;
+
+  /// 内置模型解压目录（与 SenseVoice / 旧双语模型都**平级、互不覆盖**）。
+  String? get bundledStreamingModelDir {
+    final root = profile?.appFilesDir ?? '';
+    if (root.isEmpty) return null;
+    return '$root/voice_models/$kBundledStreamingDirName';
+  }
+
+  String? _bundledFile(String name) {
+    final dir = bundledStreamingModelDir;
+    return dir == null ? null : '$dir/$name';
+  }
+
+  String? get bundledStreamingEncoderPath =>
+      _bundledFile(kBundledStreamingEncoderName);
+  String? get bundledStreamingDecoderPath =>
+      _bundledFile(kBundledStreamingDecoderName);
+  String? get bundledStreamingJoinerPath =>
+      _bundledFile(kBundledStreamingJoinerName);
+  String? get bundledStreamingTokensPath =>
+      _bundledFile(kBundledStreamingTokensName);
+
+  /// 当前**实际可用**的流式模型：**内置 14M 优先**，其次可选下载的
+  /// 200MB 中英双语模型（老用户手动下过才可能存在）。null = 都不可用。
+  StreamingModelPaths? get activeStreamingModel {
+    if (bundledStreamingReady) {
+      final encoder = bundledStreamingEncoderPath;
+      final decoder = bundledStreamingDecoderPath;
+      final joiner = bundledStreamingJoinerPath;
+      final tokens = bundledStreamingTokensPath;
+      if (encoder != null &&
+          decoder != null &&
+          joiner != null &&
+          tokens != null) {
+        return StreamingModelPaths(
+          encoder: encoder,
+          decoder: decoder,
+          joiner: joiner,
+          tokens: tokens,
+          bundled: true,
+        );
+      }
+    }
+    if (voiceModelDirComplete(streamingModelDir, kStreamingVoiceModelFiles)) {
+      return StreamingModelPaths(
+        encoder: streamingEncoderPath!,
+        decoder: streamingDecoderPath!,
+        joiner: streamingJoinerPath!,
+        tokens: streamingTokensPath!,
+        bundled: false,
+      );
+    }
+    return null;
+  }
+
+  /// **首次使用前确保内置流式模型已解压**（幂等、可重试、不抛）。
+  ///
+  /// 并发调用**只解压一次**（共享同一个 Future）；失败返回 false 并记录
+  /// [bundledStreamingError]，下一次调用会重试。
+  Future<bool> ensureStreamingReady() {
+    if (bundledStreamingReady) return Future.value(true);
+    final inflight = _ensureFuture;
+    if (inflight != null) return inflight;
+    final future = _extractBundledStreaming();
+    _ensureFuture = future.whenComplete(() {
+      _ensureFuture = null;
+    });
+    return _ensureFuture!;
+  }
+
+  Future<bool> _extractBundledStreaming() async {
+    try {
+      profile ??= await AgentBridge().deviceProfile();
+      final dir = bundledStreamingModelDir;
+      if (dir == null) {
+        bundledStreamingReady = false;
+        bundledStreamingError = '拿不到本机存储目录（宿主未返回 deviceProfile）';
+        notifyListeners();
+        return false;
+      }
+      final files = _bundledFiles;
+      await extractBundledModel(
+        dir: dir,
+        files: files,
+        completeMarker: kBundledStreamingMarker,
+        assetDir: bundledAssetDirForTest ?? kBundledStreamingAssetDir,
+        loadAsset: bundledAssetLoaderForTest ?? _loadBundledAsset,
+      );
+      bundledStreamingReady = voiceModelDirComplete(dir, files);
+      bundledStreamingError =
+          bundledStreamingReady ? null : '内置流式模型解压后校验不通过';
+    } catch (e) {
+      bundledStreamingReady = false;
+      bundledStreamingError = '内置流式模型解压失败：$e';
+    }
+    refreshInstalled();
+    notifyListeners();
+    return bundledStreamingReady;
+  }
+
+  static Future<Uint8List> _loadBundledAsset(String assetKey) async {
+    final data = await rootBundle.load(assetKey);
+    return data.buffer.asUint8List(data.offsetInBytes, data.lengthInBytes);
+  }
+
   Future<void> load() async {
     profile ??= await AgentBridge().deviceProfile();
     refreshInstalled();
@@ -322,14 +583,22 @@ class VoiceModelController extends ChangeNotifier {
   }
 
   /// 已安装 = 完成标记在，且每个文件都在、字节数精确对上。
+  ///
+  /// 流式侧分两套（B1，2026-10-30）：**内置 14M 中文模型**已解压，或
+  /// **可选下载**的 200MB 中英双语模型已完整 —— 任一可用即
+  /// [streamingInstalled] = true（默认用内置，见 [activeStreamingModel]）。
   void refreshInstalled() {
     final dir = modelDir;
-    installed = _dirComplete(dir, kVoiceModelFiles);
-    streamingInstalled = _dirComplete(streamingModelDir, kStreamingVoiceModelFiles);
+    installed = voiceModelDirComplete(dir, kVoiceModelFiles);
+    bundledStreamingReady =
+        voiceModelDirComplete(bundledStreamingModelDir, _bundledFiles);
+    final downloadedStreaming =
+        voiceModelDirComplete(streamingModelDir, kStreamingVoiceModelFiles);
+    streamingInstalled = bundledStreamingReady || downloadedStreaming;
     if (installed && download.phase != VoiceModelPhase.downloading) {
       download = const VoiceDownloadState(phase: VoiceModelPhase.done);
     }
-    if (streamingInstalled &&
+    if (downloadedStreaming &&
         streamingDownload.phase != VoiceModelPhase.downloading) {
       streamingDownload = const VoiceDownloadState(phase: VoiceModelPhase.done);
     }
@@ -344,16 +613,6 @@ class VoiceModelController extends ChangeNotifier {
           tokens.existsSync() &&
           patched.lengthSync() > raw.lengthSync();
     }
-  }
-
-  /// 目录里是否「`.complete` 在 + 每个文件字节数精确对上」。
-  bool _dirComplete(String? dir, List<VoiceModelFile> files) {
-    if (dir == null || !File('$dir/.complete').existsSync()) return false;
-    for (final f in files) {
-      final file = File('$dir/${f.name}');
-      if (!file.existsSync() || file.lengthSync() != f.bytes) return false;
-    }
-    return true;
   }
 
   /// **引擎准备**：tokens.json → tokens.txt；model_quant.onnx

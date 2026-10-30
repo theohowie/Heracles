@@ -6,6 +6,7 @@ import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.PendingIntent
+import android.content.Context
 import android.content.Intent
 import android.net.Uri
 import android.content.pm.PackageManager
@@ -125,10 +126,19 @@ class MainActivity : FlutterActivity() {
         // ★ 运行时请求通知权限（API 33+）——
         //   不请求的话「任务完成通知」永远发不出去，且用户不知道能开。
         //   只在没授权时请求一次（系统会记住"已拒绝"；下次不重复骚扰）。
-        if (checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) !=
+        //   ★ 2026-10-30（B2）：请求过的痕迹要落 SharedPreferences ——
+        //   用户拒两次后系统"不再询问"，权限页点通知只能去系统通知设置页。
+        if (Build.VERSION.SDK_INT >= 33 &&
+            checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) !=
             PackageManager.PERMISSION_GRANTED
         ) {
-            requestPermissions(arrayOf(Manifest.permission.POST_NOTIFICATIONS), REQ_POST_NOTIFICATIONS)
+            permissionPrefs().edit()
+                .putBoolean(KEY_REQUESTED_NOTIFICATIONS, true)
+                .apply()
+            requestPermissions(
+                arrayOf(Manifest.permission.POST_NOTIFICATIONS),
+                REQ_POST_NOTIFICATIONS,
+            )
         }
     }
 
@@ -280,6 +290,37 @@ class MainActivity : FlutterActivity() {
         } else {
             mainHandler.post { runCatching { result.success(value) } }
         }
+    }
+
+    // ------------------------------------------- 权限小工具（B2，2026-10-30）
+
+    /** 权限请求痕迹的落盘 ——「请求过没有」是判断还能不能弹系统框的关键。 */
+    private fun permissionPrefs() =
+        getSharedPreferences(PREF_PERMISSIONS, Context.MODE_PRIVATE)
+
+    /**
+     * 通知是否**真的**可用：通知总开关（`areNotificationsEnabled`）**且**
+     * API 33+ 的运行时权限 `POST_NOTIFICATIONS` 都已授予。
+     *
+     * 只查其中一个会骗人（B2 修的就是这个）：
+     * · 总开关关了但权限 granted ⇒ 旧实现显示「已开」，实际发不出通知；
+     * · 权限 denied 但总开关开着 ⇒ 同样发不出。
+     */
+    private fun notificationsAvailable(ctx: Context): Boolean {
+        val runtimeOk = Build.VERSION.SDK_INT < 33 ||
+            ctx.checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) ==
+            PackageManager.PERMISSION_GRANTED
+        return runtimeOk && NotificationManagerCompat.from(ctx).areNotificationsEnabled()
+    }
+
+    /** 打开本 App 的通知设置页（永久拒绝 / 关闭通知 / 低版本都走这里）。 */
+    private fun openNotificationSettings() {
+        startActivity(
+            Intent(Settings.ACTION_APP_NOTIFICATION_SETTINGS).apply {
+                putExtra(Settings.EXTRA_APP_PACKAGE, packageName)
+                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            },
+        )
     }
 
     // ------------------------------------------------------------ 工作区
@@ -509,50 +550,99 @@ class MainActivity : FlutterActivity() {
      * 全部本地同步查询（无 binder 调用），不需要切线程。
      */
     /**
-     * **拉起某项权限的系统授权流程**（权限页弹性开关，2026-10-27）。
+     * **拉起某项权限的系统授权流程**（权限页弹性开关，2026-10-27；
+     * 通知 settings 兜底 = **B2，2026-10-30**）。
      *
-     * · `notifications`：API 33+ 直接弹运行时授权框（POST_NOTIFICATIONS
-     *   已在 Manifest 声明）；低版本无此权限 → 去应用通知设置页；
-     * · `notificationsOff`：关通知只能去应用通知设置页（系统不许
-     *   App 自己撤销运行时权限）；
-     * · `accessibility`：无障碍没有授权弹窗，只能去无障碍设置页；
-     * · `overlay`：悬浮窗去它自己的授权页（带包名直达本 App）；
-     * · `media` / `camera` / `calendar`：运行时权限，直接弹系统授权框
-     *   （2026-10-27 权限页扩容；Manifest 已声明）；
-     * · `appSettings`：本 App 的系统详情页 —— 关已授的运行时权限
-     *   只能让用户去那里撤销；
-     * · `installPackages`：未知来源安装的授权页 —— **预留给安装
-     *   流程**（构建出 APK 点安装时调），权限页本身不拨它；
-     * · `automation`：屏幕自动化是厂商专属开关（小米「后台弹出
-     *   界面」等），无统一申请方式 → 如实回未实现（接口预留）。
+     * 返回**只增**：`{ok, action, granted}`（旧调用点只读 `ok`，语义不变）。
+     * `action ∈ {requested, settings_opened, already_granted}`；
+     * `granted` = 拉起**之前**的真实状态（通知项用双条件，见
+     * [notificationsAvailable]）。
      *
-     * 本方法只负责"拉起"，结果由权限页回到前台时重新查询
-     * `devicePermissions` 得到 —— **不在这里猜用户点了允许还是拒绝**。
+     * · `notifications`（API 33+）：
+     *   ① 已可用（总开关开 && `POST_NOTIFICATIONS` granted）⇒ 不上系统
+     *      界面，回 `already_granted`；
+     *   ② 没请求过、或系统仍允许再问
+     *      （`shouldShowRequestPermissionRationale`）⇒ 落 prefs 请求标记 +
+     *      `requestPermissions`，回 `requested`；
+     *   ③ **永久拒绝**（系统"不再询问"：rationale=false 且请求过）⇒
+     *      打开本 App 通知设置页，回 `settings_opened` —— 否则用户点了
+     *      开关什么都不发生（旧实现缺陷）。
+     * · `notificationsOff`：关通知只能去通知设置页（系统不许 App 自己
+     *   撤销运行时权限）⇒ `settings_opened`；
+     * · `accessibility` / `overlay` / `appSettings` / `installPackages`：
+     *   只有系统设置页 ⇒ `settings_opened`；
+     * · `media` / `camera` / `calendar` / `microphone`：运行时权限 ⇒
+     *   `requestPermissions`，回 `requested`；
+     * · `automation`：厂商专属，无统一申请方式 ⇒ 如实回未实现。
+     *
+     * 本方法只负责"拉起"；用户回到 App 后权限页重新查询
+     * `devicePermissions` 才是权威状态 —— **不在这里猜点了允许还是拒绝**。
      */
     private fun handleRequestPermission(call: MethodCall, result: MethodChannel.Result) {
         val kind = call.argument<String>("kind").orEmpty()
+        val ctx = applicationContext
+        var action = "requested"
         try {
             when (kind) {
                 "notifications" -> {
-                    if (Build.VERSION.SDK_INT >= 33) {
-                        requestPermissions(
-                            arrayOf(Manifest.permission.POST_NOTIFICATIONS), 4021,
-                        )
-                    } else {
-                        startActivity(
-                            Intent(Settings.ACTION_APP_NOTIFICATION_SETTINGS).apply {
-                                putExtra(Settings.EXTRA_APP_PACKAGE, packageName)
-                                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-                            },
+                    if (notificationsAvailable(ctx)) {
+                        return reply(
+                            result,
+                            mapOf(
+                                "ok" to true,
+                                "action" to "already_granted",
+                                "granted" to true,
+                            ),
                         )
                     }
+                    if (Build.VERSION.SDK_INT >= 33) {
+                        val prefs = permissionPrefs()
+                        val requestedBefore =
+                            prefs.getBoolean(KEY_REQUESTED_NOTIFICATIONS, false)
+                        val canAskAgain = shouldShowRequestPermissionRationale(
+                            Manifest.permission.POST_NOTIFICATIONS,
+                        )
+                        if (!requestedBefore || canAskAgain) {
+                            prefs.edit()
+                                .putBoolean(KEY_REQUESTED_NOTIFICATIONS, true)
+                                .apply()
+                            requestPermissions(
+                                arrayOf(Manifest.permission.POST_NOTIFICATIONS),
+                                REQ_POST_NOTIFICATIONS,
+                            )
+                            return reply(
+                                result,
+                                mapOf(
+                                    "ok" to true,
+                                    "action" to "requested",
+                                    "granted" to false,
+                                ),
+                            )
+                        }
+                    }
+                    // API 33+ 永久拒绝，或 API < 33（本就没有运行时权限）：
+                    // 系统不会再弹框 —— 只能去通知设置页手动开。
+                    openNotificationSettings()
+                    return reply(
+                        result,
+                        mapOf(
+                            "ok" to true,
+                            "action" to "settings_opened",
+                            "granted" to false,
+                        ),
+                    )
                 }
-                "notificationsOff" -> startActivity(
-                    Intent(Settings.ACTION_APP_NOTIFICATION_SETTINGS).apply {
-                        putExtra(Settings.EXTRA_APP_PACKAGE, packageName)
-                        addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-                    },
-                )
+                "notificationsOff" -> {
+                    openNotificationSettings()
+                    return reply(
+                        result,
+                        mapOf(
+                            "ok" to true,
+                            "action" to "settings_opened",
+                            "granted" to notificationsAvailable(ctx),
+                        ),
+                    )
+                }
                 "media" -> requestPermissions(
                     if (Build.VERSION.SDK_INT >= 33)
                         arrayOf(
@@ -575,18 +665,24 @@ class MainActivity : FlutterActivity() {
                     ),
                     4024,
                 )
-                "appSettings" -> startActivity(
-                    Intent(
-                        Settings.ACTION_APPLICATION_DETAILS_SETTINGS,
-                        Uri.parse("package:$packageName"),
-                    ).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK),
-                )
-                "installPackages" -> startActivity(
-                    Intent(
-                        Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES,
-                        Uri.parse("package:$packageName"),
-                    ).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK),
-                )
+                "appSettings" -> {
+                    action = "settings_opened"
+                    startActivity(
+                        Intent(
+                            Settings.ACTION_APPLICATION_DETAILS_SETTINGS,
+                            Uri.parse("package:$packageName"),
+                        ).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK),
+                    )
+                }
+                "installPackages" -> {
+                    action = "settings_opened"
+                    startActivity(
+                        Intent(
+                            Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES,
+                            Uri.parse("package:$packageName"),
+                        ).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK),
+                    )
+                }
                 "automation" -> return reply(
                     result,
                     mapOf(
@@ -594,20 +690,26 @@ class MainActivity : FlutterActivity() {
                         "error" to "厂商专属权限，暂无统一申请方式（接口预留）",
                     ),
                 )
-                "accessibility" -> startActivity(
-                    Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS)
-                        .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK),
-                )
-                "overlay" -> startActivity(
-                    Intent(
-                        Settings.ACTION_MANAGE_OVERLAY_PERMISSION,
-                        Uri.parse("package:$packageName"),
-                    ).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK),
-                )
+                "accessibility" -> {
+                    action = "settings_opened"
+                    startActivity(
+                        Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS)
+                            .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK),
+                    )
+                }
+                "overlay" -> {
+                    action = "settings_opened"
+                    startActivity(
+                        Intent(
+                            Settings.ACTION_MANAGE_OVERLAY_PERMISSION,
+                            Uri.parse("package:$packageName"),
+                        ).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK),
+                    )
+                }
                 else -> return reply(
                     result, mapOf("ok" to false, "error" to "未知权限项：$kind"))
             }
-            reply(result, mapOf("ok" to true))
+            reply(result, mapOf("ok" to true, "action" to action))
         } catch (e: Throwable) {
             reply(result, mapOf("ok" to false, "error" to "拉起失败：${e.message}"))
         }
@@ -654,7 +756,10 @@ class MainActivity : FlutterActivity() {
         }.getOrDefault("unknown")
 
         val notifications = runCatching {
-            if (NotificationManagerCompat.from(ctx).areNotificationsEnabled()) "granted" else "denied"
+            // B2（2026-10-30）：总开关 + POST_NOTIFICATIONS 权限**双条件** ——
+            // 只查 areNotificationsEnabled() 会在"权限 denied 但总开关开"时
+            // 谎报 granted（通知其实发不出去），反之亦然。
+            if (notificationsAvailable(ctx)) "granted" else "denied"
         }.getOrDefault("unknown")
 
         val accessibility = runCatching {
@@ -885,5 +990,9 @@ class MainActivity : FlutterActivity() {
 
         /** 运行时通知权限的 requestCode（与权限名一一对应即可） */
         private const val REQ_POST_NOTIFICATIONS = 1001
+
+        /** B2（2026-10-30）：权限请求痕迹落盘 —— 判断"永久拒绝"的依据。 */
+        private const val PREF_PERMISSIONS = "heracles_permissions"
+        private const val KEY_REQUESTED_NOTIFICATIONS = "requested.notifications"
     }
 }
