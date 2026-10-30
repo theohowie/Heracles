@@ -553,6 +553,40 @@ class _ChatScreenState extends State<ChatScreen> {
   /// 中断原因（`_planReachedGoal == false` 时显示给用户）
   String? _planClosedReason;
 
+  // ---- ★ 灵动岛自动消失（2026-10-30 P0：任务完成后不许常驻）----
+  //
+  // 用户实测：7 步任务跑完后，灵动岛会一直挂在屏幕上（收起/展开都在），
+  // 直到下一轮或切会话才变。根因是显示条件只有"有计划"这一条，
+  // 完成/中断事件只改状态、从不清空。
+  //
+  // 现在的行为（与需求逐条对应）：
+  //   · 成功完成 ⇒ 先给完成态看 4 秒，然后淡出 + 清空；
+  //   · 用户 4 秒内点过灵动岛 ⇒ **取消自动隐藏**（保持到下一轮/切会话）；
+  //   · 失败/中断 ⇒ **不隐藏**（用户要知道为什么），10 秒后只自动收起成一行，
+  //     原因保留；
+  //   · 新 run / 新计划 / 计划被空帧收起 ⇒ 计时器作废。
+
+  /// 完成态停留多久后自动淡出（用户定：4 秒）。
+  static const Duration _kPlanAutoHideAfter = Duration(seconds: 4);
+
+  /// 淡出动画时长（AnimatedOpacity 同值；动画走完才真正清空，避免闪跳）。
+  static const Duration _kPlanFadeOut = Duration(milliseconds: 220);
+
+  /// 中断/失败态：多久后自动收起成一行（不清原因）。
+  static const Duration _kPlanAutoCollapseAfter = Duration(seconds: 10);
+
+  /// 完成态自动隐藏计时器（按下发送/新计划时作废）。
+  Timer? _planAutoHideTimer;
+
+  /// 中断态自动收起计时器。
+  Timer? _planAutoCollapseTimer;
+
+  /// 用户点过灵动岛 = 正在查看 ⇒ 取消自动隐藏（保持到下一轮）。
+  bool _planUserInspecting = false;
+
+  /// 正在淡出（opacity → 0）；动画结束才清空计划字段。
+  bool _planFadingOut = false;
+
   /// **排队中的消息**（2026-10-13，按用户参考图改为**列表**）。
   ///
   /// 设置里 `BusySendBehavior.queue`（"排队发送 —— 等当前任务结束再发"）
@@ -1716,27 +1750,15 @@ class _ChatScreenState extends State<ChatScreen> {
     // ★ 计划恢复（M2，2026-10-24）：取**最后一条** plan 行还原顶部清单。
     //   副作用写在转换器里（重载必经之路）；实时路径不受影响
     //   （plan_created 事件照常覆盖这些字段）。
+    //   ★ 2026-10-30 P0：已完成的计划**不恢复**（见 restoredPlanFromRow）。
     for (final m in raw) {
-      if ((m['role'] as String?) != 'plan') continue;
-      final steps = m['steps'];
-      if (steps is! List || steps.isEmpty) continue;
-      final texts = <String>[];
-      var done = 0;
-      var active = -1;
-      for (final s in steps) {
-        if (s is! Map) continue;
-        final t = ((s['text'] as String?) ?? '').trim();
-        if (t.isEmpty) continue;
-        texts.add(t);
-        final st = (s['status'] as String?) ?? 'pending';
-        if (st == 'done') done++;
-        if (st == 'active') active = texts.length - 1;
-      }
-      if (texts.isNotEmpty) {
-        _planSteps = texts;
-        _planDone = done;
-        _planActive = active;
-      }
+      final restored = restoredPlanFromRow(m);
+      if (restored == null) continue;
+      _planSteps = restored.steps;
+      _planDone = restored.done;
+      _planActive = restored.active;
+      _planReachedGoal = restored.reachedGoal;
+      _planClosedReason = restored.closedReason;
     }
     final out = <HMessage>[];
     for (final m in raw) {
@@ -2584,6 +2606,100 @@ class _ChatScreenState extends State<ChatScreen> {
   /// 订阅取消是异步的（`cancel()` 返回 Future），不同 Flutter 版本
   /// 对"取消期间已入队消息"的处理不保证一致；而这里只多一次
   /// 整数比较，代价可忽略。**宁可留一层不会错判的检查。**
+  // ==========================================================================
+  // 计划（灵动岛）自动消失 —— 2026-10-30 P0
+  //
+  // 需求逐条对应：
+  //   ① 成功完成 ⇒ 完成态 4 秒 → 淡出 → 清空；
+  //   ② 4 秒内点岛 ⇒ 取消自动隐藏（保持到下一轮/切会话，本实现选"保持"）；
+  //   ③ 失败/中断 ⇒ 不隐藏，10 秒后仅收起成一行（原因保留）；
+  //   ④ 新 run ⇒ 先清上一轮已完成计划；
+  //   ⑤ 历史会话恢复 ⇒ 已完成计划不渲染（见 _toMessages 的 shouldRestorePlanIsland）；
+  //   ⑥ 后端 plan_updated{steps:[]} ⇒ 立即隐藏（原分支，只是顺手作废计时器）。
+  // ==========================================================================
+
+  /// 作废所有计划计时器（新计划/新 run/用户点击/切上下文都要调）。
+  void _cancelPlanTimers() {
+    _planAutoHideTimer?.cancel();
+    _planAutoHideTimer = null;
+    _planAutoCollapseTimer?.cancel();
+    _planAutoCollapseTimer = null;
+  }
+
+  /// 彻底清空计划状态（调用方负责 setState；内部会顺手作废计时器）。
+  void _resetPlanState() {
+    _cancelPlanTimers();
+    _planSteps = null;
+    _planDone = 0;
+    _planActive = 0;
+    _planCancelled = const {};
+    _planReachedGoal = null;
+    _planClosedReason = null;
+    _planUserInspecting = false;
+    _planFadingOut = false;
+  }
+
+  /// 成功完成 ⇒ 4 秒后淡出并清空（用户点过岛则保持）。
+  void _schedulePlanAutoHide() {
+    _cancelPlanTimers();
+    if (_planSteps == null || _planSteps!.isEmpty) return;
+    if (_planUserInspecting) return;
+    _planAutoHideTimer = Timer(_kPlanAutoHideAfter, () {
+      if (!mounted) return;
+      setState(() => _planFadingOut = true);
+      // 淡出动画走完（AnimatedOpacity 同值）再清空 —— 不要闪跳。
+      // 这一拍也挂在同一个字段上，保证 dispose / 新计划能把它取消掉。
+      _planAutoHideTimer = Timer(_kPlanFadeOut, () {
+        if (!mounted) return;
+        setState(_resetPlanState);
+      });
+    });
+  }
+
+  /// 失败/中断 ⇒ **不隐藏**，10 秒后只收起成一行（原因保留在字段里）。
+  void _schedulePlanAutoCollapse() {
+    _cancelPlanTimers();
+    if (_planSteps == null || _planSteps!.isEmpty) return;
+    if (_planUserInspecting) return;
+    _planAutoCollapseTimer = Timer(_kPlanAutoCollapseAfter, () {
+      if (!mounted || _planSteps == null) return;
+      setState(() => _planCollapsed = true);
+    });
+  }
+
+  /// 运行收尾时对计划做最终处置（kFinished / kFailed 共用）。
+  ///
+  /// 成功 = `reachedGoal == true`，或"步骤全完成且没有中断标记"；
+  /// 其余（含 kFailed）都按中断处理：不隐藏，只允许 10 秒后收起。
+  void _settlePlanOnRunEnd({required bool failed}) {
+    final steps = _planSteps;
+    if (steps == null || steps.isEmpty) return;
+    final allDone = _planDone >= steps.length && _planActive < 0;
+    final success = !failed &&
+        (_planReachedGoal == true || (allDone && _planReachedGoal != false));
+    if (success) {
+      _schedulePlanAutoHide();
+    } else {
+      _schedulePlanAutoCollapse();
+    }
+  }
+
+  /// 新一轮开始前：上一轮**已完成**的计划立即撤掉（避免旧计划盖住新任务）；
+  /// 未完成的计划只作废计时器（新 run 会重新推送计划）。
+  void _clearCompletedPlanOnNewRun() {
+    final steps = _planSteps;
+    if (steps == null || steps.isEmpty) {
+      _cancelPlanTimers();
+      return;
+    }
+    final allDone = _planDone >= steps.length && _planActive < 0;
+    if (_planReachedGoal == true || allDone) {
+      if (mounted) setState(_resetPlanState);
+    } else {
+      _cancelPlanTimers();
+    }
+  }
+
   void _onAgentEvent(AgentEvent e) {
     if (!mounted) return;
     // 事件不属于当前上下文 → 丢弃（见 [_hasLiveOrigin] 的说明）
@@ -2739,7 +2855,12 @@ class _ChatScreenState extends State<ChatScreen> {
       //   所以主路径是下面 `kPlanCreated` 分支；`kPlanAdvanced` 分支
       //   保留只为兼容仍会发它的老后端（不要删）。
       case AgentEvent.kPlanCreated:
+        // ★ 2026-10-30 P0：新计划 = 新的一轮进度 —— 上一轮的自动隐藏/收起
+        //   计时与"用户正在查看"标记全部作废，否则旧计时器会把新计划清掉。
+        _cancelPlanTimers();
         setState(() {
+          _planFadingOut = false;
+          _planUserInspecting = false;
           _planSteps = e.planSteps;
           // ★ 2026-10-23 修「待办不更新」：
           //   后端每次 `write_todos` **重发计划**时是带着真实进度
@@ -2785,6 +2906,12 @@ class _ChatScreenState extends State<ChatScreen> {
             _planClosedReason = e.planClosedReason;
           }
         });
+        // ★ 2026-10-30 P0：完成 ⇒ 4 秒后淡出清空；中断 ⇒ 不隐藏（10 秒后仅收起）
+        if (e.reachedGoal == true) {
+          _schedulePlanAutoHide();
+        } else if (e.reachedGoal == false) {
+          _schedulePlanAutoCollapse();
+        }
 
       // ---- ★ 计划完整帧（N4，2026-10-25 后端升级形状）----
       //
@@ -2797,10 +2924,9 @@ class _ChatScreenState extends State<ChatScreen> {
         if (detailed != null) {
           setState(() {
             if (detailed.isEmpty) {
-              _planSteps = null;
-              _planDone = 0;
-              _planActive = -1;
-              _planCancelled = const {};
+              // 契约 N4：空数组 = 无计划 ⇒ 立即隐藏；顺手作废自动隐藏计时器，
+              // 免得旧计时器把下一份计划清掉（2026-10-30 P0）。
+              _resetPlanState();
             } else {
               _planSteps = [for (final s in detailed) s['title'] ?? ''];
               _planDone = detailed
@@ -2930,6 +3056,8 @@ class _ChatScreenState extends State<ChatScreen> {
         // 运行收尾 —— 逐字状态里可能还有没结束的步骤（事件流断了、
         // `step_ended` 丢了）。留一条永远转圈的步骤会让用户以为还活着。
         _settleOrphanSteps(e.type == AgentEvent.kFailed);
+        // ★ 2026-10-30 P0：计划收尾处置 —— 完成则 4 秒后消失，失败则保留原因。
+        _settlePlanOnRunEnd(failed: e.type == AgentEvent.kFailed);
 
       // ---- 变更报告（2026-10-22）----
       //
@@ -3413,12 +3541,9 @@ class _ChatScreenState extends State<ChatScreen> {
     //    包一层判断：已 dispose 时 setState 会抛。
     if (!mounted) return;
     setState(() {
-      _planSteps = null;
-      _planDone = 0;
-      _planActive = 0;
-      _planCancelled = const {};
-      _planReachedGoal = null;
-      _planClosedReason = null;
+      // ★ 2026-10-30 P0：切上下文 = 换会话 —— 计划连同自动隐藏计时器一起清
+      //   （_resetPlanState 内部会作废计时器）。
+      _resetPlanState();
       // ★ 2026-10-23：换上下文 = 换了一份消息列表 —— 「是否跟随底部」与
       //   「有新内容」都属于**旧列表**的状态。不复位的话，新会话一进来
       //   就可能顶着「回到底部」按钮，或者明明在底部却不跟随。
@@ -4252,6 +4377,9 @@ class _ChatScreenState extends State<ChatScreen> {
       await _doCompact();
       return;
     }
+    // ★ 2026-10-30 P0：新一轮开始前撤掉上一轮**已完成**的计划 ——
+    //   否则旧计划的完成态会盖住新任务（灵动岛常驻的另一种表现）。
+    _clearCompletedPlanOnNewRun();
     setState(() {
       // ★ 附件结构化挂在消息上（2026-10-29）：不再把文件名
       //   拍扁成「📎 名字」拼进文本 —— 气泡按附件渲染
@@ -4740,6 +4868,9 @@ class _ChatScreenState extends State<ChatScreen> {
 
   @override
   void dispose() {
+    // ★ 计划自动隐藏/收起计时器（2026-10-30 P0）：不取消会在卸载后回调，
+    //   轻则 setState-after-dispose，重则测试/页面泄漏（见下方 16ms 定时器同理）。
+    _cancelPlanTimers();
     // ★ 离开页面必须停订阅 —— 否则平台侧一直持着 sink（泄漏），
     //   且事件会打到一个已卸载的 State 上。
     _eventSub?.cancel();
@@ -5043,17 +5174,30 @@ class _ChatScreenState extends State<ChatScreen> {
                     left: 0,
                     right: 0,
                     child: Center(
-                      child: DynamicIsland(
-                        steps: _planSteps!,
-                        doneCount: _planDone,
-                        activeIndex: _planActive,
-                        collapsed: _planCollapsed,
-                        onToggle: () => setState(
-                            () => _planCollapsed = !_planCollapsed),
-                        reachedGoal: _planReachedGoal,
-                        closedReason: _planClosedReason,
-                        cancelledIndices: _planCancelled,
-                        onAdjust: _prefillPlanAdjust,
+                      // ★ 2026-10-30 P0：完成态 4 秒后淡出（opacity → 0），
+                      //   动画走完才清字段 —— 直接清会闪跳。
+                      child: AnimatedOpacity(
+                        opacity: _planFadingOut ? 0 : 1,
+                        duration: _kPlanFadeOut,
+                        curve: Curves.easeOut,
+                        child: DynamicIsland(
+                          steps: _planSteps!,
+                          doneCount: _planDone,
+                          activeIndex: _planActive,
+                          collapsed: _planCollapsed,
+                          onToggle: () => setState(() {
+                            _planCollapsed = !_planCollapsed;
+                            // 用户点岛 = 想看计划 ⇒ 取消自动隐藏/收起，
+                            // 保持到下一轮或切会话（本实现选"保持"）。
+                            _planUserInspecting = true;
+                            _planFadingOut = false;
+                            _cancelPlanTimers();
+                          }),
+                          reachedGoal: _planReachedGoal,
+                          closedReason: _planClosedReason,
+                          cancelledIndices: _planCancelled,
+                          onAdjust: _prefillPlanAdjust,
+                        ),
                       ),
                     ),
                   ),
@@ -6056,6 +6200,91 @@ class _QueuedMsg {
 /// [AttachmentKind] 的 name）。宽容解析：坏行跳过、缺 kind
 /// 按扩展名推断、没 path 的不要 —— `.jsonl` 是长期数据，
 /// 一条坏附件不能拖垮整条会话的读回。
+/// 历史计划行解析后的可恢复状态（2026-10-30 P0）。
+class RestoredPlan {
+  const RestoredPlan({
+    required this.steps,
+    required this.done,
+    required this.active,
+    required this.reachedGoal,
+    required this.closedReason,
+  });
+
+  final List<String> steps;
+  final int done;
+  final int active;
+  final bool? reachedGoal;
+  final String? closedReason;
+}
+
+/// 把会话 JSONL 里的 `role:"plan"` 行解析成"能不能恢复灵动岛"。
+///
+/// 生产路径就是它（`_toMessages` 恢复历史时调用）—— 测试直接喂真实行形状：
+/// ```json
+/// {"role":"plan","steps":[{"text":"…","status":"done"}],"reachedGoal":true,"ts":…}
+/// ```
+/// 返回 `null` = 不恢复（空计划 / 已完成 / 全终态）。
+RestoredPlan? restoredPlanFromRow(Map<String, dynamic> row) {
+  if ((row['role'] as String?) != 'plan') return null;
+  final steps = row['steps'];
+  if (steps is! List || steps.isEmpty) return null;
+  final texts = <String>[];
+  var done = 0;
+  var active = -1;
+  var terminal = 0;
+  for (final s in steps) {
+    if (s is! Map) continue;
+    final t = ((s['text'] as String?) ?? '').trim();
+    if (t.isEmpty) continue;
+    texts.add(t);
+    final st = (s['status'] as String?) ?? 'pending';
+    if (st == 'done') {
+      done++;
+      terminal++;
+    } else if (st == 'cancelled' || st == 'skipped') {
+      terminal++;
+    }
+    if (st == 'active') active = texts.length - 1;
+  }
+  final reached = row['reachedGoal'];
+  final reachedGoal = reached is bool ? reached : null;
+  if (!shouldRestorePlanIsland(
+    total: texts.length,
+    terminal: terminal,
+    reachedGoal: reachedGoal,
+  )) {
+    return null;
+  }
+  final reason = (row['closedReason'] as String?)?.trim();
+  return RestoredPlan(
+    steps: texts,
+    done: done,
+    active: active,
+    reachedGoal: reachedGoal,
+    closedReason: (reason == null || reason.isEmpty) ? null : reason,
+  );
+}
+
+/// **历史会话恢复时，计划要不要显示灵动岛**（2026-10-30 P0）。
+///
+/// 用户实测：重开历史会话，已完成的任务计划还挂在灵动岛上 —— 常驻且无意义。
+/// 只有"未完成 / 中断"的计划才恢复显示（用户需要知道它停在哪）。
+///
+/// · `reachedGoal == true` ⇒ 已完成（成功收尾）⇒ 不显示；
+/// · 全部步骤都是终态（done / cancelled / skipped）⇒ 视为已完成 ⇒ 不显示；
+/// · 空计划 / 仍有未完成步骤 ⇒ 空的不显示、未完成的显示。
+///
+/// 纯函数（可在 widget 测试里直接钉回归）。
+bool shouldRestorePlanIsland({
+  required int total,
+  required int terminal,
+  bool? reachedGoal,
+}) {
+  if (total <= 0) return false;
+  if (reachedGoal == true) return false;
+  return terminal < total;
+}
+
 List<HAttachment> attachmentsFromRow(Object? raw, String messageId) {
   if (raw is! List) return const [];
   final out = <HAttachment>[];
