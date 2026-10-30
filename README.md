@@ -461,7 +461,7 @@ flowchart LR
 
 - 直链：[`Heracles-v0.3.2.apk`](https://github.com/theohowie/Heracles/releases/download/v0.3.2/Heracles-v0.3.2.apk) · **48.1 MB**（50,453,248 字节）· `versionCode 6` · **仅 arm64-v8a**
 - 校验：`sha256 = A7C2AD5DB88663CE9BCDC59C0857CA041692D5867DE747C3D3E52B9EC817F6C5`
-- 国内镜像：`git clone https://gitee.com/theohowie/heracles.git`（Gitee 仓库**只保留 `master` 分支**）；APK 发行版上传后会补到 [Gitee Releases](https://gitee.com/theohowie/heracles/releases)，此前请用上面的 GitHub 直链或按 §7 自建
+- 国内镜像：`git clone https://gitee.com/theohowie/heracles.git`（Gitee 仓库**只保留 `master` 分支**）；**APK 已同步到 [Gitee Releases](https://gitee.com/theohowie/heracles/releases)** —— `v0.3.2`（48.1 MB · 仅 arm64，sha256 同上）与 `v0.3.1`（67.5 MB），国内下载更快
 
 要求 **Android 12（API 31）及以上**、**arm64（arm64-v8a）** 手机。
 当前 release 包使用 debug 密钥签名，安装时需要允许「未知来源」；换正式密钥前不能覆盖升级。
