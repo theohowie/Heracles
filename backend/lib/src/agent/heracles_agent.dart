@@ -837,6 +837,30 @@ class HeraclesAgent {
     var totalToolCalls = 0;
     var budgetReached = false;
 
+    /// **最新计划步骤**（B8 P0，2026-10-30）：`PlanChangedEvent` 处缓存。
+    ///
+    /// 终态收尾时据此判断"计划是否真的做完了"（全部 `done`/`cancelled`）。
+    /// 空 = 本轮从来没有计划 ⇒ 终态**不发** `plan_closed`。
+    var lastPlanSteps = const <HeraclesPlanStep>[];
+
+    /// `plan_closed` 是否已经发过（三处收尾共用 **一个** helper ⇒ 只发一次）。
+    ///
+    /// 为什么要有这个闩：成功分支在 `try` 里发、失败分支在 `catch` 里发，
+    /// 而框架"先抛异常再走 catch"的路径可能让收尾被走到多次（降级重跑也会
+    /// 重新进 `try`）。没有闩就会重复播同一个终态，UI 会收到两条 plan_closed。
+    var planClosedEmitted = false;
+
+    /// **统一发计划终态**（B8 P0）：无计划不发，已有过不发。
+    ///
+    /// [reachedGoal] = 计划里每一步都 `done`/`cancelled`；
+    /// [reason] 只在 `false` 时给人话（取消/失败/中断），**不带堆栈/内部 id**。
+    void emitPlanClosed({required bool reachedGoal, String? reason}) {
+      if (lastPlanSteps.isEmpty) return;
+      if (planClosedEmitted) return;
+      planClosedEmitted = true;
+      emit(HeraclesPlanClosed(reachedGoal: reachedGoal, reason: reason));
+    }
+
     /// **本轮模型最后一次给出的正文**（`AfterCallLLMEvent` 捕获）。
     ///
     /// `null` = 本轮模型一次正文都没出（纯工具调用轮 / 异常 / 预算耗尽）。
@@ -905,12 +929,13 @@ class HeraclesAgent {
     });
     controller.on<PlanChangedEvent>((e) {
       final plan = e.plan;
-      emit(HeraclesPlanUpdated(
-        steps: [
-          for (final s in plan.steps)
-            HeraclesPlanStep(s.description, _mapStatus(s.status)),
-        ],
-      ));
+      final steps = [
+        for (final s in plan.steps)
+          HeraclesPlanStep(s.description, _mapStatus(s.status)),
+      ];
+      // B8 P0：缓存最新计划 —— 收尾时据此判定 reachedGoal。
+      lastPlanSteps = steps;
+      emit(HeraclesPlanUpdated(steps: steps));
     });
     controller.on<AfterCallLLMEvent>((e) {
       // ★★ 2026-10-23：**在这里捕获本轮正文**（比"结束时倒扫历史"可靠得多）★★
@@ -1328,6 +1353,18 @@ class HeraclesAgent {
           // 静默
         }
       }
+      // ★ B8 P0（2026-10-30）：计划终态先于 run 终态播报。
+      //   成功 = 计划里每一步都 done/cancelled；有计划的 run 才发（无计划
+      //   由 helper 直接 return）。
+      final allPlanStepsClosed = lastPlanSteps.every(
+        (s) =>
+            s.status == HeraclesPlanStatus.done ||
+            s.status == HeraclesPlanStatus.cancelled,
+      );
+      emitPlanClosed(
+        reachedGoal: allPlanStepsClosed,
+        reason: allPlanStepsClosed ? null : '任务已结束，但计划里还有未完成的步骤',
+      );
       emit(HeraclesFinished(
         finalText: _lastText(agent, turnStartIndex, captured: lastTurnText),
         turns: _state!.totalLoopCount,
@@ -1385,6 +1422,13 @@ class HeraclesAgent {
         );
         continue;
       }
+      // ★ B8 P0：计划终态先于失败终态播报（人话原因，不带堆栈/内部 id）。
+      emitPlanClosed(
+        reachedGoal: false,
+        reason: e.code == AgentExceptionCode.cancelled
+            ? '用户停止'
+            : (budgetReached ? '任务被中断：$reason' : '运行失败：$reason'),
+      );
       emit(HeraclesFailed(reason));
     } catch (e) {
       wallClock.stop();
@@ -1429,6 +1473,11 @@ class HeraclesAgent {
         );
         continue;
       }
+      // ★ B8 P0：通用异常收尾同样先播计划终态（同一个 helper 保证只发一次）。
+      emitPlanClosed(
+        reachedGoal: false,
+        reason: budgetReached ? '任务被中断：$reason' : '运行失败：$reason',
+      );
       emit(HeraclesFailed(reason));
     } finally {
       if (!finished) wallClock.stop();
@@ -2205,6 +2254,37 @@ final class HeraclesToolFinished extends HeraclesEvent {
 final class HeraclesPlanUpdated extends HeraclesEvent {
   const HeraclesPlanUpdated({required this.steps});
   final List<HeraclesPlanStep> steps;
+}
+
+/// **计划已收尾**（B8 P0，2026-10-30）—— 只在**本轮有过计划**时发。
+///
+/// ## 为什么需要独立事件（而不是塞进 finished/failed）
+///
+/// 用户重开会话时，历史里只有一串 `role:"plan"` 行（计划演化），不知道
+/// "这份计划最后是达成还是被打断"。旧实现的结果是：中断的计划在灵动岛/
+/// 计划卡上看起来像"还在进行中"，或者被误画成全绿勾。
+///
+/// ## 口径
+///
+/// · [reachedGoal] = `true`：run 正常结束 **且** 计划里每一步都
+///   `done`/`cancelled`（取消的步骤算"有结论"）；此时 [reason] 为 `null`；
+/// · [reachedGoal] = `false`：失败 / 用户取消 / 超时 / 预算或门禁熔断；
+///   [reason] 是**人话**（"用户停止" / "运行失败：…" / "任务被中断：…"），
+///   **不得**放堆栈或内部 id；
+/// · 本轮从未出现计划 ⇒ **不发**这个事件（宿主据此区分"无计划"与"计划收尾"）。
+///
+/// ## 顺序
+///
+/// 与 run 终态（[HeraclesFinished]/[HeraclesFailed]）**同批、先于它们**发出，
+/// 保证宿主先把计划封口、再发最终回答/失败原因（`local_agent` 有顺序测试）。
+final class HeraclesPlanClosed extends HeraclesEvent {
+  const HeraclesPlanClosed({required this.reachedGoal, this.reason});
+
+  /// `true` = 计划达成；`false` = 中断（失败/取消/超时/熔断）。
+  final bool reachedGoal;
+
+  /// 未达成时的人话原因（达成时为 `null`）。
+  final String? reason;
 }
 
 class HeraclesPlanStep {

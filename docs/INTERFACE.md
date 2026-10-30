@@ -70,6 +70,11 @@
 - ✅ 会话恢复时**先发一帧** `plan_updated` 还原（在用户消息落盘之后、一切运行事件之前发出）；无计划时发 `plan_updated{steps:[]}` 表示收起；
 - ⚠️ 一处追加：`status` 增加第 4 值 **`cancelled`**（模型可把步骤标记为取消 —— §6.2 允许枚举末尾追加；前端未知值按 pending 渲染即可）；
 - 验收：`backend/test/session_history_e2e_test.dart` 3 条（合成消息/多帧取最后/与去重的先后）；杀进程恢复的 UI 验收待真机（灵动岛恢复 = 读同一行）。
+- **2026-10-30 新增（B8，只增不改）**：
+  - **收尾事件 `plan_closed`**（`AgentEvent.kPlanClosed`，字段 `reachedGoal: bool` / `planClosedReason: String?`）：**只在存在计划时发、只发一次**；成功（`finished` 且步骤全部 `done`/`cancelled`）⇒ `reachedGoal=true, reason=null`；失败/中断/取消/超时/门禁熔断 ⇒ `reachedGoal=false`，`reason` 是**人话**（如"用户停止"/"运行失败：<失败原因>"/"任务被中断"），**不得是空串/堆栈/内部 id**；无计划 ⇒ 不发。前端 `kPlanClosed` 分支与 `restoredPlanFromRow` 已兼容，无需改 UI。
+  - **plan 行只增字段** `reachedGoal`/`closedReason`：每次写 plan 行时若已知道收尾信息就带上；**收尾时追加一条最终 plan 行** `{"role":"plan","steps":[…],"reachedGoal":true|false,"closedReason":"…","ts":…}`；旧行缺这两个字段 ⇒ 按 `null`（未知）处理；**不重写旧行、append-only 不变**。
+  - 顺序（实测钉死）：**`plan_closed` 事件先于 `finished`/`failed`**；**最终 plan 行在 assistant 行之前**（与既有 plan 行位置一致，重放时计划块在回答上方）。
+  - 状态：实现中；真机（5 步任务第 2 步停止 → 重开会话看"已中断"+原因）**未验证**。
 
 ### N5 模型与思考等级 —— ✅ 已满足（2026-10-25 补 `reasoningLevelsEffective`）
 

@@ -133,6 +133,11 @@ Future<void> main(List<String> args) async {
         final done = steps.where((s) => s.status == HeraclesPlanStatus.done).length;
         stdout.writeln(_dim('计划 $done/${steps.length}：'
             '${steps.map((s) => s.text).join(" → ")}'));
+      case HeraclesPlanClosed(:final reachedGoal, :final reason):
+        // B8 P0：计划终态（Headless 只打一行人话，不渲染灵动岛）
+        stdout.writeln(_dim(reachedGoal
+            ? '（计划已达成）'
+            : '（计划已中断${reason == null ? "" : "：$reason"}）'));
       case HeraclesContextCompressed():
         stdout.writeln(_dim('（上下文已自动压缩）'));
       case HeraclesBudgetWarning(:final used, :final limit):

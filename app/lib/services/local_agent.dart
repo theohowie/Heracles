@@ -1360,6 +1360,38 @@ class LocalAgentExecutor {
     var cancelled = false;
     var finalText = '';
 
+    // ---- 计划终态（B8 P0，2026-10-30）----
+    //
+    // `HeraclesPlanClosed` 只在**本轮有过计划**时才会来（backend 保证）。
+    // 到达时：①翻译成 `AgentEvent.kPlanClosed` 给 UI；②把终态先存下来，
+    // 收尾时在 assistant 行**之前**追加一条**最终 plan 行**（带 reachedGoal/
+    // closedReason），让"重开会话"也能看出计划是达成还是被打断。
+    //
+    // 单写者：这里只在 `_drive` 的事件循环/收尾区写，`appendMessage` 逐条 await
+    // —— 并发闸语义不变（与既有 plan 行/step 行同一串行链）。
+    List<Map<String, dynamic>> lastPlanSteps = const <Map<String, dynamic>>[];
+    bool? planClosedReachedGoal;
+    String? planClosedReason;
+
+    /// plan 行 JSON 形状（与既有 role:"plan" 行一致；只增两个终态字段）。
+    ///
+    /// 旧行没有 `reachedGoal`/`closedReason` ⇒ 读方按 null（未知）处理，
+    /// 不需要重写历史文件（append-only 纪律）。
+    Map<String, dynamic> planRow({
+      required List<Map<String, dynamic>> steps,
+      bool? reachedGoal,
+      String? closedReason,
+    }) =>
+        <String, dynamic>{
+          'role': 'plan',
+          'steps': steps,
+          'ts': DateTime.now().millisecondsSinceEpoch,
+          // ★ 只增字段：已知终态才写键（旧行/未收尾行没有 = null）。
+          'reachedGoal': ?reachedGoal,
+          if (closedReason != null && closedReason.isNotEmpty)
+            'closedReason': closedReason,
+        };
+
     // ★ 变更聚合（2026-10-22，用户要求对齐参考界面的"已编辑 N 个文件"卡片）
     //
     // 数字来源是**工具结果里的 diff**（`diffStatOf`），不是模型自报 ——
@@ -1525,14 +1557,28 @@ class LocalAgentExecutor {
             // ★ 计划落盘（M2，2026-10-24）：每次变化追加一行 plan ——
             //   回填取最后一行恢复（模型侧），UI 重载也读它（清单恢复）。
             //   append-only：旧计划行保留（历史里能看到计划怎么演化的）。
-            await sessionStore.appendMessage(sid, {
-              'role': 'plan',
-              'steps': [
-                for (final s in steps)
-                  {'text': s.text, 'status': s.status.name},
-              ],
-              'ts': DateTime.now().millisecondsSinceEpoch,
-            });
+            //
+            // ★ B8 P0（2026-10-30）：缓存最新 steps；若终态已经先到（正常不会，
+            //   防御性处理）就把终态字段一起带上。
+            final stepJson = [
+              for (final s in steps)
+                {'text': s.text, 'status': s.status.name},
+            ];
+            lastPlanSteps = stepJson;
+            await sessionStore.appendMessage(
+              sid,
+              planRow(
+                steps: stepJson,
+                reachedGoal: planClosedReachedGoal,
+                closedReason: planClosedReason,
+              ),
+            );
+          case HeraclesPlanClosed(:final reachedGoal, :final reason):
+            // ★ B8 P0：计划终态（只在有计划时收到；先于 finished/failed）。
+            //   ① 给 UI 发 kPlanClosed；② 存下来，收尾时写最终 plan 行。
+            planClosedReachedGoal = reachedGoal;
+            planClosedReason = reason;
+            tr.planClosed(reachedGoal: reachedGoal, reason: reason);
           case HeraclesContextCompressed(
               :final beforeMessages,
               :final afterMessages,
@@ -1616,6 +1662,25 @@ class LocalAgentExecutor {
 
     // 关流：**绝不 await**（消费端可能已走，await 会挂住）
     unawaited(controller.close());
+
+    // ---- 计划最终行（B8 P0，2026-10-30）----
+    //
+    // **位置钉死**（与既有收尾顺序对齐，别挪）：在 try/finally 全部收尾之后、
+    // assistant 行**之前**。历史回放顺序 = `plan 演化行 → … → 最终计划行 →
+    // assistant 回答`，与旧版"plan 行都在 assistant 之前"一致；
+    // 只**追加**一行，绝不重写历史文件（append-only 纪律不变）。
+    //
+    // 只在收到 `plan_closed`（= 本轮确实有计划）时才写 —— 无计划不产生空行。
+    if (planClosedReachedGoal != null && lastPlanSteps.isNotEmpty) {
+      await sessionStore.appendMessage(
+        sid,
+        planRow(
+          steps: lastPlanSteps,
+          reachedGoal: planClosedReachedGoal,
+          closedReason: planClosedReason,
+        ),
+      );
+    }
 
     // ---- 最终结果落盘（助手回答）----
     //
@@ -2123,6 +2188,19 @@ class _Translator {
             'status': steps[i].status.name,
           },
       ],
+    ));
+  }
+
+  /// **计划终态帧**（B8 P0，2026-10-30）—— 与 backend `HeraclesPlanClosed` 一一对应。
+  ///
+  /// `AgentEvent.fromMap` 读的是 map 键 `reachedGoal` / `reason`；本类字段是
+  /// `reachedGoal` / `planClosedReason`（字段名与 fromMap 对齐，见 agent_bridge）。
+  void planClosed({required bool reachedGoal, String? reason}) {
+    _sink(AgentEvent(
+      type: AgentEvent.kPlanClosed,
+      ts: _now,
+      reachedGoal: reachedGoal,
+      planClosedReason: reason,
     ));
   }
 
