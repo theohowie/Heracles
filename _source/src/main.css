@@ -131,9 +131,17 @@ img { max-width: 100%; display: block; }
 /* ---------- 特性卡 ---------- */
 .cards { display: grid; grid-template-columns: repeat(3, 1fr); gap: 16px; }
 .card-wrap { height: 100%; }
-/* 3 列布局下末行只剩 1 张卡时居中（10 张卡 = 3+3+3+1）；窄屏列数变少，不适用 */
+/* 3 列布局下 10 张卡 = 3+3+3+1：末卡不落单 —— 铺满整行作收尾卡（图标居左、文在右）；
+   窄屏列数变少不适用（2 列 5 行 / 1 列均无孤卡） */
 @media (min-width: 1001px) {
-  .card-wrap:last-child:nth-child(3n+1) { grid-column: 2; }
+  .card-wrap:last-child:nth-child(3n+1) { grid-column: 1 / -1; }
+  .card-wrap:last-child:nth-child(3n+1) .card {
+    display: grid; grid-template-columns: auto 1fr; column-gap: 18px;
+    grid-template-areas: "icon title" "icon desc"; align-items: center; padding: 24px 28px;
+  }
+  .card-wrap:last-child:nth-child(3n+1) .card-icon { grid-area: icon; margin-bottom: 0; width: 44px; height: 44px; }
+  .card-wrap:last-child:nth-child(3n+1) .card h3 { grid-area: title; margin: 0 0 6px; }
+  .card-wrap:last-child:nth-child(3n+1) .card p { grid-area: desc; max-width: 900px; }
 }
 .card {
   height: 100%; padding: 24px; border-radius: var(--radius);
