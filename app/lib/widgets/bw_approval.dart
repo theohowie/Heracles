@@ -1589,14 +1589,65 @@ class _BwTextInputSheetState extends State<_BwTextInputSheet> {
 /// 行为与抽离前**完全一致**（选项式多题、单选自动跳题、「其他…」自填、
 /// 跳过回传已答部分、未答如实回传「未回答」）。
 ///
-/// 返回：题目 id → 答案列表；`null` = 弹层被放弃（调用方按"全部未回答"处理）。
-Future<Map<String, List<String>>?> showAskGateSheet(
+/// 提问草稿（2026-10-30 P0）：弹层被**收起**时带走，重新呼出时原样还原。
+///
+/// 为什么需要它：旧实现里 `picked` / `customOn` / `customCtl` 都是弹层局部状态，
+/// 一关就销毁 —— 用户选了半题、在「其他…」里打了字，顺手收起再打开，
+/// 全没了，只能从头再选一遍。
+class AskDraft {
+  const AskDraft({
+    this.picked = const <String, Set<String>>{},
+    this.customOn = const <String>{},
+    this.customTexts = const <String, String>{},
+    this.page = 0,
+  });
+
+  /// 题目 id → 已选 label 集合
+  final Map<String, Set<String>> picked;
+
+  /// 哪些题开着「其他…」自填
+  final Set<String> customOn;
+
+  /// 「其他…」里用户打的原文（题目 id → 文本）
+  final Map<String, String> customTexts;
+
+  /// 当前页（尽量还原用户看到的位置）
+  final int page;
+}
+
+/// 提问弹层的结果（2026-10-30 P0）。
+///
+/// · [answers] 非 null ⇒ 用户「提交 / 跳过」：调用方 `replyAsk(answers)`；
+/// · [answers] == null ⇒ 用户只是**收起**（返回键 / 下拉关闭）：
+///   调用方**不得 replyAsk**，保留 [draft] 以便从常驻气泡重新呼出。
+class AskSheetResult {
+  const AskSheetResult({required this.answers, required this.draft});
+
+  final Map<String, List<String>>? answers;
+  final AskDraft draft;
+}
+
+/// 收起提问后的轻提示文案（2026-10-30 P0：不再按"未回答"回传，只是收起）。
+const String kAskCollapsedToast = '已暂时收起，可点「回答」继续';
+
+/// 返回：题目 id → 答案列表；`answers == null` = 弹层被**收起**（不提交，带草稿）。
+Future<AskSheetResult?> showAskGateSheet(
   BuildContext context, {
   required List<Map<String, dynamic>> questions,
+  AskDraft? initial,
 }) async {
   final h = Hue.of(context);
-  // ★ 逐题作答的状态：题目 id → 已选 label 集合
-  final picked = <String, Set<String>>{};
+  // ★ 逐题作答的状态：题目 id → 已选 label 集合（可从草稿还原）
+  final picked = <String, Set<String>>{
+    for (final e in (initial?.picked ?? const <String, Set<String>>{}).entries)
+      e.key: <String>{...e.value},
+  };
+  // 还原「其他…」：开着的题目 + 原文
+  final customOn = <String>{...(initial?.customOn ?? const <String>{})};
+  final customCtl = <String, TextEditingController>{
+    for (final id in customOn)
+      id: TextEditingController(text: initial?.customTexts[id] ?? ''),
+  };
 
   // ★ 2026-10-23：每题「其他…」的自填状态（用户原话「或者选其他，然后自己填」）。
   //
@@ -1608,8 +1659,6 @@ Future<Map<String, List<String>>?> showAskGateSheet(
   //   会撞 "A TextEditingController was used after being disposed"；
   //   这里与 `_renameSession` 的既有处理一致（controller 无原生资源，
   //   弹窗 State 卸载后随 GC 回收）。
-  final customOn = <String>{};
-  final customCtl = <String, TextEditingController>{};
 
   /// 合成回传答案（题目 id → 答案列表）：点选的 label + 自填**原文**。
   ///
@@ -1629,8 +1678,21 @@ Future<Map<String, List<String>>?> showAskGateSheet(
     return out;
   }
 
-  var page = 0;
+  var page = initial?.page ?? 0;
   final total = questions.length;
+  if (page < 0 || page >= total) page = 0;
+
+  /// 收起时带走的草稿（选中 / 自填原文 / 当前页）
+  AskDraft snapshot() => AskDraft(
+        picked: {
+          for (final e in picked.entries) e.key: <String>{...e.value},
+        },
+        customOn: {...customOn},
+        customTexts: {
+          for (final id in customOn) id: customCtl[id]?.text ?? '',
+        },
+        page: page,
+      );
 
   // ★ 2026-10-25 晚：居中弹窗改上拉抽屉（用户定：所有弹层统一抽屉式，
   //   高度随问题内容自适应）。语义与弹窗时代一条不变：
@@ -1646,7 +1708,7 @@ Future<Map<String, List<String>>?> showAskGateSheet(
   //     手滑碰一下，模型就以为用户拒答了）。
   //   · `PopScope(canPop: false)` —— 系统返回键先走 [_onAskBackPressed] 的
   //     二次确认，确认后才以 null 关闭并给一句轻提示。
-  final result = await showModalBottomSheet<Map<String, List<String>>>(
+  final result = await showModalBottomSheet<AskSheetResult>(
     context: context,
     backgroundColor: Colors.transparent,
     isScrollControlled: true,
@@ -1656,10 +1718,12 @@ Future<Map<String, List<String>>?> showAskGateSheet(
       canPop: false,
       onPopInvokedWithResult: (didPop, _) {
         if (didPop) return;
-        unawaited(_onAskBackPressed(sheetCtx));
+        unawaited(_onAskBackPressed(sheetCtx, snapshot));
       },
       child: BwSheetShell(
-        onDismissRequest: () => Navigator.of(sheetCtx).pop(),
+        // 下拉关闭 = 收起（不提交，保留草稿给常驻气泡重新呼出）
+        onDismissRequest: () => Navigator.of(sheetCtx)
+            .pop(AskSheetResult(answers: null, draft: snapshot())),
         child: StatefulBuilder(
         builder: (ctx, setDlgState) {
           final q = questions[page];
@@ -1838,8 +1902,9 @@ Future<Map<String, List<String>>?> showAskGateSheet(
                         color: h.surface,
                         borderRadius: BorderRadius.circular(12),
                         // 跳过 = 已答的仍然回传（别浪费用户已做的选择）
-                        onPressed: () =>
-                            Navigator.of(sheetCtx).pop(collect()),
+                        onPressed: () => Navigator.of(sheetCtx)
+                            .pop(AskSheetResult(
+                                answers: collect(), draft: snapshot())),
                         child: Text('跳过',
                             style: TextStyle(fontSize: 14.5, color: h.text)),
                       ),
@@ -1876,8 +1941,9 @@ Future<Map<String, List<String>>?> showAskGateSheet(
                               horizontal: 18, vertical: 10),
                           color: h.text,
                           borderRadius: BorderRadius.circular(12),
-                          onPressed: () =>
-                              Navigator.of(sheetCtx).pop(collect()),
+                          onPressed: () => Navigator.of(sheetCtx)
+                              .pop(AskSheetResult(
+                                  answers: collect(), draft: snapshot())),
                           child: Text('提交',
                               style: TextStyle(
                                   fontSize: 14.5,
@@ -1898,30 +1964,31 @@ Future<Map<String, List<String>>?> showAskGateSheet(
   return result;
 }
 
-/// 提问弹层的**系统返回键**处理（2026-10-29 第 4 条 P1）。
+/// 提问弹层的**系统返回键**处理（2026-10-29 第 4 条 P1 / 2026-10-30 P0）。
 ///
 /// 旧实现：返回键直接把抽屉 pop 掉 ⇒ 调用方拿到 null ⇒ `replyAsk(const {})`
 /// ⇒ 模型被告知"用户没有回答"—— 而用户只是想退回去看一眼。
 ///
-/// 现在：二次确认「放弃回答？」；
-/// · 确认 ⇒ 以 **null** 关闭（= 全部未回答，绝不编答案）+ 轻提示；
+/// 现在：二次确认「暂时收起回答？」；
+/// · 确认 ⇒ **不提交**，以 `answers: null` + 当前草稿关闭，调用方保留气泡；
 /// · 取消 ⇒ 留在原地，已答的题一个都不丢。
-Future<void> _onAskBackPressed(BuildContext sheetCtx) async {
-  final discard = await showBwConfirmSheet(
+Future<void> _onAskBackPressed(
+  BuildContext sheetCtx,
+  AskDraft Function() snapshot,
+) async {
+  final collapse = await showBwConfirmSheet(
     sheetCtx,
-    title: '放弃回答？',
-    message: '关闭后这些题会按「未回答」回传，模型不会拿到任何答案。',
-    confirmLabel: '放弃回答',
+    title: '暂时收起回答？',
+    message: '收起不会提交；问题会保留在输入框上方，可随时点「回答」继续。',
+    confirmLabel: '收起问题',
     cancelLabel: '继续回答',
-    destructive: true,
   );
-  if (!discard || !sheetCtx.mounted) return;
-  showIosToast(sheetCtx, kAskDismissedToast);
-  Navigator.of(sheetCtx).pop();
+  if (!collapse || !sheetCtx.mounted) return;
+  Navigator.of(sheetCtx)
+      .pop(AskSheetResult(answers: null, draft: snapshot()));
 }
 
-/// 提问弹层被"放弃"后的交代（2026-10-29 第 4 条）。
-const String kAskDismissedToast = '已按未回答处理';
+/// 提问弹层被"收起"后的轻提示（2026-10-30 P0）—— 由聊天页在关闭后弹出。
 
 /// 一条可点击的 ask 选项（编号 + 标题 + 说明 + 选中态）。
 ///

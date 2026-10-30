@@ -68,10 +68,9 @@ void main() {
         },
       ];
 
-  /// 打开提问抽屉，返回"调用方最终拿到的答案"读取器。
-  Future<Map<String, List<String>>? Function()> openSheet(
-      WidgetTester tester) async {
-    Map<String, List<String>>? result;
+  /// 打开提问抽屉，返回"调用方最终拿到的结果"读取器。
+  Future<AskSheetResult? Function()> openSheet(WidgetTester tester) async {
+    AskSheetResult? result;
     var returned = false;
     await tester.pumpWidget(wrap(Builder(
       builder: (ctx) => Center(
@@ -113,7 +112,7 @@ void main() {
     expect(tester.takeException(), isNull);
   });
 
-  testWidgets('★★★ 系统返回键 ⇒ 二次确认「放弃回答？」，弹层不直接关',
+  testWidgets('★★★ 系统返回键 ⇒ 二次确认「暂时收起回答？」，弹层不直接关',
       (tester) async {
     tester.view.physicalSize = const Size(393 * 3, 851 * 3);
     tester.view.devicePixelRatio = 3;
@@ -124,35 +123,38 @@ void main() {
     await settle(tester);
 
     expect(find.text('模型需要你的回答'), findsOneWidget,
-        reason: '返回键不许把提问弹层直接关掉（关掉 = 全部未回答）');
-    expect(find.text('放弃回答？'), findsOneWidget,
-        reason: '必须让用户明确知道"关掉 = 这些题按未回答处理"');
+        reason: '返回键不许把提问弹层直接关掉');
+    expect(find.text('暂时收起回答？'), findsOneWidget,
+        reason: '必须让用户知道收起不会提交、问题会保留');
     expect(tester.takeException(), isNull);
   });
 
-  testWidgets('★★ 确认放弃 ⇒ 回传 null + 轻提示「已按未回答处理」', (tester) async {
+  testWidgets('★★ 确认收起 ⇒ 不提交（answers=null）+ 草稿带着已选项', (tester) async {
     tester.view.physicalSize = const Size(393 * 3, 851 * 3);
     tester.view.devicePixelRatio = 3;
     addTearDown(tester.view.reset);
 
     final resultOf = await openSheet(tester);
+    // 选一个方案再收起 —— 草稿必须记住它
+    await tester.tap(find.text('方案 B'));
+    await settle(tester);
     await tester.binding.handlePopRoute();
     await settle(tester);
 
-    await tester.tap(find.text('放弃回答'));
+    await tester.tap(find.text('收起问题'));
     await settle(tester);
 
-    expect(find.text('模型需要你的回答'), findsNothing, reason: '确认放弃后弹层关闭');
-    expect(resultOf(), isNull,
-        reason: 'null = 调用方按"全部未回答"回传 —— 绝不编答案');
-    expect(find.text('已按未回答处理'), findsOneWidget,
-        reason: '关闭后要给用户一句交代（不能静默）');
-
-    // 轻提示 2.2s 后淡出 —— 把定时器走完，否则测试结束时报 pending timer
-    await settle(tester, times: 60);
+    expect(find.text('模型需要你的回答'), findsNothing, reason: '确认收起后弹层关闭');
+    final r = resultOf();
+    expect(r, isNotNull);
+    // ★ 2026-10-30 P0：收起 ≠ 未回答 —— 调用方拿不到答案，只拿到草稿
+    expect(r!.answers, isNull,
+        reason: '收起只保留问题，不许把"未回答"提交给模型');
+    expect(r.draft.picked['q1'], contains('方案 B'),
+        reason: '重新呼出时之前的选中态必须还在');
   });
 
-  testWidgets('★★ 取消放弃 ⇒ 弹层仍在，题目原样', (tester) async {
+  testWidgets('★★ 取消收起 ⇒ 弹层仍在，题目原样', (tester) async {
     tester.view.physicalSize = const Size(393 * 3, 851 * 3);
     tester.view.devicePixelRatio = 3;
     addTearDown(tester.view.reset);
@@ -186,9 +188,12 @@ void main() {
     await settle(tester);
 
     final r = resultOf();
-    expect(r, isNotNull, reason: '跳过是明确动作 ⇒ 不能返回 null');
-    expect(r!['q1'], ['方案 B'], reason: '已答的题必须如实回传，别浪费用户的选择');
-    expect(r.containsKey('q2'), isFalse, reason: '没答的题不进 map（= 未回答）');
+    expect(r, isNotNull);
+    expect(r!.answers, isNotNull, reason: '跳过是明确动作 ⇒ 必须带答案回来');
+    expect(r.answers!['q1'], ['方案 B'],
+        reason: '已答的题必须如实回传，别浪费用户的选择');
+    expect(r.answers!.containsKey('q2'), isFalse,
+        reason: '没答的题不进 map（= 未回答）');
   });
 
   testWidgets('★★ 「其他…」自填拉键盘：弹层不消失、不溢出（键盘重排）',

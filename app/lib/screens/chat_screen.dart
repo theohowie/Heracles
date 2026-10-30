@@ -602,6 +602,17 @@ class _ChatScreenState extends State<ChatScreen> {
   /// 前一条跑完后才发下一条（`_drainQueue` 每次只取队首）。
   final List<_QueuedMsg> _queue = [];
 
+  /// **待回答的提问**（2026-10-30 P0）。
+  ///
+  /// 弹层被收起后**不再按"全部未回答"回传** —— 它留在这里，输入卡上方
+  /// 显示常驻气泡，可随时重新呼出（选中项与「其他…」自填原文都不丢）。
+  /// 只有三种结局会清掉它：用户提交/跳过、后端 `ask_closed`（超时/中止）、
+  /// run 结束/失败/用户停止。
+  _PendingAsk? _pendingAsk;
+
+  /// 提问抽屉此刻是否开着（开着时不重复弹，气泡先隐藏）。
+  bool _askSheetOpen = false;
+
   /// 忙时输入框是否仍可用 —— 由用户的 `BusySendBehavior` 决定。
   ///
   /// `queue`（默认）与 `interrupt` 都让输入框保持可用：
@@ -3006,6 +3017,13 @@ class _ChatScreenState extends State<ChatScreen> {
         //   第三参数 `message` 只作**降级**用（老版本 Kotlin 没有 questions）。
         unawaited(_showAskDialog(context, e.questions, e.message ?? ''));
 
+      // ★ 2026-10-30 P0（后端契约仅增）：后端判定提问结束（超时/中止）。
+      //   `ask_closed{outcome: timeout|aborted}` —— 清气泡与待答，
+      //   **绝不提交假答案**（超时由后端按"未回答"回传，前端不掺和）。
+      //   ⚠️ 这里按**字符串**匹配：新事件常量由后端线落地，前端先兼容。
+      case 'ask_closed':
+        _onAskClosed();
+
       // ---- ★ 危险工具审批（2026-10-19）----
       //
       // 到达时机：Kotlin 侧已经**挂起**在审批队列上（工具返回 NeedsApproval）。
@@ -3037,6 +3055,9 @@ class _ChatScreenState extends State<ChatScreen> {
             _messages.removeWhere((m) => m.id == pid);
             _progressId = null;
           }
+          // ★ 2026-10-30 P0：run 收尾 = 这次提问已经没意义了（兜底清气泡；
+          //   正常路径由 ask_closed / 提交 先清）。
+          _pendingAsk = null;
           // ★ 折叠"与最终回答重复"的步骤正文（2026-10-13，用户反馈
           //   "final 的内容展示给用户看了，与真正发出来的又是一样的，
           //   观感不好"）—— 最终回答由 run() 返回值统一插一条，
@@ -3725,7 +3746,11 @@ class _ChatScreenState extends State<ChatScreen> {
     }
     final behavior = widget.settings.value.busySend;
     if (behavior == BusySendBehavior.interrupt) {
-      // 中断并发送：先停，再发（stop 是异步的，等它完成）
+      // 中断并发送：先停，再发（stop 是异步的，等它完成）。
+      // ★ 2026-10-30 P0：先给可见状态 —— 旧实现静默等停止完成，
+      //   用户以为发送没生效。注意与 ↑ 的"插队"区分：那是轮间插话，
+      //   这里是真的**停掉当前任务**再发新任务。
+      showIosToast(context, '正在停止当前任务并发送…');
       unawaited(() async {
         await _stopRun();
         if (!mounted) return;
@@ -3793,9 +3818,17 @@ class _ChatScreenState extends State<ChatScreen> {
       if (_busy) {
         final accepted = await _bridge.interruptRun(item.text);
         if (!mounted) return;
-        if (accepted) return; // 插话已入队，等 interrupted 事件渲染
-        // 竞态：刚好跑完 —— 退回队首走正常出队，不丢消息
+        if (accepted) {
+          // ★ 2026-10-30 P0：后端已收下（轮间注入）—— 必须明确告诉用户：
+          //   这句**不是现在就跑**，而是本轮结束时模型才会看到。
+          showIosToast(context, '已插队，模型将在本轮结束时看到');
+          return;
+        }
+        // ★ 2026-10-30 P0：不接受（后端未接线 / 刚好跑完 / 队列满）——
+        //   **绝不许静默重排队**。旧实现只 `insert(0)` 不吭声，
+        //   用户看到的就是"点了没用"。
         setState(() => _queue.insert(0, item));
+        showIosToast(context, '当前任务暂不支持插队，已保留在排队');
         return;
       }
       // 没在跑：正常发送（把附件放回，走 _runAgent 全路径）
@@ -4147,6 +4180,12 @@ class _ChatScreenState extends State<ChatScreen> {
     if (!ok) {
       // 没停到（刚好跑完 / 连点两下）—— 幂等，不报错也不写消息
       return;
+    }
+
+    // ★ 2026-10-30 P0：用户停止 = 这次提问作废 —— 气泡与草稿一起清
+    //   （后端 cancel 会走 ask_closed(aborted)，这里先清，避免残留气泡）。
+    if (_pendingAsk != null && mounted) {
+      setState(() => _pendingAsk = null);
     }
 
     // ★★ 「已停止」**不在这里写**（2026-10-27 图二 bug）★★
@@ -5207,6 +5246,14 @@ class _ChatScreenState extends State<ChatScreen> {
               ],
             ),
           ),
+          // ★ 2026-10-30 P0：待回答提问的**常驻气泡**（输入卡正上方）。
+          //   弹层收起后它替用户"记住"这件事；点一下原地恢复草稿。
+          if (_pendingAsk != null && !_askSheetOpen)
+            _AskPendingBubble(
+              h: h,
+              summary: _pendingAsk!.summary,
+              onTap: _reopenPendingAsk,
+            ),
           InputBar(
             // ★ 输入可用性按【当前会话】判，不是全局 `_busy`（2026-10-11 修 t14）
             //
@@ -5564,31 +5611,100 @@ class _ChatScreenState extends State<ChatScreen> {
   /// ★ 2026-10-29（第 4 条 P1）：选项式弹层本体已抽到
   ///   `widgets/bw_approval.dart` 的 `showAskGateSheet` —— 遮罩 / 返回键 /
   ///   键盘重排都要能被 widget 测试钉住。本方法只保留「降级分支 + 回传答案」。
+  ///
+  /// ★★ 2026-10-30 P0（重写）：**收起不等于未回答**。
+  ///
+  /// · 收到 `kAskUser` ⇒ 存 [PendingAsk] 并弹出（带已有草稿）；
+  /// · 提交 / 跳过 ⇒ `replyAsk(answers)`，清空待答；
+  /// · 收起（返回键 / 下拉）⇒ **不 replyAsk**，保留草稿，输入卡上方出现
+  ///   常驻气泡（[PendingAsk] 驱动），点「回答」可原地恢复；
+  /// · 同一 ask 不重复弹（已开着直接忽略）。
   Future<void> _showAskDialog(
     BuildContext context,
     List<Map<String, dynamic>>? questions,
     String fallbackText,
   ) async {
-    // 降级：老版本 Kotlin / 解析失败 —— 只显示题干，没有选项可点
-    if (questions == null || questions.isEmpty) {
-      // 只有一个"知道了"按钮；关掉后回传空答案（= 全部未回答，绝不编造）
-      // 2026-10-25：改上拉抽屉（单按钮形态），语义不变
-      await showBwConfirmSheet(
-        context,
-        title: '模型需要你的回答',
-        message: fallbackText.isEmpty
-            ? '（模型提了一个问题，但内容为空）'
-            : fallbackText,
-        confirmLabel: '知道了',
-        cancelLabel: null,
-      );
-      await _bridge.replyAsk(const {});
-      return;
-    }
+    if (_askSheetOpen) return; // 同一时刻只允许一个提问面板
+    final qs = questions ?? const <Map<String, dynamic>>[];
+    final pending =
+        _pendingAsk ?? _PendingAsk(questions: qs, fallbackText: fallbackText);
+    _pendingAsk = pending;
+    _askSheetOpen = true;
+    if (mounted) setState(() {});
+    try {
+      if (qs.isEmpty) {
+        // 降级：老版本 Kotlin / 解析失败 —— 只显示题干，没有选项可点。
+        // 「知道了」= 明确提交空答案；「暂时收起」= 只留气泡（可再看题干）。
+        final acknowledged = await showBwConfirmSheet(
+          context,
+          title: '模型需要你的回答',
+          message: fallbackText.isEmpty
+              ? '（模型提了一个问题，但内容为空）'
+              : fallbackText,
+          confirmLabel: '知道了',
+          cancelLabel: '暂时收起',
+        );
+        if (!mounted) return;
+        if (acknowledged) {
+          await _submitAsk(const {});
+        } else if (_pendingAsk != null) {
+          _collapseAsk(pending, pending.draft);
+        }
+        return;
+      }
 
-    final result = await showAskGateSheet(context, questions: questions);
-    // 提交 / 跳过 / 放弃（null）—— 都回传**确定的结果**（null ⇒ 空 map = 全部未回答）
-    await _bridge.replyAsk(result ?? const {});
+      final result = await showAskGateSheet(
+        context,
+        questions: qs,
+        initial: pending.draft,
+      );
+      if (!mounted) return;
+      // 面板开着期间被 ask_closed / run 收尾清掉 ⇒ 迟到的结果一律作废，
+      // 绝不补交答案（那是假信息）。
+      if (_pendingAsk == null) return;
+      if (result?.answers != null) {
+        await _submitAsk(result!.answers!);
+      } else {
+        _collapseAsk(pending, result?.draft ?? pending.draft);
+      }
+    } finally {
+      _askSheetOpen = false;
+      if (mounted) setState(() {});
+    }
+  }
+
+  /// 收起（不提交）：把草稿写回待答 + 轻提示；气泡由 build 按 `_pendingAsk` 渲染。
+  void _collapseAsk(_PendingAsk pending, AskDraft draft) {
+    if (!mounted) return;
+    pending.applyDraft(draft);
+    setState(() {});
+    showIosToast(context, kAskCollapsedToast);
+  }
+
+  /// 提交答案：**先清气泡再回传**（气泡立刻消失，不等异步往返）。
+  Future<void> _submitAsk(Map<String, List<String>> answers) async {
+    final had = _pendingAsk;
+    _pendingAsk = null;
+    if (mounted) setState(() {});
+    if (had == null) return; // 已被 ask_closed 清掉：不要补交迟到的答案
+    await _bridge.replyAsk(answers);
+  }
+
+  /// 后端判提问结束（`ask_closed{outcome: timeout|aborted}`）或 run 收尾。
+  ///
+  /// 只清界面，**不 replyAsk** —— 超时/中止的"未回答"语义由后端负责。
+  void _onAskClosed() {
+    if (_pendingAsk == null || !mounted) return;
+    setState(() => _pendingAsk = null);
+    // 面板还开着 ⇒ 直接关（`pop` 不受 PopScope 限制；maybePop 会走二次确认）
+    if (_askSheetOpen) Navigator.of(context).pop();
+  }
+
+  /// 点常驻气泡 ⇒ 重新呼出同一个提问抽屉（草稿原样还原）。
+  void _reopenPendingAsk() {
+    final p = _pendingAsk;
+    if (p == null) return;
+    unawaited(_showAskDialog(context, p.questions, p.fallbackText));
   }
 
   /// **权限档位变更**（2026-10-29 第 5 条 P1）。
@@ -6159,6 +6275,137 @@ class _QueueIconButton extends StatelessWidget {
 ///
 /// 只活在内存里 —— 它还没"发生"，不属于对话记录（所以不落盘、
 /// 也不进 `_messages`）。用户关掉 App 就等于放弃这些排队。
+/// **待回答提问的常驻气泡**（2026-10-30 P0）。
+///
+/// 位置：输入卡正上方、排队条同一区域。为什么不是插一条消息：
+/// 它是**模态等待**的可见状态（模型此刻挂着等回答），必须一直看得见、
+/// 又不能在收进消息流后看起来像"已经过去了"。
+class _AskPendingBubble extends StatelessWidget {
+  const _AskPendingBubble({
+    required this.h,
+    required this.summary,
+    required this.onTap,
+  });
+
+  final Hue h;
+  final String summary;
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(HSpace.md, 0, HSpace.md, HSpace.xs),
+      child: Material(
+        type: MaterialType.transparency,
+        child: InkWell(
+          borderRadius: BorderRadius.circular(HRadius.md),
+          onTap: onTap,
+          child: Container(
+            padding: const EdgeInsets.fromLTRB(HSpace.md, 9, 10, 9),
+            decoration: BoxDecoration(
+              color: h.surfaceAlt,
+              borderRadius: BorderRadius.circular(HRadius.md),
+              border: Border.all(color: h.border),
+            ),
+            child: Row(
+              children: [
+                Icon(AppIcons.info, size: 15, color: h.textDim),
+                const SizedBox(width: 8),
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      Text(
+                        '等待您的回答',
+                        style: TextStyle(
+                          fontSize: 12.5,
+                          fontWeight: FontWeight.w600,
+                          color: h.text,
+                        ),
+                      ),
+                      const SizedBox(height: 1),
+                      Text(
+                        summary,
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: TextStyle(fontSize: 11.5, color: h.textFaint),
+                      ),
+                    ],
+                  ),
+                ),
+                const SizedBox(width: 10),
+                Column(
+                  crossAxisAlignment: CrossAxisAlignment.end,
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Text(
+                      '回答',
+                      style: TextStyle(
+                        fontSize: 12.5,
+                        fontWeight: FontWeight.w600,
+                        color: h.accent,
+                      ),
+                    ),
+                    Text(
+                      '5 分钟内有效',
+                      style: TextStyle(fontSize: 9.5, color: h.textFaint),
+                    ),
+                  ],
+                ),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+/// **待回答的提问**（2026-10-30 P0）：弹层收起后仍然存活，驱动上面的气泡。
+class _PendingAsk {
+  _PendingAsk({required this.questions, required this.fallbackText})
+      : createdAt = DateTime.now();
+
+  final List<Map<String, dynamic>> questions;
+  final String fallbackText;
+  final DateTime createdAt;
+
+  // ---- 草稿（收起时写回；重新呼出时原样带上）----
+  Map<String, Set<String>> picked = const <String, Set<String>>{};
+  Set<String> customOn = const <String>{};
+  Map<String, String> customTexts = const <String, String>{};
+  int page = 0;
+
+  /// 题干摘要（气泡第二行；超长由 UI 省略）
+  String get summary {
+    for (final q in questions) {
+      final t = (q['question'] as String?)?.trim();
+      if (t != null && t.isNotEmpty) return t;
+    }
+    final fb = fallbackText.trim();
+    return fb.isEmpty ? '模型提了一个问题' : fb;
+  }
+
+  AskDraft get draft => AskDraft(
+        picked: {
+          for (final e in picked.entries) e.key: <String>{...e.value},
+        },
+        customOn: {...customOn},
+        customTexts: {...customTexts},
+        page: page,
+      );
+
+  void applyDraft(AskDraft d) {
+    picked = {
+      for (final e in d.picked.entries) e.key: <String>{...e.value},
+    };
+    customOn = {...d.customOn};
+    customTexts = {...d.customTexts};
+    page = d.page;
+  }
+}
+
 class _QueuedMsg {
   const _QueuedMsg({required this.text, this.attachments = const []});
   final String text;
