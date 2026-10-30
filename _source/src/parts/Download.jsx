@@ -2,20 +2,19 @@ import { useState } from 'react'
 import { Icon, ICONS, Reveal } from '../ui.jsx'
 import {
   APK_ALT, APK_PRIMARY, APK_ROUTES, APK_VERSION_CODE,
-  PKG, RELEASES, RELEASES_GITHUB, VERSION,
+  PKG, RELEASES, RELEASES_GITHUB, SHA, SHA_SOURCE, VERSION,
 } from '../data.js'
 
 /* 下载区做成一张「构建回执」：左边给你装，右边是这次产物的规格与校验值。
    两条线路都是「点一下就开始下载」的直链：默认国内走 Gitee，源站走 GitHub。
-   ⚠️ 两边的产物不是同一个文件（Gitee 是 arm64-only、GitHub 是三 ABI 胖包），
-      所以体积与 sha256 按线路分别标注，不混着写。 */
+   两条线路是同一个包（48.1 MiB，arm64-only），所以校验值只给一份。 */
 export default function Download() {
-  const [copied, setCopied] = useState('')
-  const copy = async (sha, key) => {
+  const [copied, setCopied] = useState(false)
+  const copy = async () => {
     try {
-      await navigator.clipboard.writeText(sha)
-      setCopied(key)
-      setTimeout(() => setCopied(''), 1600)
+      await navigator.clipboard.writeText(SHA)
+      setCopied(true)
+      setTimeout(() => setCopied(false), 1600)
     } catch (e) { /* 剪贴板不可用时静默 */ }
   }
 
@@ -65,9 +64,8 @@ export default function Download() {
                 </li>
               ))}
               <li className="routes-note">
-                两条都是直链：点一下就开始下载，不经过任何中间页。
-                国内默认走 Gitee（{primary.size}，arm64-only，推荐）；GitHub 那份是 {alt ? alt.size : '67.5 MiB'} 的三 ABI 胖包，
-                多出来的部分是在手机上根本用不到的原生库 —— 用来核对源站或海外镜像时再走它。
+                两条都是直链：点一下就开始下载，不经过任何中间页。两条线路是同一个包，
+                国内默认走 Gitee，海外或想核对源站就走 GitHub。
               </li>
             </ul>
 
@@ -76,10 +74,10 @@ export default function Download() {
             </p>
 
             <div className="receipt-warn">
-              <span className="warn-k mono">两个包不是同一个文件</span>
+              <span className="warn-k mono">这是个 arm64-only 包</span>
               <p>
-                Gitee 那份只保留 arm64 原生库（{primary.size}，sha 见右侧）；GitHub 源站那份是三 ABI 胖包（{alt ? alt.size : '67.5 MiB'}）。
-                内容不同、校验值也不同，所以按你要下的那条线路对 sha256。
+                已经剔掉 armeabi-v7a / x86_64 那两套用不到的原生库（原来光它们就占 ≈20 MiB）：
+                体积从 67.5 MiB 降到 {primary.size}，安装占用也更小。32 位机型仍然不受支持。
               </p>
             </div>
           </div>
@@ -105,28 +103,16 @@ export default function Download() {
             </div>
 
             <div className="sha">
-              <span className="sha-k mono">sha256 · {primary.label}</span>
-              <button type="button" className="copy-btn" onClick={() => copy(primary.sha, primary.key)}>
-                <Icon d={ICONS.copy} size={14} /> {copied === primary.key ? '已复制' : '复制'}
+              <span className="sha-k mono">sha256</span>
+              <button type="button" className="copy-btn" onClick={copy}>
+                <Icon d={ICONS.copy} size={14} /> {copied ? '已复制' : '复制'}
               </button>
               <code className="sha-v">
-                <span>{primary.sha.slice(0, 32)}</span>
-                <span>{primary.sha.slice(32)}</span>
+                <span>{SHA.slice(0, 32)}</span>
+                <span>{SHA.slice(32)}</span>
               </code>
+              <span className="sha-note mono">{SHA_SOURCE}</span>
             </div>
-
-            {alt && (
-              <div className="sha sha--alt">
-                <span className="sha-k mono">sha256 · {alt.label}</span>
-                <button type="button" className="copy-btn" onClick={() => copy(alt.sha, alt.key)}>
-                  <Icon d={ICONS.copy} size={14} /> {copied === alt.key ? '已复制' : '复制'}
-                </button>
-                <code className="sha-v">
-                  <span>{alt.sha.slice(0, 32)}</span>
-                  <span>{alt.sha.slice(32)}</span>
-                </code>
-              </div>
-            )}
           </div>
         </Reveal>
       </div>

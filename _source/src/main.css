@@ -665,8 +665,7 @@ ol, ul { margin: 0; padding: 0; list-style: none; }
 .routes-note { display: block; color: rgba(246, 243, 234, 0.58); font-size: 11.5px; line-height: 1.65; margin-top: 2px; }
 .route-meta { color: rgba(246, 243, 234, 0.52); font-size: 10.5px; }
 .spec-links { display: flex; flex-wrap: wrap; gap: 14px; }
-.sha--alt { padding-top: 2px; border-top: 1px dashed rgba(255, 255, 255, 0.1); }
-.sha--alt .sha-v { font-size: 10px; color: rgba(246, 243, 234, 0.52); }
+.sha-note { flex: 1 1 100%; order: 3; font-size: 10px; color: rgba(246, 243, 234, 0.5); }
 .spec-link {
   font-size: 11.5px; color: rgba(246, 243, 234, 0.64); width: fit-content;
   display: inline-flex; align-items: center; gap: 4px;

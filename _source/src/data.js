@@ -11,22 +11,18 @@
 export const APK_GITHUB = 'https://github.com/theohowie/Heracles/releases/download/v0.3.2/Heracles-v0.3.2.apk'
 export const APK_GITEE = 'https://gitee.com/theohowie/heracles/releases/download/v0.3.2/Heracles-v0.3.2.apk'
 
-/* ⚠️ 两条线路的产物**不是同一个文件**（2026-10-30 实测核对）：
-   · Gitee  ：arm64-only，50,453,248 B = 48.1 MiB，versionCode 6，sha A7C2AD5D…
-   · GitHub ：三 ABI 胖包，67.5 MiB，versionCode 6，sha 6CD46736…
-   v7a/x86_64 那两套原生库缺 Flutter 引擎、跑不起来，所以 arm64-only 才是推荐包。
-   换版本时：两条线路各自的体积/sha256 都要跟着更新，别只改一个。 */
+/* 两条线路**同一个包**（2026-10-30 复核）：GitHub 与 Gitee 的 `Heracles-v0.3.2.apk`
+   都是 50,453,248 B = 48.1 MiB 的 arm64-only 构建（versionCode 6 / versionName 0.3.2，
+   aapt2 读出 native-code 仅 arm64-v8a）。换版本时两条线路一起换、一起核。 */
 export const GITEE_READY = true // 国内线路已就绪 → 默认走 Gitee
 export const APK_ROUTES = [
   {
     key: 'gitee', label: 'Gitee', hint: '国内线路', url: APK_GITEE, ready: GITEE_READY,
-    size: '48.1 MiB', sha: 'A7C2AD5DB88663CE9BCDC59C0857CA041692D5867DE747C3D3E52B9EC817F6C5',
-    build: 'arm64-only', note: '只含 arm64 原生库（推荐）',
+    size: '48.1 MiB', build: 'arm64-only',
   },
   {
     key: 'github', label: 'GitHub', hint: '源站', url: APK_GITHUB, ready: true,
-    size: '67.5 MiB', sha: '6CD4673686EA2C260605D388433048DFDF8BD9A9209D16E661FDD3D956F436B8',
-    build: '三 ABI', note: '含 v7a / x86_64 死重',
+    size: '48.1 MiB', build: 'arm64-only',
   },
 ]
 export const APK_PRIMARY = GITEE_READY ? APK_ROUTES[0] : APK_ROUTES[1]
@@ -38,7 +34,9 @@ export const RELEASES = 'https://gitee.com/theohowie/heracles/releases'
 export const RELEASES_GITHUB = 'https://github.com/theohowie/Heracles/releases'
 export const REPO = 'https://github.com/theohowie/Heracles'
 export const GITEE = 'https://gitee.com/theohowie/heracles'
-export const SHA = APK_PRIMARY.sha
+/* sha256 是 2026-10-30 从码云那份**下载后实算**的（A7C2AD5D…）；GitHub 那份字节数与之完全一致 */
+export const SHA = 'A7C2AD5DB88663CE9BCDC59C0857CA041692D5867DE747C3D3E52B9EC817F6C5'
+export const SHA_SOURCE = 'Gitee / GitHub 同一份文件'
 export const VERSION = 'v0.3.2'
 export const APK_SIZE = APK_PRIMARY.size
 export const APK_VERSION_CODE = '6'
