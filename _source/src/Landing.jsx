@@ -33,17 +33,19 @@ const ICONS = {
   compass: <><circle cx="12" cy="12" r="9" /><path d="M15.5 8.5l-2 5-5 2 2-5z" /></>,
 }
 
+/* bento 网格（6 列基准）：span = 跨几列（2 小卡 / 3 半行 / 4 旗舰）；
+   tone: 'hero' = 黑底旗舰卡，'accent' = 描边亮点卡。行分布 4+2 / 2+2+2 / 2+2+2 / 3+3 */
 const FEATURES = [
-  { icon: 'folder', title: '真实工作区', desc: '用系统文件选择器授权任意目录（含 /sdcard 上的项目）。列目录、读文件、局部补丁、按文件名与按内容搜索，长文件自动分段。' },
-  { icon: 'terminal', title: '内联执行沙箱', desc: 'APK 里自带 PRoot + Alpine rootfs：命令在独立的文件系统里跑，产物与半成品都留在里面，可整块回滚。轻量面内置，编译环境按需下载。' },
-  { icon: 'box', title: '在这台手机上构建 APK', desc: '工具链就绪后走 aapt2 → javac → d8 → 进程内对齐 → 签名，产出可安装的 APK。不需要 Gradle，也不需要另一台电脑。' },
-  { icon: 'shield', title: '抗幻觉靠架构', desc: '工具白名单 + 参数门禁三态（允许 / 需要确认 / 拒绝）+ 解析失败绝不猜：不执行，如实回告。' },
-  { icon: 'eye', title: '执行过程看得见', desc: '长任务收进灵动岛：收起是步骤数字轨道，展开是完整待办。该问就问、该批就批，每一次工具调用都留痕可回查。' },
-  { icon: 'link', title: '会话严格 append-only', desc: '从不改写历史消息，只往后追加。长会话的代价随轮次几乎不变，云端前缀缓存更稳，上下文压缩也更可预测。' },
-  { icon: 'key', title: 'BYOK，Key 不出手机', desc: 'API Key 只存本地安全存储、只出现在请求头里，不进日志。任务随时可中断，也可以排队后再发。' },
-  { icon: 'mic', title: '语音与相机输入', desc: 'SenseVoice 本地识别，点一下把字填进输入框；拍照直接进附件，发出去的图片成图留存、可看大图——识别与成像都在手机上完成。' },
-  { icon: 'compass', title: 'JEV 决策模式', desc: '纠结「该不该」时问一句：专用决策模型只管是非与置信度，理由由你当前的对话模型像朋友一样补写。云端开箱即用，本地小模型档位可下载；答不上来就直说，绝不编一个答案。' },
-  { icon: 'code', title: '纯 Dart 内核 + Flutter 前端', desc: 'backend/ 是纯 Dart 包，379 项单测不依赖 Flutter 与 Android；设备能力由 Kotlin 桥提供，界面层是 Flutter。' },
+  { icon: 'box', span: 4, tone: 'hero', title: '在这台手机上构建 APK', desc: '工具链就绪后走 aapt2 → javac → d8 → 进程内对齐 → 签名，产出可安装的 APK。不需要 Gradle，也不需要另一台电脑。' },
+  { icon: 'compass', span: 2, tone: 'accent', title: 'JEV 决策模式', desc: '纠结「该不该」时问一句：专用决策模型给是非与置信度，理由由你当前的对话模型像朋友一样补写；答不上就直说，绝不编一个答案。' },
+  { icon: 'terminal', span: 2, title: '内联执行沙箱', desc: 'APK 里自带 PRoot + Alpine rootfs：命令在独立的文件系统里跑，产物与半成品都留在里面，可整块回滚。' },
+  { icon: 'folder', span: 2, title: '真实工作区', desc: '用系统文件选择器授权任意目录（含 /sdcard 上的项目）。列目录、读文件、局部补丁、按文件名与按内容搜索。' },
+  { icon: 'eye', span: 2, title: '执行过程看得见', desc: '长任务收进灵动岛：收起是步骤数字轨道，展开是完整待办。该问就问、该批就批，每一次工具调用都留痕可回查。' },
+  { icon: 'shield', span: 2, title: '抗幻觉靠架构', desc: '工具白名单 + 参数门禁三态（允许 / 需要确认 / 拒绝）+ 解析失败绝不猜：不执行，如实回告。' },
+  { icon: 'key', span: 2, title: 'BYOK，Key 不出手机', desc: 'API Key 只存本地安全存储、只出现在请求头里，不进日志。任务随时可中断，也可以排队后再发。' },
+  { icon: 'mic', span: 2, title: '语音与相机输入', desc: 'SenseVoice 本地识别，点一下把字填进输入框；拍照直接进附件，发出去的图片成图留存、可看大图。' },
+  { icon: 'link', span: 3, title: '会话严格 append-only', desc: '从不改写历史消息，只往后追加。长会话的代价随轮次几乎不变，云端前缀缓存更稳，上下文压缩也更可预测。' },
+  { icon: 'code', span: 3, title: '纯 Dart 内核 + Flutter 前端', desc: 'backend/ 是纯 Dart 包，379 项单测不依赖 Flutter 与 Android；设备能力由 Kotlin 桥提供，界面层是 Flutter。' },
 ]
 
 const STEPS = [
@@ -217,8 +219,9 @@ function Features() {
       </Reveal>
       <div className="cards">
         {FEATURES.map((f, i) => (
-          <Reveal key={f.title} delay={i * 0.05} className="card-wrap">
-            <div className="card">
+          <Reveal key={f.title} delay={i * 0.04}
+            className={`card-wrap s${f.span}${f.tone ? ` tone-${f.tone}` : ''}`}>
+            <div className={`card${f.span >= 3 ? ' card-row' : ''}`}>
               <div className="card-icon"><Icon d={ICONS[f.icon]} /></div>
               <h3>{f.title}</h3>
               <p>{f.desc}</p>

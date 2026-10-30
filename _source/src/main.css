@@ -128,21 +128,12 @@ img { max-width: 100%; display: block; }
   box-shadow: 0 18px 40px rgba(0, 0, 0, .10);
 }
 
-/* ---------- 特性卡 ---------- */
-.cards { display: grid; grid-template-columns: repeat(3, 1fr); gap: 16px; }
+/* ---------- 特性卡（bento：大小不一，6 列基准） ---------- */
+.cards { display: grid; grid-template-columns: repeat(6, 1fr); gap: 16px; }
 .card-wrap { height: 100%; }
-/* 3 列布局下 10 张卡 = 3+3+3+1：末卡不落单 —— 铺满整行作收尾卡（图标居左、文在右）；
-   窄屏列数变少不适用（2 列 5 行 / 1 列均无孤卡） */
-@media (min-width: 1001px) {
-  .card-wrap:last-child:nth-child(3n+1) { grid-column: 1 / -1; }
-  .card-wrap:last-child:nth-child(3n+1) .card {
-    display: grid; grid-template-columns: auto 1fr; column-gap: 18px;
-    grid-template-areas: "icon title" "icon desc"; align-items: center; padding: 24px 28px;
-  }
-  .card-wrap:last-child:nth-child(3n+1) .card-icon { grid-area: icon; margin-bottom: 0; width: 44px; height: 44px; }
-  .card-wrap:last-child:nth-child(3n+1) .card h3 { grid-area: title; margin: 0 0 6px; }
-  .card-wrap:last-child:nth-child(3n+1) .card p { grid-area: desc; max-width: 900px; }
-}
+.s2 { grid-column: span 2; }
+.s3 { grid-column: span 3; }
+.s4 { grid-column: span 4; }
 .card {
   height: 100%; padding: 24px; border-radius: var(--radius);
   border: 1px solid var(--line); background: var(--bg-card); box-shadow: var(--shadow-card);
@@ -155,6 +146,22 @@ img { max-width: 100%; display: block; }
 }
 .card h3 { margin: 0 0 8px; font-size: 17.5px; }
 .card p { margin: 0; color: var(--fg-dim); font-size: 14.8px; }
+/* 宽卡（跨 3 列以上）内部横排：图标居左、文在右，避免整行长句 */
+.card-row {
+  display: grid; grid-template-columns: auto 1fr; column-gap: 18px; align-items: center;
+  grid-template-areas: "icon title" "icon desc"; padding: 26px 28px;
+}
+.card-row .card-icon { grid-area: icon; margin-bottom: 0; width: 44px; height: 44px; }
+.card-row h3 { grid-area: title; }
+.card-row p { grid-area: desc; max-width: 760px; }
+/* 旗舰卡：黑底（呼应黑白主题）；亮点卡：accent 描边 */
+.tone-hero .card { background: #0a0a0d; border-color: rgba(255, 255, 255, .14); }
+.tone-hero .card:hover { border-color: rgba(255, 255, 255, .32); }
+.tone-hero .card h3 { color: #fff; }
+.tone-hero .card p { color: rgba(255, 255, 255, .66); }
+.tone-hero .card-icon { background: rgba(255, 255, 255, .1); }
+.tone-accent .card { border-color: rgba(0, 113, 227, .5); box-shadow: 0 0 0 1px rgba(0, 113, 227, .16), var(--shadow-card); }
+.tone-accent .card-icon { background: rgba(0, 113, 227, .14); }
 
 /* ---------- 状态 ---------- */
 .status-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
@@ -219,13 +226,30 @@ img { max-width: 100%; display: block; }
   .how-tab { white-space: nowrap; }
   .how-body { grid-template-columns: 1fr; }
   .cards { grid-template-columns: 1fr 1fr; }
+  /* 平板 2 列：旗舰卡与亮点卡独占一行，其余两两成对（10 卡恰好无孤卡） */
+  .s2, .s3 { grid-column: span 1; }
+  .s4, .card-wrap.tone-accent { grid-column: span 2; }
   .gallery { grid-template-columns: 1fr 1fr; }
   .status-grid { grid-template-columns: 1fr; }
   .nav-links { display: none; }
   .section { padding: 60px 22px; }
 }
+/* 平板独占整行的亮点卡也横排（手机档恢复竖排） */
+@media (max-width: 1000px) and (min-width: 621px) {
+  .card-wrap.tone-accent .card {
+    display: grid; grid-template-columns: auto 1fr; column-gap: 18px; align-items: center;
+    grid-template-areas: "icon title" "icon desc"; padding: 26px 28px;
+  }
+  .card-wrap.tone-accent .card-icon { grid-area: icon; margin-bottom: 0; width: 44px; height: 44px; }
+  .card-wrap.tone-accent .card h3 { grid-area: title; }
+  .card-wrap.tone-accent .card p { grid-area: desc; }
+}
 @media (max-width: 620px) {
   .cards, .gallery { grid-template-columns: 1fr; }
+  .cards .card-wrap { grid-column: auto; }
+  .card-row { grid-template-columns: 1fr; grid-template-areas: "icon" "title" "desc"; padding: 24px; }
+  .card-row .card-icon { margin-bottom: 14px; }
+  .card-row p { max-width: none; }
   .how-body { padding: 20px; }
   .how-shot img { width: 220px; }
 }
