@@ -458,8 +458,8 @@ flowchart LR
 
 从 [Releases](https://github.com/theohowie/Heracles/releases) 下载 APK，当前版本 **v0.3.2**（2026-10-30）：
 
-- 直链：[`Heracles-v0.3.2.apk`](https://github.com/theohowie/Heracles/releases/download/v0.3.2/Heracles-v0.3.2.apk) · **67.5 MB**（70,802,147 字节）· `versionCode 6`
-- 校验：`sha256 = 6CD4673686EA2C260605D388433048DFDF8BD9A9209D16E661FDD3D956F436B8`
+- 直链：[`Heracles-v0.3.2.apk`](https://github.com/theohowie/Heracles/releases/download/v0.3.2/Heracles-v0.3.2.apk) · **48.1 MB**（50,453,248 字节）· `versionCode 6` · **仅 arm64-v8a**
+- 校验：`sha256 = A7C2AD5DB88663CE9BCDC59C0857CA041692D5867DE747C3D3E52B9EC817F6C5`
 
 要求 **Android 12（API 31）及以上**、**arm64（arm64-v8a）** 手机。
 当前 release 包使用 debug 密钥签名，安装时需要允许「未知来源」；换正式密钥前不能覆盖升级。
