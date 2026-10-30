@@ -15,7 +15,9 @@
   --surface: #ffffff;
   --ink: #151513;
   --ink-2: #5a5852;
-  --ink-3: #8c8a81;
+  /* 三级文字要过 AA：10–12px 的等宽标签原来 #8c8a81 只有 ~3.2:1，
+     按「纸 #f6f5f1 上 ≥4.5:1」反推，压到 #6a6860（≈5.0:1）。 */
+  --ink-3: #6a6860;
   --hair: rgba(21, 21, 19, 0.15);
   --hair-2: rgba(21, 21, 19, 0.08);
 
@@ -29,8 +31,9 @@
   --term: #12130f;
   --term-2: #17180f;
   --term-fg: #ece9e0;
-  --term-fg-2: rgba(236, 233, 224, 0.6);
-  --term-fg-3: rgba(236, 233, 224, 0.4);
+  --term-fg-2: rgba(236, 233, 224, 0.68);
+  /* 同样按 AA 反推：0.4 的透明度在 #12130f 上只有 ~3.3:1，提到 0.62（≈6.3:1） */
+  --term-fg-3: rgba(236, 233, 224, 0.62);
   --term-line: rgba(255, 255, 255, 0.1);
   --term-ok: #63c98a;
   --term-warn: #e0a444;
@@ -136,6 +139,16 @@ ol, ul { margin: 0; padding: 0; list-style: none; }
   border-radius: 999px; padding: 3px 9px; line-height: 1.4;
 }
 
+/* 移动端目录：<=1000px 才出现的按钮 + 下拉面板 */
+.nav-menu-btn {
+  display: none; align-items: center; justify-content: center; flex: none;
+  width: 40px; height: 40px; border-radius: 999px; cursor: pointer;
+  border: 1px solid var(--hair); background: transparent; color: var(--ink);
+  transition: background 0.18s, border-color 0.18s;
+}
+.nav-menu-btn:hover { background: rgba(21, 21, 19, 0.04); border-color: rgba(21, 21, 19, 0.3); }
+.nav-menu { display: none; }
+
 /* ============================== 按钮 ============================== */
 .btn {
   display: inline-flex; align-items: center; justify-content: center; gap: 8px;
@@ -204,7 +217,7 @@ ol, ul { margin: 0; padding: 0; list-style: none; }
 }
 .cta-row { display: flex; flex-wrap: wrap; gap: 11px; margin-top: clamp(22px, 2.6vw, 32px); }
 .hero-note { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin: 15px 0 0; font-size: 12px; color: var(--ink-3); }
-.hero-note a { border-bottom: 1px solid var(--hair); padding-bottom: 1px; transition: color 0.2s, border-color 0.2s; }
+.hero-note a { border-bottom: 1px solid var(--hair); padding: 4px 0 3px; transition: color 0.2s, border-color 0.2s; }
 .hero-note a:hover { color: var(--ink); border-bottom-color: var(--ink); }
 .sep { opacity: 0.45; }
 
@@ -266,7 +279,7 @@ ol, ul { margin: 0; padding: 0; list-style: none; }
 /* ============================== 影片 ============================== */
 .film-head { display: flex; align-items: center; justify-content: space-between; gap: 16px; flex-wrap: wrap; margin-bottom: 16px; }
 .film-note { font-size: 11.5px; color: var(--ink-3); display: flex; gap: 8px; flex-wrap: wrap; }
-.film-note a { color: var(--ink-2); border-bottom: 1px solid var(--hair); }
+.film-note a { color: var(--ink-2); border-bottom: 1px solid var(--hair); padding: 4px 0 3px; }
 .film-note a:hover { color: var(--ink); border-bottom-color: var(--ink); }
 .film {
   border-radius: 18px; overflow: hidden; background: #000;
@@ -309,8 +322,21 @@ ol, ul { margin: 0; padding: 0; list-style: none; }
 }
 .stream::-webkit-scrollbar { width: 6px; }
 .stream::-webkit-scrollbar-thumb { background: rgba(255, 255, 255, 0.16); border-radius: 3px; }
-.ev-wrap { min-width: 0; position: relative; transition: opacity 0.4s ease; }
-.ev-wrap[data-state="future"] { opacity: 0.42; }
+.ev-wrap { min-width: 0; position: relative; }
+/* 「还没走到」的条目不用整体透明（那会把小字压到 3:1 以下）：
+   改成「卡片底色与边框变淡 + 强调色收起」，文字保持满对比度。
+   当前条另有绿色左竖线；这样三种状态仍然分得清。 */
+.ev-wrap[data-state="future"] .ev--tool,
+.ev-wrap[data-state="future"] .ev--patch {
+  border-color: rgba(255, 255, 255, 0.06);
+  background: transparent;
+}
+.ev-wrap[data-state="future"] .tool-name,
+.ev-wrap[data-state="future"] .patch-stat,
+.ev-wrap[data-state="future"] .gate-badge,
+.ev-wrap[data-state="future"] .ev-who { opacity: 0.72; }
+.ev-wrap[data-state="future"] .diff,
+.ev-wrap[data-state="future"] .tool-out { background: rgba(0, 0, 0, 0.18); }
 .ev-wrap[data-state="past"] { opacity: 1; }
 .ev-wrap[data-state="current"]::before {
   content: ""; position: absolute; left: -12px; top: 1px; bottom: 1px; width: 2px;
@@ -349,7 +375,7 @@ ol, ul { margin: 0; padding: 0; list-style: none; }
 .diff-sign { display: inline-block; width: 10px; opacity: 0.75; }
 .diff-add { color: #93dcaa; background: rgba(99, 201, 138, 0.1); }
 .diff-del { color: #eda3a3; background: rgba(237, 120, 120, 0.1); }
-.diff-ctx { color: rgba(236, 233, 224, 0.42); }
+.diff-ctx { color: rgba(236, 233, 224, 0.56); }
 
 .ev--gate { border: 1px solid rgba(224, 164, 68, 0.42); background: rgba(224, 164, 68, 0.07); border-radius: 11px; padding: 13px; }
 .gate-head { display: flex; align-items: center; gap: 9px; flex-wrap: wrap; }
@@ -508,7 +534,7 @@ ol, ul { margin: 0; padding: 0; list-style: none; }
 .mount-line { display: flex; align-items: baseline; gap: 7px; white-space: nowrap; min-width: 0; }
 .mount-line > span:nth-child(2) { overflow: hidden; text-overflow: ellipsis; }
 .mount-arrow { color: var(--term-ok); flex: none; }
-.mount-note { color: rgba(246, 243, 234, 0.4); flex: none; margin-left: auto; }
+.mount-note { color: rgba(246, 243, 234, 0.55); flex: none; margin-left: auto; }
 .tone-mark .bento-card { border-color: rgba(21, 21, 19, 0.5); box-shadow: 0 0 0 1px rgba(21, 21, 19, 0.1), 0 1px 2px rgba(21, 21, 19, 0.04); }
 .tone-mark .bento-icon { background: var(--ink); color: var(--paper-2); border-color: var(--ink); }
 
@@ -564,6 +590,7 @@ ol, ul { margin: 0; padding: 0; list-style: none; }
 .lightbox {
   position: fixed; inset: 0; z-index: 200; display: grid; place-items: center; padding: 24px;
   background: rgba(10, 10, 8, 0.88); -webkit-backdrop-filter: blur(6px); backdrop-filter: blur(6px);
+  overscroll-behavior: contain;
 }
 .lightbox figure { margin: 0; display: flex; flex-direction: column; align-items: center; gap: 12px; max-height: 90vh; }
 .lightbox img { max-height: 76vh; width: auto; border-radius: 16px; box-shadow: 0 50px 100px rgba(0, 0, 0, 0.6); }
@@ -612,7 +639,7 @@ ol, ul { margin: 0; padding: 0; list-style: none; }
   border: 1px solid rgba(255, 255, 255, 0.1);
   box-shadow: 0 70px 110px -80px rgba(21, 21, 19, 0.9);
 }
-.receipt-eyebrow { font-size: 10.5px; letter-spacing: 0.18em; color: rgba(246, 243, 234, 0.44); }
+.receipt-eyebrow { font-size: 10.5px; letter-spacing: 0.18em; color: rgba(246, 243, 234, 0.56); }
 .receipt-title { margin: 12px 0 0; font-size: clamp(25px, 3vw, 38px); line-height: 1.2; letter-spacing: -0.035em; font-weight: 800; }
 .receipt-lede { margin: 14px 0 0; max-width: 30em; font-size: 14.5px; color: rgba(246, 243, 234, 0.6); }
 .receipt .cta-row { margin-top: 22px; }
@@ -621,7 +648,7 @@ ol, ul { margin: 0; padding: 0; list-style: none; }
 .receipt .btn--ghost { border-color: rgba(255, 255, 255, 0.24); color: #f6f3ea; }
 .receipt .btn--ghost:hover { background: rgba(255, 255, 255, 0.08); border-color: rgba(255, 255, 255, 0.4); }
 .receipt :focus-visible { outline-color: #f6f3ea; }
-.receipt-note { margin: 16px 0 0; font-size: 11.5px; color: rgba(246, 243, 234, 0.4); }
+.receipt-note { margin: 16px 0 0; font-size: 11.5px; color: rgba(246, 243, 234, 0.56); }
 
 /* 版本对照：可下载的包与页面描述的主线能力不是同一个东西 —— 这条必须显眼但别吼 */
 .receipt-warn {
@@ -633,15 +660,15 @@ ol, ul { margin: 0; padding: 0; list-style: none; }
 .receipt-warn p { margin: 0; font-size: 12px; line-height: 1.7; color: rgba(246, 243, 234, 0.66); }
 
 .receipt-spec { border-left: 1px solid rgba(255, 255, 255, 0.12); padding-left: clamp(16px, 2.2vw, 30px); display: flex; flex-direction: column; gap: 13px; min-width: 0; }
-.spec-title { font-size: 10.5px; letter-spacing: 0.18em; color: rgba(246, 243, 234, 0.4); }
+.spec-title { font-size: 10.5px; letter-spacing: 0.18em; color: rgba(246, 243, 234, 0.56); }
 .spec-table { display: grid; gap: 8px; }
 .spec-row { display: flex; justify-content: space-between; gap: 12px; padding-bottom: 8px; border-bottom: 1px dotted rgba(255, 255, 255, 0.11); font-size: 12.5px; }
-.spec-row dt { color: rgba(246, 243, 234, 0.45); flex: none; }
+.spec-row dt { color: rgba(246, 243, 234, 0.58); flex: none; }
 .spec-row dd { margin: 0; text-align: right; overflow-wrap: anywhere; }
 
 .sha { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
-.sha-k { font-size: 10px; letter-spacing: 0.12em; color: rgba(246, 243, 234, 0.38); flex: 0 0 auto; }
-.sha-v { flex: 1 1 100%; order: 2; font-size: 10px; line-height: 1.8; color: rgba(246, 243, 234, 0.58); background: rgba(0, 0, 0, 0.32); border-radius: 8px; padding: 8px 11px; overflow-wrap: anywhere; }
+.sha-k { font-size: 10px; letter-spacing: 0.12em; color: rgba(246, 243, 234, 0.56); flex: 0 0 auto; }
+.sha-v { flex: 1 1 100%; order: 2; font-size: 10px; line-height: 1.8; color: rgba(246, 243, 234, 0.7); background: rgba(0, 0, 0, 0.32); border-radius: 8px; padding: 8px 11px; overflow-wrap: anywhere; }
 .sha-v span { display: block; letter-spacing: 0.04em; }
 .copy-btn {
   display: inline-flex; align-items: center; gap: 5px; cursor: pointer;
@@ -659,7 +686,7 @@ ol, ul { margin: 0; padding: 0; list-style: none; }
 .foot-brand strong { font-size: 15px; letter-spacing: -0.015em; }
 .foot-brand p { margin: 1px 0 0; font-size: 11px; color: var(--ink-3); }
 .foot-links { margin-left: auto; display: flex; gap: 18px; flex-wrap: wrap; font-size: 13px; color: var(--ink-2); }
-.foot-links a { display: inline-flex; align-items: center; gap: 3px; transition: color 0.2s; }
+.foot-links a { display: inline-flex; align-items: center; gap: 3px; padding: 4px 0; transition: color 0.2s; }
 .foot-links a:hover { color: var(--ink); }
 .foot-line {
   display: flex; justify-content: space-between; gap: 14px; flex-wrap: wrap;
@@ -699,6 +726,18 @@ ol, ul { margin: 0; padding: 0; list-style: none; }
   .s4 { grid-column: span 2; }
   .nav-links { display: none; }
   .nav-right { margin-left: auto; }
+  .nav-menu-btn { display: inline-flex; }
+  .nav-menu {
+    display: grid; position: absolute; top: 100%; left: 0; right: 0;
+    padding: 4px var(--gutter) 14px;
+    /* 不透明：这是覆盖在内容上的下拉面板，透一点都会让下面的标题串进菜单里 */
+    background: var(--paper-2);
+    border-bottom: 1px solid var(--hair);
+    box-shadow: 0 26px 44px -34px rgba(21, 21, 19, 0.5);
+  }
+  .nav-menu a { padding: 13px 2px; border-bottom: 1px solid var(--hair-2); font-size: 15.5px; color: var(--ink-2); }
+  .nav-menu a:hover { color: var(--ink); }
+  .nav-menu a:last-child { border-bottom: 0; color: var(--ink); font-weight: 600; }
   .br-lg { display: none; }
 }
 
@@ -720,6 +759,14 @@ ol, ul { margin: 0; padding: 0; list-style: none; }
 
 @media (max-width: 640px) {
   body { font-size: 15.5px; }
+  /* 手机上真的够得着：可点控件的短边不小于 40px */
+  .tbtn { min-height: 40px; min-width: 40px; justify-content: center; }
+  .gate-actions .btn--xs, .lightbox-x { min-height: 40px; }
+  .copy-btn { min-height: 38px; }
+  /* 小字下限：9.5–10px 在手机上读起来太吃力，抬到 10.5–11px */
+  .run-tag, .warn-k, .sha-k, .sha-v, .side-num, .thumb-name, .reel-note, .eyebrow-num { font-size: 10.5px; }
+  .device-cap, .session-tag, .ev-time, .plan-num, .tool-meta, .tool-sub,
+  .note-stat, .statusline, .stage-cap, .band-k, .spec-title { font-size: 11px; }
   .specs { grid-template-columns: 1fr; border-top: 1px solid var(--hair); }
   .spec { padding: 11px 0; display: grid; grid-template-columns: 92px minmax(0, 1fr); column-gap: 12px; align-items: baseline; }
   .spec + .spec { border-left: 0; border-top: 1px solid var(--hair-2); padding-left: 0; }

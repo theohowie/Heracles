@@ -38,6 +38,9 @@ export default function Ledger() {
                 <li key={w}><Icon d={ICONS.check} size={14} className="mark-ok" />{w}</li>
               ))}
             </ul>
+            <p className="ledger-note">
+              每条都有单测或真机证据；真机那部分见上面的「最近实测」。
+            </p>
           </Reveal>
 
           <Reveal className="ledger-card ledger-card--todo" delay={0.07}>

@@ -19,7 +19,7 @@ const NAV = [
 function Logo() {
   return (
     <a className="brand" href="#top" aria-label="Heracles 首页">
-      <img src="/Heracles/logo.png" alt="" width="30" height="30" />
+      <img src="/Heracles/logo-96.png" alt="" width="30" height="30" />
       <span className="brand-name">Heracles</span>
     </a>
   )
@@ -30,6 +30,7 @@ function Nav() {
   const bar = useSpring(scrollYProgress, { stiffness: 180, damping: 30, restDelta: 0.001 })
   const [solid, setSolid] = useState(false)
   const [active, setActive] = useState('')
+  const [menu, setMenu] = useState(false)
 
   useEffect(() => {
     const onScroll = () => setSolid(window.scrollY > 8)
@@ -50,6 +51,14 @@ function Nav() {
     return () => io.disconnect()
   }, [])
 
+  // 移动端目录：Esc 关掉，滚出视口也关掉
+  useEffect(() => {
+    if (!menu) return undefined
+    const onKey = (e) => { if (e.key === 'Escape') setMenu(false) }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [menu])
+
   return (
     <header className={`nav${solid ? ' is-solid' : ''}`}>
       <div className="nav-inner wrap">
@@ -63,8 +72,22 @@ function Nav() {
         <div className="nav-right">
           <span className="nav-ver mono">{VERSION}</span>
           <a className="btn btn--ink btn--sm" href="#download">下载 APK</a>
+          <button type="button" className="nav-menu-btn"
+            aria-expanded={menu} aria-controls="nav-menu"
+            aria-label={menu ? '收起目录' : '打开目录'}
+            onClick={() => setMenu((v) => !v)}>
+            <Icon d={menu ? ICONS.cross : ICONS.menu} size={18} />
+          </button>
         </div>
       </div>
+      {menu && (
+        <div className="nav-menu" id="nav-menu">
+          {NAV.map((n) => (
+            <a key={n.href} href={n.href} onClick={() => setMenu(false)}>{n.label}</a>
+          ))}
+          <a href="#download" onClick={() => setMenu(false)}>下载 APK</a>
+        </div>
+      )}
       <motion.span className="nav-progress" style={{ scaleX: bar }} aria-hidden="true" />
     </header>
   )
@@ -202,7 +225,7 @@ function Footer() {
     <footer className="foot">
       <div className="wrap foot-inner">
         <div className="foot-brand">
-          <img src="/Heracles/logo.png" alt="" width="34" height="34" />
+          <img src="/Heracles/logo-96.png" alt="" width="34" height="34" />
           <div>
             <strong>Heracles</strong>
             <p className="mono">手机上的开发智能体 · GPL-3.0</p>

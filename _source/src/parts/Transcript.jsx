@@ -147,13 +147,16 @@ export default function Transcript() {
 
   useEffect(() => { if (finished) setPlaying(false) }, [finished])
 
-  // 把「当前」那条滚进视野（面板内部滚动，不带动整页）
+  // 把「当前」那条滚进面板内部（只动这个滚动容器，绝不带动整页 ——
+  // 早先用 scrollIntoView 会把整页拉到面板位置，用户一进站就「被跳走」）
   useEffect(() => {
     const box = streamRef.current
-    if (!box) return
+    if (!box || !inView) return
     const el = box.querySelector('[data-current="true"]')
-    if (el) el.scrollIntoView({ block: 'nearest', behavior: reduce ? 'auto' : 'smooth' })
-  }, [pointer, reduce])
+    if (!el) return
+    const top = el.getBoundingClientRect().top - box.getBoundingClientRect().top + box.scrollTop
+    box.scrollTo({ top: Math.max(0, top - box.clientHeight * 0.4), behavior: reduce ? 'auto' : 'smooth' })
+  }, [pointer, reduce, inView])
 
   const decide = useCallback((d) => {
     setDecision(d)

@@ -13,6 +13,8 @@ export default function Reel() {
   const count = GALLERY.length
   const shot = GALLERY[i]
   const stageRef = useRef(null)
+  const closeRef = useRef(null)
+  const lastFocus = useRef(null)
 
   const go = useCallback((d) => setI((v) => (v + d + count) % count), [count])
 
@@ -22,15 +24,26 @@ export default function Reel() {
     return () => clearInterval(t)
   }, [paused, open, reduce, count])
 
+  /* 灯箱：键盘（Esc / ←→）+ 焦点进得去出得来 + 后面不滚 */
   useEffect(() => {
     if (!open) return undefined
+    lastFocus.current = document.activeElement
+    closeRef.current?.focus()
+    const prevOverflow = document.body.style.overflow
+    document.body.style.overflow = 'hidden'
     const onKey = (e) => {
       if (e.key === 'Escape') setOpen(false)
       if (e.key === 'ArrowRight') go(1)
       if (e.key === 'ArrowLeft') go(-1)
+      // 焦点不跑出对话框
+      if (e.key === 'Tab' && closeRef.current) { e.preventDefault(); closeRef.current.focus() }
     }
     window.addEventListener('keydown', onKey)
-    return () => window.removeEventListener('keydown', onKey)
+    return () => {
+      window.removeEventListener('keydown', onKey)
+      document.body.style.overflow = prevOverflow
+      if (lastFocus.current && typeof lastFocus.current.focus === 'function') lastFocus.current.focus()
+    }
   }, [open, go])
 
   return (
@@ -101,6 +114,7 @@ export default function Reel() {
       <AnimatePresence>
         {open && (
           <motion.div className="lightbox" onClick={() => setOpen(false)}
+            role="dialog" aria-modal="true" aria-label={`截图大图：${shot.title}，${shot.desc}`}
             initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} transition={{ duration: 0.22 }}>
             <motion.figure onClick={(e) => e.stopPropagation()}
               initial={reduce ? false : { scale: 0.96, y: 10 }} animate={{ scale: 1, y: 0 }} exit={{ scale: 0.97 }}
@@ -112,7 +126,7 @@ export default function Reel() {
                 <span className="mono">← → 切换 · Esc 关闭</span>
               </figcaption>
             </motion.figure>
-            <button type="button" className="lightbox-x" onClick={() => setOpen(false)} aria-label="关闭">
+            <button type="button" className="lightbox-x" ref={closeRef} onClick={() => setOpen(false)} aria-label="关闭大图">
               <Icon d={ICONS.cross} size={18} />
             </button>
           </motion.div>
