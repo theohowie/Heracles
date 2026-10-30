@@ -62,6 +62,7 @@ class InputBar extends StatefulWidget {
     this.onQueuedSendNow,
     this.onQueuedRemove,
     this.onQueuedPin,
+    this.onQueuedEdit,
     this.reasoningLevel = ReasoningLevel.auto,
     this.onReasoningLevelChanged,
     this.runTierNotice,
@@ -221,6 +222,12 @@ class InputBar extends StatefulWidget {
   /// 置顶某条（参考图的 ⧉）—— 当前运行结束后它先发，**不**打断
   final ValueChanged<int>? onQueuedPin;
 
+  /// 编辑某条（2026-10-30 用户要求：正在排队的消息要能改）。
+  ///
+  /// 只把下标交出去 —— 编辑界面与"保存后替换队列项"的逻辑在上层
+  /// （`chat_screen._editQueued`：抽屉预填原文、附件与队列位置不变）。
+  final ValueChanged<int>? onQueuedEdit;
+
   @override
   State<InputBar> createState() => _InputBarState();
 }
@@ -318,7 +325,7 @@ class _InputBarState extends State<InputBar>
             // 位置：**输入框正上方**。用户原话：
             // 「排队的消息要在输入框上面显示……不是在工作步骤里显示已排队」。
             //
-            // 每行：💬 文本  +  右侧三个动作（置顶 / 删除 / 立即发送）
+            // 每行：💬 文本  +  右侧动作（编辑 / 置顶 / 删除 / 立即发送）
             // 视觉与输入容器同宽同圆角，看起来是"输入区的一部分"。
             for (var i = 0; i < widget.queuedTexts.length; i++)
               _QueuedRow(
@@ -329,6 +336,7 @@ class _InputBarState extends State<InputBar>
                 onRemove:
                     widget.onQueuedRemove == null ? null : () => widget.onQueuedRemove!(i),
                 onPin: widget.onQueuedPin == null ? null : () => widget.onQueuedPin!(i),
+                onEdit: widget.onQueuedEdit == null ? null : () => widget.onQueuedEdit!(i),
                 // 只有队首那条有"置顶"的意义（已在最前就不显示）
                 canPin: i > 0,
               ),
@@ -1339,6 +1347,7 @@ class _QueuedRow extends StatelessWidget {
     required this.onSendNow,
     required this.onRemove,
     required this.onPin,
+    required this.onEdit,
     required this.canPin,
   });
 
@@ -1347,6 +1356,9 @@ class _QueuedRow extends StatelessWidget {
   final VoidCallback? onSendNow;
   final VoidCallback? onRemove;
   final VoidCallback? onPin;
+
+  /// 编辑本条（2026-10-30）：点 ✎ 打开上层编辑抽屉
+  final VoidCallback? onEdit;
 
   /// 已在队首时"置顶"没有意义 —— 不画那个按钮
   final bool canPin;
@@ -1388,6 +1400,8 @@ class _QueuedRow extends StatelessWidget {
             ),
             if (canPin && onPin != null)
               _iconBtn(CupertinoIcons.arrow_up_to_line, '置顶（下一个发）', onPin!),
+            if (onEdit != null)
+              _iconBtn(CupertinoIcons.pencil, '编辑', onEdit!),
             if (onRemove != null)
               _iconBtn(AppIcons.trash, '删除', onRemove!),
             if (onSendNow != null)

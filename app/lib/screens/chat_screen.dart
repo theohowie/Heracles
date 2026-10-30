@@ -5294,6 +5294,8 @@ class _ChatScreenState extends State<ChatScreen> {
             onQueuedSendNow: _sendQueuedNow,
             onQueuedRemove: _removeQueued,
             onQueuedPin: _pinQueued,
+            // ★ 2026-10-30：排队行就地编辑（复用已有的 _editQueued 抽屉）
+            onQueuedEdit: _editQueued,
             attachments: _attachments,
             onPickAttachment: _pickAttachment,
             onRemoveAttachment: _removeAttachment,

@@ -183,6 +183,43 @@ void main() {
     await settle(tester, times: 45); // 排空 toast 计时器
   });
 
+  testWidgets('★★ 排队行「编辑」⇒ 原地改文本，队列位置/附件不变、不发送',
+      (tester) async {
+    steerAccepted = true;
+    scriptLongRun();
+    await pumpChat(tester);
+    await send(tester, '跑一个长任务');
+    await settle(tester);
+
+    await send(tester, '排队原文ABC');
+    // 先把「已排队…」的 toast 计时走完 —— 它是一层 absorb-pointer 覆盖，
+    // 否则点排队行会被它吃掉（真机 2.2s 后同样消失）。
+    await settle(tester, times: 45);
+    expect(upButton, findsOneWidget, reason: '前置：已在排队');
+
+    // 点排队行的「编辑」
+    expect(find.byTooltip('编辑'), findsOneWidget,
+        reason: '排队行必须有编辑入口（旧实现只有管理面板里能点）');
+    await tester.tap(find.byTooltip('编辑'));
+    await settle(tester, times: 10);
+
+    expect(find.text('编辑排队消息'), findsOneWidget, reason: '编辑抽屉已打开');
+    await tester.enterText(
+        find.byType(CupertinoTextField).last, '改过的排队内容XYZ');
+    await settle(tester, times: 4);
+    await tester.tap(find.text('保存'));
+    await settle(tester, times: 10);
+
+    // 队列里换成新文案；旧的消失；仍在排队（没有被发出去）
+    expect(find.text('改过的排队内容XYZ'), findsOneWidget,
+        reason: '保存后队列行必须显示新文本');
+    expect(find.text('排队原文ABC'), findsNothing);
+    expect(upButton, findsOneWidget, reason: '编辑不改变"还在排队"这件事');
+
+    hold.complete();
+    await settle(tester, times: 45);
+  });
+
   testWidgets('★★ accepted=false ⇒ 明确提示 + 该条仍在排队（不许静默）',
       (tester) async {
     steerAccepted = false;

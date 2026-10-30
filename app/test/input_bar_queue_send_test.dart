@@ -83,4 +83,27 @@ void main() {
     expect(stopped, 1);
     expect(sent, isEmpty);
   });
+
+  testWidgets('★★ 排队行有「编辑」入口，点它交出该条下标（2026-10-30）',
+      (tester) async {
+    final edited = <int>[];
+    final sentNow = <int>[];
+
+    await tester.pumpWidget(wrap(InputBar(
+      onSend: (_) {},
+      queuedTexts: const ['排队原文'],
+      onQueuedEdit: edited.add,
+      onQueuedSendNow: sentNow.add,
+    )));
+    await tester.pump(const Duration(milliseconds: 300));
+
+    // 排队行必须能看到「编辑」按钮（旧实现只有 置顶/删除/立即发送）
+    expect(find.byTooltip('编辑'), findsOneWidget,
+        reason: '正在排队的消息必须能就地编辑');
+    await tester.tap(find.byTooltip('编辑'));
+    await tester.pump(const Duration(milliseconds: 200));
+
+    expect(edited, [0], reason: '点第 1 条必须交出下标 0');
+    expect(sentNow, isEmpty, reason: '编辑 ≠ 立即发送');
+  });
 }
