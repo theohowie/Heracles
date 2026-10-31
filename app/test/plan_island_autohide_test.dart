@@ -559,6 +559,38 @@ void main() {
         reason: '空计划不显示',
       );
     });
+
+    test('e3) 只认最后一条 plan 行：旧 4/5 + 完成 5/5 ⇒ 不恢复', () {
+      // 真机 bug 现场：同一 run 留下 4/5 未完成帧，随后 5/5 reachedGoal:true。
+      final rows = <Map<String, dynamic>>[
+        planRow(['done', 'done', 'done', 'done', 'active']),
+        planRow(List.filled(5, 'done'), reachedGoal: true),
+      ];
+      expect(restoredPlanFromRows(rows), isNull,
+          reason: '最后一条已完成 ⇒ 旧未完成快照不得复活灵动岛');
+
+      // 3 步任务的同形：2/3 旧帧 + 3/3 完成帧
+      expect(
+        restoredPlanFromRows([
+          planRow(['done', 'done', 'active']),
+          planRow(List.filled(3, 'done')),
+        ]),
+        isNull,
+      );
+
+      // 最后一条仍未完成 ⇒ 正常恢复最后一条的进度
+      final running = restoredPlanFromRows([
+        planRow(['done', 'done', 'active']),
+        planRow(['done', 'done', 'done', 'active', 'pending']),
+      ]);
+      expect(running, isNotNull);
+      expect(running!.done, 3);
+      expect(running.active, 3);
+
+      // 没有 plan 行 ⇒ null（调用方清空）
+      expect(restoredPlanFromRows([]), isNull);
+      expect(restoredPlanFromRows([{'role': 'user', 'text': 'hi'}]), isNull);
+    });
   });
 }
 

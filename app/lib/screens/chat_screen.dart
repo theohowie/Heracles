@@ -1859,35 +1859,22 @@ class _ChatScreenState extends State<ChatScreen> {
     // 顶上一个"4/5 进行中"的岛常驻，而任务其实早完成了。
     //
     // 现在：先找最后一条 plan 行，只应用它；它是已完成/空计划 ⇒ 清空状态。
-    Map<String, dynamic>? lastPlanRow;
-    for (final m in raw) {
-      if ((m['role'] as String?) == 'plan') lastPlanRow = m;
-    }
-    if (lastPlanRow != null) {
-      final restored = restoredPlanFromRow(lastPlanRow);
-      if (restored == null) {
-        // 最后一条是"已完成/全 cancelled/空计划" ⇒ 不恢复，并清空旧快照
-        _planSteps = null;
-        _planDone = 0;
-        _planActive = 0;
-        _planCancelled = const {};
-        _planReachedGoal = null;
-        _planClosedReason = null;
-      } else {
-        _planSteps = restored.steps;
-        _planDone = restored.done;
-        _planActive = restored.active;
-        _planReachedGoal = restored.reachedGoal;
-        _planClosedReason = restored.closedReason;
-      }
-    } else {
-      // 这批行里没有任何 plan（新会话/纯对话）—— 也不许留上一次的旧计划
+    final restored = restoredPlanFromRows(raw);
+    if (restored == null) {
+      // 最后一条是"已完成/全 cancelled/空计划"，或这批行没有任何 plan
+      // （新会话/纯对话）⇒ 不恢复，并清空旧快照
       _planSteps = null;
       _planDone = 0;
       _planActive = 0;
       _planCancelled = const {};
       _planReachedGoal = null;
       _planClosedReason = null;
+    } else {
+      _planSteps = restored.steps;
+      _planDone = restored.done;
+      _planActive = restored.active;
+      _planReachedGoal = restored.reachedGoal;
+      _planClosedReason = restored.closedReason;
     }
     final out = <HMessage>[];
     for (final m in raw) {
@@ -6766,6 +6753,21 @@ class RestoredPlan {
   final int active;
   final bool? reachedGoal;
   final String? closedReason;
+}
+
+/// 从**完整行序列**恢复历史计划：只认最后一条 `role:"plan"` 行。
+///
+/// T1-3（2026-10-31）：同一场 run 的 JSONL 常留多帧（如 4/5 未完成 →
+/// 5/5 reachedGoal:true）。旧实现逐行恢复，完成行返回 null 时只 continue，
+/// 结果把更早的 4/5 留了下来 ⇒ 切会话/重启后旧进度岛复活。这里显式取
+/// **最后一条**；没有 plan 行也返回 null（调用方清空旧状态）。
+RestoredPlan? restoredPlanFromRows(List<Map<String, dynamic>> rows) {
+  Map<String, dynamic>? lastPlanRow;
+  for (final row in rows) {
+    if ((row['role'] as String?) == 'plan') lastPlanRow = row;
+  }
+  if (lastPlanRow == null) return null;
+  return restoredPlanFromRow(lastPlanRow);
 }
 
 /// 把会话 JSONL 里的 `role:"plan"` 行解析成"能不能恢复灵动岛"。
