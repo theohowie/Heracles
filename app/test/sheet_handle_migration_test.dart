@@ -176,12 +176,15 @@ void main() {
 
   testWidgets('提问弹层：只有一个抓手', (tester) async {
     await openSheet(tester, (ctx) async {
-      await showAskGateSheet(ctx, questions: const [
+      await showAskGateSheet(ctx, questions: const <Map<String, dynamic>>[
         {
           'id': 'q1',
           'question': '选哪个方案？',
           'multi': false,
-          'options': ['甲', '乙'],
+          'options': [
+            {'label': '甲', 'description': ''},
+            {'label': '乙', 'description': ''},
+          ],
         },
       ]);
     });

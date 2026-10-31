@@ -416,20 +416,22 @@ class MessageRow extends StatelessWidget {
               mainAxisSize: MainAxisSize.min,
               crossAxisAlignment: CrossAxisAlignment.stretch,
               children: [
-                _menuRow(
-                  h,
+                BwActionCard(
+                  h: h,
                   icon: AppIcons.copy,
                   label: '复制',
                   onTap: () => Navigator.of(sheetCtx).pop('copy'),
                 ),
-                if (onEdit != null)
-                  _menuRow(
-                    h,
+                if (onEdit != null) ...[
+                  const SizedBox(height: 8),
+                  BwActionCard(
+                    h: h,
                     icon: AppIcons.edit,
                     label: '编辑重发',
                     subtitle: '把这条消息放回输入框修改后重新发送',
                     onTap: () => Navigator.of(sheetCtx).pop('edit'),
                   ),
+                ],
               ],
             ),
           ),
@@ -449,39 +451,7 @@ class MessageRow extends StatelessWidget {
     }
   }
 
-  /// 抽屉菜单行（图标 + 标题 + 可选副标题），与全 App 菜单同一规格。
-Widget _menuRow(
-  Hue h, {
-  required IconData icon,
-  required String label,
-  String? subtitle,
-  required VoidCallback onTap,
-}) {
-  return InkWell(
-    borderRadius: BorderRadius.circular(12),
-    onTap: onTap,
-    child: Padding(
-      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 11),
-      child: Row(
-        children: [
-          Icon(icon, size: 19, color: h.textDim),
-          const SizedBox(width: 12),
-          Expanded(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Text(label, style: TextStyle(fontSize: 15, color: h.text)),
-                if (subtitle != null)
-                  Text(subtitle,
-                      style: TextStyle(fontSize: 11.5, color: h.textFaint)),
-              ],
-            ),
-          ),
-        ],
-      ),
-    ),
-  );
-}
+  /// 抽屉菜单行已统一迁到 [BwActionCard]（2026-10-31 T2-4），不再保留裸 InkWell 行。
 
 /// 助手消息：无边框，靠间距与字体区分
   Widget _assistant(

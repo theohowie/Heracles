@@ -2573,41 +2573,7 @@ class ModelSettingsPage extends StatelessWidget {
   }
 }
 
-/// 提供商菜单行（与全 App 抽屉菜单同一规格）。
-Widget _providerMenuRow(
-  Hue h, {
-  required IconData icon,
-  required String label,
-  String? subtitle,
-  bool danger = false,
-  required VoidCallback onTap,
-}) {
-  final color = danger ? HColors.errorOn(h.dark) : h.text;
-  return InkWell(
-    borderRadius: BorderRadius.circular(12),
-    onTap: onTap,
-    child: Padding(
-      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 11),
-      child: Row(
-        children: [
-          Icon(icon, size: 19, color: color),
-          const SizedBox(width: 12),
-          Expanded(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Text(label, style: TextStyle(fontSize: 15, color: color)),
-                if (subtitle != null)
-                  Text(subtitle,
-                      style: TextStyle(fontSize: 11.5, color: h.textFaint)),
-              ],
-            ),
-          ),
-        ],
-      ),
-    ),
-  );
-}
+/// 提供商菜单行已统一迁到 [BwActionCard]（2026-10-31 T2-4），不再保留裸 InkWell 行。
 
 class _ProviderCard extends StatelessWidget {
   const _ProviderCard({
@@ -2663,14 +2629,15 @@ class _ProviderCard extends StatelessWidget {
                         color: h.text),
                   ),
                 ),
-                _providerMenuRow(
-                  h,
+                BwActionCard(
+                  h: h,
                   icon: CupertinoIcons.square_pencil_fill,
                   label: '编辑',
                   onTap: () => Navigator.of(sheetCtx).pop(false),
                 ),
-                _providerMenuRow(
-                  h,
+                const SizedBox(height: 8),
+                BwActionCard(
+                  h: h,
                   icon: CupertinoIcons.trash_fill,
                   label: '删除',
                   subtitle: '同时清除已保存的 API Key',

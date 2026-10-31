@@ -169,7 +169,7 @@ class _ArchivedSessionsScreenState extends State<ArchivedSessionsScreen> {
                     fontSize: 13, fontWeight: FontWeight.w600, color: h.text),
               ),
             ),
-            _MenuRow(
+            BwActionCard(
               h: h,
               icon: CupertinoIcons.chat_bubble_fill,
               label: '打开',
@@ -178,7 +178,8 @@ class _ArchivedSessionsScreenState extends State<ArchivedSessionsScreen> {
                 widget.onOpen(w.id, s.id);
               },
             ),
-            _MenuRow(
+            const SizedBox(height: 8),
+            BwActionCard(
               h: h,
               icon: CupertinoIcons.archivebox,
               label: '取消归档',
@@ -187,7 +188,8 @@ class _ArchivedSessionsScreenState extends State<ArchivedSessionsScreen> {
                 _unarchive(w, s);
               },
             ),
-            _MenuRow(
+            const SizedBox(height: 8),
+            BwActionCard(
               h: h,
               icon: CupertinoIcons.trash_fill,
               label: '删除',
@@ -326,38 +328,5 @@ class _ArchivedRow extends StatelessWidget {
   }
 }
 
-class _MenuRow extends StatelessWidget {
-  const _MenuRow({
-    required this.h,
-    required this.icon,
-    required this.label,
-    required this.onTap,
-    this.danger = false,
-  });
 
-  final Hue h;
-  final IconData icon;
-  final String label;
-  final VoidCallback onTap;
-  final bool danger;
-
-  @override
-  Widget build(BuildContext context) {
-    final color = danger ? HColors.errorOn(h.dark) : h.text;
-    return InkWell(
-      borderRadius: BorderRadius.circular(12),
-      onTap: onTap,
-      child: Padding(
-        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 12),
-        child: Row(
-          children: [
-            Icon(icon, size: 18, color: color),
-            const SizedBox(width: 12),
-            Text(label, style: TextStyle(fontSize: 15, color: color)),
-          ],
-        ),
-      ),
-    );
-  }
-}
 
