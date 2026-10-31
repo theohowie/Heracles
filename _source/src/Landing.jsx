@@ -205,7 +205,7 @@ function Film() {
           <video
             key={`${near}-${srcIdx}`}
             src={near && !failed ? VIDEOS.hero[srcIdx] : undefined}
-            poster={SHOT('hero-v3')}
+            poster={SHOT('film-poster')}
             autoPlay={!reduce} muted loop playsInline preload="none"
             aria-label="Heracles 真机操作录屏（无声，15 秒循环）"
             onError={() => {
