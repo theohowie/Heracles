@@ -7,6 +7,7 @@ import 'package:heracles/screens/sandbox_screen.dart';
 import 'package:heracles/screens/settings_screen.dart';
 import 'package:heracles/services/settings_controller.dart';
 import 'package:heracles/theme/app_theme.dart';
+import 'package:heracles/widgets/bw_approval.dart';
 
 import 'support/secure_storage_mock.dart';
 
@@ -176,6 +177,35 @@ void main() {
     expect(calls, contains('reset'));
     expect(find.text('未激活'), findsOneWidget);
     await tester.pump(const Duration(seconds: 3));
+  });
+
+  testWidgets('★★ 重置确认抽屉：只有壳自带的一只抓手（不自绘）', (tester) async {
+    installed = true;
+    await tester.pumpWidget(wrap(const SandboxScreen()));
+    await tester.pump();
+    await tester.scrollUntilVisible(find.text('重置沙箱'), 120);
+    await tester.tap(find.text('重置沙箱'));
+    await tester.pumpAndSettle();
+    expect(find.text('重置沙箱？'), findsOneWidget);
+    // T2-4：抽屉统一（共享壳 + 共享抓手），本页不许再自绘抓手
+    expect(find.byType(BwSheetShell), findsOneWidget);
+    expect(tester.widget<BwSheetShell>(find.byType(BwSheetShell)).showHandle,
+        isTrue);
+    expect(find.byType(BwSheetHandle), findsOneWidget);
+    final bars = tester
+        .widgetList(find.byWidgetPredicate((w) {
+          if (w is! Container) return false;
+          final c = w.constraints;
+          return c != null &&
+              c.minWidth == 36 &&
+              c.maxWidth == 36 &&
+              c.minHeight == 4 &&
+              c.maxHeight == 4;
+        }))
+        .length;
+    expect(bars, 1, reason: '沙箱抽屉里出现 $bars 条 36×4 抓手（应只有共享那一只）');
+    await tester.tap(find.text('取消'));
+    await tester.pumpAndSettle();
   });
 
   testWidgets('设置主页有沙箱入口且副行带状态', (tester) async {

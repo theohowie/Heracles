@@ -204,17 +204,6 @@ class _GitHubConnectSheetState extends State<_GitHubConnectSheet> {
             crossAxisAlignment: CrossAxisAlignment.stretch,
             children: [
               // 抓手
-              Center(
-                child: Container(
-                  width: 36,
-                  height: 4,
-                  margin: const EdgeInsets.only(bottom: HSpace.sm),
-                  decoration: BoxDecoration(
-                    color: h.border,
-                    borderRadius: BorderRadius.circular(2),
-                  ),
-                ),
-              ),
               Text(
                 '连接 Github',
                 style: TextStyle(

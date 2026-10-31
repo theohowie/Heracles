@@ -362,17 +362,6 @@ class _GitPanelState extends State<_GitPanel> {
               mainAxisSize: MainAxisSize.min,
               crossAxisAlignment: CrossAxisAlignment.stretch,
               children: [
-                Center(
-                  child: Container(
-                    width: 36,
-                    height: 4,
-                    margin: const EdgeInsets.only(bottom: HSpace.sm),
-                    decoration: BoxDecoration(
-                      color: widget.h.border,
-                      borderRadius: BorderRadius.circular(2),
-                    ),
-                  ),
-                ),
                 Text('新建分支',
                     style: TextStyle(
                         fontSize: 17,
@@ -491,17 +480,6 @@ class _GitPanelState extends State<_GitPanel> {
             mainAxisSize: MainAxisSize.min,
             crossAxisAlignment: CrossAxisAlignment.stretch,
             children: [
-              Center(
-                child: Container(
-                  width: 36,
-                  height: 4,
-                  margin: const EdgeInsets.only(bottom: HSpace.md),
-                  decoration: BoxDecoration(
-                    color: h.border,
-                    borderRadius: BorderRadius.circular(2),
-                  ),
-                ),
-              ),
               Row(
                 children: [
                   Icon(CupertinoIcons.arrow_branch,

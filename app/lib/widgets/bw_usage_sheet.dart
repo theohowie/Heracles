@@ -60,14 +60,6 @@ class _UsageSheetState extends State<_UsageSheet> {
         child: Column(
           children: [
             const SizedBox(height: 10),
-            Container(
-              width: 36,
-              height: 4,
-              decoration: BoxDecoration(
-                color: h.border,
-                borderRadius: BorderRadius.circular(999),
-              ),
-            ),
             Padding(
               padding: const EdgeInsets.fromLTRB(20, 12, 8, 4),
               child: Row(

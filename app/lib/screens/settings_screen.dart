@@ -2225,16 +2225,6 @@ class _MemoryEditorSheetState extends State<_MemoryEditorSheet> {
             mainAxisSize: MainAxisSize.min,
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              Center(
-                child: Container(
-                  width: 36,
-                  height: 4,
-                  decoration: BoxDecoration(
-                    color: h.border,
-                    borderRadius: BorderRadius.circular(2),
-                  ),
-                ),
-              ),
               const SizedBox(height: HSpace.md),
               Text(
                 _isEdit ? '编辑记忆' : '添加记忆',

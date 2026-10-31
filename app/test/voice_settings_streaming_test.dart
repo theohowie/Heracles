@@ -1,4 +1,4 @@
-﻿// Copyright (C) 2026 The Heracles Authors
+// Copyright (C) 2026 The Heracles Authors
 // SPDX-License-Identifier: GPL-3.0
 //
 // **语音设置页：两张模型卡 + 页顶总状态 + 真卸载/重装**（task-7 / T0-1，2026-10-31）。
@@ -14,12 +14,17 @@
 // 本文件钉住：
 //   ① 流式已就绪 + SenseVoice 未下载 ⇒ 总状态「可用」，未下载只出现在
 //      SenseVoice 那张卡里；两张卡都在；未下载时不显示「删除」
-//   ② 两套都没准备 ⇒ 总状态是「首次使用自动准备」，不是「未下载」
+//   ② 两套都没准备 ⇒ 总状态是「需准备」，不是「未下载」
 //   ③ 内置准备失败 ⇒ 卡片显示 bundledStreamingError 人话 + 总状态「需准备」，
 //      点「重试」真的重新解压并恢复「已就绪」
 //   ④ 卸载：确认后真删两个模型目录 + 总状态「已卸载」+ 出现「重新安装」
 //   ⑤ 重新安装：清卸载标记 + 重新解压内置模型 ⇒ 恢复「语音输入可用」
 //   ⑥ SenseVoice 已下载才显示「删除」
+//   ⑦ 页面显示模型真实目录 + 卸载即删说明
+//   ⑧ T1-2：总状态明说「可用（无需下载）」；SenseVoice 副标题「可选 ·
+//      未下载不影响语音输入」；页面底部三段说明长文已删
+//   ⑨ T1-2：AppBar「?」打开说明抽屉（BwSheetShell 统一抓手 + 标题 +
+//      三段原文 + 可滚动），关闭后回原页
 library;
 
 import 'dart:io';
@@ -32,6 +37,7 @@ import 'package:heracles/models/jev.dart';
 import 'package:heracles/screens/voice_settings_screen.dart';
 import 'package:heracles/services/voice_service.dart';
 import 'package:heracles/theme/app_theme.dart';
+import 'package:heracles/widgets/bw_approval.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 void main() {
@@ -172,8 +178,8 @@ void main() {
     final total = textOf(tester, 'voice-total-status');
     expect(total, contains('语音输入可用'),
         reason: '流式内置已就绪就是「语音输入可用」—— 不能被 SenseVoice 未下载拖成整体不可用');
-    expect(total, contains('流式识别已就绪'),
-        reason: '总状态要点明「流式识别已就绪」，不能只落到"首次使用自动准备"那种泛化文案');
+    expect(total, contains('无需下载'),
+        reason: 'T1-2：「无需下载」必须明说 —— 用户不该以为要下 231MB 才能用语音');
     expect(total, isNot(contains('未下载')), reason: '总状态不许出现「未下载」口径');
     expect(total, isNot(contains('不可用')));
 
@@ -181,19 +187,19 @@ void main() {
     expect(find.byKey(const Key('voice-streaming-card')), findsOneWidget);
     expect(find.byKey(const Key('voice-sensevoice-card')), findsOneWidget);
     expect(textOf(tester, 'voice-streaming-status'), contains('已就绪'));
-    expect(inCard('voice-sensevoice-card', find.textContaining('未下载')),
+    expect(inCard('voice-sensevoice-card', find.textContaining('ONNX 量化版')),
         findsOneWidget);
 
     // 未下载 ⇒ 不显示「删除」（删的是 SenseVoice，不是整体）。
     expect(find.text('删除'), findsNothing);
   });
 
-  testWidgets('② 两套都没准备 ⇒ 总状态「首次使用自动准备」，不是「未下载」',
+  testWidgets('② 两套都没准备 ⇒ 总状态「需准备」，不是「未下载」',
       (tester) async {
     await pumpScreen(tester);
 
     final total = textOf(tester, 'voice-total-status');
-    expect(total, contains('自动准备'),
+    expect(total, contains('语音输入需准备'),
         reason: '内置模型开箱即用、首次点麦克风才解压 —— 不该显示未下载/需重下');
     expect(total, isNot(contains('未下载')));
     expect(textOf(tester, 'voice-streaming-status'), contains('首次使用'));
@@ -260,7 +266,7 @@ void main() {
       isFalse,
       reason: 'SenseVoice 目录也必须删掉',
     );
-    expect(textOf(tester, 'voice-total-status'), contains('已卸载'));
+    expect(textOf(tester, 'voice-total-status'), contains('语音输入不可用（已卸载）'));
     expect(textOf(tester, 'voice-action-note'), contains('已释放'));
     expect(find.byKey(const Key('voice-install')), findsOneWidget);
     expect(find.byKey(const Key('voice-uninstall')), findsNothing);
@@ -286,7 +292,7 @@ void main() {
     };
 
     await pumpScreen(tester);
-    expect(textOf(tester, 'voice-total-status'), contains('已卸载'));
+    expect(textOf(tester, 'voice-total-status'), contains('语音输入不可用（已卸载）'));
     expect(find.byKey(const Key('voice-install')), findsOneWidget);
 
     await tester.tap(find.byKey(const Key('voice-install')));
@@ -326,5 +332,75 @@ void main() {
         reason: '目录必须是真实路径（不是编的）: $expectedDir');
     expect(find.textContaining('卸载语音输入'), findsWidgets,
         reason: '要写清卸载会删掉这个目录下的两套模型');
+  });
+
+  // ------------------------------------------------ T1-2：无需下载 / 说明抽屉
+
+  testWidgets('⑧ 总状态明说「可用（无需下载）」+ SenseVoice 副标题「可选 · 未下载不影响语音输入」',
+      (tester) async {
+    await tester.runAsync(seedBundledReady);
+    await pumpScreen(tester);
+
+    expect(textOf(tester, 'voice-total-status'), contains('语音输入可用（无需下载）'),
+        reason: '内置流式随包 —— SenseVoice 未下载时必须明说"可用且无需下载"，'
+            '否则用户会以为必须下 231MB 才能用语音');
+
+    final optional =
+        tester.widget<Text>(find.byKey(const Key('voice-sensevoice-optional')));
+    final text = optional.data ?? optional.textSpan!.toPlainText();
+    expect(text, contains('可选'), reason: 'SenseVoice 是可选高精度模型');
+    expect(text, contains('未下载不影响语音输入'),
+        reason: '不能让「未下载」看起来像故障/缺失必需件');
+
+    // 三段说明长文已从页面底部删除（只留在 ? 抽屉里）。
+    expect(find.textContaining('14M 中文 streaming zipformer 已随 App 打包'),
+        findsNothing, reason: '说明长文收进抽屉后，页面上不该还有');
+    expect(find.textContaining('经 ModelScope 官方仓库下载'), findsNothing);
+    expect(find.textContaining('麦克风权限在「设置 → 设备权限」里统一开启'), findsNothing);
+  });
+
+  testWidgets('⑨ AppBar「?」打开说明抽屉：标题 + 三段原文 + 统一抓手 + 可滚动；关闭回原页',
+      (tester) async {
+    // 矮屏：让三段说明超出可视高度，同时验证「可滚动」而不是溢出。
+    tester.view.physicalSize = const Size(320, 420);
+    tester.view.devicePixelRatio = 1.0;
+    addTearDown(tester.view.reset);
+
+    await pumpScreen(tester);
+    expect(find.byKey(const Key('voice-help')), findsOneWidget,
+        reason: 'AppBar 右上角要有「?」入口');
+    expect(find.text('语音识别说明'), findsNothing);
+
+    await tester.tap(find.byKey(const Key('voice-help')));
+    await tester.pumpAndSettle();
+
+    expect(find.text('语音识别说明'), findsOneWidget, reason: '抽屉标题');
+    // 三段原文搬进抽屉（不是删掉）。
+    expect(find.textContaining('流式识别（内置）：14M 中文 streaming zipformer'),
+        findsOneWidget);
+    expect(find.textContaining('整段识别（可选）：SenseVoiceSmall'), findsOneWidget);
+    expect(find.textContaining('「卸载语音输入」会删掉两套模型'), findsOneWidget);
+    expect(find.textContaining('麦克风权限在「设置 → 设备权限」里统一开启'), findsOneWidget);
+
+    // 统一抓手由 BwSheetShell 默认渲染（别自绘 ⇒ 只能有一个）。
+    expect(find.byType(BwSheetHandle), findsOneWidget,
+        reason: '抽屉抓手必须走 BwSheetShell 的统一 BwSheetHandle');
+
+    // 内容可滚动：矮屏下三段说明超出可视高度，应能滚（不是溢出裁字）。
+    final scrollable = tester.state<ScrollableState>(find
+        .descendant(
+          of: find.byType(BwSheetShell),
+          matching: find.byType(Scrollable),
+        )
+        .first);
+    expect(scrollable.position.maxScrollExtent, greaterThan(0),
+        reason: '说明抽屉内容要能滚动（矮屏/大字号下不能溢出）');
+    expect(tester.takeException(), isNull);
+
+    // 关闭 ⇒ 回原页。
+    await tester.tap(find.byKey(const Key('voice-help-close')));
+    await tester.pumpAndSettle();
+    expect(find.text('语音识别说明'), findsNothing, reason: '关掉抽屉应回到原页');
+    expect(find.byKey(const Key('voice-total-status')), findsOneWidget);
   });
 }

@@ -21,6 +21,7 @@
 //   j) 4 秒到点先淡出（岛还在、opacity→0），220ms 后才清空（不许闪跳）
 
 import 'dart:async';
+import 'dart:convert';
 
 import 'package:flutter/cupertino.dart';
 import 'package:flutter/material.dart';
@@ -61,6 +62,11 @@ void main() {
   /// 按顺序消费的脚本队列：每次 `run()` 取一个（用于第 d 条"新旧两轮"）。
   final scripts = <Future<void> Function()>[];
 
+  /// 会话列表（`sessions.json`）与各会话落盘行 —— 供"切会话/重启后旧计划
+  /// 复活"（T1-3）的 UI 用例复用同一套真通道夹具。
+  final sessions = <Map<String, dynamic>>[];
+  final messagesBySession = <String, List<Map<String, dynamic>>>{};
+
   void installMocks() {
     final messenger =
         TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger;
@@ -77,17 +83,32 @@ void main() {
     messenger.setMockMethodCallHandler(deviceChannel, (call) async {
       final args = call.arguments is Map ? call.arguments as Map : const {};
       final path = args['path'] as String? ?? '';
+      final sid = path.split('/').last.replaceAll('.jsonl', '');
       switch (call.method) {
         case 'fs.stat':
           return <String, dynamic>{'ok': true, 'exists': false};
         case 'fs.readText':
+          if (path.endsWith('sessions.json')) {
+            return <String, dynamic>{
+              'ok': true,
+              'text': jsonEncode(sessions),
+              'truncated': false,
+            };
+          }
+          final rows = messagesBySession[sid] ?? const <Map<String, dynamic>>[];
           return <String, dynamic>{
             'ok': true,
-            'text': path.endsWith('sessions.json') ? '[]' : '',
+            'text': rows.map(jsonEncode).join('\n'),
             'truncated': false,
           };
         case 'fs.readTailLines':
-          return <String, dynamic>{'ok': true, 'lines': <String>[]};
+          // Kotlin 契约：`{ok, text, truncated}`（不是 lines 列表）。
+          final rows = messagesBySession[sid] ?? const <Map<String, dynamic>>[];
+          return <String, dynamic>{
+            'ok': true,
+            'text': rows.map(jsonEncode).join('\n'),
+            'truncated': false,
+          };
         case 'fs.appendText':
         case 'fs.writeText':
         case 'fs.mkdir':
@@ -121,6 +142,8 @@ void main() {
     AgentBridge.executorFactoryForTest = null;
     pushRef = null;
     scripts.clear();
+    sessions.clear();
+    messagesBySession.clear();
   });
 
   Future<SettingsController> freshController() async {

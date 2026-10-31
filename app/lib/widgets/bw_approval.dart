@@ -1,4 +1,4 @@
-import 'dart:async';
+﻿import 'dart:async';
 
 import 'package:flutter/cupertino.dart';
 import 'package:flutter/material.dart';
@@ -32,16 +32,53 @@ import '../theme/cupertino_kit.dart';
 ///
 /// 安全抽屉（审批请求、完全访问二次确认）allowDrag=false：
 /// 只能按钮决策，下滑/点外都不构成决定——只保留入场弹性。
+/// **上拉抽屉统一抓手**（2026-10-31 用户定版，T2-4）。
+///
+/// 规格：36×4、pill 圆角、`h.border` 颜色、顶部/底部间距统一。
+/// 由 [BwSheetShell] 默认渲染（`showHandle: true`）—— 各抽屉**不要再自绘**
+/// 抓手，否则会出现双抓手（`test/bw_sheet_handle_test.dart` 有防回归断言）。
+class BwSheetHandle extends StatelessWidget {
+  const BwSheetHandle({super.key});
+
+  /// 抓手尺寸（用户定版，别改）
+  static const double width = 36;
+  static const double height = 4;
+
+  @override
+  Widget build(BuildContext context) {
+    final h = Hue.of(context);
+    return Padding(
+      // 顶部/底部间距统一（此前各抽屉 8/10/12/14 混用）
+      padding: const EdgeInsets.only(top: 10, bottom: 12),
+      child: Center(
+        child: Container(
+          width: width,
+          height: height,
+          decoration: BoxDecoration(
+            color: h.border,
+            borderRadius: BorderRadius.circular(HRadius.pill),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
 class BwSheetShell extends StatefulWidget {
   const BwSheetShell({
     super.key,
     required this.onDismissRequest,
     required this.child,
     this.allowDrag = true,
+    this.showHandle = true,
   });
 
   final VoidCallback onDismissRequest;
   final bool allowDrag;
+
+  /// 是否渲染统一抓手（默认 true）。只有**自己已有更合适头部**的极少数
+  /// 抽屉才允许关掉 —— 关之前先确认不是"忘了删本地抓手"。
+  final bool showHandle;
   final Widget child;
 
   @override
@@ -196,7 +233,18 @@ class _BwSheetShellState extends State<BwSheetShell>
     //   内容按自然高度摆在顶部（OverflowBox 允许超出、由盒子裁剪）——
     //   上拉 = 盒子变高（停靠 66%/80%），下方始终是白色表面。
     final h = Hue.of(context);
-    final measured = KeyedSubtree(key: _measureKey, child: widget.child);
+    // ★ 2026-10-31（T2-4）：统一抓手由壳渲染 —— 各抽屉删掉自绘抓手，
+    //   否则双抓手。抓手放进被测量的子树里，自然高度才算得准。
+    final measured = KeyedSubtree(
+      key: _measureKey,
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          if (widget.showHandle) const BwSheetHandle(),
+          widget.child,
+        ],
+      ),
+    );
     final Widget body = LayoutBuilder(
       builder: (context, constraints) {
         _availH = constraints.maxHeight;
@@ -290,17 +338,6 @@ class _FullAccessConfirmSheetState extends State<_FullAccessConfirmSheet> {
           mainAxisSize: MainAxisSize.min,
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            Center(
-              child: Container(
-                width: 36,
-                height: 4,
-                decoration: BoxDecoration(
-                  color: h.border,
-                  borderRadius: BorderRadius.circular(999),
-                ),
-              ),
-            ),
-            const SizedBox(height: 16),
             const Text(
               '开启完全访问？',
               style: TextStyle(fontSize: 17, fontWeight: FontWeight.w700),
@@ -453,17 +490,6 @@ Future<void> showApprovalModeSheet(
             mainAxisSize: MainAxisSize.min,
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-            Center(
-              child: Container(
-                width: 36,
-                height: 4,
-                decoration: BoxDecoration(
-                  color: h.border,
-                  borderRadius: BorderRadius.circular(999),
-                ),
-              ),
-            ),
-            const SizedBox(height: 14),
             Text(
               '审批模式',
               style: TextStyle(
@@ -550,17 +576,6 @@ Future<T?> showBwRadioSheet<T>(
             mainAxisSize: MainAxisSize.min,
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              Center(
-                child: Container(
-                  width: 36,
-                  height: 4,
-                  decoration: BoxDecoration(
-                    color: h.border,
-                    borderRadius: BorderRadius.circular(999),
-                  ),
-                ),
-              ),
-              const SizedBox(height: 14),
               Text(title,
                   style: TextStyle(
                       fontSize: 17,
@@ -1034,7 +1049,7 @@ class _ApprovalRequestBodyState extends State<_ApprovalRequestBody> {
 
   @override
   Widget build(BuildContext context) {
-    final h = widget.h;
+    // final h = widget.h;  // 2026-10-31: 抓手已由 BwSheetShell 统一渲染，本 build 不再用 h
     return SafeArea(
       child: ConstrainedBox(
         constraints: BoxConstraints(
@@ -1046,17 +1061,6 @@ class _ApprovalRequestBodyState extends State<_ApprovalRequestBody> {
             mainAxisSize: MainAxisSize.min,
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              Center(
-                child: Container(
-                  width: 36,
-                  height: 4,
-                  decoration: BoxDecoration(
-                    color: h.border,
-                    borderRadius: BorderRadius.circular(999),
-                  ),
-                ),
-              ),
-              const SizedBox(height: 16),
               Flexible(
                 child: SingleChildScrollView(
                   child: AnimatedSize(
@@ -1356,17 +1360,6 @@ Future<bool> showBwConfirmSheet(
           mainAxisSize: MainAxisSize.min,
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            Center(
-              child: Container(
-                width: 36,
-                height: 4,
-                decoration: BoxDecoration(
-                  color: h.border,
-                  borderRadius: BorderRadius.circular(999),
-                ),
-              ),
-            ),
-            const SizedBox(height: 16),
             Text(
               title,
               style: const TextStyle(fontSize: 17, fontWeight: FontWeight.w700),
@@ -1499,17 +1492,6 @@ class _BwTextInputSheetState extends State<_BwTextInputSheet> {
             mainAxisSize: MainAxisSize.min,
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              Center(
-                child: Container(
-                  width: 36,
-                  height: 4,
-                  decoration: BoxDecoration(
-                    color: h.border,
-                    borderRadius: BorderRadius.circular(999),
-                  ),
-                ),
-              ),
-              const SizedBox(height: 16),
               Text(
                 widget.title,
                 style:
@@ -1785,17 +1767,6 @@ Future<AskSheetResult?> showAskGateSheet(
                 mainAxisSize: MainAxisSize.min,
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                  Center(
-                    child: Container(
-                      width: 36,
-                      height: 4,
-                      decoration: BoxDecoration(
-                        color: h.border,
-                        borderRadius: BorderRadius.circular(999),
-                      ),
-                    ),
-                  ),
-                  const SizedBox(height: 14),
                   Row(
                     children: [
                       Icon(CupertinoIcons.question_circle_fill,

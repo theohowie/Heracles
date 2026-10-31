@@ -166,17 +166,6 @@ class _GitBranchSheetState extends State<_GitBranchSheet> {
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
             // 抓手
-            Center(
-              child: Container(
-                width: 36,
-                height: 4,
-                margin: const EdgeInsets.only(bottom: HSpace.sm),
-                decoration: BoxDecoration(
-                  color: h.border,
-                  borderRadius: BorderRadius.circular(2),
-                ),
-              ),
-            ),
             // 标题左对齐（与「选择仓库」统一）
             Text(
               '选择分支',

@@ -668,7 +668,6 @@ class _WorkspaceDrawerBody extends StatelessWidget {
             mainAxisSize: MainAxisSize.min,
             crossAxisAlignment: CrossAxisAlignment.stretch,
             children: [
-              _bwSheetHandle(h),
               const SizedBox(height: 8),
               Padding(
                 padding: const EdgeInsets.fromLTRB(12, 4, 12, 8),
@@ -930,7 +929,6 @@ class _WorkspaceDrawerBody extends StatelessWidget {
                     // 边框的选项卡（与审批模式/单选抽屉同款），
                     // 选中 = 主文本色边框（浅色下黑边框）；旧版
                     // 「纯文字行 + 右侧对勾」与抓手一起补齐。
-                    _bwSheetHandle(h),
                     _sheetGroupLabel(h, '分组方式'),
                     _optionCard(h, '按工作区',
                         draft.grouping == SessionGrouping.byWorkspace, () {
@@ -1058,7 +1056,6 @@ void _sessionMenu(
         child: Column(
           mainAxisSize: MainAxisSize.min,
           children: [
-            _bwSheetHandle(h),
             const SizedBox(height: 8),
             _bwMenuRow(
               h,
@@ -1108,17 +1105,6 @@ void _sessionMenu(
 }
 
 /// 抽屉抓手（与 bw 系列抽屉一致的样式）
-Widget _bwSheetHandle(Hue h) => Center(
-      child: Container(
-        width: 36,
-        height: 4,
-        decoration: BoxDecoration(
-          color: h.border,
-          borderRadius: BorderRadius.circular(999),
-        ),
-      ),
-    );
-
 /// 统一抽屉菜单行 = 边框动作卡（BwActionCard，2026-10-29 用户
 /// 定版）：灰边框、无单选圆圈，按下时边框变主文本色；
 /// [danger] = 图标与文字一起语义红（删除类）。
@@ -1507,7 +1493,6 @@ class _AddWorkspaceMenu extends StatelessWidget {
               mainAxisSize: MainAxisSize.min,
               crossAxisAlignment: CrossAxisAlignment.stretch,
               children: [
-                _bwSheetHandle(h),
                 const SizedBox(height: 8),
                 _bwMenuRow(
                   h,
@@ -1779,7 +1764,6 @@ class _WorkspaceGroup extends StatelessWidget {
           child: Column(
             mainAxisSize: MainAxisSize.min,
             children: [
-              _bwSheetHandle(h),
               const SizedBox(height: 8),
               // 路径行：点按 → 在系统文件管理里打开这个文件夹
               // （宿主 fs.openFolder；打不开时外层 toast 如实提示）

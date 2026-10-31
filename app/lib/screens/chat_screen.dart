@@ -1,4 +1,4 @@
-﻿import 'dart:async';
+import 'dart:async';
 import 'dart:convert';
 
 import 'package:flutter/cupertino.dart';
@@ -1110,6 +1110,9 @@ class _ChatScreenState extends State<ChatScreen> {
     _restoreView();
     unawaited(_jev.load());
     unawaited(_reload().then((_) => _consumePendingOpenSession()));
+    // ★ T1-1（2026-10-31）：首屏进入就刷一次上下文占用 —— 冷启动时用户
+    //   可能直接落在"上次的会话"上，不刷新顶栏就是「上下文 —」。
+    unawaited(_refreshContextUsage());
   }
 
   /// **完成通知点击 → 打开对应会话**（2026-10-19）。
@@ -1756,6 +1759,11 @@ class _ChatScreenState extends State<ChatScreen> {
       _metrics.clear();
       _error = null;
       _loadingHistory = true;
+      // ★ T1-1（2026-10-31）：上下文占用属于**上一个会话**，切换/加载前先复位，
+      //   否则顶栏会短暂显示上个会话的环数（甚至把「—」拖到新会话）。
+      _contextLimit = -1;
+      _frozenTokens = -1;
+      _contextBreakdown = const <String, int>{};
     });
 
     try {
@@ -1791,6 +1799,12 @@ class _ChatScreenState extends State<ChatScreen> {
         }
         _loadingHistory = false;
       });
+
+      // ★ T1-1（2026-10-31）：会话加载完成立刻刷新上下文占用 ——
+      //   旧实现只在"打开用量抽屉 / run 结束"时刷新，冷启动直接进历史会话时
+      //   `_contextLimit` 还是初值 -1 ⇒ 顶栏永远「上下文 —」，直到用户点开
+      //   用量抽屉才突然有数（真机复现）。刷新失败保持「—」，不编 0%。
+      unawaited(_refreshContextUsage());
 
       // ★ 切回一个**仍在运行**的会话 → 重连事件订阅（2026-10-11，t11 的 #3）
       //
@@ -1834,18 +1848,46 @@ class _ChatScreenState extends State<ChatScreen> {
     // ★ T0-2（2026-10-31）：分页状态由本批行决定 —— 每次重放先复位
     //   （合成分页行只在"还有更早"时出现，见下面的 case 'system'）。
     _historyHasEarlier = false;
-    // ★ 计划恢复（M2，2026-10-24）：取**最后一条** plan 行还原顶部清单。
-    //   副作用写在转换器里（重载必经之路）；实时路径不受影响
-    //   （plan_created 事件照常覆盖这些字段）。
-    //   ★ 2026-10-30 P0：已完成的计划**不恢复**（见 restoredPlanFromRow）。
+    // ★ 计划恢复（M2，2026-10-24 / T1-3 2026-10-31 修正）：只认**最后一条**
+    //   `role:"plan"` 行。
+    //
+    // ## 旧实现为什么让"已完成任务"的岛复活
+    //
+    // 旧代码逐行 `restoredPlanFromRow(m)` 并 `continue`：同一 run 的 JSONL 里
+    // 常见「4/5 未完成」→「5/5 reachedGoal:true」两帧；最后那帧返回 null 时
+    // 只是 continue，**前面 4/5 的快照就留在了字段里** ⇒ 切会话/杀进程重开后
+    // 顶上一个"4/5 进行中"的岛常驻，而任务其实早完成了。
+    //
+    // 现在：先找最后一条 plan 行，只应用它；它是已完成/空计划 ⇒ 清空状态。
+    Map<String, dynamic>? lastPlanRow;
     for (final m in raw) {
-      final restored = restoredPlanFromRow(m);
-      if (restored == null) continue;
-      _planSteps = restored.steps;
-      _planDone = restored.done;
-      _planActive = restored.active;
-      _planReachedGoal = restored.reachedGoal;
-      _planClosedReason = restored.closedReason;
+      if ((m['role'] as String?) == 'plan') lastPlanRow = m;
+    }
+    if (lastPlanRow != null) {
+      final restored = restoredPlanFromRow(lastPlanRow);
+      if (restored == null) {
+        // 最后一条是"已完成/全 cancelled/空计划" ⇒ 不恢复，并清空旧快照
+        _planSteps = null;
+        _planDone = 0;
+        _planActive = 0;
+        _planCancelled = const {};
+        _planReachedGoal = null;
+        _planClosedReason = null;
+      } else {
+        _planSteps = restored.steps;
+        _planDone = restored.done;
+        _planActive = restored.active;
+        _planReachedGoal = restored.reachedGoal;
+        _planClosedReason = restored.closedReason;
+      }
+    } else {
+      // 这批行里没有任何 plan（新会话/纯对话）—— 也不许留上一次的旧计划
+      _planSteps = null;
+      _planDone = 0;
+      _planActive = 0;
+      _planCancelled = const {};
+      _planReachedGoal = null;
+      _planClosedReason = null;
     }
     final out = <HMessage>[];
     for (final m in raw) {
@@ -2346,17 +2388,6 @@ class _ChatScreenState extends State<ChatScreen> {
               children: [
                 // ★ 抓手必须有（2026-10-29 用户实报图 6：这张抽屉
                 // 漏了抓手，看着不像上拉抽屉 —— 其余 bw 抽屉都有）。
-                Center(
-                  child: Container(
-                    width: 36,
-                    height: 4,
-                    decoration: BoxDecoration(
-                      color: h.border,
-                      borderRadius: BorderRadius.circular(999),
-                    ),
-                  ),
-                ),
-                const SizedBox(height: 8),
                 // 顺序：相机在照片上面（2026-10-29 用户指定）。
                 _sheetPickRow(
                   h,
@@ -4274,16 +4305,6 @@ class _ChatScreenState extends State<ChatScreen> {
                 child: Column(
                   mainAxisSize: MainAxisSize.min,
                   children: [
-                    // iOS 风格抓手
-                    Container(
-                      width: 36,
-                      height: 5,
-                      margin: const EdgeInsets.only(top: HSpace.sm),
-                      decoration: BoxDecoration(
-                        color: h.border,
-                        borderRadius: BorderRadius.circular(HRadius.pill),
-                      ),
-                    ),
                     Padding(
                       padding: const EdgeInsets.fromLTRB(
                           HSpace.lg, HSpace.md, HSpace.xs, HSpace.xs),

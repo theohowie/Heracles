@@ -8,6 +8,23 @@ import '../theme/cupertino_kit.dart';
 import '../theme/pressable.dart';
 import '../widgets/bw_approval.dart';
 
+/// 语音识别说明（T1-2：从页面底部搬进 AppBar「?」抽屉，**文案保持原文三段**）。
+///
+/// 之前三段长文常驻页面底部 → 页面被说明淹没、且每次进来都占一大块；
+/// 收进「?」抽屉后页面只留状态与操作，需要解释时再展开。
+const kVoiceHelpP1 =
+    '流式识别（内置）：14M 中文 streaming zipformer 已随 App 打包，'
+    '约 24 MB，无需下载；点麦克风说话时会边说边出字，全程本机离线。';
+
+const kVoiceHelpP2 =
+    '整段识别（可选）：SenseVoiceSmall（阿里 FunASR）多语言模型，'
+    '量化版约 231 MB，经 ModelScope 官方仓库下载，适合长句高精度转写。';
+
+const kVoiceHelpP3 =
+    '两套模型都存放在 App 私有目录，卸载 App 会一并删除；「卸载语音输入」'
+    '会删掉两套模型并停用语音输入，可用「重新安装」重新解压内置模型。'
+    '录音不上传。麦克风权限在「设置 → 设备权限」里统一开启。';
+
 /// **语音识别设置页**（2026-10-29 用户定；2026-10-31 T0-1 重做）。
 ///
 /// 语音有两套**互相独立**的模型，各有各的状态：
@@ -64,6 +81,15 @@ class _VoiceSettingsScreenState extends State<VoiceSettingsScreen> {
           icon: const Icon(AppIcons.back, size: 21),
           onPressed: () => Navigator.of(context).pop(),
         ),
+        // T1-2：说明收进「?」上拉抽屉（页面不再堆三段长文）。
+        actions: [
+          IconButton(
+            key: const Key('voice-help'),
+            tooltip: '语音识别说明',
+            icon: const Icon(AppIcons.info, size: 21),
+            onPressed: () => unawaited(_showHelpSheet()),
+          ),
+        ],
       ),
       body: AnimatedBuilder(
         animation: _voice,
@@ -99,17 +125,6 @@ class _VoiceSettingsScreenState extends State<VoiceSettingsScreen> {
               //   用户要能核对"到底装在哪、卸载删的是什么"——只写"App 私有目录"
               //   太虚；真实路径由 VoiceModelController 给出（profile.appFilesDir）。
               _modelsDirRow(h),
-              const SizedBox(height: HSpace.lg),
-              Text(
-                '流式识别（内置）：14M 中文 streaming zipformer 已随 App 打包，'
-                '约 24 MB，无需下载；点麦克风说话时会边说边出字，全程本机离线。\n\n'
-                '整段识别（可选）：SenseVoiceSmall（阿里 FunASR）多语言模型，'
-                '量化版约 231 MB，经 ModelScope 官方仓库下载，适合长句高精度转写。\n\n'
-                '两套模型都存放在 App 私有目录，卸载 App 会一并删除；「卸载语音输入」'
-                '会删掉两套模型并停用语音输入，可用「重新安装」重新解压内置模型。'
-                '录音不上传。麦克风权限在「设置 → 设备权限」里统一开启。',
-                style: HTxt.caption.copyWith(color: h.textFaint, height: 1.55),
-              ),
             ],
           );
         },
@@ -119,21 +134,27 @@ class _VoiceSettingsScreenState extends State<VoiceSettingsScreen> {
 
   // ---------------------------------------------------------------- 总状态
 
-  /// 页顶总状态文案（只回答"语音输入能不能用"）。
+  /// 页顶总状态文案（只回答"语音输入能不能用、要不要下载"）。
+  ///
+  /// T1-2（2026-10-31 用户定）：三档固定口径 ——
+  /// 「语音输入可用（无需下载）」/「语音输入不可用（已卸载）」/「语音输入需准备」。
+  /// **内置流式随包**这个事实必须写在脸上：SenseVoice 是可选高精度模型，
+  /// 它没下载不能把整体说成"未下载/需重下"。
   String get _totalStatusText {
     if (!_voice.loaded) return '检测中…';
     if (_uninstalled) return '语音输入不可用（已卸载）';
     if (_voice.bundledStreamingProgress != null) {
       return '语音输入需准备 · 正在准备内置模型…';
     }
-    if (_voice.streamingInstalled) return '语音输入可用 · 流式识别已就绪';
-    if (_voice.installed && _voice.engineReady) {
-      return '语音输入可用 · 整段识别已就绪';
+    // 内置流式已就绪，或整段识别已就绪（下载过 SenseVoice 的用户）⇒ 都能直接用，
+    // 无需再下载任何东西。
+    if (_voice.streamingInstalled || (_voice.installed && _voice.engineReady)) {
+      return '语音输入可用（无需下载）';
     }
     if (_voice.bundledStreamingError != null) {
       return '语音输入需准备 · 内置模型准备失败（可重试）';
     }
-    return '语音输入可用 · 首次使用时会自动准备内置模型';
+    return '语音输入需准备';
   }
 
   Widget _totalStatusRow(Hue h) {
@@ -360,6 +381,17 @@ class _VoiceSettingsScreenState extends State<VoiceSettingsScreen> {
             _modelAction(h, state),
           ],
         ),
+        // T1-2：副标题点明 SenseVoice 是**可选**的 —— "未下载"不是故障，
+        // 内置流式随包就能用语音输入（不让用户以为必须下 231MB）。
+        // 固定单行 + ellipsis：不随下载字节数/屏宽变行数（沿用卡片防抖动口径）。
+        const SizedBox(height: HSpace.sm),
+        Text(
+          _senseVoiceOptionalLine(state, installed),
+          key: const Key('voice-sensevoice-optional'),
+          maxLines: 1,
+          overflow: TextOverflow.ellipsis,
+          style: HTxt.caption.copyWith(color: h.textFaint),
+        ),
         if (state.phase == VoiceModelPhase.downloading) ...[
           const SizedBox(height: HSpace.sm),
           ClipRRect(
@@ -432,6 +464,19 @@ class _VoiceSettingsScreenState extends State<VoiceSettingsScreen> {
       VoiceModelPhase.error => '下载失败',
       _ => '未下载',
     };
+  }
+
+  /// SenseVoice 卡副标题（T1-2）。
+  ///
+  /// · 未下载 ⇒ 明确"不影响语音输入"（它是可选的高精度模型）；
+  /// · 下载中 ⇒ 说明下载中同样不影响流式；
+  /// · 已下载 ⇒ 说清它的用途（长句高精度整段转写），避免"未下载"假信息。
+  String _senseVoiceOptionalLine(VoiceDownloadState state, bool installed) {
+    if (installed) return '可选 · 已下载，用于长句高精度整段转写';
+    if (state.phase == VoiceModelPhase.downloading) {
+      return '可选 · 下载中，不影响语音输入';
+    }
+    return '可选 · 未下载不影响语音输入';
   }
 
   Widget _modelAction(Hue h, VoiceDownloadState state) {
@@ -507,6 +552,122 @@ class _VoiceSettingsScreenState extends State<VoiceSettingsScreen> {
           ? '内置流式模型已就绪'
           : '准备失败：${result.message ?? '未知原因'}';
     });
+  }
+
+  // ------------------------------------------------------------ 说明抽屉
+
+  /// AppBar「?」→ 语音识别说明（[BwSheetShell] 上拉抽屉；统一抓手由壳渲染，
+  /// 这里**不自绘抓手**，否则会出现双抓手）。
+  ///
+  /// T1-2：原来常驻页面底部的三段长文搬到这里；内容封顶 60% 屏高 +
+  /// `SingleChildScrollView` ⇒ 矮屏/大字号下可滚动不溢出。关掉（知道了 /
+  /// 下滑 / 点遮罩）回原页。
+  Future<void> _showHelpSheet() {
+    return showModalBottomSheet<void>(
+      context: context,
+      backgroundColor: Colors.transparent,
+      isScrollControlled: true,
+      shape: const RoundedRectangleBorder(),
+      builder: (sheetCtx) {
+        final h = Hue.of(sheetCtx);
+        return BwSheetShell(
+          onDismissRequest: () => Navigator.of(sheetCtx).pop(),
+          child: SafeArea(
+            top: false,
+            child: Padding(
+              padding: const EdgeInsets.fromLTRB(20, 0, 20, 16),
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: [
+                  Text(
+                    '语音识别说明',
+                    key: const Key('voice-help-title'),
+                    style: const TextStyle(
+                      fontSize: 17,
+                      fontWeight: FontWeight.w700,
+                    ),
+                  ),
+                  const SizedBox(height: 12),
+                  ConstrainedBox(
+                    constraints: BoxConstraints(
+                      maxHeight: MediaQuery.sizeOf(sheetCtx).height * 0.6,
+                    ),
+                    child: SingleChildScrollView(
+                      key: const Key('voice-help-scroll'),
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Text(
+                            kVoiceHelpP1,
+                            key: const Key('voice-help-p1'),
+                            style: _helpTextStyle(h),
+                          ),
+                          const SizedBox(height: 12),
+                          Text(
+                            kVoiceHelpP2,
+                            key: const Key('voice-help-p2'),
+                            style: _helpTextStyle(h),
+                          ),
+                          const SizedBox(height: 12),
+                          Text(
+                            kVoiceHelpP3,
+                            key: const Key('voice-help-p3'),
+                            style: _helpTextStyle(h),
+                          ),
+                        ],
+                      ),
+                    ),
+                  ),
+                  const SizedBox(height: 14),
+                  _sheetPrimaryButton(
+                    h,
+                    key: const Key('voice-help-close'),
+                    label: '知道了',
+                    onTap: () => Navigator.of(sheetCtx).pop(),
+                  ),
+                ],
+              ),
+            ),
+          ),
+        );
+      },
+    );
+  }
+
+  TextStyle _helpTextStyle(Hue h) =>
+      TextStyle(fontSize: 13.5, height: 1.6, color: h.textDim);
+
+  Widget _sheetPrimaryButton(
+    Hue h, {
+    required Key key,
+    required String label,
+    required VoidCallback onTap,
+  }) {
+    return Pressable(
+      key: key,
+      child: GestureDetector(
+        onTap: onTap,
+        behavior: HitTestBehavior.opaque,
+        child: Container(
+          padding: const EdgeInsets.symmetric(vertical: 12),
+          decoration: BoxDecoration(
+            color: h.text,
+            borderRadius: BorderRadius.circular(HRadius.pill),
+          ),
+          child: Center(
+            child: Text(
+              label,
+              style: TextStyle(
+                fontSize: 15,
+                fontWeight: FontWeight.w600,
+                color: h.bg,
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
   }
 
   Future<void> _confirmDelete() async {
