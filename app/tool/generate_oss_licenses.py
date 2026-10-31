@@ -160,6 +160,12 @@ def main():
             'text': text,
         })
 
+    # 项目本体（Heracles 自己的 GPL-3.0）—— 用户 2026-11-01 指出开源许可页
+    # 只列了第三方依赖，漏了本项目的许可证。置顶，单独 group 'self'。
+    entries.insert(0, dict(
+        name='Heracles', version='', group='self', origin='本项目',
+        kind='GPL-3.0', note='应用本体',
+        text=read_file(os.path.join(ROOT, 'LICENSE'))))
     apache = read_file(APACHE_CANONICAL)
     manual = [
         dict(name='Flutter', version='', group='platform', origin='平台',

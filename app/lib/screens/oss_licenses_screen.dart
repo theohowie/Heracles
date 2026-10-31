@@ -15,9 +15,12 @@ class OssLicensesScreen extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final h = Hue.of(context);
+    final self = kOssEntries.where((e) => e.group == 'self').toList();
     final direct = kOssEntries.where((e) => e.group == 'direct').toList();
     final second = kOssEntries.where((e) => e.group == 'second').toList();
     final platform = kOssEntries.where((e) => e.group == 'platform').toList();
+    // 项目本体不算“第三方开源项目”，引言里只数第三方依赖。
+    final thirdParty = kOssEntries.where((e) => e.group != 'self').length;
     return Scaffold(
       backgroundColor: h.bg,
       appBar: AppBar(
@@ -32,12 +35,16 @@ class OssLicensesScreen extends StatelessWidget {
             HSpace.lg, HSpace.md, HSpace.lg, HSpace.xl),
         children: [
           Text(
-            'Heracles 基于以下 ${kOssEntries.length} 个开源项目构建，谨此致谢。'
+            'Heracles 本体以 GPL-3.0 开源；同时基于以下 $thirdParty 个开源项目构建，谨此致谢。'
             '名单含直接依赖与它们的依赖（两层），以及平台、原生组件与图标资产；'
             '点任意一项可查看其完整许可文本。',
             style: TextStyle(fontSize: 12.5, height: 1.55, color: h.textFaint),
           ),
           const SizedBox(height: HSpace.lg),
+          if (self.isNotEmpty) ...[
+            _group(h, 'Heracles 本体', self),
+            const SizedBox(height: HSpace.lg),
+          ],
           _group(h, '直接依赖', direct),
           const SizedBox(height: HSpace.lg),
           _group(h, '二层依赖', second),
