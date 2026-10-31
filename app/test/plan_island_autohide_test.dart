@@ -15,6 +15,10 @@
 //   d) 发送新消息 ⇒ 上一轮已完成计划立即消失
 //   e) 历史会话恢复：已完成计划不显示（shouldRestorePlanIsland 直测）
 //   f) plan_updated 空帧 ⇒ 立即隐藏（契约语义，防回归）
+//   g) 运行中点岛（展开）⇒ 完成后仍会 4 秒消失（旧实现"看过一眼"就常驻 → 必红）
+//   h) 只有 plan_updated 全 done/cancelled（无 plan_closed）⇒ 也消失（兜底）
+//   i) 完成后 1 秒内点岛 ⇒ 取消自动隐藏（窗口内能力不许丢）
+//   j) 4 秒到点先淡出（岛还在、opacity→0），220ms 后才清空（不许闪跳）
 
 import 'dart:async';
 
@@ -186,6 +190,15 @@ void main() {
         planStepsDetailed: const <Map<String, String>>[],
       );
 
+  AgentEvent planUpdated(List<String> statuses) => AgentEvent(
+        type: AgentEvent.kPlanUpdated,
+        ts: DateTime.now().millisecondsSinceEpoch,
+        planStepsDetailed: [
+          for (var i = 0; i < statuses.length; i++)
+            {'title': '步骤 ${i + 1}', 'status': statuses[i]},
+        ],
+      );
+
   AgentEvent finished() => AgentEvent(
         type: AgentEvent.kFinished,
         ts: DateTime.now().millisecondsSinceEpoch,
@@ -230,6 +243,126 @@ void main() {
       await waitAutoHide(tester);
       expect(find.byType(DynamicIsland), findsNothing,
           reason: '任务完成后灵动岛必须自动消失，不许常驻（P0）');
+    });
+
+    // ★ 2026-10-30 P0 修复点（任务 T1-3）：旧实现里 **运行中** 点一下岛会把
+    //   `_planUserInspecting` 置 true 并作废计时器 ⇒ 完成时的自动隐藏直接
+    //   return，于是"看过一眼"= 永久常驻。这是用户实测那个 bug 的真身。
+    testWidgets('g) 运行中点岛 ⇒ 完成时仍会 4 秒自动消失（旧实现必红）',
+        (tester) async {
+      // gate 让 run 停在"运行中"，给测试体在完成**之前**点岛的机会。
+      final gate = Completer<void>();
+      scripts.add(() async {
+        await pushRef!(planCreated(7));
+        await gate.future;
+        await pushRef!(planClosed(reachedGoal: true));
+        await pushRef!(finished());
+      });
+      await pumpChat(tester);
+      await sendMessage(tester);
+      expect(find.byType(DynamicIsland), findsOneWidget,
+          reason: '运行中应先显示计划');
+
+      // 任务还在跑，用户点岛看一眼（旧实现会把它记成"用户正在查看"）
+      await tester.tap(find.byType(DynamicIsland));
+      await settle(tester, times: 3);
+
+      gate.complete();
+      await settle(tester, times: 8);
+      expect(find.byType(DynamicIsland), findsOneWidget,
+          reason: '完成瞬间仍要给用户看到完成态');
+
+      await waitAutoHide(tester);
+      expect(find.byType(DynamicIsland), findsNothing,
+          reason: '运行中点岛不得阻断完成后的自动消失（"看过一眼"≠ 永久常驻）');
+    });
+
+    // ★ 兜底路径：某些后端/收尾顺序只发 plan_updated 全终态、没有
+    //   plan_closed；旧实现此时没有任何地方排计时器 ⇒ 完成态常驻。
+    testWidgets('h) 只有 plan_updated 全 done/cancelled ⇒ 也 4 秒后消失（兜底）',
+        (tester) async {
+      final gate = Completer<void>();
+      scripts.add(() async {
+        await pushRef!(planCreated(7));
+        await pushRef!(planUpdated(
+            ['done', 'done', 'done', 'active', 'pending', 'pending', 'pending']));
+        await pushRef!(planUpdated(
+            ['done', 'done', 'done', 'done', 'cancelled', 'done', 'done']));
+        // 不推 plan_closed / finished：隔离"计划帧兜底"这条路径。
+        await gate.future;
+      });
+      await pumpChat(tester);
+      await sendMessage(tester);
+      expect(find.byType(DynamicIsland), findsOneWidget,
+          reason: '全终态帧后仍应先显示完成态');
+      expect(find.textContaining('7/7'), findsWidgets,
+          reason: 'done+cancelled 都算终态 ⇒ 应显示 7/7');
+
+      await waitAutoHide(tester);
+      expect(find.byType(DynamicIsland), findsNothing,
+          reason: 'plan_updated 全 done/cancelled + active<0 也必须安排自动隐藏（兜底）');
+
+      gate.complete();
+      await settle(tester, times: 3);
+    });
+
+    // ★ 反向约束：改动不能把"完成后 4 秒内点岛取消自动隐藏"这条用户能力弄丢。
+    testWidgets('i) 完成后 1 秒内点岛 ⇒ 取消自动隐藏（窗口内仍然有效）',
+        (tester) async {
+      scripts.add(() async {
+        await pushRef!(planCreated(7));
+        await pushRef!(planClosed(reachedGoal: true));
+        await pushRef!(finished());
+      });
+      await pumpChat(tester);
+      await sendMessage(tester);
+      expect(find.byType(DynamicIsland), findsOneWidget);
+
+      // 完成后 1 秒（4 秒窗口内）点岛
+      await tester.pump(const Duration(seconds: 1));
+      await tester.tap(find.byType(DynamicIsland));
+      await settle(tester, times: 3);
+      await tester.pump(const Duration(seconds: 8));
+      await tester.pump(const Duration(milliseconds: 300));
+      expect(find.byType(DynamicIsland), findsOneWidget,
+          reason: '完成后 4 秒窗口内点岛仍可取消自动隐藏（保持到下一轮/切会话）');
+    });
+
+    // ★ 淡出顺序：4 秒到点只应"开始淡出"（岛还在，opacity→0），
+    //   220ms 淡出走完才真正清空字段 —— 直接闪掉对用户是"计划凭空消失"。
+    testWidgets('j) 4 秒到点先淡出、淡出走完才清空（不许闪跳）', (tester) async {
+      scripts.add(() async {
+        await pushRef!(planCreated(7));
+        await pushRef!(planClosed(reachedGoal: true));
+        await pushRef!(finished());
+      });
+      await pumpChat(tester);
+      await sendMessage(tester);
+      expect(find.byType(DynamicIsland), findsOneWidget);
+
+      // 逐帧推进到"开始淡出"那一刻：一次 pump(4s) 会把紧接着的 220ms
+      // 淡出计时器也跑完，看不到中间态。
+      var fading = false;
+      for (var i = 0; i < 120 && !fading; i++) {
+        await tester.pump(const Duration(milliseconds: 60));
+        if (find.byType(DynamicIsland).evaluate().isEmpty) break;
+        final fade = tester.widget<AnimatedOpacity>(find
+            .ancestor(
+              of: find.byType(DynamicIsland),
+              matching: find.byType(AnimatedOpacity),
+            )
+            .first);
+        fading = fade.opacity == 0;
+      }
+      expect(fading, isTrue,
+          reason: '4 秒到点应进入淡出（opacity→0），而不是直接闪掉');
+      expect(find.byType(DynamicIsland), findsOneWidget,
+          reason: '淡出动画期间灵动岛仍在树上');
+
+      await tester.pump(const Duration(milliseconds: 220));
+      await tester.pump(const Duration(milliseconds: 60));
+      expect(find.byType(DynamicIsland), findsNothing,
+          reason: '淡出动画走完才真正清空计划状态');
     });
 
     testWidgets('b) 4 秒内点一下 ⇒ 取消自动隐藏，之后仍在', (tester) async {

@@ -8,10 +8,19 @@ import '../theme/cupertino_kit.dart';
 import '../theme/pressable.dart';
 import '../widgets/bw_approval.dart';
 
-/// **语音识别设置页**（2026-10-29 用户定）：语音识别用本地模型，
-/// 用户在这页自行下载 SenseVoiceSmall（ONNX），下载、校验、落盘
-/// 与引擎准备都由 App 配好；模型就绪后输入框的麦克风按钮即可
-/// 离线把语音转成文字。录音只在本机处理，不上传。
+/// **语音识别设置页**（2026-10-29 用户定；2026-10-31 T0-1 重做）。
+///
+/// 语音有两套**互相独立**的模型，各有各的状态：
+///
+/// 1. **流式识别（内置 · 约 24 MB）** —— 14M 中文 streaming zipformer 随 App
+///    打包，首次点麦克风时自动解压，边说边出字；开箱即用、不需要下载。
+/// 2. **整段识别 SenseVoice（可选 · 231 MB）** —— 阿里 FunASR 多语言模型，
+///    经 ModelScope 官方仓库下载，适合长句高精度转写（流式不可用时的回退）。
+///
+/// 页顶总状态只回答"语音输入能不能用"：**流式内置就绪就算可用**，绝不因为
+/// SenseVoice 没下载就把整体判成"未下载/需重下"（那样会让用户以为要下
+/// 231 MB 才能用语音）。卸载/重装是真操作：`deleteAllVoiceModels()` 删三个
+/// 模型目录并落盘卸载标记，`installVoiceModels()` 清标记并重新解压内置模型。
 ///
 /// 麦克风**权限不在这页管**（2026-10-29 用户定）：权限统一在
 /// 设置 → 设备权限页申请，一处就够，这页不放第二份。
@@ -25,11 +34,24 @@ class VoiceSettingsScreen extends StatefulWidget {
 class _VoiceSettingsScreenState extends State<VoiceSettingsScreen> {
   final _voice = VoiceModelController.shared();
 
+  /// 最近一次卸载/安装/重试的结果（人话）—— 结果如实写在页面上，
+  /// 不用 toast 一闪而过（卸载释放了多少、哪项失败，用户要能回看）。
+  String? _actionNote;
+
+  /// 动作进行中：防止重复点（解压/删除都要几秒）。
+  bool _busy = false;
+
   @override
   void initState() {
     super.initState();
     unawaited(_voice.load());
   }
+
+  /// 已卸载（用户主动卸载或语音总开关被关）—— 之后绝不自动解压。
+  bool get _uninstalled => _voice.voiceUninstalled || !_voice.voiceEnabled;
+
+  /// 流式是否可用（内置已解压，或老用户下过双语模型）。
+  bool get _streamingReady => !_uninstalled && _voice.streamingInstalled;
 
   @override
   Widget build(BuildContext context) {
@@ -54,22 +76,222 @@ class _VoiceSettingsScreenState extends State<VoiceSettingsScreen> {
               HSpace.xl,
             ),
             children: [
+              _groupLabel(h, '语音输入'),
+              _totalStatusRow(h),
+              if (_actionNote != null) ...[
+                const SizedBox(height: HSpace.sm),
+                Padding(
+                  padding: const EdgeInsets.only(left: 4),
+                  child: Text(
+                    _actionNote!,
+                    key: const Key('voice-action-note'),
+                    style: HTxt.caption.copyWith(color: h.textDim, height: 1.5),
+                  ),
+                ),
+              ],
+              const SizedBox(height: HSpace.lg),
               _groupLabel(h, '语音模型'),
-              _card(h, [_modelRow(h)]),
+              _streamingCard(h),
+              const SizedBox(height: HSpace.md),
+              _senseVoiceCard(h),
               const SizedBox(height: HSpace.lg),
               Text(
                 '流式识别（内置）：14M 中文 streaming zipformer 已随 App 打包，'
                 '约 24 MB，无需下载；点麦克风说话时会边说边出字，全程本机离线。\n\n'
                 '整段识别（可选）：SenseVoiceSmall（阿里 FunASR）多语言模型，'
                 '量化版约 231 MB，经 ModelScope 官方仓库下载，适合长句高精度转写。\n\n'
-                '两套模型都存放在 App 私有目录，卸载 App 会一并删除；录音不上传。'
-                '麦克风权限在「设置 → 设备权限」里统一开启。',
+                '两套模型都存放在 App 私有目录，卸载 App 会一并删除；「卸载语音输入」'
+                '会删掉两套模型并停用语音输入，可用「重新安装」重新解压内置模型。'
+                '录音不上传。麦克风权限在「设置 → 设备权限」里统一开启。',
                 style: HTxt.caption.copyWith(color: h.textFaint, height: 1.55),
               ),
             ],
           );
         },
       ),
+    );
+  }
+
+  // ---------------------------------------------------------------- 总状态
+
+  /// 页顶总状态文案（只回答"语音输入能不能用"）。
+  String get _totalStatusText {
+    if (!_voice.loaded) return '检测中…';
+    if (_uninstalled) return '语音输入不可用（已卸载）';
+    if (_voice.bundledStreamingProgress != null) {
+      return '语音输入需准备 · 正在准备内置模型…';
+    }
+    if (_voice.streamingInstalled) return '语音输入可用 · 流式识别已就绪';
+    if (_voice.installed && _voice.engineReady) {
+      return '语音输入可用 · 整段识别已就绪';
+    }
+    if (_voice.bundledStreamingError != null) {
+      return '语音输入需准备 · 内置模型准备失败（可重试）';
+    }
+    return '语音输入可用 · 首次使用时会自动准备内置模型';
+  }
+
+  Widget _totalStatusRow(Hue h) {
+    final ready = _streamingReady || (!_uninstalled && _voice.installed && _voice.engineReady);
+    final warn = _uninstalled || _voice.bundledStreamingError != null;
+    final action = _uninstalled
+        ? _pillButton(
+            h,
+            key: const Key('voice-install'),
+            label: '重新安装',
+            filled: true,
+            onTap: _busy ? null : () => unawaited(_install()),
+          )
+        : (_voice.streamingInstalled || _voice.installed)
+            ? _pillButton(
+                h,
+                key: const Key('voice-uninstall'),
+                label: '卸载',
+                filled: false,
+                onTap: _busy ? null : () => unawaited(_confirmUninstall()),
+              )
+            : null;
+    return Row(
+      children: [
+        Container(
+          width: 8,
+          height: 8,
+          decoration: BoxDecoration(
+            color: ready
+                ? h.text
+                : (warn ? HColors.errorOn(h.dark) : h.textFaint),
+            shape: BoxShape.circle,
+          ),
+        ),
+        const SizedBox(width: HSpace.sm),
+        Expanded(
+          child: Text(
+            _totalStatusText,
+            key: const Key('voice-total-status'),
+            style: HTxt.body.copyWith(fontWeight: FontWeight.w600, height: 1.4),
+          ),
+        ),
+        if (action != null) ...[
+          const SizedBox(width: HSpace.sm),
+          action,
+        ],
+      ],
+    );
+  }
+
+  // ------------------------------------------------------------ 流式（内置）
+
+  String get _streamingStatusLine {
+    const base = '中文 streaming zipformer · 约 24 MB';
+    if (_uninstalled) return '$base · 已卸载';
+    if (_voice.bundledStreamingReady) return '$base · 已就绪';
+    if (_voice.streamingInstalled) return '$base · 已就绪（使用已下载的双语模型）';
+    if (_voice.bundledStreamingError != null) return '$base · 准备失败';
+    return '$base · 首次使用时自动准备';
+  }
+
+  Widget _streamingCard(Hue h) {
+    final ready = _streamingReady;
+    final error = _uninstalled ? null : _voice.bundledStreamingError;
+    return _card(
+      h,
+      key: const Key('voice-streaming-card'),
+      children: [
+        Row(
+          children: [
+            Container(
+              width: 38,
+              height: 38,
+              decoration: BoxDecoration(
+                color: h.surface,
+                borderRadius: BorderRadius.circular(12),
+              ),
+              child: Icon(
+                ready ? Icons.check : AppIcons.mic,
+                size: 19,
+                color: h.text,
+              ),
+            ),
+            const SizedBox(width: HSpace.md),
+            Expanded(
+              // 固定两行块（与 SenseVoice 卡同规格）：下载/解压时进度文字
+              // 变长也不会改卡片高度。
+              child: ConstrainedBox(
+                constraints: const BoxConstraints(minHeight: 38),
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  mainAxisAlignment: MainAxisAlignment.center,
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      '流式识别（内置）',
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: HTxt.body.copyWith(fontWeight: FontWeight.w600),
+                    ),
+                    const SizedBox(height: 1),
+                    Text(
+                      _streamingStatusLine,
+                      key: const Key('voice-streaming-status'),
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: HTxt.caption.copyWith(
+                        color: h.textFaint,
+                        fontFeatures: const [FontFeature.tabularFigures()],
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ),
+            if (error != null) ...[
+              const SizedBox(width: HSpace.sm),
+              _pillButton(
+                h,
+                key: const Key('voice-streaming-retry'),
+                label: '重试',
+                filled: true,
+                onTap: _busy ? null : () => unawaited(_retryBundled()),
+              ),
+            ],
+          ],
+        ),
+        if (_voice.bundledStreamingProgress != null &&
+            !_uninstalled &&
+            error == null) ...[
+          const SizedBox(height: HSpace.sm),
+          ClipRRect(
+            borderRadius: BorderRadius.circular(HRadius.pill),
+            child: LinearProgressIndicator(
+              value: _voice.bundledStreamingProgress,
+              minHeight: 6,
+              backgroundColor: h.border,
+              color: h.text,
+            ),
+          ),
+        ],
+        if (error != null) ...[
+          const SizedBox(height: HSpace.sm),
+          Text(
+            error,
+            key: const Key('voice-streaming-error'),
+            style: HTxt.caption.copyWith(
+              color: const Color(0xFFDC2626),
+              height: 1.5,
+            ),
+          ),
+        ],
+      ],
+    );
+  }
+
+  // -------------------------------------------------- 整段识别（SenseVoice）
+
+  Widget _senseVoiceCard(Hue h) {
+    return _card(
+      h,
+      key: const Key('voice-sensevoice-card'),
+      children: [_modelRow(h)],
     );
   }
 
@@ -221,7 +443,7 @@ class _VoiceSettingsScreenState extends State<VoiceSettingsScreen> {
         h,
         label: '删除',
         filled: false,
-        onTap: () => unawaited(_confirmDelete(h)),
+        onTap: () => unawaited(_confirmDelete()),
       );
     }
     return _pillButton(
@@ -234,11 +456,59 @@ class _VoiceSettingsScreenState extends State<VoiceSettingsScreen> {
     );
   }
 
-  Future<void> _confirmDelete(Hue h) async {
+  // ------------------------------------------------------------ 卸载 / 重装
+
+  Future<void> _confirmUninstall() async {
+    final ok = await showBwConfirmSheet(
+      context,
+      title: '卸载语音输入？',
+      message: '会删除内置流式模型（约 24 MB）与 SenseVoice（若已下载），'
+          '语音输入随即不可用；可随时在本页「重新安装」。',
+      confirmLabel: '确认卸载',
+      destructive: true,
+    );
+    if (!ok || !mounted) return;
+    setState(() => _busy = true);
+    final result = await _voice.deleteAllVoiceModels();
+    if (!mounted) return;
+    setState(() {
+      _busy = false;
+      _actionNote = result.ok
+          ? '已卸载 · 已释放 ${voiceFormatBytes(result.freedBytes)}'
+          : '已卸载，但有 ${result.failures.length} 项删除失败：'
+              '${result.failures.first}';
+    });
+  }
+
+  Future<void> _install() async {
+    setState(() => _busy = true);
+    final result = await _voice.installVoiceModels();
+    if (!mounted) return;
+    setState(() {
+      _busy = false;
+      _actionNote = result.ok
+          ? '已重新安装 · 流式识别可用'
+          : '安装失败：${result.message ?? '未知原因'}';
+    });
+  }
+
+  Future<void> _retryBundled() async {
+    setState(() => _busy = true);
+    final result = await _voice.ensureStreamingReady();
+    if (!mounted) return;
+    setState(() {
+      _busy = false;
+      _actionNote = result.ok
+          ? '内置流式模型已就绪'
+          : '准备失败：${result.message ?? '未知原因'}';
+    });
+  }
+
+  Future<void> _confirmDelete() async {
     final ok = await showBwConfirmSheet(
       context,
       title: '删除语音模型？',
-      message: '删除后语音输入将不可用，需要时可在本页重新下载。',
+      message: '删除 SenseVoice 后仍可用内置流式识别；需要时可重新下载。',
       confirmLabel: '删除',
       destructive: true,
     );
@@ -247,11 +517,13 @@ class _VoiceSettingsScreenState extends State<VoiceSettingsScreen> {
 
   Widget _pillButton(
     Hue h, {
+    Key? key,
     required String label,
     required bool filled,
     required VoidCallback? onTap,
   }) {
     return Pressable(
+      key: key,
       enabled: onTap != null,
       child: GestureDetector(
         onTap: onTap,
@@ -282,8 +554,9 @@ class _VoiceSettingsScreenState extends State<VoiceSettingsScreen> {
     );
   }
 
-  Widget _card(Hue h, List<Widget> children) {
+  Widget _card(Hue h, {Key? key, required List<Widget> children}) {
     return Container(
+      key: key,
       decoration: BoxDecoration(
         color: h.surfaceAlt,
         borderRadius: BorderRadius.circular(HRadius.xl),

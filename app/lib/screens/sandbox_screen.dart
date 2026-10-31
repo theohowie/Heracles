@@ -22,6 +22,9 @@ import '../widgets/bw_approval.dart';
 /// - 不把它描述成「安全沙箱」：PRoot 不是敌对代码隔离，它解决的
 ///   是文件污染与崩溃回滚；
 /// - 界面只出现 `@name` 逻辑名，**绝不显示物理路径**；
+///   ⚠️ 唯一例外（2026-10-29 T2-7）：**编译环境的安装目录**要显示 ——
+///   它是 App 私有目录里的安装位置（排障第一问「装在哪、占多少」），
+///   不是用户文件的物理路径；挂载点仍然只显示 `@name`。
 /// - 通道只展示可用性与风险，**不做授权开关**（放行是门禁的事）。
 class SandboxScreen extends StatefulWidget {
   const SandboxScreen({super.key});
@@ -41,6 +44,9 @@ class _SandboxScreenState extends State<SandboxScreen> {
   // ---- T2 编译环境（2026-10-29）----
   SandboxBuildSuiteStatus? _suite;
   bool _activatingSuite = false;
+
+  /// 卸载 T2 进行中（按钮置灰 + 转圈，防重复提交）
+  bool _resettingSuite = false;
   int _suitePercent = -1;
   String _suiteStage = '';
   StreamSubscription<SandboxOutputChunk>? _suiteProgressSub;
@@ -488,10 +494,15 @@ class _SandboxScreenState extends State<SandboxScreen> {
 
   // ---------------------------------------------------------------- T2 编译环境
 
-  /// 「编译环境」卡片：显示 T2（JDK+Gradle+android.jar）状态，提供激活入口。
+  /// 「编译环境」卡片：显示 T2（JDK+Gradle+android.jar）状态，提供激活/卸载入口。
   ///
   /// 为什么单独一张卡而不是塞进「管理」：它不是"危险操作"，是**功能开关** ——
   /// 激活后沙箱才具备「从源码编 APK」的能力，用户需要看到体积与收益再决定。
+  ///
+  /// 2026-10-29 T2-7 补齐「已安装」的真相：装好之后用户必须能看到
+  /// **实际占用多少、装在哪**（后端 `buildSuiteStatus` 现在给
+  /// `occupiedBytes` / `installDir`），并且能**单独卸载** T2 ——
+  /// 旧版只能「重置沙箱」整个回滚（连 T0 一起清），代价太大。
   Widget _buildSuiteCard(Hue h) {
     final s = _suite;
     final ready = s?.ready ?? false;
@@ -502,6 +513,9 @@ class _SandboxScreenState extends State<SandboxScreen> {
       'androidJar': 'android.jar',
     };
     final missingText = missing.map((k) => labels[k] ?? k).join('、');
+    final version = s?.version ?? '';
+    final occupied = s?.occupiedBytes ?? 0;
+    final installDir = s?.installDir ?? '';
 
     return GestureDetector(
       onTap: (ready || _activatingSuite) ? null : _activateSuite,
@@ -512,80 +526,139 @@ class _SandboxScreenState extends State<SandboxScreen> {
           borderRadius: BorderRadius.circular(HRadius.xl),
         ),
         padding: const EdgeInsets.symmetric(horizontal: 18, vertical: 15),
-        child: Row(
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            Expanded(
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Text(
-                    ready ? '编译环境 · 已就绪' : '编译环境 · 未安装',
-                    style: TextStyle(
-                      fontSize: 16,
-                      fontWeight: FontWeight.w500,
-                      color: h.text,
-                    ),
-                  ),
-                  const SizedBox(height: 3),
-                  Text(
-                    ready
-                        ? '可以在沙箱里编译 APK'
-                        : (_activatingSuite
-                            ? (_suiteStage.isEmpty
-                                ? '正在准备…'
-                                : _suiteStage)
-                            : '约 415 MB · 需要联网下载${missingText.isEmpty ? '' : '（缺 $missingText）'}'),
-                    style: TextStyle(fontSize: 13, color: h.textFaint),
-                    maxLines: 2,
-                    overflow: TextOverflow.ellipsis,
-                  ),
-                  if (_activatingSuite) ...[
-                    const SizedBox(height: 8),
-                    ClipRRect(
-                      borderRadius: BorderRadius.circular(2),
-                      child: LinearProgressIndicator(
-                        // percent < 0 = 不确定进度（不画假百分比）
-                        value: _suitePercent >= 0 ? _suitePercent / 100 : null,
-                        minHeight: 3,
-                        backgroundColor: h.border,
-                      ),
-                    ),
-                  ],
-                ],
-              ),
-            ),
-            if (!ready)
-              _activatingSuite
-                  ? SizedBox(
-                      width: 16,
-                      height: 16,
-                      child: CircularProgressIndicator(
-                        strokeWidth: 2,
-                        color: h.textFaint,
-                      ),
-                    )
-                  // ★ 用**真按钮**而不是整行手势（2026-10-29 真机：整行 tap 不响应）
-                  //   415 MB 的动作本来也该是个明确按钮，用户要有「按下去」的确定感。
-                  : FilledButton(
-                      onPressed: _activateSuite,
-                      style: FilledButton.styleFrom(
-                        backgroundColor: h.text,
-                        foregroundColor: h.bg,
-                        minimumSize: const Size(76, 36),
-                        padding: const EdgeInsets.symmetric(horizontal: 16),
-                        shape: RoundedRectangleBorder(
-                          borderRadius: BorderRadius.circular(18),
-                        ),
-                      ),
-                      child: Text(
-                        '下载',
+            Row(
+              children: [
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        ready ? '编译环境 · 已就绪' : '编译环境 · 未安装',
                         style: TextStyle(
-                          fontSize: 14,
-                          fontWeight: FontWeight.w600,
-                          color: h.bg,
+                          fontSize: 16,
+                          fontWeight: FontWeight.w500,
+                          color: h.text,
                         ),
                       ),
-                    ),
+                      const SizedBox(height: 3),
+                      Text(
+                        ready
+                            ? '已安装 · 实际占用 ${_formatBytes(occupied)}'
+                                '${version.isEmpty ? '' : ' · 版本 $version'}'
+                            : (_activatingSuite
+                                ? (_suiteStage.isEmpty
+                                    ? '正在准备…'
+                                    : _suiteStage)
+                                : '约 415 MB · 需要联网下载${missingText.isEmpty ? '' : '（缺 $missingText）'}'),
+                        style: TextStyle(fontSize: 13, color: h.textFaint),
+                        maxLines: 2,
+                        overflow: TextOverflow.ellipsis,
+                      ),
+                    ],
+                  ),
+                ),
+                if (!ready)
+                  _activatingSuite
+                      ? SizedBox(
+                          width: 16,
+                          height: 16,
+                          child: CircularProgressIndicator(
+                            strokeWidth: 2,
+                            color: h.textFaint,
+                          ),
+                        )
+                      // ★ 用**真按钮**而不是整行手势（2026-10-29 真机：整行 tap 不响应）
+                      //   415 MB 的动作本来也该是个明确按钮，用户要有「按下去」的确定感。
+                      : FilledButton(
+                          onPressed: _activateSuite,
+                          style: FilledButton.styleFrom(
+                            backgroundColor: h.text,
+                            foregroundColor: h.bg,
+                            minimumSize: const Size(76, 36),
+                            padding: const EdgeInsets.symmetric(horizontal: 16),
+                            shape: RoundedRectangleBorder(
+                              borderRadius: BorderRadius.circular(18),
+                            ),
+                          ),
+                          child: Text(
+                            '下载',
+                            style: TextStyle(
+                              fontSize: 14,
+                              fontWeight: FontWeight.w600,
+                              color: h.bg,
+                            ),
+                          ),
+                        ),
+              ],
+            ),
+            // ---- 已安装：装在哪 + 单独卸载（2026-10-29 T2-7）----
+            if (ready && installDir.isNotEmpty) ...[
+              const SizedBox(height: 10),
+              Text(
+                '安装位置',
+                style: TextStyle(fontSize: 11.5, color: h.textFaint),
+              ),
+              const SizedBox(height: 2),
+              Text(
+                // 路径没有空格，Flutter 不会在 `/` 处折行 ⇒ 必须给零宽断点，
+                // 否则 393dp 真机上整串会右侧溢出（这里只影响**显示**）。
+                _wrapPathForDisplay(installDir),
+                style: TextStyle(
+                  fontFamily: kMonoFontFamily,
+                  fontFamilyFallback: kMonoFallback,
+                  fontSize: 11,
+                  height: 1.45,
+                  color: h.textFaint,
+                ),
+              ),
+              const SizedBox(height: 10),
+              OutlinedButton(
+                onPressed: _resettingSuite ? null : _uninstallSuite,
+                style: OutlinedButton.styleFrom(
+                  foregroundColor: HColors.errorOn(h.dark),
+                  side: BorderSide(
+                    color: HColors.errorOn(h.dark).withValues(alpha: 0.55),
+                  ),
+                  minimumSize: const Size(0, 34),
+                  padding: const EdgeInsets.symmetric(horizontal: 14),
+                  shape: RoundedRectangleBorder(
+                    borderRadius: BorderRadius.circular(17),
+                  ),
+                ),
+                child: _resettingSuite
+                    ? SizedBox(
+                        width: 14,
+                        height: 14,
+                        child: CircularProgressIndicator(
+                          strokeWidth: 2,
+                          color: HColors.errorOn(h.dark),
+                        ),
+                      )
+                    : Text(
+                        '卸载编译环境',
+                        style: TextStyle(
+                          fontSize: 13,
+                          fontWeight: FontWeight.w600,
+                          color: HColors.errorOn(h.dark),
+                        ),
+                      ),
+              ),
+            ],
+            if (_activatingSuite) ...[
+              const SizedBox(height: 8),
+              ClipRRect(
+                borderRadius: BorderRadius.circular(2),
+                child: LinearProgressIndicator(
+                  // percent < 0 = 不确定进度（不画假百分比）
+                  value: _suitePercent >= 0 ? _suitePercent / 100 : null,
+                  minHeight: 3,
+                  backgroundColor: h.border,
+                ),
+              ),
+            ],
           ],
         ),
       ),
@@ -617,6 +690,69 @@ class _SandboxScreenState extends State<SandboxScreen> {
       _suiteStage = '';
     });
     showIosToast(context, r.ok ? (r.alreadyReady ? '编译环境已就绪' : '编译环境已装好') : '失败：${r.message}');
+  }
+
+  /// **卸载 T2 编译环境**（2026-10-29 T2-7）。
+  ///
+  /// 为什么不能只靠 `resetBuildSuite()` 的 bool：它分不清"删干净了"和
+  /// "删了一半/还留着"。这里按三步走：
+  /// 1. 二次确认，写清会删 JDK 17 / Gradle / android.jar 与体积（破坏性）；
+  /// 2. `resetBuildSuiteVerbose()` 拿到删除清单 / 失败项 / 实测释放字节；
+  /// 3. **重查** `buildSuiteStatus()` —— 以磁盘真相为准：
+  ///    · 仍 `ready` ⇒ 「卸载未完成 + 原因」，卡片保持已就绪（不画假状态）；
+  ///    · 不 ready 但仍有 `occupiedBytes` ⇒ 人话说「还剩多少、在哪」；
+  ///    · 都干净 ⇒ 「编译环境已卸载（释放 N）」。
+  ///
+  /// 只动 T2 —— 不碰 T0 rootfs（「重置沙箱」仍是另一条路）。
+  Future<void> _uninstallSuite() async {
+    if (_resettingSuite) return;
+    final bytes = _suite?.occupiedBytes ?? 0;
+    final sizeText = bytes > 0 ? _formatBytes(bytes) : '';
+    final ok = await showBwConfirmSheet(
+      context,
+      title: '卸载编译环境？',
+      message: '会删除沙箱里的 JDK 17、Gradle 和 android.jar'
+          '${sizeText.isEmpty ? '' : '（约 $sizeText）'}。'
+          '卸载后沙箱就不能编译 APK 了，下次要用需要重新下载；'
+          '源码工作区与手机的其它文件不受影响。',
+      confirmLabel: '卸载',
+      destructive: true,
+    );
+    if (ok != true || !mounted) return;
+
+    setState(() => _resettingSuite = true);
+    final r = await _service.resetBuildSuiteVerbose();
+    // ★ 重查：不信 reset 的返回值，以磁盘真相为准（任务书明确要求）。
+    await _refreshSuite();
+    if (!mounted) return;
+    setState(() => _resettingSuite = false);
+
+    final after = _suite;
+    final stillReady = after?.ready ?? false;
+    final residualBytes = after?.occupiedBytes ?? 0;
+    final where = _tailPath(after?.installDir ?? r.installDir);
+    if (stillReady) {
+      showIosToast(context, '卸载未完成：${_resetFailureText(r)}');
+    } else if (residualBytes > 0) {
+      // 文件没删干净就不说"已卸载"——剩多少、在哪，让用户能自己再看一眼。
+      showIosToast(
+          context, '卸载后仍残留 ${_formatBytes(residualBytes)}（$where），可以再试一次');
+    } else if (!r.ok) {
+      showIosToast(context, '卸载未完成：${_resetFailureText(r)}');
+    } else {
+      showIosToast(context, '编译环境已卸载（释放 ${_formatBytes(r.freedBytes)}）');
+    }
+  }
+
+  /// 失败项转人话：优先点名"哪一项没删掉 + 为什么"。
+  String _resetFailureText(SandboxBuildSuiteResetResult r) {
+    if (r.failed.isNotEmpty) {
+      return r.failed
+          .take(2)
+          .map((f) => '${f.path}（${f.reason}）')
+          .join('；');
+    }
+    return r.message.isEmpty ? '后端未返回原因' : r.message;
   }
 
   Widget _resetCard(Hue h) {
@@ -667,4 +803,33 @@ class _SandboxScreenState extends State<SandboxScreen> {
       ),
     );
   }
+}
+
+// ============================================================ 展示小工具
+
+/// 字节数 → 人话（502.0 MB / 120.7 MB / 1.4 GB）。
+///
+/// 与 Kotlin `formatBytes` 同口径（1024 进制、一位小数）；只用于 T2 卡片的
+/// 「实际占用 / 卸载可释放」，数字**来自后端实测**，不在这里估算。
+String _formatBytes(int bytes) {
+  if (bytes <= 0) return '0 B';
+  const gb = 1024 * 1024 * 1024;
+  const mb = 1024 * 1024;
+  const kb = 1024;
+  if (bytes >= gb) return '${(bytes / gb).toStringAsFixed(1)} GB';
+  if (bytes >= mb) return '${(bytes / mb).toStringAsFixed(1)} MB';
+  if (bytes >= kb) return '${(bytes / kb).toStringAsFixed(1)} KB';
+  return '$bytes B';
+}
+
+/// 长路径加零宽断点（U+200B）：Flutter 的换行只在空格等处断，
+/// 一条没有空格的宿主绝对路径在 393dp 真机上会**整串右侧溢出**。
+/// 只影响显示，数据本身不改（测试比对前把 U+200B 剥掉即可）。
+String _wrapPathForDisplay(String path) => path.replaceAll('/', '/\u200B');
+
+/// 取路径末两段（`…/opt/t2`）——Toast 里带全路径太长，说清"在哪"就够。
+String _tailPath(String path) {
+  final parts = path.split('/').where((s) => s.isNotEmpty).toList();
+  if (parts.length <= 2) return path;
+  return '…/${parts.sublist(parts.length - 2).join('/')}';
 }

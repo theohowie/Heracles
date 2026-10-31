@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:io';
 import 'dart:math' as math;
 import 'dart:ui' as ui;
@@ -8,6 +9,7 @@ import 'package:flutter/material.dart';
 import '../models/attachment.dart';
 import '../models/settings.dart';
 import 'image_viewer.dart';
+import '../services/agent_bridge.dart';
 import '../services/voice_input.dart';
 import '../theme/app_theme.dart';
 import '../theme/cupertino_kit.dart';
@@ -15,6 +17,7 @@ import 'brand_icons.dart';
 import '../theme/pressable.dart';
 import 'bw_approval.dart';
 import 'bw_model_sheet.dart';
+import 'voice_draft.dart' as voice_draft;
 
 /// 底部输入区 —— 固定，始终可见。
 ///
@@ -53,6 +56,7 @@ class InputBar extends StatefulWidget {
     this.providerLabel,
     this.providers = const [],
     this.activeProviderId,
+    this.currentProviderId,
     this.onProviderSelected,
     this.onOpenModelCatalog,
     this.onModelTap,
@@ -164,8 +168,15 @@ class InputBar extends StatefulWidget {
   /// 全部 provider（弹层列出）
   final List<ModelProviderConfig> providers;
 
-  /// 当前选中的 provider id
+  /// 当前选中的 provider id（用户显式点选过才有值）
   final String? activeProviderId;
+
+  /// **当前实际生效的 provider id**（2026-10-31，T2-6）。
+  ///
+  /// 用户没显式点选时 [activeProviderId] 是 null，而模型胶囊显示的是
+  /// `effectiveProvider`（自动选中的那个）—— 抽屉要靠这个值才能标出
+  /// 「当前」，否则会出现「胶囊有模型名、抽屉里却没有『当前』」。
+  final String? currentProviderId;
 
   /// 用户选中某个 provider
   final ValueChanged<String>? onProviderSelected;
@@ -242,6 +253,30 @@ class _InputBarState extends State<InputBar>
   final _focus = FocusNode();
   bool _hasText = false;
 
+  // ---- 流式语音草稿（T0-1d）----
+  //
+  // `AgentBridge.voicePartials` 每 200–300ms 回一段**累积全文**；这里只把
+  // 「草稿段」替换进输入框（前后缀与光标由 `VoiceDraft` 负责），
+  // 停止时 final 转正式文本、取消时恢复录音前原文与选区。
+  final voice_draft.VoiceDraft _draft = voice_draft.VoiceDraft();
+
+  /// 草稿事件订阅（dispose 时取消；取消后 voice_input 会走"代填"回退，
+  /// 但本组件常驻，正常路径下代填永不触发）。
+  StreamSubscription<VoicePartial>? _partialSub;
+
+  /// 我们自己写输入框时置 true ⇒ 监听器不把这次写入当成"用户手打"。
+  bool _applyingVoice = false;
+
+  /// 本次录音的会话 id（由第一条 partial 学到；迟到的旧会话一律丢弃）。
+  String? _partialSessionId;
+
+  /// 草稿态镜像（[voice_draft.VoiceDraft] 不是 Listenable，靠这两个标志重建）。
+  bool _draftVisible = false;
+  bool _draftHasText = false;
+
+  /// 正在 dispose：监听器不再 setState、不再把写入当手打。
+  bool _disposing = false;
+
   /// 生成中流光动画（6s 一圈）：旋转描边 + 呼吸光晕共用
   late final AnimationController _glow = AnimationController(
     vsync: this,
@@ -256,9 +291,20 @@ class _InputBarState extends State<InputBar>
     super.initState();
     if (_glowActive) _glow.repeat();
     _controller.addListener(() {
+      if (_disposing) return;
       final has = _controller.text.trim().isNotEmpty;
       if (has != _hasText) setState(() => _hasText = has);
+      if (_applyingVoice) return;
+      // 录音中用户手打 ⇒ 先把草稿落为正式文本，之后迟到的 partial 一律丢弃
+      // （用户接管了输入框，不能再用识别结果覆盖他的字）。
+      if (_draft.active) {
+        _draft.applyUserEdit(_controller.value);
+        _partialSessionId = null;
+        _syncDraftFlags();
+      }
     });
+    // 流式草稿：服务层解码泵把累积全文广播到这里，只替换草稿段。
+    _partialSub = AgentBridge.voicePartials.listen(_onVoicePartial);
   }
 
   @override
@@ -273,10 +319,108 @@ class _InputBarState extends State<InputBar>
 
   @override
   void dispose() {
+    _disposing = true;
+    _partialSub?.cancel();
+    _partialSub = null;
+    // 页面销毁 = 放弃本次录音：把半成品草稿撤掉、恢复录音前原文与选区。
+    if (_draft.active) _applyVoiceValue(_draft.cancel());
     _glow.dispose();
     _ownController?.dispose();
     _focus.dispose();
     super.dispose();
+  }
+
+  // ---------------------------------------------------- 流式草稿（T0-1d）
+
+  /// 把草稿算出来的值写进输入框 —— 这是我们自己写的，不算"用户手打"。
+  void _applyVoiceValue(TextEditingValue value) {
+    _applyingVoice = true;
+    try {
+      _controller.value = value;
+    } finally {
+      _applyingVoice = false;
+    }
+  }
+
+  /// 草稿态变化 ⇒ 重建（「正在识别…」与下划线只在录音/草稿期间出现）。
+  void _syncDraftFlags() {
+    final visible = _draft.active;
+    final hasText = visible && _draft.draft.isNotEmpty;
+    if (visible == _draftVisible && hasText == _draftHasText) return;
+    if (!mounted || _disposing) {
+      _draftVisible = visible;
+      _draftHasText = hasText;
+      return;
+    }
+    setState(() {
+      _draftVisible = visible;
+      _draftHasText = hasText;
+    });
+  }
+
+  /// 一条累积草稿事件。
+  void _onVoicePartial(VoicePartial partial) {
+    if (!_draft.active || _disposing) return;
+    final session = _partialSessionId;
+    if (session == null) {
+      _partialSessionId = partial.sessionId;
+    } else if (partial.sessionId != session) {
+      return; // 迟到的旧会话（不串台）
+    }
+    if (partial.isFinal) {
+      _applyVoiceValue(_draft.commitFinal(partial.text));
+      _partialSessionId = null;
+    } else {
+      _applyVoiceValue(
+        _draft.applyPartial(partial.text, selection: _controller.selection),
+      );
+    }
+    _syncDraftFlags();
+  }
+
+  /// 麦克风点按（开始/停止）—— 行为仍在 [VoiceInputController]，
+  /// 这里只负责"开始前记锚点、结束后收草稿"。
+  Future<void> _onMicTap() async {
+    final voice = VoiceInputController.shared();
+    final starting = voice.phase == VoiceInputPhase.idle;
+    if (starting) {
+      // 录音开始前记下锚点与选区：partial 就地增长，取消时原样恢复。
+      final sel = _controller.selection;
+      final anchor = sel.isValid ? sel.start : _controller.text.length;
+      _partialSessionId = null;
+      _applyVoiceValue(
+        _draft.start(
+          _controller.text,
+          anchor,
+          selection:
+              sel.isValid ? sel : TextSelection.collapsed(offset: anchor),
+        ),
+      );
+      _syncDraftFlags();
+    }
+    await voice.onMicTap(
+      target: _controller,
+      toast: (m) {
+        if (mounted) showIosToast(context, m, icon: AppIcons.mic);
+      },
+    );
+    if (!mounted || _disposing) return;
+    if (starting) {
+      // 开录被拒/失败（权限、模型没备好）⇒ 放弃草稿，恢复原文与选区。
+      if (voice.phase == VoiceInputPhase.idle && _draft.active) {
+        _applyVoiceValue(_draft.cancel());
+      }
+    } else if (_draft.active) {
+      // 停录：等不到 final partial（流式不可用/收尾兜底）⇒ 用最后一段草稿
+      // 定稿；草稿为空则不写值（整段回退可能已经自己把识别文本插进输入框）。
+      if (_draft.draft.isEmpty) {
+        _draft.cancel();
+      } else {
+        _applyVoiceValue(_draft.commitFinal(_draft.draft));
+      }
+    }
+    _partialSessionId = null;
+    _syncDraftFlags();
   }
 
   void _send() {
@@ -474,36 +618,64 @@ class _InputBarState extends State<InputBar>
                         h: h,
                         onRemove: widget.onRemoveAttachment,
                       ),
-                    // ---- 文本区 ----
-                    // ★ ConstrainedBox maxHeight 130：maxLines:null 的
-                    //   TextField 会随内容无限长 —— 限高后多行内部滚动，
-                    //   容器高度封顶（不设上限会 BOTTOM OVERFLOWED）。
-                    ConstrainedBox(
-                      constraints: const BoxConstraints(maxHeight: 130),
-                      child: CupertinoTextField.borderless(
-                        controller: _controller,
-                        focusNode: _focus,
-                        enabled: widget.enabled,
-                        maxLines: null,
-                        minLines: 1,
-                        // ★ 回车 = 发送（真机习惯与全部测试的既有语义）
-                        textInputAction: TextInputAction.send,
-                        onSubmitted: (_) => _send(),
-                        style: TextStyle(
-                          fontSize: 15,
-                          height: 1.45,
-                          color: h.text,
-                        ),
-                        placeholder: widget.queuedTexts.isEmpty
-                            ? '给 Heracles 发消息…'
-                            : '发送将排在队尾；↑ 可插队立即发送',
-                        placeholderStyle:
-                            TextStyle(color: h.textFaint, fontSize: 15),
-                        padding: const EdgeInsets.fromLTRB(
-                          HSpace.lg, HSpace.md, HSpace.lg, HSpace.sm,
-                        ),
-                      ),
-                    ),
+    // ---- 文本区 ----
+    // ★ ConstrainedBox maxHeight 130：maxLines:null 的
+    //   TextField 会随内容无限长 —— 限高后多行内部滚动，
+    //   容器高度封顶（不设上限会 BOTTOM OVERFLOWED）。
+    ConstrainedBox(
+      constraints: const BoxConstraints(maxHeight: 130),
+      child: CupertinoTextField.borderless(
+        controller: _controller,
+        focusNode: _focus,
+        enabled: widget.enabled,
+        maxLines: null,
+        minLines: 1,
+        // ★ 回车 = 发送（真机习惯与全部测试的既有语义）
+        textInputAction: TextInputAction.send,
+        onSubmitted: (_) => _send(),
+        style: TextStyle(
+          fontSize: 15,
+          height: 1.45,
+          color: h.text,
+        ),
+        placeholder: widget.queuedTexts.isEmpty
+            ? '给 Heracles 发消息…'
+            : '发送将排在队尾；↑ 可插队立即发送',
+        placeholderStyle:
+            TextStyle(color: h.textFaint, fontSize: 15),
+        padding: const EdgeInsets.fromLTRB(
+          HSpace.lg, HSpace.md, HSpace.lg, HSpace.sm,
+        ),
+      ),
+    ),
+    // ---- 录音中轻量「正在识别…」（T0-1d）----
+    //
+    // 用户明确要求"轻量、不要整屏 loading"：只在输入卡里加一行小字，
+    // 状态复用 VoiceInputController.phase（recording/recognizing）。
+    AnimatedBuilder(
+      animation: VoiceInputController.shared(),
+      builder: (context, _) {
+        final voice = VoiceInputController.shared();
+        final visible =
+            voice.recording || voice.busy || (_draftVisible && _draft.active);
+        if (!visible) return const SizedBox.shrink();
+        return _VoiceDraftHint(h: h, recognizing: voice.busy);
+      },
+    ),
+    // ---- 草稿下划线（只覆盖「草稿段存在且未定稿」的窗口）----
+    //
+    // 输入框用的是外部 TextEditingController（chat_screen 持有），
+    // 没法给"草稿那一段"单独套 TextStyle ⇒ 用一条随草稿出现/消失的
+    // 下划线表达"这段还是草稿"，final 后立即收起。
+    Container(
+      key: const Key('voice-draft-underline'),
+      height: _draftHasText ? 1.5 : 0,
+      margin: const EdgeInsets.symmetric(horizontal: HSpace.lg),
+      decoration: BoxDecoration(
+        color: h.textDim,
+        borderRadius: BorderRadius.circular(999),
+      ),
+    ),
                     // ---- 底行：＋(小) / 模型胶囊 / 权限盾 / 发送 ----
                     //
                     // 2026-10-26 对图二（TRAE）再对齐：＋是小圆钮带灰底；
@@ -539,6 +711,7 @@ class _InputBarState extends State<InputBar>
                                   widget.onReasoningLevelChanged,
                               providers: widget.providers,
                               activeProviderId: widget.activeProviderId,
+                              currentProviderId: widget.currentProviderId,
                               onProviderSelected: widget.onProviderSelected,
                               onOpenModelCatalog: widget.onOpenModelCatalog,
                             ),
@@ -551,13 +724,12 @@ _PermissionIconButton(
                             onPicked: widget.onPermissionChanged,
                           ),
                           const SizedBox(width: 8),
-                          // ★ 麦克风占位（2026-10-28 用户令预留）：放在
-                          // 盾与发送之间，后面接语音识别；现在点按
-                          // 只提示未接入，不假装能用。
+                          // ★ 麦克风（2026-10-28 用户令预留；2026-10-29 接真识别；
+                          // 2026-10-31 接流式草稿）：点一次开始、再点一次停录。
                           _MicButton(
                             h: h,
                             enabled: widget.enabled,
-                            controller: _controller,
+                            onMicTap: () => unawaited(_onMicTap()),
                           ),
                           const SizedBox(width: 8),
                                                     _SendButton(
@@ -953,12 +1125,14 @@ class _MicButton extends StatelessWidget {
   const _MicButton({
     required this.h,
     required this.enabled,
-    required this.controller,
+    required this.onMicTap,
   });
 
   final Hue h;
   final bool enabled;
-  final TextEditingController controller;
+
+  /// 由输入条状态层接管（要抓锚点/收草稿），本组件只管长相与可点性。
+  final VoidCallback onMicTap;
 
   @override
   Widget build(BuildContext context) {
@@ -983,13 +1157,7 @@ class _MicButton extends StatelessWidget {
                 side: BorderSide(color: Colors.transparent),
               ),
               child: InkWell(
-                onTap: tappable
-                    ? () => voice.onMicTap(
-                          target: controller,
-                          toast: (m) => showIosToast(context, m,
-                              icon: AppIcons.mic),
-                        )
-                    : null,
+                onTap: tappable ? onMicTap : null,
                 customBorder: const CircleBorder(),
                 child: recognizing
                     ? CupertinoActivityIndicator(
@@ -1006,6 +1174,38 @@ class _MicButton extends StatelessWidget {
           ),
         );
       },
+    );
+  }
+}
+
+/// **录音中的轻量提示**（T0-1d）—— 输入卡内一行小字，不是整屏 loading。
+///
+/// 红点 = 正在收音（与麦克风按钮的录音红同一个色值 `#FF3B30`，取自
+/// 现有录音态样式）；识别收尾时换成弱化点，文字始终是「正在识别…」。
+class _VoiceDraftHint extends StatelessWidget {
+  const _VoiceDraftHint({required this.h, required this.recognizing});
+
+  final Hue h;
+  final bool recognizing;
+
+  @override
+  Widget build(BuildContext context) {
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(HSpace.lg, HSpace.sm, HSpace.lg, 0),
+      child: Row(
+        children: [
+          Container(
+            width: 6,
+            height: 6,
+            decoration: BoxDecoration(
+              color: recognizing ? h.textFaint : const Color(0xFFFF3B30),
+              shape: BoxShape.circle,
+            ),
+          ),
+          const SizedBox(width: 6),
+          Text('正在识别…', style: HTxt.caption.copyWith(color: h.textDim)),
+        ],
+      ),
     );
   }
 }
@@ -1198,6 +1398,7 @@ class _ModelSelector extends StatelessWidget {
     required this.onReasoningLevelChanged,
     required this.providers,
     required this.activeProviderId,
+    this.currentProviderId,
     required this.onProviderSelected,
     this.onOpenModelCatalog,
     this.maxTextWidth = 200,
@@ -1219,8 +1420,11 @@ class _ModelSelector extends StatelessWidget {
   /// 全部 provider（弹层里列出；已配置的才可选中）
   final List<ModelProviderConfig> providers;
 
-  /// 当前选中的 provider id
+  /// 当前选中的 provider id（用户显式点选过才有值）
   final String? activeProviderId;
+
+  /// 当前**实际生效**的 provider id（见 [InputBar.currentProviderId]）
+  final String? currentProviderId;
 
   /// 用户选中了某个 provider
   final ValueChanged<String>? onProviderSelected;
@@ -1240,6 +1444,7 @@ class _ModelSelector extends StatelessWidget {
       context,
       providers: providers,
       activeProviderId: activeProviderId,
+      currentProviderId: currentProviderId,
       reasoningLevel: reasoningLevel,
       onProviderSelected: onProviderSelected,
       onOpenModelCatalog: onOpenModelCatalog,

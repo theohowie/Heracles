@@ -26,23 +26,32 @@ Future<void> showModelSheet(
   BuildContext context, {
   required List<ModelProviderConfig> providers,
   required String? activeProviderId,
+  String? currentProviderId,
   required ReasoningLevel reasoningLevel,
   ValueChanged<String>? onProviderSelected,
   ValueChanged<String>? onOpenModelCatalog,
   ValueChanged<ReasoningLevel>? onReasoningLevelChanged,
 }) async {
   final h = Hue.of(context);
+  // ★「当前」判据（2026-10-29 T2 第 6 条）：**不再只认用户显式点过的
+  //   `activeProviderId`**。用户没点过时它是 null，而输入框胶囊显示的是
+  //   `AppSettings.effectiveProvider`（models/settings.dart:733-749 会自动
+  //   选中一个）⇒ 旧版胶囊上有模型名、抽屉里却没有任何「当前」。
+  //   调用方把 `effectiveProvider?.id` 作为 [currentProviderId] 传进来
+  //   （唯一口径，抽屉里**不重算**选择顺序）；只有旧调用没传时才退回
+  //   `activeProviderId`（compat）。
+  final currentId = currentProviderId ?? activeProviderId;
   // ★ 思考档位是否真生效（后端如实标注）：Anthropic / Responses 轨
   //   不读 reasoning_effort ⇒ 只给开/关两态。数据优先吃能力快照
   //   （rLv），没有快照时按 provider 协议推导。
   var levelsEffective = true;
-  final activeProvider =
-      providers.where((p) => p.id == activeProviderId).firstOrNull;
-  if (activeProvider != null) {
+  final currentProvider =
+      providers.where((p) => p.id == currentId).firstOrNull;
+  if (currentProvider != null) {
     levelsEffective =
-        activeProvider.modelCapabilities[activeProvider.model]
+        currentProvider.modelCapabilities[currentProvider.model]
                 ?.reasoningLevelsEffective ??
-            activeProvider.protocol.reasoningLevelsEffective;
+            currentProvider.protocol.reasoningLevelsEffective;
   }
   final visible = providers
       .where((p) => p.isConfigured || AppSettings.isLocalConfig(p))
@@ -118,7 +127,7 @@ Future<void> showModelSheet(
                 if (i > 0) const SizedBox(height: 8),
                 BwOptionCard(
                   h: h,
-                  selected: visible[i].id == activeProviderId,
+                  selected: visible[i].id == currentId,
                   title: visible[i].model.isNotEmpty
                       ? visible[i].model
                       : visible[i].name,
@@ -131,7 +140,7 @@ Future<void> showModelSheet(
                   trailing: Row(
                     mainAxisSize: MainAxisSize.min,
                     children: [
-                      if (visible[i].id == activeProviderId)
+                      if (visible[i].id == currentId)
                         _Badge(h: h, label: '当前')
                       else if (AppSettings.isLocalConfig(visible[i]))
                         _Badge(h: h, label: '端侧'),

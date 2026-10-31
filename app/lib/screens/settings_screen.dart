@@ -4,9 +4,9 @@ import 'dart:io';
 
 import 'package:flutter/cupertino.dart';
 import 'package:flutter/material.dart';
-import 'package:flutter/services.dart';
 
 import 'package:package_info_plus/package_info_plus.dart';
+import 'package:url_launcher/url_launcher.dart';
 
 import '../models/jev.dart';
 import '../models/settings.dart';
@@ -3900,8 +3900,22 @@ class _ThemeCard extends StatelessWidget {
       );
 }
 
+/// 打开一条外部链接（可注入：widget 测试给假实现断言 URL/模式；
+/// 生产默认走 `url_launcher` 的系统浏览器）。
+typedef AboutUrlOpener = Future<bool> Function(Uri url, LaunchMode mode);
+
+/// 生产默认实现：**系统浏览器**打开（[LaunchMode.externalApplication]）。
+///
+/// 返回值就是 url_launcher 的语义：`false` = 没打开（没有处理该 URL 的
+/// Activity 等）——调用方必须如实提示，不能默认成功。
+Future<bool> openExternalInBrowser(Uri url, LaunchMode mode) =>
+    launchUrl(url, mode: mode);
+
 class AboutPage extends StatefulWidget {
-  const AboutPage({super.key});
+  const AboutPage({super.key, this.urlOpener});
+
+  /// 外链打开实现；null = 生产默认 [openExternalInBrowser]。
+  final AboutUrlOpener? urlOpener;
 
   @override
   State<AboutPage> createState() => _AboutPageState();
@@ -3929,9 +3943,27 @@ class _AboutPageState extends State<AboutPage> {
   static const _repoUrl = 'https://github.com/theohowie/Heracles';
   static const _issuesUrl = 'https://github.com/theohowie/Heracles/issues';
 
-  void _copy(BuildContext context, String text) {
-    Clipboard.setData(ClipboardData(text: text));
-    showIosToast(context, '链接已复制');
+  /// 外链 = **真跳转**（2026-10-29 T1 第 5 条）：
+  /// 旧版只把链接塞剪贴板 + 「链接已复制」，用户点了浏览器没反应；
+  /// 现在一律 `externalApplication` 交给系统浏览器打开，失败如实 Toast。
+  Future<void> _openUrl(String url) async {
+    var opened = false;
+    try {
+      final opener = widget.urlOpener ?? openExternalInBrowser;
+      opened = await opener(Uri.parse(url), LaunchMode.externalApplication);
+    } catch (_) {
+      // 通道不可用 / ActivityNotFound：统一折成"没打开"，交给下面说人话。
+      opened = false;
+    }
+    if (!mounted) return;
+    if (!opened) showIosToast(context, '无法打开浏览器');
+  }
+
+  /// 开源许可证 = **应用内完整列表**（同一套 iOS 侧滑路由，与设置页二级页一致）。
+  void _openLicenses() {
+    Navigator.of(context).push(
+      CupertinoPageRoute<void>(builder: (_) => const OssLicensesScreen()),
+    );
   }
 
   @override
@@ -4052,14 +4084,18 @@ class _AboutPageState extends State<AboutPage> {
               _CardRow(
                 title: 'GitHub 仓库',
                 value: 'theohowie/Heracles',
-                onTap: () => _copy(context, _repoUrl),
+                onTap: () => _openUrl(_repoUrl),
               ),
               _CardRow(
                 title: '问题反馈',
                 value: 'GitHub Issues',
-                onTap: () => _copy(context, _issuesUrl),
+                onTap: () => _openUrl(_issuesUrl),
               ),
-              const _CardRow(title: '开源许可证', value: '见仓库 LICENSE'),
+              _CardRow(
+                title: '开源许可证',
+                value: '完整列表',
+                onTap: _openLicenses,
+              ),
             ],
           ),
           const SizedBox(height: 20),
