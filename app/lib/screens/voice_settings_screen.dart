@@ -94,6 +94,11 @@ class _VoiceSettingsScreenState extends State<VoiceSettingsScreen> {
               _streamingCard(h),
               const SizedBox(height: HSpace.md),
               _senseVoiceCard(h),
+              const SizedBox(height: HSpace.md),
+              // ★ 2026-10-31（T0-1 f）：模型实际落盘目录 + 卸载即删说明。
+              //   用户要能核对"到底装在哪、卸载删的是什么"——只写"App 私有目录"
+              //   太虚；真实路径由 VoiceModelController 给出（profile.appFilesDir）。
+              _modelsDirRow(h),
               const SizedBox(height: HSpace.lg),
               Text(
                 '流式识别（内置）：14M 中文 streaming zipformer 已随 App 打包，'
@@ -545,6 +550,59 @@ class _VoiceSettingsScreenState extends State<VoiceSettingsScreen> {
         ),
       ),
     );
+  }
+
+  /// **模型落盘目录**（T0-1 f，2026-10-31）。
+  ///
+  /// 用户要能核对"装在哪个目录、卸载会删什么"。`voice_models/` 是 App 私有
+  /// 目录：真机路径由控制器给出（`<appFilesDir>/voice_models`），拿不到
+  /// profile 时（测试/极早期）退化成相对说明 —— 不编一个假绝对路径。
+  Widget _modelsDirRow(Hue h) {
+    final root = _modelsRootDir;
+    return Container(
+      key: const Key('voice-models-dir'),
+      padding: const EdgeInsets.all(12),
+      decoration: BoxDecoration(
+        color: h.surface,
+        borderRadius: BorderRadius.circular(HRadius.md),
+        border: Border.all(color: h.border),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text('模型目录',
+              style: TextStyle(
+                  fontSize: 12.5,
+                  fontWeight: FontWeight.w600,
+                  color: h.textDim)),
+          const SizedBox(height: 4),
+          SelectableText(
+            root ?? 'files/voice_models/（App 私有目录）',
+            style: TextStyle(
+                fontSize: 11.5, height: 1.45, color: h.textFaint),
+          ),
+          const SizedBox(height: 4),
+          Text(
+            '该目录下两套模型（内置流式 + SenseVoice）在「卸载语音输入」时一并删除；'
+            '卸载 App 也会一并删除。录音不上传。',
+            style: TextStyle(fontSize: 11, height: 1.5, color: h.textFaint),
+          ),
+        ],
+      ),
+    );
+  }
+
+  /// `<appFilesDir>/voice_models` —— 优先用内置流式目录反推（它一定在
+  /// `voice_models/` 下），拿不到 profile 时返回 null。
+  String? get _modelsRootDir {
+    final dir = _voice.bundledStreamingModelDir ??
+        _voice.streamingModelDir ??
+        _voice.modelDir;
+    if (dir == null || dir.isEmpty) return null;
+    const marker = '/voice_models';
+    final i = dir.indexOf(marker);
+    if (i < 0) return dir;
+    return dir.substring(0, i + marker.length);
   }
 
   Widget _groupLabel(Hue h, String text) {

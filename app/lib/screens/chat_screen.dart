@@ -21,6 +21,7 @@ import '../services/agent_bridge.dart';
 import '../services/device_capabilities.dart';
 import '../services/jev_service.dart';
 import '../services/model_context_table.dart';
+import '../services/session_store.dart';
 import '../services/settings_controller.dart';
 import '../theme/app_theme.dart';
 import '../theme/cupertino_kit.dart';
@@ -713,13 +714,26 @@ class _ChatScreenState extends State<ChatScreen> {
   ///（用户看到"会话记录超过通道 1MB 上限…"，像是模型说的话）。现在它只
   /// 负责置这个标记 ⇒ 列表顶部显示「更早消息未加载」横幅。
   ///
-  /// ## 翻页（还没做，已移交后端线）
+  /// ## 翻页（2026-10-31 已接）
   ///
-  /// 点横幅加载上一页需要 `AgentBridge.loadMessages(..., limit, offset)`
-  /// 把参数转发给 `SessionStore`（后者已支持，见 session_store.dart:689-709）。
-  /// 桥接层还没加这两个具名参数 ⇒ 现在点横幅只如实提示"需要后端分页接口"，
-  /// **不假装能加载**。参数落地后在这里接 offset 累加即可。
+  /// 点横幅用 `SessionStore.loadMessages(limit, offset)` 取上一窗口：
+  /// `offset` = 已加载的**文件行数**（合成提示行不计），`limit` = 每页行数。
+  /// 桥接 `AgentBridge.loadMessages` 还没转发这两个参数（已移交后端线），
+  /// 所以这里**临时直连** `SessionStore`（纯 Dart，同一 `heracles/device`
+  /// 通道；桥接补齐后把 `_pagingStore` 换成 `_bridge` 调用即可）。
   bool _historyHasEarlier = false;
+
+  /// 已加载的会话**文件行数**（= 下一次翻页的 `offset`）。
+  ///
+  /// 只数真实落盘行：合成分页行、读取失败提示行都不算 —— 否则 offset
+  /// 会虚高，翻页时漏掉/重复一行。
+  int _historyLinesLoaded = 0;
+
+  /// 每页行数（T0-2）。200 行 ≈ 一屏半到两屏，翻一次就有明显内容。
+  static const int _kHistoryPageLines = 200;
+
+  /// 正在加载更早消息（按钮态：转圈 + 防连点）。
+  bool _historyLoadingEarlier = false;
 
   // ---- 会话列表缓存（2026-10-23）----
   //
@@ -1765,6 +1779,9 @@ class _ChatScreenState extends State<ChatScreen> {
         _messages
           ..clear()
           ..addAll(_toMessages(raw));
+        // ★ T0-2：记下这次读了多少**文件行** —— 翻页 offset 从这里起算。
+        _historyLinesLoaded = _sessionLinesOf(raw);
+        _historyLoadingEarlier = false;
         if (restoredUsage != null) {
           _usageBySession[sessionId] = restoredUsage;
         } else {
@@ -2163,6 +2180,92 @@ class _ChatScreenState extends State<ChatScreen> {
       if (w.id == workspaceId) return w.treeUri;
     }
     return '';
+  }
+
+  /// 取某个工作区的**绝对路径**（`SessionStore` 与文件操作都要它）
+  String? _workspacePathOf(String workspaceId) {
+    for (final w in _workspaces) {
+      if (w.id == workspaceId) return w.path;
+    }
+    return null;
+  }
+
+  /// 本次读回的**真实文件行数**（T0-2 翻页 offset 的度量）。
+  ///
+  /// 排除两类**不是会话内容**的行：
+  /// · `_synthetic:"paging"` —— SessionStore 头插的分页提示行；
+  /// · 读取失败时尾插的 `role:system` 提示行（`…后面的消息没有显示。`）。
+  /// 不排除的话 offset 虚高，翻页会漏行或重复。
+  static int _sessionLinesOf(List<Map<String, dynamic>> rows) {
+    var n = 0;
+    for (final m in rows) {
+      if (m['_synthetic'] == 'paging') continue;
+      final text = (m['text'] as String?) ?? '';
+      if (m['role'] == 'system' && text.endsWith('后面的消息没有显示。')) {
+        continue;
+      }
+      n++;
+    }
+    return n;
+  }
+
+  /// **加载更早消息**（T0-2，2026-10-31）。
+  ///
+  /// 取上一页（`limit: 每页行数 + 1`、`offset: 已加载行数`）：
+  /// · 多要 1 行是为了判断"还有没有更早" —— 返回 > 每页行数 ⇒ 还有；
+  ///   正好 <= 每页行数 ⇒ 到头了，横幅消失；
+  /// · 合并时**插到最前**并保持滚动位置：记下插入前后的 `maxScrollExtent`
+  ///   差值，插完把 `pixels` 同步加上差值 —— 用户眼里的内容不跳；
+  /// · 去重靠 offset 连续性（窗口不重叠），不靠文本比对（消息可以重复）。
+  Future<void> _loadEarlierMessages() async {
+
+    final wsId = _activeWorkspace?.id;
+    final sid = _activeSessionId;
+    final path = wsId == null ? null : _workspacePathOf(wsId);
+    if (sid == null || path == null || path.isEmpty) return;
+
+    setState(() => _historyLoadingEarlier = true);
+    try {
+      // 直连 SessionStore（桥接未转发 limit/offset；见 `_historyHasEarlier` 注释）。
+      final store = SessionStore(workspaceRoot: path);
+      final rows = await store.loadMessages(
+        sid,
+        limit: _kHistoryPageLines + 1,
+        offset: _historyLinesLoaded,
+      );
+      if (!mounted) return;
+      final lines = _sessionLinesOf(rows);
+      if (lines <= 0) {
+        // 窗口空了 = 确实没有更早的了
+        setState(() {
+          _historyHasEarlier = false;
+          _historyLoadingEarlier = false;
+        });
+        return;
+      }
+      final older = _toMessages(rows); // 内部会按合成行临时改 _historyHasEarlier
+      final before = _scroll.hasClients ? _scroll.position.pixels : null;
+      final beforeMax =
+          _scroll.hasClients ? _scroll.position.maxScrollExtent : null;
+      setState(() {
+        _messages.insertAll(0, older);
+        _historyLinesLoaded += lines;
+        // 多要了 1 行还拿到 > 每页 ⇒ 前面还有
+        _historyHasEarlier = lines > _kHistoryPageLines;
+        _historyLoadingEarlier = false;
+      });
+      if (before != null && beforeMax != null) {
+        WidgetsBinding.instance.addPostFrameCallback((_) {
+          if (!mounted || !_scroll.hasClients) return;
+          final delta = _scroll.position.maxScrollExtent - beforeMax;
+          final target = (before + delta)
+              .clamp(0.0, _scroll.position.maxScrollExtent);
+          if (target.isFinite) _scroll.jumpTo(target);
+        });
+      }
+    } catch (_) {
+      if (mounted) setState(() => _historyLoadingEarlier = false);
+    }
   }
 
   HSession? _findSession(String workspaceId, String sessionId) {
@@ -3670,6 +3773,8 @@ class _ChatScreenState extends State<ChatScreen> {
       // ★ T0-2：分页状态属于**旧列表** —— 换会话/新建/删会话后必须复位，
       //   否则新会话顶上会残留「更早消息未加载」（假入口比没有更糟）。
       _historyHasEarlier = false;
+      _historyLinesLoaded = 0;
+      _historyLoadingEarlier = false;
       // 压缩提示是**实时流**的瞬态提示（不落盘）：换会话后不该残留 ——
       // 它是"那个会话当时发生过"的事，锚点也属于旧列表。
       _compressedNotes.clear();
@@ -6089,15 +6194,15 @@ class _ChatScreenState extends State<ChatScreen> {
   /// 长会话（> 通道 1MB 文本上限）只加载了最近一段 —— 用户必须**看得见**
   /// "上面还有"，否则会以为记录丢了（旧实现那句 1MB 提示还被画成了模型气泡）。
   ///
-  /// ⚠️ 翻页接口未落地：`AgentBridge.loadMessages` 还没有 `limit` / `offset`
-  /// 具名参数（`SessionStore` 侧已支持，桥接转发已移交后端线）——
-  /// 所以点它只如实说明，**不假装能加载**。
+  /// ⚠️ 翻页走 `SessionStore` 直连（`AgentBridge` 尚未转发 limit/offset，
+  /// 已移交后端线）：见 [ _loadEarlierMessages ] 的注释。
   Widget _earlierMessagesBanner(Hue h) {
+    final loading = _historyLoadingEarlier;
     return Padding(
       padding: const EdgeInsets.fromLTRB(HSpace.lg, HSpace.sm, HSpace.lg, 0),
       child: GestureDetector(
         behavior: HitTestBehavior.opaque,
-        onTap: () => showIosToast(context, '加载更早消息需要后端分页接口（已移交）'),
+        onTap: loading ? null : () => unawaited(_loadEarlierMessages()),
         child: Container(
           width: double.infinity,
           padding: const EdgeInsets.symmetric(vertical: 8),
@@ -6106,10 +6211,27 @@ class _ChatScreenState extends State<ChatScreen> {
             color: h.surfaceAlt,
             borderRadius: BorderRadius.circular(HRadius.pill),
           ),
-          child: Text(
-            '更早消息未加载',
-            style: TextStyle(fontSize: 12, color: h.textDim),
-          ),
+          child: loading
+              ? Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    SizedBox(
+                      width: 12,
+                      height: 12,
+                      child: CupertinoActivityIndicator(
+                          radius: 6, color: h.textFaint),
+                    ),
+                    const SizedBox(width: 8),
+                    Text(
+                      '正在加载更早消息…',
+                      style: TextStyle(fontSize: 12, color: h.textDim),
+                    ),
+                  ],
+                )
+              : Text(
+                  '加载更早消息',
+                  style: TextStyle(fontSize: 12, color: h.textDim),
+                ),
         ),
       ),
     );

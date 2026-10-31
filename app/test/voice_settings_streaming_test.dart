@@ -1,4 +1,4 @@
-// Copyright (C) 2026 The Heracles Authors
+﻿// Copyright (C) 2026 The Heracles Authors
 // SPDX-License-Identifier: GPL-3.0
 //
 // **语音设置页：两张模型卡 + 页顶总状态 + 真卸载/重装**（task-7 / T0-1，2026-10-31）。
@@ -311,5 +311,20 @@ void main() {
     expect(textOf(tester, 'voice-total-status'), contains('语音输入可用'));
     expect(inCard('voice-sensevoice-card', find.text('删除')), findsOneWidget);
     expect(textOf(tester, 'voice-streaming-status'), contains('已就绪'));
+  });
+
+  testWidgets('⑦ 页面显示模型真实目录 + 卸载即删说明（用户要能核对）',
+      (tester) async {
+    await tester.runAsync(seedBundledReady);
+    await pumpScreen(tester);
+
+    // 真实落盘目录 = profile.appFilesDir/voice_models（App 私有）
+    final expectedDir = '${tmp.path}/voice_models';
+    expect(find.byKey(const Key('voice-models-dir')), findsOneWidget,
+        reason: '语音设置页必须能核对模型装在哪个目录');
+    expect(find.textContaining(expectedDir), findsOneWidget,
+        reason: '目录必须是真实路径（不是编的）: $expectedDir');
+    expect(find.textContaining('卸载语音输入'), findsWidgets,
+        reason: '要写清卸载会删掉这个目录下的两套模型');
   });
 }

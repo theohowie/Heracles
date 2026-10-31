@@ -58,11 +58,17 @@ void main() {
     {'id': 'sess-err', 'title': '会话坏', 'updatedAt': 1000},
   ];
 
-  /// 尾部读取返回的行（= 设备侧 `fs.readTailLines` 的 `lines`）。
-  final tailRows = <Map<String, dynamic>>[
-    {'role': 'user', 'text': '最新一条消息', 'ts': 900},
-    {'role': 'assistant', 'text': '最新回答', 'ts': 901},
-  ];
+  /// 大会话的虚拟文件（T0-2 真翻页用）：2400 行、每行一条消息。
+  /// 初始 `limit:0` 只拿尾部 2000 行；两页后到顶。
+  const totalBigLines = 2400;
+  List<Map<String, dynamic>> bigLines() => <Map<String, dynamic>>[
+        for (var i = 0; i < totalBigLines; i++)
+          <String, dynamic>{
+            'role': i.isEven ? 'user' : 'assistant',
+            'text': 'L-$i',
+            'ts': i + 1,
+          },
+      ];
 
   void installMocks() {
     final messenger =
@@ -122,21 +128,27 @@ void main() {
               'truncated': false,
             };
           }
-          // 大会话不该走全文读（stat 已报 >1MB）；万一走了也给出同样两行。
+          // 大会话不该走全文读（stat 已报 >1MB）；万一走了也算"被截断"，
+          // SessionStore 会因此改走 tail。
           return <String, dynamic>{
             'ok': true,
-            'text': tailRows.map(jsonEncode).join('\n'),
-            'truncated': false,
+            'text': bigLines().map(jsonEncode).join('\n'),
+            'truncated': true,
           };
         case 'fs.readTailLines':
-          // Kotlin 契约：`fs.readTailLines` → `{ok, text, truncated, totalLines?}`
-          // （DeviceFs.kt:331 —— 返回的是拼接后的 text，不是 lines 列表）。
+          // Kotlin 契约：`fs.readTailLines` → `{ok, text, truncated}`。
+          // 大会话按 `maxLines` 真窗口返回（翻页测试要靠它）。
           if (isBig) {
-            // `truncated == (tail.size >= want)` ⇒ 语义是"前面还有"
+            final all = bigLines();
+            final maxLines = (args['maxLines'] as num?)?.toInt() ?? 0;
+            final want = maxLines <= 0 ? all.length : maxLines;
+            final take = want < all.length ? want : all.length;
+            final chunk = all.sublist(all.length - take);
             return <String, dynamic>{
               'ok': true,
-              'text': tailRows.map(jsonEncode).join('\n'),
-              'truncated': true,
+              'text': chunk.map(jsonEncode).join('\n'),
+              // `truncated == (tail.size >= want)` ⇒ "前面可能还有"
+              'truncated': maxLines > 0 && take >= maxLines && maxLines < all.length,
             };
           }
           return <String, dynamic>{
@@ -215,32 +227,31 @@ void main() {
   }
 
   group('T0-2 长会话分页可见部分（SessionStore 尾部读取 + 合成分页行）', () {
-    testWidgets('a) 大会话：最新消息可见、无 1MB 气泡、顶部有「更早消息未加载」',
+    testWidgets('a) 大会话：最新消息可见、无 1MB 气泡、顶部有「加载更早消息」',
         (tester) async {
       await pumpChat(tester);
       await openSession(tester, '会话大');
 
       // 最新内容必须显示（尾部读取的意义）——
-      expect(find.textContaining('最新一条消息'), findsOneWidget,
+      expect(find.textContaining('L-2399'), findsOneWidget,
           reason: '长会话要看到最新的消息，而不是最早的 1MB');
-      expect(find.textContaining('最新回答'), findsOneWidget);
 
       // 合成分页行不许再画成气泡（旧行为把它的 text 当 assistant 气泡）
       expect(find.textContaining('1MB'), findsNothing,
           reason: '「会话记录超过通道 1MB…」这类文案不能再出现在对话流里');
 
-      // 顶部要有入口/说明
-      expect(find.text('更早消息未加载'), findsOneWidget,
-          reason: '更早的消息没加载时，顶部必须明确告诉用户');
+      // 顶部要有可点入口
+      expect(find.text('加载更早消息'), findsOneWidget,
+          reason: '更早的消息没加载时，顶部必须给出加载入口');
     });
 
     testWidgets('b) 切到普通小会话 ⇒ 横幅消失（状态跟着会话走）', (tester) async {
       await pumpChat(tester);
       await openSession(tester, '会话大');
-      expect(find.text('更早消息未加载'), findsOneWidget);
+      expect(find.text('加载更早消息'), findsOneWidget);
 
       await openSession(tester, '会话小');
-      expect(find.text('更早消息未加载'), findsNothing,
+      expect(find.text('加载更早消息'), findsNothing,
           reason: '小会话没有"更早"，横幅不能残留');
       expect(find.textContaining('小会话消息'), findsOneWidget);
     });
@@ -252,23 +263,39 @@ void main() {
 
       expect(find.textContaining('磁盘 I/O 错误'), findsOneWidget,
           reason: '读失败的提示必须显示，否则用户以为记录真的没了');
-      expect(find.text('更早消息未加载'), findsNothing,
+      expect(find.text('加载更早消息'), findsNothing,
           reason: '读失败 ≠ 还有更早的消息（不许误报分页入口）');
     });
 
-    testWidgets('d) 点横幅 ⇒ 如实告知"需要后端分页接口（已移交）"', (tester) async {
+    testWidgets('d) 点「加载更早消息」⇒ 真加载上一页，到底后入口消失', (tester) async {
       await pumpChat(tester);
       await openSession(tester, '会话大');
 
-      await tester.tap(find.text('更早消息未加载'));
-      await settle(tester, times: 10);
-      expect(find.textContaining('加载更早消息需要后端分页接口'), findsOneWidget,
-          reason: '翻页接口未落地时不许假装能加载，也不许静默无反应');
+      final scrollable = find.byType(Scrollable).first;
+      double extent() =>
+          tester.state<ScrollableState>(scrollable).position.maxScrollExtent;
+      final before = extent();
 
-      // Toast 自身有 2.2 秒停留 + 淡出计时器 —— 推完再结束，
-      // 否则 `flutter_test` 会报 "A Timer is still pending"。
-      await tester.pump(const Duration(seconds: 3));
-      await settle(tester, times: 6);
+      // 2400 行；初始尾部 2000 行（L-400..L-2399）⇒ 第 1 页拿 201 行（L-199..L-399）
+      await tester.tap(find.text('加载更早消息'));
+      await settle(tester, times: 20);
+      expect(find.text('加载更早消息'), findsOneWidget,
+          reason: '第一页之后还有更早的（L-0..L-198），入口应保留');
+      final afterFirst = extent();
+      expect(afterFirst, greaterThan(before),
+          reason: '点入口必须真的把上一页插进列表（列表总高度变大）');
+
+      // 第 2 页拿剩下的 199 行 ⇒ 到顶，入口消失
+      await tester.tap(find.text('加载更早消息'));
+      await settle(tester, times: 20);
+      expect(find.text('加载更早消息'), findsNothing,
+          reason: '全部加载完（2400 行）后入口必须消失，不能永远显示');
+      expect(extent(), greaterThan(afterFirst),
+          reason: '第二页也要真的插进列表');
+
+      // 视口保持：最新一条仍在屏幕上（插入上一页不许把用户甩走）
+      expect(find.text('L-2399'), findsOneWidget,
+          reason: '加载更早消息不能改变用户当前看的位置');
     });
   });
 }
