@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { AnimatePresence, motion, useInView, useReducedMotion } from 'framer-motion'
+import { AnimatePresence, motion, useInView } from 'framer-motion'
 import { Icon, ICONS, Reveal, SectionHead } from '../ui.jsx'
+import { useMotionOff } from '../motion.jsx'
 import { GALLERY, SHOT_DATE, VERSION } from '../data.js'
 
 /* 界面：左边一张大图，右边标题/说明 + 缩略图轨 + 箭头。
@@ -8,10 +9,11 @@ import { GALLERY, SHOT_DATE, VERSION } from '../data.js'
 export default function Reel() {
   const [i, setI] = useState(0)
   const [open, setOpen] = useState(false)
-  const reduce = useReducedMotion()
+  const reduce = useMotionOff()
   const count = GALLERY.length
   const shot = GALLERY[i]
   const stageRef = useRef(null)
+  const stripRef = useRef(null)
   const closeRef = useRef(null)
   const lastFocus = useRef(null)
   const sectionRef = useRef(null)
@@ -26,6 +28,16 @@ export default function Reel() {
     const t = setInterval(() => setI((v) => (v + 1) % count), 5200)
     return () => clearInterval(t)
   }, [open, reduce, onScreen, count])
+
+  // 自动轮播时把胶片条滚到当前那张，让「在哪里」看得出来
+  useEffect(() => {
+    const strip = stripRef.current
+    if (!strip || open) return
+    const el = strip.children[i]
+    if (!el) return
+    const left = el.offsetLeft - strip.clientWidth / 2 + el.clientWidth / 2
+    strip.scrollTo({ left: Math.max(0, left), behavior: reduce ? 'auto' : 'smooth' })
+  }, [i, open, reduce])
 
   /* 灯箱：键盘（Esc / ←→）+ 焦点进得去出得来 + 后面不滚 */
   useEffect(() => {
@@ -100,7 +112,7 @@ export default function Reel() {
             </AnimatePresence>
 
             {/* 缩略图就是普通按钮：aria-pressed 比不完整的 tablist 更诚实 */}
-            <div className="thumbs" aria-label="界面截图">
+            <div className="thumbs" aria-label="界面截图" ref={stripRef}>
               {GALLERY.map((g, n) => (
                 <button type="button" key={g.src} aria-pressed={n === i}
                   className={`thumb${n === i ? ' on' : ''}`} onClick={() => setI(n)} title={g.title}>

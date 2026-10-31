@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
-import { motion, useInView, useReducedMotion } from 'framer-motion'
+import { motion, useInView } from 'framer-motion'
 import { Icon, ICONS, SectionHead } from '../ui.jsx'
+import { useMotionOff } from '../motion.jsx'
 import { STEPS } from '../data.js'
 
 /* 上手路径：真序列（所以有 01–04 编号）。
@@ -10,7 +11,7 @@ export default function Journey() {
   const [active, setActive] = useState(0)
   const listRef = useRef(null)
   const sectionRef = useRef(null)
-  const reduce = useReducedMotion()
+  const reduce = useMotionOff()
   const near = useInView(sectionRef, { once: true, margin: '300px 0px' })
 
   useEffect(() => {

@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
-import { motion, useInView, useReducedMotion, useScroll, useSpring } from 'framer-motion'
+import { motion, useInView, useScroll, useSpring } from 'framer-motion'
 import { Icon, ICONS, HandStroke, Reveal, SectionHead } from './ui.jsx'
+import { useMotionOff, useMotionToggle } from './motion.jsx'
 import { APK, APK_PRIMARY, APK_SIZE, BAND, GITEE, HERO_SPECS, REPO, RELEASES, SHOT, SHOT_DATE, VERSION, VIDEOS } from './data.js'
 import Transcript from './parts/Transcript.jsx'
 import Journey from './parts/Journey.jsx'
@@ -31,6 +32,7 @@ function Nav() {
   const [solid, setSolid] = useState(false)
   const [active, setActive] = useState('')
   const [menu, setMenu] = useState(false)
+  const { off: motionOff, toggle: toggleMotion } = useMotionToggle()
 
   useEffect(() => {
     const onScroll = () => setSolid(window.scrollY > 8)
@@ -70,6 +72,11 @@ function Nav() {
           ))}
         </nav>
         <div className="nav-right">
+          <button type="button" className="nav-motion mono" onClick={toggleMotion}
+            aria-pressed={!motionOff} title={motionOff ? '开启动效' : '关闭动效'}>
+            动效<span className={`nav-motion-dot${motionOff ? '' : ' on'}`} aria-hidden="true" />
+            {motionOff ? '关' : '开'}
+          </button>
           <span className="nav-ver mono">{VERSION}</span>
           <a className="btn btn--ink btn--sm" href="#download">下载 APK</a>
           <button type="button" className="nav-menu-btn"
@@ -86,6 +93,9 @@ function Nav() {
             <a key={n.href} href={n.href} onClick={() => setMenu(false)}>{n.label}</a>
           ))}
           <a href="#download" onClick={() => setMenu(false)}>下载 APK</a>
+          <button type="button" className="nav-menu-motion" onClick={toggleMotion} aria-pressed={!motionOff}>
+            动效 {motionOff ? '关' : '开'}
+          </button>
         </div>
       )}
       <motion.span className="nav-progress" style={{ scaleX: bar }} aria-hidden="true" />
@@ -96,7 +106,7 @@ function Nav() {
 /* 首屏：左侧一句话立论，右侧是真实的手机界面 + 一处工程标注。
    那个手绘圈是整站唯一的「手写笔迹」，用来把注意力钉在「手机」两个字上。 */
 function Hero() {
-  const reduce = useReducedMotion()
+  const reduce = useMotionOff()
   return (
     <section className="hero" id="top">
       <div className="hero-grid-bg" aria-hidden="true" />
@@ -185,7 +195,7 @@ function Band() {
 }
 
 function Film() {
-  const reduce = useReducedMotion()
+  const reduce = useMotionOff()
   const ref = useRef(null)
   // 视频要进到视口才挂 src（压到 376 KB 了，但仍然不该和首屏抢带宽）
   const near = useInView(ref, { once: true, margin: '0px' })

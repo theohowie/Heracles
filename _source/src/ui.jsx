@@ -1,5 +1,6 @@
-import { motion, useReducedMotion, useInView } from 'framer-motion'
+import { motion, useInView } from 'framer-motion'
 import { useRef } from 'react'
+import { useMotionOff } from './motion.jsx'
 
 /* ---------- 内联 SVG 图标（全站不用 emoji） ---------- */
 export const Icon = ({ d, size = 20, className = '', strokeWidth = 1.6 }) => (
@@ -47,7 +48,7 @@ export const HAND = {
 }
 
 export function HandStroke({ kind = 'circle', delay = 0.2, className = '' }) {
-  const reduce = useReducedMotion()
+  const reduce = useMotionOff()
   return (
     <svg className={`hand hand--${kind} ${className}`} viewBox="0 0 220 110" fill="none"
       preserveAspectRatio="none" aria-hidden="true">
@@ -63,7 +64,7 @@ export function HandStroke({ kind = 'circle', delay = 0.2, className = '' }) {
 
 /* ---------- 进场 ---------- */
 export function Reveal({ children, delay = 0, y = 20, className = '', as = 'div', ...rest }) {
-  const reduce = useReducedMotion()
+  const reduce = useMotionOff()
   const Comp = motion[as] || motion.div
   return (
     <Comp className={className}

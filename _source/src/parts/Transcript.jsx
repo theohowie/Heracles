@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { useInView, useReducedMotion } from 'framer-motion'
+import { useInView } from 'framer-motion'
 import { Icon, ICONS } from '../ui.jsx'
+import { useMotionOff } from '../motion.jsx'
 import { SESSION, SESSION_NOTES } from '../data.js'
 
 /* ============================================================
@@ -107,7 +108,7 @@ function Note({ ev }) {
 }
 
 export default function Transcript() {
-  const reduce = useReducedMotion()
+  const reduce = useMotionOff()
   const boxRef = useRef(null)
   const streamRef = useRef(null)
   /* 用「实时」在视口判断而不是 once：离开视口就暂停，滚回来接着播 ——

@@ -151,6 +151,26 @@ ol, ul { margin: 0; padding: 0; list-style: none; }
 .nav-menu-btn:hover { background: rgba(21, 21, 19, 0.04); border-color: rgba(21, 21, 19, 0.3); }
 .nav-menu { display: none; }
 
+/* 动效开关：默认开，点一下关（存 localStorage，见 src/motion.jsx） */
+.nav-motion {
+  display: inline-flex; align-items: center; gap: 6px; flex: none;
+  font-size: 11.5px; color: var(--ink-2); line-height: 1.4;
+  border: 1px solid var(--hair); border-radius: 999px; padding: 4px 10px;
+  background: transparent; cursor: pointer;
+  transition: color 0.2s, border-color 0.2s, background 0.2s;
+}
+.nav-motion:hover { color: var(--ink); border-color: rgba(21, 21, 19, 0.34); }
+.nav-motion-dot {
+  width: 6px; height: 6px; border-radius: 50%; background: var(--ink-3);
+  transition: background 0.25s, box-shadow 0.25s;
+}
+.nav-motion-dot.on { background: var(--ok); box-shadow: 0 0 0 3px var(--ok-soft); }
+.nav-menu-motion {
+  margin-top: 6px; display: flex; align-items: center; justify-content: space-between;
+  padding: 13px 2px; border: 0; border-top: 1px solid var(--hair-2); background: transparent;
+  font: inherit; font-size: 15.5px; color: var(--ink-2); cursor: pointer;
+}
+
 /* ============================== 按钮 ============================== */
 .btn {
   display: inline-flex; align-items: center; justify-content: center; gap: 8px;
@@ -592,13 +612,21 @@ ol, ul { margin: 0; padding: 0; list-style: none; }
 .reel-spec { font-size: 10.5px; color: var(--ink-3); letter-spacing: 0.08em; text-transform: uppercase; }
 .reel-note { margin: 0; font-size: 10.5px; color: var(--ink-3); line-height: 1.6; }
 
-.thumbs { display: grid; grid-template-columns: repeat(4, 1fr); gap: 7px; }
+/* 16 张截图 ⇒ 横向胶片条（一行可滚），比 4×4 网格更省高度、也更好扫 */
+.thumbs {
+  display: flex; gap: 7px; overflow-x: auto; overscroll-behavior-x: contain;
+  padding: 2px 2px 8px; scrollbar-width: thin;
+  scroll-snap-type: x proximity;
+}
+.thumbs::-webkit-scrollbar { height: 6px; }
+.thumbs::-webkit-scrollbar-thumb { background: var(--hair); border-radius: 3px; }
 .thumb {
+  flex: 0 0 64px; scroll-snap-align: center;
   padding: 0; cursor: pointer; overflow: hidden; display: flex; flex-direction: column;
   border: 1px solid var(--hair-2); border-radius: 10px; background: var(--surface);
   transition: border-color 0.2s, transform 0.2s;
 }
-.thumb img { width: 100%; aspect-ratio: 0.484; object-fit: cover; object-position: top; opacity: 0.7; transition: opacity 0.2s; }
+.thumb img { width: 100%; aspect-ratio: 0.4606; object-fit: cover; object-position: top; opacity: 0.7; transition: opacity 0.2s; }
 .thumb-name { font-size: 10.5px; color: var(--ink-2); padding: 4px 2px 5px; text-align: center; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .thumb:hover { transform: translateY(-2px); }
 .thumb:hover img { opacity: 0.92; }
@@ -790,7 +818,8 @@ ol, ul { margin: 0; padding: 0; list-style: none; }
   .runs-title { padding-top: 0; }
   .run { grid-template-columns: 78px minmax(0, 1fr); }
   .run-tag { grid-column: 2; justify-self: start; }
-  .thumbs { grid-template-columns: repeat(5, 1fr); }
+  .thumbs { padding-bottom: 10px; }
+  .thumb { flex-basis: 60px; }
   .is-wide { grid-template-columns: 1fr; grid-template-areas: "icon" "title" "desc" "spec"; }
   .is-wide .bento-icon { margin-bottom: 4px; }
 }
@@ -813,7 +842,7 @@ ol, ul { margin: 0; padding: 0; list-style: none; }
   .spec-n { grid-column: 2; }
   .bento { grid-template-columns: 1fr; }
   .s4, .s2, .s3 { grid-column: auto; }
-  .thumbs { grid-template-columns: repeat(4, 1fr); }
+  .thumb { flex-basis: 58px; }
   .session { border-radius: 16px; }
   .session-head { padding: 12px 14px; flex-wrap: wrap; }
   .session-chips { display: none; }
@@ -840,12 +869,18 @@ ol, ul { margin: 0; padding: 0; list-style: none; }
 }
 
 /* 打印时不要跑动画、不要大片深色 */
-@media (prefers-reduced-motion: reduce) {
-  html { scroll-behavior: auto; }
-  *, *::before, *::after {
-    animation-duration: 0.001ms !important;
-    animation-iteration-count: 1 !important;
-    transition-duration: 0.001ms !important;
-  }
-  .bento-card:hover, .btn:hover, .reel-shot:hover, .thumb:hover { transform: none; }
+/* 只有在导航栏把「动效」关掉时才降级（html[data-motion="off"]）。
+   ⚠️ 不要再用 prefers-reduced-motion 直接关全站动效 —— 站长要求动效一直开，
+   而且系统开着「减少动效」的访客会被这条规则连轮播、回放、进场动画一起干掉。 */
+html[data-motion="off"] { scroll-behavior: auto; }
+html[data-motion="off"] *,
+html[data-motion="off"] *::before,
+html[data-motion="off"] *::after {
+  animation-duration: 0.001ms !important;
+  animation-iteration-count: 1 !important;
+  transition-duration: 0.001ms !important;
 }
+html[data-motion="off"] .bento-card:hover,
+html[data-motion="off"] .btn:hover,
+html[data-motion="off"] .reel-shot:hover,
+html[data-motion="off"] .thumb:hover { transform: none; }

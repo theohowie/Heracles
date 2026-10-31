@@ -268,16 +268,22 @@ export const FEATURES = [
   },
 ]
 
-/* ---------- 界面（2026-10-30 真机重拍；含 v0.3.2 的灵动岛 / 用量抽屉 / 提问面板） ---------- */
+/* ---------- 界面（2026-10-30 真机重拍 · 16 张，竖版 560 宽） ---------- */
 export const GALLERY = [
   { src: SHOT('empty-v3'), title: '空态', desc: '开口就是任务：一句话起步，五个建议胶囊', spec: '新会话' },
   { src: SHOT('tool-v3'), title: '工具卡与缓存', desc: '命令、退出码、耗时都留在卡片上；顶栏实时显示缓存命中', spec: '工具卡' },
   { src: SHOT('ask-v3'), title: '它反过来问你', desc: '拿不准就问：给选项、给「其他」，不猜你的意图', spec: '提问面板' },
+  { src: SHOT('queue-v3'), title: '排队与插队', desc: '多个问题排队、逐个回答，也能中途插队先发', spec: '队列' },
   { src: SHOT('usage-v3'), title: '用量与缓存', desc: '命中 / 未命中 / 输出逐项可见，缓存命中 95%', spec: '可复算' },
-  { src: SHOT('jev-v3'), title: 'JEV 决策', desc: '是非问题给「推荐 / 不推荐 + 置信度」，不编理由', spec: '决策模式' },
+  { src: SHOT('context-v3'), title: '上下文占用', desc: '1% 已用，按系统提示 / 工具定义 / 消息拆开看', spec: '预算可见' },
+  { src: SHOT('jevcard-v3'), title: 'JEV 决策入口', desc: '「有什么拿不准的？交给决策引擎判断」', spec: '决策模式' },
+  { src: SHOT('jev-v3'), title: 'JEV 结论', desc: '给「推荐 / 不推荐 + 置信度」，不编理由', spec: '置信度' },
   { src: SHOT('approval-v3'), title: '审批档位', desc: '手动审批 / 工作区内修改 / 完全访问，随时切换', spec: '门禁三档' },
-  { src: SHOT('github-v3'), title: '连接 GitHub', desc: '设备码登录，登录后即可读分支、提交改动', spec: '设备码' },
-  { src: SHOT('appearance-v3'), title: '外观', desc: '深浅、主题、玻璃效果与页面切换实时预览', spec: '实时预览' },
+  { src: SHOT('voice-v3'), title: '本地语音输入', desc: '录音中再点一次麦克风结束，边说边出字，录音不上传', spec: '内置 14M 模型' },
+  { src: SHOT('attach-v3'), title: '附件', desc: '相机拍照、相册选图、选文件，三种入口一列排开', spec: '拍照即附' },
+  { src: SHOT('github-v3'), title: '连接 GitHub', desc: '设备码登录（2A8B-09E9），登录后即可读分支、提交改动', spec: '设备码' },
+  { src: SHOT('search-v3'), title: '会话搜索', desc: '按工作区分组，跨会话搜关键词，最近会话带时间', spec: '可检索' },
+  { src: SHOT('appearance-v3'), title: '外观', desc: '深浅、主题、玻璃效果与界面字号实时预览', spec: '实时预览' },
   { src: SHOT('settings-v3'), title: '设置首页', desc: '通用 / 记忆 / 权限 / 模型 / 外观，一屏看全', spec: '五个入口' },
   { src: SHOT('about-v3'), title: '关于', desc: '版本、许可与开源信息（这一版是 0.3.2）', spec: 'GPL-3.0' },
 ]
