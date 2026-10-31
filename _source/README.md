@@ -42,10 +42,15 @@ gh-pages/
 1. **事实纪律**：`data.js` 里每条产品声明都必须能在仓库里找到依据；
    没被证明的只能写进 `LIMITS`（页面上是「尚未验证」栏）。
    核对过程与证据在 `.dshwork/gh-pages-shots/facts.md`（本机，不入库）。
-2. **版本纪律**：可下载的是 **v0.2.2**（2026-10-26 构建），它没有沙箱 / 三作用域记忆 /
-   流式语音，而页面描述的是主线。下载区那段「版本对照」就是为这件事写的 ——
-   **发新包之后**要一起改：`data.js` 的 `APK / VERSION / APK_SIZE / SHA / SHOT_DATE`、
-   下载区对照文案、以及按新包重拍 8 张截图（现在这批是 10-26 的界面）。
+2. **版本纪律**：当前发布 **v0.3.2**（2026-10-30），下载是两条直链（默认 Gitee 国内 / GitHub 源站，
+   同一个 arm64-only 包 48.1 MiB）。换版本时要一起改：`data.js` 的
+   `VERSION / APK_SIZE / APK_VERSION_CODE / SHA / APK_GITEE / APK_GITHUB / SHOT_DATE`，
+   并按新包重拍截图（现在 `shots/*-v3.webp` 是 2026-10-30 真机，15 张：hero / 4 步 / 10 张图库）。
+
+3. **素材纪律**：截图统一 560 宽、webp；新增截图放 `public/shots/` 并在 `data.js` 里引用
+   （构建会拷到分支根 `shots/`）。视频压过：`video/hero-loop.mp4` ≈376 KB、
+   `video/heracles-30s.mp4` ≈644 KB（1280×720 / crf30 / 无音轨 / faststart）；
+   要换托管就在 `data.js` 的 `VIDEOS` 数组里把新地址放最前面，播放器会按顺序自动换源。
 
 ## 改站点的流程
 

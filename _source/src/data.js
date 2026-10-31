@@ -43,7 +43,14 @@ export const VERSION = 'v0.3.2'
 export const APK_SIZE = APK_PRIMARY.size
 export const APK_VERSION_CODE = '6'
 export const PKG = 'com.theohowie.heracles'
-export const SHOT_DATE = '2026-10-26'
+export const SHOT_DATE = '2026-10-30'
+
+/* 视频源：本地（GitHub Pages）为默认。若把两个 mp4 也传到码云 Release 附件，
+   把地址放进数组最前面 —— 播放器会按顺序自动换源（前一个失败就试下一个）。 */
+export const VIDEOS = {
+  hero: ['/Heracles/video/hero-loop.mp4'],
+  full: ['/Heracles/video/heracles-30s.mp4'],
+}
 
 export const SHOT = (name) => `/Heracles/shots/${name}.webp`
 
@@ -162,7 +169,7 @@ export const STEPS = [
   {
     key: 'workspace',
     label: '加工作区',
-    shot: SHOT('empty-v2'),
+    shot: SHOT('workspace-v3'),
     title: '先把项目放进来',
     body: '用系统文件选择器授权项目目录，或直接用不受限的默认工作区。它读到的是你真实的工程文件，不是上传到云端的副本。',
     points: ['SAF 授权，不复制项目', '支持 /sdcard 上的既有工程', '工作区按路径登记，互不覆盖'],
@@ -171,7 +178,7 @@ export const STEPS = [
   {
     key: 'talk',
     label: '说明需求',
-    shot: SHOT('chat-v2'),
+    shot: SHOT('chat-v3'),
     title: '像跟人说话一样描述任务',
     body: '说清要改什么，它自己决定调哪些工具。每次调用都是一张可展开的卡片：读了哪个文件、改了哪几行、命令输出是什么，都留在会话里可回查。',
     points: ['工具调用可展开核对', '改文件给出行级 diff', '语音转写、拍照进附件'],
@@ -180,7 +187,7 @@ export const STEPS = [
   {
     key: 'model',
     label: '配模型',
-    shot: SHOT('modelsheet-v2'),
+    shot: SHOT('model-v3'),
     title: '模型与思考档位随时切',
     body: '多家提供商并存，默认用哪个一目了然。思考档位与最大轮次在同一个抽屉里，切换只对新消息生效，不会打断正在跑的任务。',
     points: ['OpenAI 兼容 / Anthropic / Responses 三轨可配', '思考档位按协议自适应', '最大轮次可限制花费'],
@@ -189,7 +196,7 @@ export const STEPS = [
   {
     key: 'route',
     label: '看清权限与路由',
-    shot: SHOT('perms-v2'),
+    shot: SHOT('perms-v3'),
     title: '这条命令会跑在哪，先告诉你',
     body: '设备权限与当前执行路由集中在一页；命令按路由去沙箱或手机 shell。沙箱没就绪就直接拒绝，不会偷偷改到手机上跑。',
     points: ['权限与执行路由一页看清', '沙箱环境按需下载', '产物留在 rootfs，清空重装即回滚'],
@@ -261,16 +268,18 @@ export const FEATURES = [
   },
 ]
 
-/* ---------- 界面 ---------- */
+/* ---------- 界面（2026-10-30 真机重拍；含 v0.3.2 的灵动岛 / 用量抽屉 / 提问面板） ---------- */
 export const GALLERY = [
-  { src: SHOT('empty-v2'), title: '空态', desc: '开口就是任务：一句话起步，五个建议胶囊', spec: '新会话' },
-  { src: SHOT('chat-v2'), title: '会话与工具调用', desc: '工具卡可展开，改哪几行、跑什么命令都留痕', spec: '工具卡' },
-  { src: SHOT('generating-v2'), title: '生成中', desc: '彩虹光圈 + 停止键，随时打断长任务', spec: '可中断' },
-  { src: SHOT('modelsheet-v2'), title: '模型与思考', desc: '多家 provider、思考档位、最大轮次一处切换', spec: '三轨协议' },
-  { src: SHOT('perms-v2'), title: '设备权限', desc: '权限与执行路由集中在一页', spec: '执行路由' },
-  { src: SHOT('home-v2'), title: '设置首页', desc: '通用 / 记忆 / 权限 / 模型 / 外观', spec: '五个入口' },
-  { src: SHOT('appearance-v2'), title: '外观', desc: '深浅与主题、玻璃效果实时预览', spec: '实时预览' },
-  { src: SHOT('about-v2'), title: '关于', desc: '版本、许可与开源信息', spec: 'GPL-3.0' },
+  { src: SHOT('empty-v3'), title: '空态', desc: '开口就是任务：一句话起步，五个建议胶囊', spec: '新会话' },
+  { src: SHOT('tool-v3'), title: '工具卡与缓存', desc: '命令、退出码、耗时都留在卡片上；顶栏实时显示缓存命中', spec: '工具卡' },
+  { src: SHOT('ask-v3'), title: '它反过来问你', desc: '拿不准就问：给选项、给「其他」，不猜你的意图', spec: '提问面板' },
+  { src: SHOT('usage-v3'), title: '用量与缓存', desc: '命中 / 未命中 / 输出逐项可见，缓存命中 95%', spec: '可复算' },
+  { src: SHOT('jev-v3'), title: 'JEV 决策', desc: '是非问题给「推荐 / 不推荐 + 置信度」，不编理由', spec: '决策模式' },
+  { src: SHOT('approval-v3'), title: '审批档位', desc: '手动审批 / 工作区内修改 / 完全访问，随时切换', spec: '门禁三档' },
+  { src: SHOT('github-v3'), title: '连接 GitHub', desc: '设备码登录，登录后即可读分支、提交改动', spec: '设备码' },
+  { src: SHOT('appearance-v3'), title: '外观', desc: '深浅、主题、玻璃效果与页面切换实时预览', spec: '实时预览' },
+  { src: SHOT('settings-v3'), title: '设置首页', desc: '通用 / 记忆 / 权限 / 模型 / 外观，一屏看全', spec: '五个入口' },
+  { src: SHOT('about-v3'), title: '关于', desc: '版本、许可与开源信息（这一版是 0.3.2）', spec: 'GPL-3.0' },
 ]
 
 /* ---------- 状态台账（基线 = README §10 + 头部数字；2026-10-30 用户裁定同步） ---------- */

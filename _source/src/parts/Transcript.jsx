@@ -110,7 +110,9 @@ export default function Transcript() {
   const reduce = useReducedMotion()
   const boxRef = useRef(null)
   const streamRef = useRef(null)
-  const inView = useInView(boxRef, { once: true, margin: '-18% 0px' })
+  /* 用「实时」在视口判断而不是 once：离开视口就暂停，滚回来接着播 ——
+     不然用户滚过去又滚回来，只会看到「已经播完了」。 */
+  const inView = useInView(boxRef, { margin: '-12% 0px' })
 
   const [decision, setDecision] = useState(null)
   const [pointer, setPointer] = useState(1) // 1-based：指向「当前」那一条
@@ -133,17 +135,21 @@ export default function Transcript() {
   const awaiting = decision === null && pointer - 1 === gateIndex
   const finished = pointer > timeline.length
 
+  /* 进视口开始播（减少动效时只单步）。离开视口暂停，回来继续；
+     用户手动暂停后不会被这段逻辑重新拉起（依赖只在 inView/awaiting/finished 变化时跑）。 */
   useEffect(() => {
-    if (!inView) return
-    if (reduce) { setDecision('allow'); setPointer(99); setPlaying(false) } else setPlaying(true)
-  }, [inView, reduce])
+    if (reduce) { setPlaying(false); return }
+    if (!inView) { setPlaying(false); return }
+    if (finished || awaiting) return
+    setPlaying(true)
+  }, [inView, reduce, finished, awaiting])
 
   useEffect(() => {
-    if (!playing || awaiting || finished || !inView) return undefined
+    if (!playing || reduce || awaiting || finished || !inView) return undefined
     const wait = DWELL[timeline[pointer - 1]?.kind] ?? 1500
     const t = setTimeout(() => setPointer((p) => p + 1), wait)
     return () => clearTimeout(t)
-  }, [playing, awaiting, finished, pointer, timeline, inView])
+  }, [playing, reduce, awaiting, finished, pointer, timeline, inView])
 
   useEffect(() => { if (finished) setPlaying(false) }, [finished])
 
@@ -191,7 +197,7 @@ export default function Transcript() {
       <div className="session-body">
         <div className="stream" ref={streamRef} role="log" aria-live="polite" aria-label="任务回放">
           {timeline.map((ev, i) => {
-            const state = reduce ? 'past' : i + 1 < pointer ? 'past' : i + 1 === pointer ? 'current' : 'future'
+            const state = i + 1 < pointer ? 'past' : i + 1 === pointer ? 'current' : 'future'
             return (
               <div key={ev.id} className="ev-wrap" data-current={state === 'current' ? 'true' : undefined}
                 data-state={state}>
@@ -200,16 +206,19 @@ export default function Transcript() {
                 {ev.kind === 'tool' && <Tool ev={ev} />}
                 {ev.kind === 'patch' && <Patch ev={ev} />}
                 {ev.kind === 'gate' && (
-                  <Gate ev={ev} decision={decision} live={state === 'current'} onDecide={decide} />
+                  <Gate ev={ev} decision={decision} live={decision === null} onDecide={decide} />
                 )}
                 {(ev.kind === 'deny' || ev.kind === 'done') && <Note ev={ev} />}
               </div>
             )
           })}
-          {(awaiting || (playing && !finished)) && (
+          {(awaiting || (playing && !reduce && !finished)) && (
             <p className="stream-wait">
               {awaiting ? '等你决定 —— 这期间不会执行任何东西' : '正在往下走…'}
             </p>
+          )}
+          {reduce && !finished && !awaiting && (
+            <p className="stream-wait">减少动效已开启：不自动播放，用下面的箭头一步步看</p>
           )}
         </div>
 
@@ -239,12 +248,20 @@ export default function Transcript() {
           <button type="button" className="tbtn" onClick={() => goto(pointer - 1)} aria-label="上一步" disabled={pointer <= 1}>
             <Icon d={ICONS.prev} size={15} />
           </button>
-          <button type="button" className="tbtn tbtn--main"
-            onClick={() => (finished ? reset() : setPlaying((p) => !p))}
-            aria-label={finished ? '重新播放' : playing ? '暂停' : '继续播放'} disabled={awaiting}>
-            <Icon d={finished ? ICONS.refresh : playing ? ICONS.pause : ICONS.play} size={15} />
-            <span>{finished ? '重播' : playing ? '暂停' : '播放'}</span>
-          </button>
+          {reduce ? (
+            // 减少动效：不给「播放/暂停」（按了也不会自己走，反而像坏了），只给单步
+            <button type="button" className="tbtn tbtn--main" onClick={() => goto(pointer + 1)}
+              aria-label="下一步" disabled={finished || awaiting}>
+              <Icon d={ICONS.next} size={15} /><span>下一步</span>
+            </button>
+          ) : (
+            <button type="button" className="tbtn tbtn--main"
+              onClick={() => (finished ? reset() : setPlaying((p) => !p))}
+              aria-label={finished ? '重新播放' : playing ? '暂停' : '继续播放'} disabled={awaiting}>
+              <Icon d={finished ? ICONS.refresh : playing ? ICONS.pause : ICONS.play} size={15} />
+              <span>{finished ? '重播' : playing ? '暂停' : '播放'}</span>
+            </button>
+          )}
           <button type="button" className="tbtn" onClick={() => goto(pointer + 1)} aria-label="下一步"
             disabled={finished || awaiting}>
             <Icon d={ICONS.next} size={15} />

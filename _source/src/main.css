@@ -291,6 +291,15 @@ ol, ul { margin: 0; padding: 0; list-style: none; }
 /* 录屏顶部有十几像素的蓝色章节进度条（片子自带的）—— 上下各裁掉一点，
    让卡片边缘是干净的画面，而不是一条蓝线。 */
 .film video { width: 100%; aspect-ratio: 16 / 8.15; object-fit: cover; }
+.film { position: relative; }
+.film-fallback {
+  position: absolute; inset: 0; display: flex; align-items: center; justify-content: center;
+  gap: 10px; flex-wrap: wrap; padding: 16px;
+  background: rgba(18, 19, 15, 0.86); color: #f6f3ea; font-size: 12.5px;
+}
+.film-fallback .mono { color: rgba(246, 243, 234, 0.72); }
+.film-fallback .btn--ghost { border-color: rgba(255, 255, 255, 0.3); color: #f6f3ea; }
+.film-fallback .btn--ghost:hover { background: rgba(255, 255, 255, 0.1); }
 
 /* ============================== 会话回放（机器层） ============================== */
 .session {
@@ -439,6 +448,11 @@ ol, ul { margin: 0; padding: 0; list-style: none; }
 /* align-items 必须是 stretch（不能 start）：右侧要做 sticky，
    它所在的那一列必须先被拉满高度，否则 sticky 没有可移动的余量。 */
 .journey { display: grid; grid-template-columns: minmax(0, 1fr) 380px; gap: clamp(28px, 5vw, 76px); align-items: stretch; }
+/* 关键：sticky 的行程来自「它所在那一列的高度 − 它自身高度」。
+   网格里的 stage 被 stretch 拉成整行高，给它加 padding 反而会**缩短**内容高度 ⇒ 行程变小。
+   正确做法是给左栏尾部留一段尾巴，把整行拉高，右边的手机才有多余行程可用。 */
+.journey-stage { position: relative; }
+.journey-list::after { content: ""; display: block; height: clamp(200px, 44vh, 440px); }
 .journey-list { min-width: 0; position: relative; }
 .step {
   position: relative; min-height: 38vh;
@@ -470,8 +484,9 @@ ol, ul { margin: 0; padding: 0; list-style: none; }
 .step-points svg { flex: none; margin-top: 4px; color: var(--ok); }
 
 .journey-stage { position: relative; }
-.stage-sticky { position: sticky; top: 96px; display: flex; flex-direction: column; align-items: center; gap: 13px; }
-.phone { width: min(316px, 100%); }
+/* top 与高度一起保证：1280 高以下也能整块塞进视口，不会被底部吃掉 */
+.stage-sticky { position: sticky; top: 84px; display: flex; flex-direction: column; align-items: center; gap: 12px; }
+.phone { width: min(300px, 100%); }
 .phone-frame {
   padding: 7px; border-radius: 28px; background: var(--surface); border: 1px solid var(--hair);
   box-shadow: 0 2px 6px rgba(21, 21, 19, 0.04), 0 34px 70px -44px rgba(21, 21, 19, 0.45);

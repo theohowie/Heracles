@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { AnimatePresence, motion, useReducedMotion } from 'framer-motion'
+import { AnimatePresence, motion, useInView, useReducedMotion } from 'framer-motion'
 import { Icon, ICONS, Reveal, SectionHead } from '../ui.jsx'
 import { GALLERY, SHOT_DATE, VERSION } from '../data.js'
 
@@ -8,21 +8,24 @@ import { GALLERY, SHOT_DATE, VERSION } from '../data.js'
 export default function Reel() {
   const [i, setI] = useState(0)
   const [open, setOpen] = useState(false)
-  const [paused, setPaused] = useState(false)
   const reduce = useReducedMotion()
   const count = GALLERY.length
   const shot = GALLERY[i]
   const stageRef = useRef(null)
   const closeRef = useRef(null)
   const lastFocus = useRef(null)
+  const sectionRef = useRef(null)
+  /* 自动轮播的开关只看两件事：灯箱开着、用户开了减少动效。
+     （早先鼠标停在区块上就暂停 —— 用户一进来光标就压在页面上，轮播永远是「已暂停」。） */
+  const onScreen = useInView(sectionRef, { margin: '-20% 0px' })
 
   const go = useCallback((d) => setI((v) => (v + d + count) % count), [count])
 
   useEffect(() => {
-    if (paused || open || reduce) return undefined
-    const t = setInterval(() => setI((v) => (v + 1) % count), 5600)
+    if (open || reduce || !onScreen) return undefined
+    const t = setInterval(() => setI((v) => (v + 1) % count), 5200)
     return () => clearInterval(t)
-  }, [paused, open, reduce, count])
+  }, [open, reduce, onScreen, count])
 
   /* 灯箱：键盘（Esc / ←→）+ 焦点进得去出得来 + 后面不滚 */
   useEffect(() => {
@@ -47,7 +50,7 @@ export default function Reel() {
   }, [open, go])
 
   return (
-    <section className="section section--reel" id="reel">
+    <section className="section section--reel" id="reel" ref={sectionRef}>
       <div className="wrap">
         <SectionHead
           index="04" eyebrow="界面"
@@ -56,8 +59,8 @@ export default function Reel() {
           side={<span className="mono">{String(i + 1).padStart(2, '0')} / {String(count).padStart(2, '0')}</span>}
         />
 
-        <Reveal className="reel" onMouseEnter={() => setPaused(true)} onMouseLeave={() => setPaused(false)}>
-          <div className="reel-stage" ref={stageRef} onFocus={() => setPaused(true)} onBlur={() => setPaused(false)}>
+        <Reveal className="reel">
+          <div className="reel-stage" ref={stageRef}>
             <button type="button" className="reel-shot" onClick={() => setOpen(true)} aria-label={`放大查看：${shot.title}`}>
               <AnimatePresence mode="wait" initial={false}>
                 <motion.img key={shot.src} src={shot.src} alt={`${shot.title}：${shot.desc}`}
@@ -79,7 +82,9 @@ export default function Reel() {
               <button type="button" className="tbtn" onClick={() => go(1)} aria-label="下一张">
                 <Icon d={ICONS.next} size={16} />
               </button>
-              <span className="reel-auto mono">{paused ? '已暂停轮播' : reduce ? '自动轮播已关闭' : '自动轮播中'}</span>
+              <span className="reel-auto mono">
+                {reduce ? '减少动效：轮播已关' : open ? '灯箱打开中' : '自动轮播中'}
+              </span>
             </div>
 
             <AnimatePresence mode="wait" initial={false}>

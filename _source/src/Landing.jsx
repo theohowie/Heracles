@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import { motion, useInView, useReducedMotion, useScroll, useSpring } from 'framer-motion'
 import { Icon, ICONS, HandStroke, Reveal, SectionHead } from './ui.jsx'
-import { APK, APK_PRIMARY, APK_SIZE, BAND, GITEE, HERO_SPECS, REPO, RELEASES, SHOT, SHOT_DATE, VERSION } from './data.js'
+import { APK, APK_PRIMARY, APK_SIZE, BAND, GITEE, HERO_SPECS, REPO, RELEASES, SHOT, SHOT_DATE, VERSION, VIDEOS } from './data.js'
 import Transcript from './parts/Transcript.jsx'
 import Journey from './parts/Journey.jsx'
 import Bento from './parts/Bento.jsx'
@@ -150,8 +150,8 @@ function Hero() {
           transition={{ duration: 0.9, delay: 0.18, ease: [0.22, 1, 0.36, 1] }}>
           <figure className="device">
             <div className="device-frame">
-              <img src={SHOT('chat-v2')} width="560" height="1156"
-                alt="Heracles 真机界面：一个会话里，用户要求跑 date 命令，模型先说明思路，再以工具卡展示执行结果" />
+              <img src={SHOT('hero-v3')} width="560" height="1216"
+                alt="Heracles 真机界面：会话里灵动岛显示 5/5 步骤，下面是一条工具卡与 +340/−180 的改动摘要，顶栏显示缓存命中 95%" />
             </div>
             <span className="annot annot--top" aria-hidden="true">
               <span className="annot-text mono">1080 × 2400</span>
@@ -159,7 +159,7 @@ function Hero() {
             </span>
             <figcaption className="device-cap mono">
               <span className="live-dot" aria-hidden="true" />
-              真机实拍 {SHOT_DATE} · 命中 99%
+              真机实拍 {SHOT_DATE} · 命中 95%
             </figcaption>
           </figure>
         </motion.div>
@@ -187,8 +187,10 @@ function Band() {
 function Film() {
   const reduce = useReducedMotion()
   const ref = useRef(null)
-  // 1.8 MB 的录屏不该和首屏抢带宽：进到视口附近才挂 src
+  // 视频要进到视口才挂 src（压到 376 KB 了，但仍然不该和首屏抢带宽）
   const near = useInView(ref, { once: true, margin: '0px' })
+  const [srcIdx, setSrcIdx] = useState(0)
+  const [failed, setFailed] = useState(false)
   return (
     <section className="section section--film" id="film" ref={ref}>
       <div className="wrap">
@@ -196,13 +198,31 @@ function Film() {
           <span className="eyebrow"><span className="eyebrow-num">15s</span>真机录屏</span>
           <p className="film-note mono">
             无声循环 ·
-            <a href="/Heracles/video/heracles-30s.mp4" target="_blank" rel="noreferrer">看完整 30 秒版本</a>
+            <a href={VIDEOS.full[0]} target="_blank" rel="noreferrer">看完整 30 秒版本</a>
           </p>
         </div>
         <Reveal className="film">
-          <video src={near ? '/Heracles/video/hero-loop.mp4' : undefined} poster={SHOT('home-v2')}
+          <video
+            key={`${near}-${srcIdx}`}
+            src={near && !failed ? VIDEOS.hero[srcIdx] : undefined}
+            poster={SHOT('hero-v3')}
             autoPlay={!reduce} muted loop playsInline preload="none"
-            aria-label="Heracles 真机操作录屏（无声，15 秒循环）" />
+            aria-label="Heracles 真机操作录屏（无声，15 秒循环）"
+            onError={() => {
+              // 源挂了就换下一个；全挂了就露出「重试 / 打开原片」的兜底
+              if (srcIdx + 1 < VIDEOS.hero.length) setSrcIdx(srcIdx + 1)
+              else setFailed(true)
+            }}
+            onStalled={() => { if (near && srcIdx + 1 < VIDEOS.hero.length) setSrcIdx(srcIdx + 1) }}
+          />
+          {failed && (
+            <div className="film-fallback">
+              <span className="mono">录屏没加载出来（可能是网络）</span>
+              <button type="button" className="btn btn--ghost btn--xs"
+                onClick={() => { setFailed(false); setSrcIdx(0) }}>重试</button>
+              <a className="btn btn--ghost btn--xs" href={VIDEOS.full[0]} target="_blank" rel="noreferrer">打开原片</a>
+            </div>
+          )}
         </Reveal>
       </div>
     </section>
