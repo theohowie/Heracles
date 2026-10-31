@@ -32,6 +32,7 @@ import 'package:heracles/services/settings_controller.dart';
 import 'package:heracles/theme/app_theme.dart';
 import 'package:heracles/theme/cupertino_kit.dart' show AppIcons;
 import 'package:heracles/widgets/bw_approval.dart' show BwOptionCard, BwSheetShell;
+import 'package:heracles/widgets/bw_topbar.dart' show TopMetricLine;
 import 'package:heracles/widgets/workspace_drawer.dart';
 
 import 'support/secure_storage_mock.dart';
@@ -126,6 +127,10 @@ void main() {
       baseUrl: 'https://api.deepseek.com/v1',
       model: 'deepseek-chat',
       apiKey: 'sk-test',
+      // T1-1：顶栏上下文环要有上限才能画百分比；测试里给服务端权威值。
+      modelCapabilities: {
+        'deepseek-chat': ModelCapability(contextWindow: 1000000),
+      },
     ));
     await c.setActiveProvider('deepseek-account');
     return c;
@@ -371,6 +376,21 @@ void main() {
       await openSession(tester, '会话 A');
       expect(find.text('命中 90%'), findsOneWidget,
           reason: '切回 A 仍是 A 的累计账');
+    });
+
+    testWidgets('d) 打开会话后上下文环立即有数（T1-1，不许等用量抽屉）',
+        (tester) async {
+      seedTwoSessions();
+      await pumpChat(tester);
+      await openSession(tester, '会话 A');
+
+      final ctx = tester
+          .widgetList<TopMetricLine>(find.byType(TopMetricLine))
+          .firstWhere((line) => line.label == '上下文');
+      expect(ctx.valueText, isNot('—'),
+          reason: '打开会话后顶栏上下文必须已有占用率（旧实现要打开用量抽屉才刷新）');
+      expect(ctx.valueText, endsWith('%'),
+          reason: '有上限且会话有内容 ⇒ 应显示百分比');
     });
 
     testWidgets('b) 重建 ChatScreen（模拟杀进程重开）⇒ 仍显示汇总命中率',
