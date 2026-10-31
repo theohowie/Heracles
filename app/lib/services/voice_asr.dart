@@ -22,11 +22,38 @@ class VoiceAsr {
   static sherpa.OfflineRecognizer? _recognizer;
   static String? _recognizerKey;
   static bool _bindingsReady = false;
+  static bool _releaseHookRegistered = false;
+
+  /// **释放常驻识别器**（真卸载时调用；sherpa 绑定本身不销毁，可再次初始化）。
+  ///
+  /// 只释放 ffi 侧 recognizer，不抛异常；重复调用安全。
+  static void release() {
+    try {
+      _recognizer?.free();
+    } catch (_) {}
+    _recognizer = null;
+    _recognizerKey = null;
+  }
+
+  /// 把 [release] 注册进 [VoiceModelController.engineReleaseHooks]（只注册一次）。
+  static void _ensureReleaseHook() {
+    if (_releaseHookRegistered) return;
+    _releaseHookRegistered = true;
+    VoiceModelController.registerEngineRelease(release);
+  }
 
   /// 把一个 16kHz PCM16 WAV 文件识别成文本。
-  /// 模型没备好 / 文件读不出 → 抛 [StateError] 带人话原因。
+  /// 模型没备好 / 文件读不出 → 抛 [StateError] 带人话原因；
+  /// 已卸载（[VoiceModelController.voiceUninstalled]）→ 抛
+  /// `StateError(kVoiceUninstalledError)`，**不加载任何模型**。
   static Future<String> transcribeWav(String wavPath) async {
     final voice = VoiceModelController.shared();
+    _ensureReleaseHook();
+    if (voice.voiceUninstalled || !voice.voiceEnabled) {
+      // 真卸载后即使磁盘残留也不转写；先释放可能还活着的 recognizer。
+      release();
+      throw StateError(kVoiceUninstalledError);
+    }
     if (!voice.engineReady) {
       throw StateError('语音模型还没准备好');
     }

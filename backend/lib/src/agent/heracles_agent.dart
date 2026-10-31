@@ -909,6 +909,14 @@ class HeraclesAgent {
     final client = _buildClient();
     final controller = AgentController();
 
+    // ---- 计划自动推进（P0，2026-10-31）----
+    //
+    // 只在启用计划时装。**同一个实例**贯穿初始 run 与两次降级重跑 ——
+    // 自动推进记账（"哪些步已经自动推过"）必须跟计划走，不能因换模型重置；
+    // 模型主动 `write_todos` 覆盖时由 [noteExternalPlan] 重置记账。
+    // 注意：必须声明在 `controller.on<PlanChangedEvent>` 注册**之前**。
+    final planProgressHook = _options.enablePlan ? _PlanProgressHook() : null;
+
     // ---- 把框架的 Controller 事件转成我们的 HeraclesEvent ----
     controller.on<LLMChunkEvent>((e) {
       // ⚠️ 字段是 `response`（ModelMessage），不是 `chunk`
@@ -954,6 +962,9 @@ class HeraclesAgent {
     });
     controller.on<PlanChangedEvent>((e) {
       final plan = e.plan;
+      // ★ P0（2026-10-31）：区分"模型主动更新"与"自动推进"。
+      //   自动推进帧（本 hook 自己发的）不影响记账；模型帧重置记账。
+      planProgressHook?.noteExternalPlan(plan);
       final steps = [
         for (final s in plan.steps)
           HeraclesPlanStep(s.description, _mapStatus(s.status)),
@@ -1134,6 +1145,10 @@ class HeraclesAgent {
       gate: _askGate,
     );
 
+    // ---- 计划自动推进（P0，2026-10-31）----
+    //
+    // （实例在上方 `controller` 之后创建；此处保留说明）
+
     // ---- 组装 StatefulAgent ----
     //
     // ## 跨轮记忆（2026-10-23 修）
@@ -1240,6 +1255,9 @@ class HeraclesAgent {
           _SteerHook(_options.takeSteerMessage!),
         budgetHook,
         approvalHook,
+
+        // ★ P0（2026-10-31）：计划自动推进 —— 执行类工具成功后推进一格并播帧。
+        if (planProgressHook != null) planProgressHook,
 
         // ★ P4（2026-10-25）：完成门禁 —— 写过文件且最后一次验证失败时
         //   拒绝收尾，模型必须回到修复循环（"带病收尾"被架构拦下）。
@@ -1440,6 +1458,8 @@ class HeraclesAgent {
               _SteerHook(_options.takeSteerMessage!),
             budgetHook,
             approvalHook,
+            // ★ P0（2026-10-31）：计划自动推进（同一实例 ⇒ 记账不因换模型重置）
+            if (planProgressHook != null) planProgressHook,
           ],
           loopDetector: DefaultLoopDetector(
             state: _state!,
@@ -1497,6 +1517,8 @@ class HeraclesAgent {
               _SteerHook(_options.takeSteerMessage!),
             budgetHook,
             approvalHook,
+            // ★ P0（2026-10-31）：计划自动推进（同一实例）
+            if (planProgressHook != null) planProgressHook,
           ],
           loopDetector: DefaultLoopDetector(
             state: _state!,
@@ -1923,6 +1945,122 @@ class _ReflectionHook extends AgentHook {
       _consecutiveFailures = 0;
     }
     return Future.value(ToolResultHookResult.proceed());
+  }
+}
+
+/// **计划自动推进 hook**（P0，2026-10-31）—— 清单要跟着真实执行走。
+///
+/// ## 为什么需要（真因）
+///
+/// 框架的计划帧只在模型主动 `write_todos` 时发。模型经常"闷头做五六步、
+/// 最后才 update 一次" ⇒ 灵动岛在整段任务里**一动不动**，用户以为它没进展。
+/// 本 hook 在执行类工具**成功后**推进一格并播 `PlanChangedEvent`，
+/// 让清单跟着真实执行走（模型主动更新仍然优先，见 [noteExternalPlan]）。
+///
+/// ## 规则（钉死，测试覆盖）
+///
+/// · 只在本轮**已有计划**时生效；工具**成功**（`isError == false`）才推进；
+/// · **不推进**的工具（[skipTools]）：计划/问答/记忆/技能等元数据工具 +
+///   纯读工具 —— 它们成功**不代表完成了一个 todo**；
+/// · 动作：有 `inProgress` ⇒ 标 `completed`，再把下一个 `pending` 标
+///   `inProgress`；没有 `inProgress` ⇒ 只把第一个 `pending` 标 `inProgress`
+///   （**本步不标 done** —— 还没真开始做）；
+/// · **每步只自动推进一次**（[_autoAdvanced] 记账 + 状态本身）；
+///   模型随后 `write_todos` **以模型为准**：收到外部计划帧时清空记账；
+/// · 失败步骤**绝不**标 done（`isError` 直接 return，不改任何状态）；
+/// · `plan_closed` 语义不变：全部 done/cancelled 才算 `reachedGoal=true`。
+class _PlanProgressHook extends AgentHook {
+  /// 不推进计划的工具（与 `_ApprovalPolicy._readOnly` 同族）。
+  ///
+  /// 为什么这些不算"完成一步"：它们要么是**元数据操作**（改计划/问人/
+  /// 存记忆/切技能 —— 不产生工作成果），要么是**纯读**（看文件/查状态
+  /// 不等于做完了某步）。把它们算进去会让清单连续跳格、甚至跳过头。
+  static const skipTools = {
+    // 计划 / 问答 / 记忆 / 技能（元数据）
+    'write_todos', 'ask_user', 'save_memory', 'propose_global_memory',
+    'activate_skills', 'deactivate_skills', 'list_skills',
+    // 纯读
+    'read_file', 'list_files', 'find_files', 'grep_files',
+    'web_fetch', 'check_device_state',
+    // MCP 只读
+    'mcp_list_tools', 'mcp_list_resources', 'mcp_list_prompts',
+    'mcp_read_resource', 'mcp_get_prompt',
+    // git 只读
+    'git_status', 'git_log', 'git_diff', 'git_branches', 'git_show_commit',
+  };
+
+  /// 已自动推进过的步骤 key（`序号\t描述`）。
+  ///
+  /// 为什么需要：状态本身（completed）只能挡住"再标一次 done"，
+  /// 挡不住"模型把同一步改回 inProgress 后又被自动完成"的抖动；
+  /// 也用它在模型覆盖时整体重置。
+  final Set<String> _autoAdvanced = <String>{};
+
+  /// 本 hook 最近一次播出去的 `PlanState` 对象（identify 自己的帧）。
+  ///
+  /// `controller.publish` 是**同步**的：监听回调会在本行内执行，
+  /// 靠对象同一性区分"自动帧"与"模型帧"，避免自己把自己的记账清掉
+  /// （那会导致同一步被反复推进）。
+  Object? _lastPublishedPlan;
+
+  static String _keyOf(int index, String description) =>
+      '$index\t$description';
+
+  /// 监听器回调：区分模型帧与自动帧。
+  ///
+  /// · `identical(plan, _lastPublishedPlan)` ⇒ 自己刚播的，**不动记账**；
+  /// · 其它帧（模型 `write_todos`）⇒ **重置记账**（模型覆盖优先）。
+  void noteExternalPlan(PlanState? plan) {
+    if (plan == null) return;
+    if (identical(plan, _lastPublishedPlan)) return;
+    _autoAdvanced.clear();
+    _lastPublishedPlan = null;
+  }
+
+  @override
+  FutureOr<ToolResultHookResult> afterToolCall(ToolResultHookContext context) {
+    final result = context.result;
+    // ★ 失败/被拒绝的调用绝不推进，更不得标 done。
+    if (result.isError) return ToolResultHookResult.proceed(result: result);
+    if (skipTools.contains(result.name)) {
+      return ToolResultHookResult.proceed(result: result);
+    }
+    final plan = context.agent.state.plan;
+    if (plan == null || plan.steps.isEmpty) {
+      return ToolResultHookResult.proceed(result: result);
+    }
+
+    final steps = plan.steps;
+    var changed = false;
+
+    final ip = steps.indexWhere((s) => s.status == StepStatus.inProgress);
+    if (ip >= 0) {
+      // 1) 当前步做完了（每步只自动推进一次）。
+      final key = _keyOf(ip, steps[ip].description);
+      if (!_autoAdvanced.contains(key)) {
+        steps[ip].status = StepStatus.completed;
+        _autoAdvanced.add(key);
+        changed = true;
+        // 2) 再开下一个 pending；没有 pending（最后一步）⇒ 全完成，停。
+        final next = steps.indexWhere((s) => s.status == StepStatus.pending);
+        if (next >= 0) {
+          steps[next].status = StepStatus.inProgress;
+        }
+      }
+    } else {
+      // 没有 inProgress ⇒ 只"开始"第一个 pending，**本步不标 done**。
+      final next = steps.indexWhere((s) => s.status == StepStatus.pending);
+      if (next >= 0) {
+        steps[next].status = StepStatus.inProgress;
+        changed = true;
+      }
+    }
+
+    if (!changed) return ToolResultHookResult.proceed(result: result);
+    _lastPublishedPlan = plan;
+    // 用框架既有事件通道播一帧 ⇒ 宿主 `HeraclesPlanUpdated` 照常转发。
+    context.agent.controller?.publish(PlanChangedEvent(context.agent, plan));
+    return ToolResultHookResult.proceed(result: result);
   }
 }
 

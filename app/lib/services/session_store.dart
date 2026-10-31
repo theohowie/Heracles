@@ -245,6 +245,19 @@ class SessionStore {
   /// 所以**失败要能看见**；但也别抛，UI 那层没有恢复手段）。
   String? lastError;
 
+  /// 上一次 [loadMessages] 是否**只加载了最近一段**（前面还有更早的历史）。
+  ///
+  /// 只增字段：老调用方忽略它即可；UI 可据此显示"加载更早"入口。
+  /// 触发条件：长会话（> 通道 1MB）走 tail 兜底，或 `limit > 0` 的窗口截断。
+  bool lastLoadHasEarlier = false;
+
+  /// 上一次 [loadMessages] 是否因通道 1 MB 上限而**丢掉了头部**（只拿到尾部）。
+  ///
+  /// 与 [lastLoadHasEarlier] 的区别：它是"确知头部被截断"——
+  /// 旧宿主没有 `fs.readTailLines` 时可能连"真正的尾部"都拿不到，这时
+  /// [lastError] 会明确说"最新消息可能未显示"（不假装完整）。
+  bool lastLoadTruncatedAtHead = false;
+
   /// 工作区根（绝对路径，无尾部分隔符）。
   String get workspaceRoot => _root;
 
@@ -673,10 +686,23 @@ class SessionStore {
   ///
   /// ## 参数
   ///
-  /// - [limit]：**只返回最近多少条**。`0`（默认）= 全量，**保持向后兼容** ——
-  ///   老调用点（`agent_bridge.loadMessages`）不传就还是全读。
+  /// - [limit]：**只返回最近多少条**。`0`（默认）= "尽量全部"，
+  ///   **保持向后兼容** —— 老调用点（`agent_bridge.loadMessages`）不传就还是全读。
+  ///
+  ///   ★ **T0-4（2026-10-31）**：`0` 不再等于"死读 readText"。
+  ///   通道读文本有 **1 MB** 上限，超长会话这么读只会拿到**开头** 1 MB。
+  ///   现在 `0` 的判定是：
+  ///   · 文件 ≤ 1 MB ⇒ 读全（真正完整，[lastLoadHasEarlier] == false）；
+  ///   · 文件 > 1 MB（stat 或 readText 的 truncated 确认）⇒ 自动 `fs.readTailLines`
+  ///     读最后 [ContractSession.tailLoadLines] 行（[lastLoadHasEarlier] /
+  ///     [lastLoadTruncatedAtHead] == true，返回列表头插一条 `_synthetic: paging`
+  ///     的 system 行，带 `hasEarlier`/`truncatedAtHead` 键 —— **只增字段**）；
+  ///   · 旧宿主没有 `fs.readTailLines` ⇒ 回落 readText 后**本地切最后 N 行**；
+  ///     若 readText 也被 1 MB 截断，[lastError] 会明确写"最新消息可能未显示"
+  ///     （绝不把前 1 MB 当完整历史）。
   /// - [offset]：从第几条（0 起）开始返回，配合 [limit] 做"往前翻更多"。
   ///   与 SQL 的 OFFSET 同语义：**在"最近 limit 条"这个窗口内**再偏移。
+  ///   注意：`limit: 0` 的 tail 兜底下只用它做尾部窗口内偏移，不支持无限往前。
   ///
   /// ## 长会话怎么优化（2026-10-23，用户报"卡住不动"）
   ///
@@ -715,6 +741,8 @@ class SessionStore {
     int offset = 0,
   }) async {
     lastError = null;
+    lastLoadHasEarlier = false;
+    lastLoadTruncatedAtHead = false;
     final want = limit <= 0 ? 0 : limit.clamp(1, _hardMaxLines);
     final skip = offset < 0 ? 0 : offset;
 
@@ -724,26 +752,25 @@ class SessionStore {
       path = messagesPath(sessionId);
     } on ArgumentError catch (e) {
       lastError = '会话 id 非法，拒绝读取会话记录：$e';
-      return <Map<String, dynamic>>[
-        <String, dynamic>{'role': 'system', 'text': lastError!, 'ts': 0},
-      ];
+      return _systemErrorRow(lastError!);
     }
 
-    final raw = want == 0
-        ? await _ch.call('fs.readText', <String, Object?>{
-            'path': path,
-            'offsetLine': 1,
-            'maxLines': 0,
-          })
-        : await _ch.call('fs.readTailLines', <String, Object?>{
-            'path': path,
-            // ★ 多要一点余量（want + skip + 缓冲）。
-            //
-            // 为什么要缓冲：.jsonl 末尾有换行、历史里也可能有空行/坏行，
-            // 这些行**占了行数额度但解析后会被丢掉**。只要一点余量，
-            // 就能保证"要 10 条真的拿到 10 条"，而不是偶尔少一条。
-            'maxLines': (want + skip + _lineSlack).clamp(1, _hardMaxLines),
-          });
+    // ★ T0-4（2026-10-31）：`limit == 0`（"加载全部"）不再盲信 readText。
+    //   超长会话（> 通道 1MB）改读**文件尾部** —— 旧行为只把前 1MB 当完整历史，
+    //   用户切会话看到的是**开头**、最新消息反而丢了（只留一句 1MB 提示）。
+    if (want == 0) {
+      return _loadAllOrTail(path, skip: skip);
+    }
+
+    final raw = await _ch.call('fs.readTailLines', <String, Object?>{
+      'path': path,
+      // ★ 多要一点余量（want + skip + 缓冲）。
+      //
+      // 为什么要缓冲：.jsonl 末尾有换行、历史里也可能有空行/坏行，
+      // 这些行**占了行数额度但解析后会被丢掉**。只要一点余量，
+      // 就能保证"要 10 条真的拿到 10 条"，而不是偶尔少一条。
+      'maxLines': _tailLineBudget(skip: skip, want: want),
+    });
 
     final err = errorOf(raw);
     if (err != null) {
@@ -752,7 +779,7 @@ class SessionStore {
       // ⚠️ 这里**不能**再调 `loadMessages(sessionId)`（不传 limit）——
       //    那会把整个文件原样返回、把分页彻底丢掉（曾经踩过）。
       //    所以这条回落路径自己读全文，然后走**同一套**窗口逻辑。
-      if (want > 0 && err.contains('未知方法')) {
+      if (err.contains('未知方法')) {
         final full = await _ch.call('fs.readText', <String, Object?>{
           'path': path,
           'offsetLine': 1,
@@ -762,48 +789,160 @@ class SessionStore {
         if (ferr != null) {
           if (ferr.contains('不存在')) return <Map<String, dynamic>>[];
           lastError = ferr;
-          return <Map<String, dynamic>>[
-            <String, dynamic>{
-              'role': 'system',
-              'text': '无法读取会话记录：$ferr',
-              'ts': 0,
-            },
-          ];
+          return _systemErrorRow(lastError!);
         }
-        // 落到下面的统一解析 + 窗口逻辑（want > 0 会自己截）
+        // 向下统一解析 + 窗口逻辑（want > 0 会自己截）
         return _parseAndWindow(full, want: want, skip: skip);
       }
       if (err.contains('不存在')) return <Map<String, dynamic>>[];
       lastError = err;
-      return <Map<String, dynamic>>[
-        <String, dynamic>{
-          'role': 'system',
-          'text': '无法读取会话记录：$err',
-          'ts': 0,
-        },
-      ];
+      return _systemErrorRow(lastError!);
     }
 
     return _parseAndWindow(raw, want: want, skip: skip);
   }
 
+  /// 取尾部时请求多少行（`want + skip + 余量`，夹到硬上限）。
+  int _tailLineBudget({required int skip, required int want}) =>
+      (want + skip + _lineSlack).clamp(1, _hardMaxLines);
+
+  /// **`limit == 0` 的"加载全部"**：能读全就读全；读不全（> 通道 1MB）改读尾部。
+  ///
+  /// 判定顺序（都是**事实**，不是猜）：
+  /// 1. `fs.stat` 报的字节数 > [ContractSession.channelTextMaxBytes] ⇒ 直接 tail；
+  /// 2. 否则 `fs.readText` 全量读，`truncated == true` ⇒ 仍走 tail；
+  /// 3. 只有"真读全且没截断"才返回全部（`hasEarlier == false`）。
+  Future<List<Map<String, dynamic>>> _loadAllOrTail(
+    String path, {
+    required int skip,
+  }) async {
+    final stat = await _ch.call('fs.stat', <String, Object?>{'path': path});
+    final statErr = errorOf(stat);
+    final size = (stat['size'] as num?)?.toInt();
+    if (statErr == null &&
+        size != null &&
+        size > ContractSession.channelTextMaxBytes) {
+      return _loadTail(path, skip: skip);
+    }
+
+    final full = await _ch.call('fs.readText', <String, Object?>{
+      'path': path,
+      'offsetLine': 1,
+      'maxLines': 0,
+    });
+    final ferr = errorOf(full);
+    if (ferr != null) {
+      if (ferr.contains('不存在')) return <Map<String, dynamic>>[];
+      lastError = ferr;
+      return _systemErrorRow(lastError!);
+    }
+    if (full['truncated'] == true) {
+      // stat 不可用 / 文件在两步之间长大 ⇒ 仍按尾部兜底。
+      // ★ 绝不把"前 1MB"当完整历史 —— 这正是本轮修掉的 bug。
+      return _loadTail(path, skip: skip);
+    }
+
+    return _parseAndWindow(full, want: 0, skip: skip);
+  }
+
+  /// 读**文件尾部**（长会话的 `limit=0` 兜底；旧宿主回退也走这里）。
+  Future<List<Map<String, dynamic>>> _loadTail(
+    String path, {
+    required int skip,
+  }) async {
+    final tail = await _ch.call('fs.readTailLines', <String, Object?>{
+      'path': path,
+      'maxLines': _tailLineBudget(
+        skip: skip,
+        want: ContractSession.tailLoadLines,
+      ),
+    });
+    final err = errorOf(tail);
+    if (err == null) {
+      // Kotlin 的 `readTailLines` 语义：`truncated == (tail.size >= want)`，
+      // 即"前面**可能**还有"（DeviceFs KDoc 的诚实边界）。文件已确认超 1MB
+      // ⇒ 头部一定被截，按 `truncatedAtHead = true` 如实上报。
+      final hasEarlier = tail['truncated'] == true;
+      lastLoadHasEarlier = hasEarlier;
+      lastLoadTruncatedAtHead = hasEarlier;
+      return _parseAndWindow(
+        tail,
+        want: ContractSession.tailLoadLines,
+        skip: skip,
+        hasEarlier: hasEarlier,
+        truncatedAtHead: hasEarlier,
+        pagingText: '（会话记录超过通道 1MB 上限：仅为省内存加载了最近 '
+            '${ContractSession.tailLoadLines} 条；更早的消息仍在磁盘上，可继续加载。）',
+      );
+    }
+    if (err.contains('不存在')) return <Map<String, dynamic>>[];
+    if (!err.contains('未知方法')) {
+      lastError = err;
+      return _systemErrorRow(lastError!);
+    }
+
+    // ---- 旧宿主：没有 fs.readTailLines ----
+    //
+    // 能读到全文（旧实现没有 1MB 闸）⇒ 本地切最后 N 行，语义与 tail 一致；
+    // 只拿到前 1MB ⇒ **拿不到真正的尾部**，必须如实说"最新消息可能未显示"，
+    // 不能把前 1MB 当完整历史（那正是旧的 bug）。
+    final full = await _ch.call('fs.readText', <String, Object?>{
+      'path': path,
+      'offsetLine': 1,
+      'maxLines': 0,
+    });
+    final ferr = errorOf(full);
+    if (ferr != null) {
+      if (ferr.contains('不存在')) return <Map<String, dynamic>>[];
+      lastError = ferr;
+      return _systemErrorRow(lastError!);
+    }
+    final truncated = full['truncated'] == true;
+    lastLoadHasEarlier = true;
+    lastLoadTruncatedAtHead = truncated;
+    lastError = truncated
+        ? '通道不支持尾部读取（旧宿主），且会话超过通道 1MB 上限：'
+            '当前只拿到前 1MB，**最新消息可能未显示**。请升级 App 后重新打开会话。'
+        : '通道不支持尾部读取（旧宿主）：仅为省内存加载了最近 '
+            '${ContractSession.tailLoadLines} 条；更早的消息仍在磁盘上。';
+    return _parseAndWindow(
+      full,
+      want: ContractSession.tailLoadLines,
+      skip: skip,
+      hasEarlier: true,
+      truncatedAtHead: truncated,
+      pagingText: truncated
+          ? '（通道不支持尾部读取且记录超过 1MB：当前显示的是前 1MB 的末尾，'
+              '**最新消息可能未显示**；请升级 App。）'
+          : '（通道不支持尾部读取（旧宿主）：仅为省内存加载了最近 '
+              '${ContractSession.tailLoadLines} 条；更早的消息仍在磁盘上。）',
+      appendNoShowSuffix: false,
+    );
+  }
+
+  /// 统一的"读失败"返回形状：一条 system 行，**不是静默空列表**。
+  List<Map<String, dynamic>> _systemErrorRow(String reason) =>
+      <Map<String, dynamic>>[
+        <String, dynamic>{'role': 'system', 'text': reason, 'ts': 0},
+      ];
+
   /// 解析通道返回的文本 → 行列表，并应用分页窗口。
   ///
-  /// 抽成方法是为了让**两条路径共用同一套窗口逻辑**
-  /// （`readTailLines` 正常路径 与 `readText` 回落路径）——
+  /// 抽成方法是为了让**多条路径共用同一套窗口逻辑**
+  /// （`readTailLines` 正常路径 / `readText` 回落路径 / `limit=0` 的 tail 兜底）——
   /// 分开写过一次就出过 bug：回落路径把整个文件原样返回，分页被丢。
+  ///
+  /// [hasEarlier]/[truncatedAtHead] 会**只增**地写进那条 `_synthetic: paging`
+  /// 提示行（老读者忽略未知键）；[pagingText] 用来按来源给不同的人话。
   List<Map<String, dynamic>> _parseAndWindow(
     Map<String, Object?> raw, {
     required int want,
     required int skip,
+    bool hasEarlier = false,
+    bool truncatedAtHead = false,
+    String? pagingText,
+    bool appendNoShowSuffix = true,
   }) {
-    if (raw['truncated'] == true && want == 0) {
-      // 只有"全量读（readText）"下的 truncated 才代表**真丢内容**
-      // （超过通道 1MB 上限）。readTailLines 下的 truncated 只表示
-      // "前面还有更早的消息没取"，那是分页的正常行为。
-      lastError = '会话记录超过通道 1MB 文本上限，只读回了前面一部分。';
-    }
-
     final text = (raw['text'] as String?) ?? '';
     final all = <Map<String, dynamic>>[];
     for (final line in const LineSplitter().convert(text)) {
@@ -823,7 +962,7 @@ class SessionStore {
 
     // ---- 分页窗口 ----
     //
-    // `all` 是拿到的行（顺序 = 写入顺序）。两条路径内容**不一样**：
+    // `all` 是拿到的行（顺序 = 写入顺序）。几条路径内容**不一样**：
     //
     // | 路径 | `all` 是什么 |
     // |---|---|
@@ -851,21 +990,28 @@ class SessionStore {
       out = all;
     }
 
-    // 有更早的消息没加载 ⇒ 插一条提示（UI 的 `_toMessages` 已支持 system role）
-    if (want > 0 && all.length > out.length) {
+    // 有更早的消息没加载 ⇒ 插一条提示（UI 的 `_toMessages` 已支持 system role）。
+    // ★ 只增：`hasEarlier` / `truncatedAtHead` 两个键 + `_synthetic` 标记。
+    final earlier = hasEarlier || (want > 0 && all.length > out.length);
+    if (earlier) {
       out.insert(0, <String, dynamic>{
         'role': 'system',
-        'text': '（更早的消息未加载：只为省内存加载了最近 $want 条。'
-            '完整记录仍在磁盘上。）',
+        'text': pagingText ??
+            '（更早的消息未加载：只为省内存加载了最近 $want 条。'
+                '完整记录仍在磁盘上。）',
         'ts': 0,
         '_synthetic': 'paging',
+        'hasEarlier': true,
+        if (truncatedAtHead) 'truncatedAtHead': true,
       });
     }
 
     if (lastError != null) {
       out.add(<String, dynamic>{
         'role': 'system',
-        'text': '${lastError!}后面的消息没有显示。',
+        'text': appendNoShowSuffix
+            ? '${lastError!}后面的消息没有显示。'
+            : lastError!,
         'ts': 0,
       });
     }
@@ -1221,6 +1367,13 @@ Map<String, dynamic>? _normalizeEntry(Map<String, dynamic> message) {
       if (n != null) out[k] = n;
       continue;
     }
+    // ★ T1-5（2026-10-31）：`steadyHitRate` 是唯一浮点键（只增；
+    //   解不出数就不写 —— 不写假 0）。
+    if (_doubleKeys.contains(k)) {
+      final d = _doubleOf(v);
+      if (d != null) out[k] = d;
+      continue;
+    }
     if (_boolKeys.contains(k)) {
       final b = _boolOf(v);
       if (b != null) out[k] = b;
@@ -1256,6 +1409,16 @@ const Set<String> _intKeys = <String>{
   'turns',
   // ★ D6（2026-10-29）：历史命令卡的真实退出码（只增；缺失时调用方不写键）
   'exitCode',
+  // ★ T1-5（2026-10-31）：会话用量汇总行 `role:"session_usage"` 的累计计数
+  //   （只增；旧文件没有这些键照常读，未知键原样保留逻辑不动）
+  'runs',
+  'reportedTurns',
+  'unreportedTurns',
+};
+
+/// 浮点键（T1-5）：`steadyHitRate` 是 double；宽松接受 num/数字字符串。
+const Set<String> _doubleKeys = <String>{
+  'steadyHitRate',
 };
 
 const Set<String> _boolKeys = <String>{
@@ -1309,9 +1472,21 @@ int? _intOf(Object? v) {
   return null;
 }
 
+/// 宽松取 double：`num` / 数字字符串都认（T1-5 的 `steadyHitRate` 用）。
+///
+/// 返回 `null` = 无法解析（**不写假 0** —— 与 cached 同一条口径纪律）。
+double? _doubleOf(Object? v) {
+  if (v is num) return v.isFinite ? v.toDouble() : null;
+  if (v is String) {
+    final t = v.trim();
+    if (t.isEmpty) return null;
+    return double.tryParse(t);
+  }
+  return null;
+}
+
 /// 宽松取 bool：`bool` / `"true"·"1"` / `1` 都认（旧数据里三种都出现过）。
-bool? _boolOf(Object? v) {
-  if (v is bool) return v;
+bool? _boolOf(Object? v) {  if (v is bool) return v;
   if (v is num) return v != 0;
   if (v is String) {
     final t = v.trim().toLowerCase();

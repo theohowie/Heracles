@@ -64,7 +64,7 @@ class ToolchainActivation(
     fun status(): ToolchainStatus {
         val t2 = File(rootfsHostRoot, T2_DIR)
         val marker = File(t2, VERSION_MARKER)
-        val jdkHome = File(rootfsHostRoot, "usr/lib/jvm/java-17-openjdk")
+        val jdkHome = File(rootfsHostRoot, JDK_DIR)
         val gradleBin = findGradleBin(File(t2, "gradle"))
         val androidJar = File(t2, "platform/android.jar")
 
@@ -73,11 +73,19 @@ class ToolchainActivation(
             "gradle" to (gradleBin != null),
             "androidJar" to (androidJar.isFile && androidJar.length() > 1_000_000),
         )
+        // 只增字段（T2-6）：UI 要能直接说「缺 JDK 17 / 缺 Gradle / 缺 android.jar」，
+        // 而不是把 parts 的 key 原样翻给用户；占用空间让「卸载能释放多少」有依据。
+        // ⚠️ JDK 也是 T2 的一部分（apk add 装进 rootfs 的 usr/lib/jvm），必须一起算进来，
+        //    否则"激活占 415MB、卸载只释放 130MB"会对不上账。
+        val missing = parts.filterValues { !it }.keys.map { PART_LABELS[it] ?: it }
+        val occupied = directorySizeNoFollowLinks(t2) + directorySizeNoFollowLinks(jdkHome)
         return ToolchainStatus(
             installDir = t2.absolutePath,
             version = if (marker.isFile) marker.readText().trim() else "",
             parts = parts,
             ready = parts.values.all { it },
+            occupiedBytes = occupied,
+            missing = missing,
         )
     }
 
@@ -132,7 +140,7 @@ class ToolchainActivation(
             // ⚠️ 真机已知：`apk add` 在 PRoot 里常常**退出码非 0 但实际装好了**
             //   （`usr/bin/.apk.xxx: No such file or directory`）。所以判据是**装出来没有**，
             //   不是退出码。这一点 sandbox 的实测记录里有（见 porting-log）。
-            val jdkBin = File(rootfsHostRoot, "usr/lib/jvm/java-17-openjdk/bin/javac")
+            val jdkBin = File(rootfsHostRoot, "$JDK_DIR/bin/javac")
             if (!jdkBin.exists()) {
                 return@withLock ActivationResult.failed(
                     "JDK 安装失败：javac 不存在。\n" +
@@ -182,10 +190,125 @@ class ToolchainActivation(
         }
     }
 
-    /** **重置** T2（删掉重装）。只影响 T2，不动 T0/T1。 */
-    fun reset(): Boolean {
+    /**
+     * **真的卸载 T2**（T2-6）—— 不只是 `rm -rf /opt/t2`。
+     *
+     * ## 为什么必须比"删一个目录"复杂
+     * T2 由三部分组成，装法完全不同：
+     * | 部分 | 装法 | 卸载方式 |
+     * |---|---|---|
+     * | Gradle + android.jar + 版本标记 | 宿主侧下载解压到 `opt/t2` | 删目录即可 |
+     * | **JDK 17** | **沙箱内 `apk add openjdk17-jdk`** | 必须 `apk del`（否则 apk 数据库仍记「已安装」） |
+     * | gradle 的 PATH 链接 | 沙箱内 `ln -s` 到 `/usr/local/bin/gradle` | 删链接 |
+     *
+     * ⚠️ JDK 这一步**不能只删目录**：`apk add` 的数据库（`/lib/apk/db/installed`）仍会
+     * 认为 openjdk17-jdk 已安装，下次 `activate()` 里 `apk add --no-cache` 会**直接跳过**，
+     * 于是 javac 永远缺失 —— 用户会看到"重装也没用"。所以先 `apk info -e` 探测、
+     * 需要时 `apk del`，再兜底删宿主侧残留。
+     *
+     * 边界（**只动 T2**）：
+     * - 不碰 rootfs 本身（T0）、不动 `opt/as`（T1 内置工具）、不动 `workspace/` 用户工作区；
+     * - `apk del` 只点名 `openjdk17-jdk`，不跑 `apk del --purge`、不重装 rootfs。
+     *
+     * @param deleteDir 删除注入点（单测模拟"删不掉"用；默认真删）
+     * @return 卸载结果：删了什么 / 失败项 / 释放多少 / 当前缺失项（**只增字段**）
+     */
+    suspend fun reset(
+        deleteDir: (File) -> Boolean = { dir -> dir.deleteRecursively() },
+    ): ToolchainResetResult = lock.withLock {
+        val t2 = File(rootfsHostRoot, T2_DIR)
+        val jdkHome = File(rootfsHostRoot, JDK_DIR)
+        val gradleLink = File(rootfsHostRoot, GRADLE_LINK)
+        val beforeBytes = directorySizeNoFollowLinks(t2) + directorySizeNoFollowLinks(jdkHome)
+
+        val removed = mutableListOf<String>()
+        val failed = mutableListOf<ResetFailure>()
+        val warnings = mutableListOf<String>()
+
+        // ---- ① JDK：先让 apk 数据库跟上（失败不阻断，但要如实记）----
+        val jdkInApkDb = runCatching {
+            runInSandbox(APK_HAS_JDK, APK_QUERY_TIMEOUT_MS).exitCode == 0
+        }.getOrDefault(false)
+        if (jdkInApkDb) {
+            val del = runCatching { runInSandbox(APK_DEL_JDK, APK_DEL_TIMEOUT_MS) }.getOrNull()
+            if (del == null || del.exitCode != 0) {
+                warnings += "apk del openjdk17-jdk 未成功（exit=${del?.exitCode ?: "异常"}）" +
+                    (del?.let { "：${it.tail(200)}" } ?: "") +
+                    "；JDK 文件会由宿主侧删除，但 apk 数据库可能仍标记" +
+                    "「已安装」⇒ 下次激活可能跳过 JDK 安装。"
+            }
+        }
+
+        // ---- ② 宿主侧删除（apk del 可能只删了一部分，或根本没跑）----
+        listOf(t2, jdkHome, gradleLink).forEach { target ->
+            if (!target.exists()) return@forEach
+            val guest = guestPathOf(rootfsHostRoot, target)
+            var failureReason: String? = null
+            val ok = try {
+                deleteDir(target)
+            } catch (failure: Throwable) {
+                failureReason = "${failure.javaClass.simpleName}: ${failure.message}"
+                false
+            }
+            // 以**实际存在性**为准，不信删除函数的返回值：`deleteRecursively()` 在
+            // "删一半失败" 时会返回 false 但目标可能已不存在；反过来也可能返回 true
+            // 却因权限/只读挂载留下残留。卸载结果必须反映磁盘真相。
+            if (!target.exists()) {
+                removed += guest
+            } else {
+                failed += ResetFailure(
+                    guest,
+                    failureReason
+                        ?: if (ok) {
+                            "删除调用返回成功但路径仍存在（残留）"
+                        } else {
+                            "删除失败（路径仍存在：${target.absolutePath}）"
+                        },
+                )
+            }
+        }
+
+        // ---- ③ 复核：status() 必须变成"未就绪"，否则就是有残留 ----
+        val after = status()
+        val afterBytes = directorySizeNoFollowLinks(t2) + directorySizeNoFollowLinks(jdkHome)
+        val freedBytes = (beforeBytes - afterBytes).coerceAtLeast(0L)
+        if (after.ready) {
+            failed += ResetFailure(
+                after.installDir,
+                "卸载后自检仍显示就绪（可能有残留文件：${after.parts}）",
+            )
+        }
+        val success = failed.isEmpty()
+        val message = buildString {
+            append(if (success) "已卸载 T2 编译环境" else "T2 卸载未完全成功")
+            append("：释放 ${formatBytes(freedBytes)}")
+            if (removed.isEmpty()) {
+                append("（本来就没装，没有可删的文件）")
+            } else {
+                append("，删除 ${removed.size} 项（${removed.joinToString("、")}）")
+            }
+            if (failed.isNotEmpty()) {
+                append("；失败 ${failed.size} 项：")
+                append(failed.joinToString("；") { "${it.path}（${it.reason}）" })
+            }
+            if (warnings.isNotEmpty()) {
+                append("；注意：")
+                append(warnings.joinToString("；"))
+            }
+            append("；当前缺失：")
+            append(if (after.missing.isEmpty()) "无（意外）" else after.missing.joinToString("、"))
+        }
         lastResult = null
-        return File(rootfsHostRoot, T2_DIR).deleteRecursively()
+        ToolchainResetResult(
+            success = success,
+            ready = after.ready,
+            installDir = after.installDir,
+            removed = removed,
+            failed = failed,
+            freedBytes = freedBytes,
+            missing = after.missing,
+            message = message,
+        )
     }
 
     // ---------------------------------------------------------------- 内部
@@ -286,12 +409,54 @@ class ToolchainActivation(
         val stderr: String,
     )
 
-    /** T2 状态（**如实**：哪个装了、哪个没装）。 */
+    /** T2 状态（**如实**：哪个装了、哪个没装）。只增字段，旧读者的 `parts`/`ready` 语义不变。 */
     data class ToolchainStatus(
         val installDir: String,
         val version: String,
         val parts: Map<String, Boolean>,
         val ready: Boolean,
+        /**
+         * T2 当前占用（`/opt/t2` + JDK 目录，字节）。UI 用来显示「卸载可释放 N MB」。
+         *
+         * 口径与 `du -sb` 一致（见 [directorySizeNoFollowLinks]）：**不跟随符号链接**，
+         * 读不到的目录跳过而不是让整次查询失败。
+         */
+        val occupiedBytes: Long = 0L,
+        /**
+         * 缺失项（**人话**，如 `JDK 17（javac）`）。`ready == true` 时为空。
+         *
+         * 为什么不用 `parts` 的 key 直接给 UI：`androidJar` 这种内部字段名对用户没有意义。
+         */
+        val missing: List<String> = emptyList(),
+    )
+
+    /** 卸载失败的一项（路径 + 人话原因；给 UI 直接显示）。 */
+    data class ResetFailure(
+        val path: String,
+        val reason: String,
+    )
+
+    /**
+     * T2 卸载结果（T2-6，**只增字段**；旧的 `reset(): Boolean` 语义落在 [success]）。
+     *
+     * @param success 全部删除项都成功 **且** 卸载后 `status().ready == false`
+     * @param ready 卸载后重新探测的 `status().ready`（正常应为 false；true 说明有残留）
+     * @param installDir T2 安装目录（宿主绝对路径，`/opt/t2` 对应的宿主位置）
+     * @param removed 实际删掉的路径清单（**沙箱视角**，如 `/opt/t2`，与用户看到的路径一致）
+     * @param failed 删除失败项；为空表示干净卸载
+     * @param freedBytes 释放的字节数（删前占用 − 删后占用；**实测差**，不是估算）
+     * @param missing 卸载后仍缺失的项（正常 = 三项全缺 ⇒ 下次激活会重新装）
+     * @param message 给人看的一句话（含失败原因/注意事项）
+     */
+    data class ToolchainResetResult(
+        val success: Boolean,
+        val ready: Boolean,
+        val installDir: String,
+        val removed: List<String>,
+        val failed: List<ResetFailure>,
+        val freedBytes: Long,
+        val missing: List<String>,
+        val message: String,
     )
 
     /** 激活结果。 */
@@ -325,6 +490,56 @@ class ToolchainActivation(
         /** T2 在 rootfs 内的目录。 */
         const val T2_DIR = "opt/t2"
         const val VERSION_MARKER = ".heracles-t2-version"
+
+        /**
+         * JDK 在 rootfs 内的目录（`apk add openjdk17-jdk` 装到这里）。
+         *
+         * ★ 卸载必须一起删：JDK 是 T2 体积的大头（≈284 MB），只删 `/opt/t2`
+         *   会出现"卸载成功但空间没释放"，且 `status()` 里 jdk 仍为 true。
+         */
+        const val JDK_DIR = "usr/lib/jvm/java-17-openjdk"
+
+        /** gradle 的 PATH 链接（`/usr/local/bin/gradle` → `/opt/t2/gradle/bin/gradle`）。 */
+        const val GRADLE_LINK = "usr/local/bin/gradle"
+
+        /** 分项 key → 给人看的缺失项文案（`status().missing` 用）。 */
+        private val PART_LABELS = mapOf(
+            "jdk" to "JDK 17（javac）",
+            "gradle" to "Gradle（bin/gradle）",
+            "androidJar" to "android.jar（platform/android.jar）",
+        )
+
+        /** 判断 JDK 是否**在 apk 数据库里**（决定要不要先 `apk del`）。 */
+        private const val APK_HAS_JDK = "apk info -e openjdk17-jdk >/dev/null 2>&1"
+
+        /** 卸载 JDK（让 apk 数据库一致；否则下次 `apk add` 会跳过）。 */
+        private const val APK_DEL_JDK = "apk del openjdk17-jdk 2>&1"
+
+        private const val APK_QUERY_TIMEOUT_MS = 20_000L
+        private const val APK_DEL_TIMEOUT_MS = 180_000L
+
+        /**
+         * 把宿主绝对路径翻成**沙箱视角**（给 `removed` 清单用；用户认的是 `/opt/t2`）。
+         *
+         * 注意：沙箱视角永远是 POSIX 风格（`/a/b`），而宿主可能是 Windows 跑单测
+         * （`C:\…\opt\t2`）—— 所以这里统一把分隔符归一成 `/`，否则单测机上会得到
+         * `/\opt\t2` 这种既不宿主也不沙箱的怪路径。
+         */
+        private fun guestPathOf(rootfsHostRoot: File, file: File): String {
+            val root = rootfsHostRoot.absolutePath.replace('\\', '/').trimEnd('/')
+            val abs = file.absolutePath.replace('\\', '/')
+            return if (abs.startsWith(root)) "/" + abs.removePrefix(root).trimStart('/') else abs
+        }
+
+        private fun formatBytes(bytes: Long): String = when {
+            bytes >= 1024L * 1024 * 1024 ->
+                String.format(java.util.Locale.US, "%.2f GB", bytes / 1024.0 / 1024.0 / 1024.0)
+            bytes >= 1024L * 1024 ->
+                String.format(java.util.Locale.US, "%.1f MB", bytes / 1024.0 / 1024.0)
+            bytes >= 1024 ->
+                String.format(java.util.Locale.US, "%.1f KB", bytes / 1024.0)
+            else -> "$bytes B"
+        }
 
         /** T2 需要预留的磁盘（JDK 284 MiB + Gradle 131 MB + jar 25 MB + 解压余量）。 */
         const val REQUIRED_BYTES = 500L * 1024 * 1024

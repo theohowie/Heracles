@@ -299,8 +299,12 @@ class SandboxFacade(context: Context) {
     ): com.heracles.sandbox.runtime.ToolchainActivation.ActivationResult =
         toolchain.activate(onProgress)
 
-    /** 清掉 T2（只动 T2，不碰 T0/T1）。 */
-    fun resetBuildSuite(): Boolean = toolchain.reset()
+    /**
+     * 卸载 T2（T2-6）：**真卸载** —— 删 `/opt/t2` + JDK（`apk del` 优先）+ gradle 的 PATH 链接，
+     * 返回删除清单 / 失败项 / 释放字节 / 当前缺失项。只动 T2，不碰 T0/T1 与用户工作区。
+     */
+    suspend fun resetBuildSuite(): com.heracles.sandbox.runtime.ToolchainActivation.ToolchainResetResult =
+        toolchain.reset()
 
 
     /** 二进制缺失时给人看的说明。 */

@@ -75,6 +75,7 @@
   - **plan 行只增字段** `reachedGoal`/`closedReason`：每次写 plan 行时若已知道收尾信息就带上；**收尾时追加一条最终 plan 行** `{"role":"plan","steps":[…],"reachedGoal":true|false,"closedReason":"…","ts":…}`；旧行缺这两个字段 ⇒ 按 `null`（未知）处理；**不重写旧行、append-only 不变**。
   - 顺序（实测钉死）：**`plan_closed` 事件先于 `finished`/`failed`**；**最终 plan 行在 assistant 行之前**（与既有 plan 行位置一致，重放时计划块在回答上方）。
   - 状态：实现中；真机（5 步任务第 2 步停止 → 重开会话看"已中断"+原因）**未验证**。
+- **2026-10-31 新增（自动推进，只增行为）**：计划不再只在模型 `write_todos` 时更新 —— 每个**工作类工具成功执行后**自动推进一格并推一帧 `plan_updated`（当前 `in_progress` → `completed`，下一个 `pending` → `in_progress`；无 `in_progress` 时首个 `pending` 变 `in_progress` 且本步不标 done）。约束：非执行类工具（`write_todos`/`ask_user`/`save_memory`/`activate_skills`）不推进；**失败工具不推进、绝不把失败步骤标 done**；**每步只自动推进一次**；模型随后 `write_todos` 覆盖时**以模型为准**（重置自动记账）；`plan_closed` 语义不变（全部 `done`/`cancelled` 才 `reachedGoal=true`）。提示词与 `write_todos` 描述已强化"每完成一步立刻更新，不要攒到最后"。
 
 ### N5 模型与思考等级 —— ✅ 已满足（2026-10-25 补 `reasoningLevelsEffective`）
 
@@ -398,6 +399,7 @@ class VoicePartial {
 - 新事件类型已登记（approval_required / context_updated / plan_updated；approval_request 与 plan_created 保留在 knownTypes 供旧读者，后端不再发送）；
 - 事件字段只增（callId/workspaceInside/breakdown/limit/limitSource/planStepsDetailed）；`.jsonl` 只增行类型与字段（tool_call/plan/compact 行 + tool 行的 id 字段；**2026-10-29 新增**：step 行可带 prompt/cached/out（cached 为 null 不写键），新增 `role:"approval"` 与 `role:"ask"` 结果行，字段见 §N12.10 与 `接口.md` §7.2；旧值 `'allow'|'allow_always'` 仍接受但落盘统一 `once/always/deny`；**D6 已拍板**：tool 行只增 `surface`/`exitCode`/`command`（取不到就不写键，回放由前端接））；
 - 契约常量以 `contract.dart` 为唯一来源 ✅（同目录另有 `接口.md` 记录后端→前端的实现面，与本文互补：本文是**前端提出的契约**，`接口.md` 是**后端的实现清单**）。
+- **2026-10-31 只增项**：① `plan_updated` 由**自动推进**额外触发（见 N4；模型 `write_todos` 覆盖优先）；② 长会话读取：`loadMessages` 返回结构只增 `truncatedAtHead`/`hasEarlier`，默认改读**尾部 N 行**（见 `接口.md` §9.4）；③ 新增 JSONL 行类型 `role:"session_usage"`（见 `接口.md` §9.5，只增不吃旧行）；④ 语音模型状态/卸载 API 只增（`voiceEnabled`/`E_VOICE_UNINSTALLED`/`deleteAllVoiceModels`/`installVoiceModels`，见 `接口.md` §9.6）。
 
 ## 7. 待确认 —— 已关账（前端 2026-10-25 全部接受）
 

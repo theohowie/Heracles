@@ -428,6 +428,12 @@ class SandboxService {
         (k, v) => MapEntry(k.toString(), v == true),
       ),
       error: raw['ok'] == true ? null : (raw['error'] as String?) ?? '查询失败',
+      // T2-6 只增字段：安装目录 / 当前占用 / 缺失项（人话）
+      installDir: (raw['installDir'] as String?) ?? '',
+      occupiedBytes: (raw['occupiedBytes'] as num?)?.toInt() ?? 0,
+      missingLabels: ((raw['missing'] as List?) ?? const [])
+          .map((e) => e.toString())
+          .toList(growable: false),
     );
   }
 
@@ -447,9 +453,26 @@ class SandboxService {
   }
 
   /// 清掉 T2（只动编译环境，不碰 T0 基础环境 / T1 工具）。
+  ///
+  /// 旧接口，只回 `bool`（**保持兼容，别删**）。要看「删了什么 / 为什么失败 /
+  /// 释放多少 / 现在缺什么」请用 [resetBuildSuiteVerbose]。
   Future<bool> resetBuildSuite() async {
     final raw = await _client.call('resetBuildSuite');
     return raw['ok'] == true;
+  }
+
+  /// **卸载 T2 并拿到真状态**（T2-6）：删除清单 / 失败项 / 释放字节 / 当前缺失项。
+  ///
+  /// 服务端（Kotlin `ToolchainActivation.reset()`）会：
+  /// 1. `apk info -e` 判断 JDK 是否在 apk 库里 → 在就先 `apk del openjdk17-jdk`
+  ///    （否则下次激活 `apk add` 会以为已装好而跳过，javac 永远缺失）；
+  /// 2. 宿主侧删 `/opt/t2`、JDK 目录、`/usr/local/bin/gradle` 链接；
+  /// 3. 复核 `status()` 必须变成未就绪，否则把残留列为失败项。
+  ///
+  /// 只动 T2，不碰 rootfs（T0）/ 内置工具（T1）/ 用户工作区。
+  Future<SandboxBuildSuiteResetResult> resetBuildSuiteVerbose() async {
+    final raw = await _client.call('resetBuildSuite');
+    return SandboxBuildSuiteResetResult.fromMap(raw);
   }
 
   // -------------------------------------------------------------- 文件
@@ -665,6 +688,9 @@ class SandboxBuildSuiteStatus {
     required this.version,
     required this.parts,
     required this.error,
+    this.installDir = '',
+    this.occupiedBytes = 0,
+    this.missingLabels = const <String>[],
   });
 
   /// 三项（jdk / gradle / androidJar）都齐了才为 true。
@@ -676,12 +702,96 @@ class SandboxBuildSuiteStatus {
   /// 分项状态，如 `{jdk: true, gradle: false, androidJar: false}`。
   final Map<String, bool> parts;
 
+  /// T2 安装目录（宿主绝对路径；UI 展示/排障用）。
+  final String installDir;
+
+  /// T2 当前占用字节（`/opt/t2` + JDK 目录）；UI 用来显示「卸载可释放 N MB」。
+  final int occupiedBytes;
+
+  /// 缺失项（**人话**，Kotlin 侧给，如「JDK 17（javac）」）。
+  final List<String> missingLabels;
+
   final String? error;
 
   bool get ok => error == null;
 
   /// 缺哪一项（UI 要如实说"缺 Gradle"，而不是笼统说"未就绪"）。
-  List<String> get missing => parts.entries.where((e) => !e.value).map((e) => e.key).toList();
+  /// 优先用服务端给的人话文案；老版本服务端没这个字段时回落到 parts 的 key。
+  List<String> get missing => missingLabels.isNotEmpty
+      ? missingLabels
+      : parts.entries.where((e) => !e.value).map((e) => e.key).toList();
+}
+
+/// T2 卸载失败项（路径 + 人话原因）。
+class SandboxResetFailure {
+  const SandboxResetFailure({required this.path, required this.reason});
+
+  /// 沙箱视角路径（如 `/opt/t2`）。
+  final String path;
+
+  /// 失败原因（如「删除失败（路径仍存在：…）」「apk del 未成功…」）。
+  final String reason;
+}
+
+/// T2 卸载结果（T2-6，对应 Kotlin `ToolchainResetResult`）。
+class SandboxBuildSuiteResetResult {
+  const SandboxBuildSuiteResetResult({
+    required this.ok,
+    required this.ready,
+    required this.installDir,
+    required this.removed,
+    required this.failed,
+    required this.freedBytes,
+    required this.missing,
+    required this.message,
+  });
+
+  /// 全部删除项成功 **且** 卸载后 `status().ready == false`。
+  final bool ok;
+
+  /// 卸载后重新探测的 ready（正常应为 false；true 说明有残留）。
+  final bool ready;
+
+  /// T2 安装目录（宿主绝对路径）。
+  final String installDir;
+
+  /// 实际删掉的路径清单（沙箱视角，如 `/opt/t2`）。
+  final List<String> removed;
+
+  /// 删除失败项（空 = 干净卸载）。
+  final List<SandboxResetFailure> failed;
+
+  /// **实测**释放字节数（删前占用 − 删后占用），不是估算。
+  final int freedBytes;
+
+  /// 卸载后仍缺失的项（正常 = 三项全缺 ⇒ 下次激活会重新安装）。
+  final List<String> missing;
+
+  /// 给人看的一句话（含失败原因 / 注意事项）。
+  final String message;
+
+  factory SandboxBuildSuiteResetResult.fromMap(Map<dynamic, dynamic> raw) {
+    return SandboxBuildSuiteResetResult(
+      ok: raw['ok'] == true,
+      ready: raw['ready'] == true,
+      installDir: (raw['installDir'] as String?) ?? '',
+      removed: ((raw['removed'] as List?) ?? const [])
+          .map((e) => e.toString())
+          .toList(growable: false),
+      failed: ((raw['failed'] as List?) ?? const [])
+          .whereType<Map>()
+          .map((e) => SandboxResetFailure(
+                path: (e['path'] as String?) ?? '',
+                reason: (e['reason'] as String?) ?? '',
+              ))
+          .toList(growable: false),
+      freedBytes: (raw['freedBytes'] as num?)?.toInt() ?? 0,
+      missing: ((raw['missing'] as List?) ?? const [])
+          .map((e) => e.toString())
+          .toList(growable: false),
+      message: (raw['message'] as String?) ?? '',
+    );
+  }
 }
 
 /// T2 激活结果。

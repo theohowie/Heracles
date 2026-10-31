@@ -192,7 +192,7 @@ void main() {
       VoiceModelController.bundledAssetLoaderForTest = loader.load;
 
       expect(voice.streamingInstalled, isFalse);
-      expect(await voice.ensureStreamingReady(), isTrue);
+      expect((await voice.ensureStreamingReady()).ok, isTrue);
 
       expect(voice.bundledStreamingReady, isTrue);
       expect(voice.streamingInstalled, isTrue, reason: '内置解压完成即"流式可用"');
@@ -206,7 +206,7 @@ void main() {
       expect(voiceModelDirComplete(dir, fakeFiles), isTrue);
       // 二次调用零资产读取（幂等）。
       final calls = loader.totalCalls;
-      expect(await voice.ensureStreamingReady(), isTrue);
+      expect((await voice.ensureStreamingReady()).ok, isTrue);
       expect(loader.totalCalls, calls);
     });
 
@@ -225,7 +225,7 @@ void main() {
         voice.ensureStreamingReady(),
         voice.ensureStreamingReady(),
       ]);
-      expect(results, [true, true, true]);
+      expect(results.map((r) => r.ok).toList(), [true, true, true]);
       // 四个文件各读一次（不是 4×3 次）。
       expect(loader.totalCalls, 4, reason: '并发调用必须共享同一次解压');
       expect(voice.streamingInstalled, isTrue);
@@ -241,7 +241,7 @@ void main() {
       })..fail = true;
       VoiceModelController.bundledAssetLoaderForTest = bad.load;
 
-      expect(await voice.ensureStreamingReady(), isFalse);
+      expect((await voice.ensureStreamingReady()).ok, isFalse);
       expect(voice.bundledStreamingReady, isFalse);
       expect(voice.streamingInstalled, isFalse);
       expect(voice.bundledStreamingError, isNotNull);
@@ -254,7 +254,7 @@ void main() {
         'tokens.txt': 2,
       });
       VoiceModelController.bundledAssetLoaderForTest = good.load;
-      expect(await voice.ensureStreamingReady(), isTrue);
+      expect((await voice.ensureStreamingReady()).ok, isTrue);
       expect(voice.bundledStreamingError, isNull);
     });
 
@@ -298,7 +298,7 @@ void main() {
         'joiner.onnx': 3,
         'tokens.txt': 2,
       }).load;
-      expect(await voice.ensureStreamingReady(), isTrue);
+      expect((await voice.ensureStreamingReady()).ok, isTrue);
       voice.refreshInstalled();
 
       final model = voice.activeStreamingModel;

@@ -508,6 +508,9 @@ class SandboxBridge(
                             "version" to s.version,
                             "installDir" to s.installDir,
                             "parts" to s.parts,
+                            // T2-6 只增字段（UI 用来显示「占用多少 / 缺哪项」）
+                            "occupiedBytes" to s.occupiedBytes,
+                            "missing" to s.missing,
                         )
                     },
                     onFailure = { e -> failure(e.message ?: e.javaClass.simpleName) },
@@ -541,9 +544,24 @@ class SandboxBridge(
             }
 
             "resetBuildSuite" -> scope.launch {
-                val r = withContext(Dispatchers.IO) { runCatching { toolchain.reset() } }
+                // T2-6：卸载返回**真状态**（删除清单 / 失败项 / 释放字节 / 当前缺失项），
+                // 而不是一个 Boolean —— UI 要说清「删了什么、为什么失败、现在缺什么」。
+                val r = withContext(Dispatchers.IO) {
+                    runCatching { runBlocking { toolchain.reset() } }
+                }
                 reply(result, r.fold(
-                    onSuccess = { ok -> mapOf("ok" to true, "cleared" to ok) },
+                    onSuccess = { x ->
+                        mapOf(
+                            "ok" to x.success,
+                            "ready" to x.ready,
+                            "installDir" to x.installDir,
+                            "removed" to x.removed,
+                            "failed" to x.failed.map { mapOf("path" to it.path, "reason" to it.reason) },
+                            "freedBytes" to x.freedBytes,
+                            "missing" to x.missing,
+                            "message" to x.message,
+                        )
+                    },
                     onFailure = { e -> failure(e.message ?: e.javaClass.simpleName) },
                 ))
             }

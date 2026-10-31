@@ -69,6 +69,13 @@ class VoiceInputController extends ChangeNotifier {
 
     final voice = VoiceModelController.shared();
     if (!voice.loaded) await voice.load();
+    // 真卸载时由本控制器释放当前流式 session（注册到 engineReleaseHooks）。
+    VoiceModelController.registerEngineRelease(_releaseStreamingEngine);
+    // ★ T0-2 真卸载闸门：用户卸载过 ⇒ 明确人话提示，**不录音、不解压、不转写**。
+    if (voice.voiceUninstalled || !voice.voiceEnabled) {
+      toast('语音模型已卸载：设置 → 语音识别 里可重新安装');
+      return;
+    }
     // ★ 每次点麦克风都重新看一次磁盘：模型可能在设置页刚下完、或某处被
     // 删除/改名（§N13.4 的回退判定必须即时，不能吃启动时的缓存）。只做
     // 几个 `File.existsSync/lengthSync`，主 isolate 开销可忽略。
@@ -79,7 +86,12 @@ class VoiceInputController extends ChangeNotifier {
     // 备好（默认用内置；老模型只有在用户明确需要高精度时才被 `activeStreamingModel`
     // 在 bundled 不可用时选中）。解压失败不崩，照旧走整段回退。
     if (!voice.bundledStreamingReady) {
-      await voice.ensureStreamingReady();
+      final ensured = await voice.ensureStreamingReady();
+      // 双保险：解压期间用户可能刚好点了卸载。
+      if (ensured.uninstalled) {
+        toast('语音模型已卸载：设置 → 语音识别 里可重新安装');
+        return;
+      }
     }
     // 两条路径的模型门槛分开算（§N13.4）：
     // · 流式：内置解压完成（或可选下载完整）即可录（边说边出字）；
@@ -235,6 +247,11 @@ class VoiceInputController extends ChangeNotifier {
         // 回退：与今天完全一致的整段识别。
         if (runner != null) await runner.dispose();
         final voice = VoiceModelController.shared();
+        // T0-2：卸载后即使残留 WAV 也绝不转写（VoiceAsr 里还有一道硬闸）。
+        if (voice.voiceUninstalled || !voice.voiceEnabled) {
+          toast('语音模型已卸载：设置 → 语音识别 里可重新安装');
+          return;
+        }
         if (!voice.installed || !voice.engineReady) {
           toast('流式不可用，且整段识别模型未准备');
           return;
@@ -274,6 +291,15 @@ class VoiceInputController extends ChangeNotifier {
     // 先断流（取消后立即停发 partial），再让宿主丢录音文件。
     if (runner != null) await runner.cancel();
     await AgentBridge().cancelVoiceRecord();
+  }
+
+  /// 真卸载时释放流式引擎/解码器（注册进
+  /// [VoiceModelController.engineReleaseHooks]，删除模型时被调用）。
+  static void _releaseStreamingEngine() {
+    final controller = VoiceInputController._shared;
+    final runner = controller._stream;
+    controller._stream = null;
+    if (runner != null) unawaited(runner.cancel());
   }
 }
 

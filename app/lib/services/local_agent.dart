@@ -1458,6 +1458,11 @@ class LocalAgentExecutor {
     var cancelled = false;
     var finalText = '';
 
+    /// 本轮**总轮数**（`HeraclesFinished.turns`）—— 会话用量汇总用。
+    ///
+    /// `null` = run 没有正常收尾（取消/异常），此时退化为 `tr.currentTurn`。
+    int? finishedTurns;
+
     // ---- 计划终态（B8 P0，2026-10-30）----
     //
     // `HeraclesPlanClosed` 只在**本轮有过计划**时才会来（backend 保证）。
@@ -1694,6 +1699,7 @@ class LocalAgentExecutor {
             );
           case HeraclesFinished(finalText: final ft, turns: final turnCount):
             finalText = ft;
+            finishedTurns = turnCount;
             tr.endStep(status: ft.trim().isEmpty ? 'empty' : 'ok');
             tr.settleTurn(); // 最终回答轮（无工具）也要记账
             tr.finished(ft, turnCount, sw.elapsedMilliseconds);
@@ -1793,6 +1799,19 @@ class LocalAgentExecutor {
       );
     }
 
+    // ---- 会话用量汇总行（T1-5，2026-10-31）----
+    //
+    // **只在有 turn 的 run 写**（空 run 不留空壳）；位置钉死在 assistant 行
+    // **之前** —— 保持"会话文件最后一行是 assistant 回答"这个既有不变量
+    // （`jsonl_accounting_test` 钉过它），汇总行放在回答前一步。
+    // 口径 = **本会话累计**（读上一条汇总再累加，跨 run/重启不丢；旧文件
+    // 没有该行 ⇒ 从 0 起，不假装有）。单写者：`_drive` 收尾串行调用。
+    await _appendSessionUsage(
+      sid: sid,
+      tr: tr,
+      runTurns: finishedTurns ?? tr.currentTurn,
+    );
+
     // ---- 最终结果落盘（助手回答）----
     //
     // ★ 2026-10-22：`prompt/out/cached` 从**恒 0** 改为真实上报值
@@ -1817,6 +1836,7 @@ class LocalAgentExecutor {
         'ts': DateTime.now().millisecondsSinceEpoch,
       });
     }
+
 
     // ---- 组装 AgentRunResult（UI 的权威结果）----
     //
@@ -1872,6 +1892,130 @@ class LocalAgentExecutor {
     final s = e.toString();
     return s.length > 300 ? '${s.substring(0, 300)}…' : s;
   }
+
+  /// **追加会话用量汇总行**（T1-5，2026-10-31；只增行类型）。
+  ///
+  /// ## 口径：**本会话累计**
+  ///
+  /// 每次 run 收尾读会话文件里**最后一条** `role:"session_usage"` 行（上一次
+  /// 累计），把本场 run 的数加上去再写一行 —— 跨 run、跨重启都不丢；
+  /// 旧文件没有该行 ⇒ 从 0 起（不假装有历史、也不重写旧行）。
+  ///
+  /// ## 字段语义
+  ///
+  /// · `runs`：累计 run 场数（含失败的——失败 run 也消耗了模型调用）；
+  /// · `turns`：累计**总轮数**（`HeraclesFinished.turns`；取消/异常退化为
+  ///   本轮实际开始的轮数）；
+  /// · `reportedTurns`：累计**拿到 usage 的轮数**（与 assistant 行同源）；
+  /// · `unreportedTurns`：累计"有轮次但 provider 没上报 usage"的轮数
+  ///   （= turns - reportedTurns，用来解释"顶栏用量为什么偏小"）；
+  /// · `prompt` / `out` / `cached`：累计 token。`cached` 只在**至少上报过
+  ///   一次**缓存字段时才写 —— 从没上报过就**不写键**（不写假 0，
+  ///   前端显示"不可用"）。
+  /// · `steadyHitRate`：**最近一场能算出的**稳态命中率（跨 run 不重算 token
+  ///   加权——那会变成另一个口径）；没有 ⇒ 不写键（null）。
+  /// · `ts`：写入时间。
+  ///
+  /// ## 为什么只在 `runTurns > 0` 时写
+  ///
+  /// 空 run（还没开始就失败/被取消）没有用量可记 —— 写一行全 0 的汇总会
+  /// 让"会话用量"看起来比实际更差，且让 runs 虚高。
+  Future<void> _appendSessionUsage({
+    required String sid,
+    required _Translator tr,
+    required int runTurns,
+  }) async {
+    if (runTurns <= 0) return;
+
+    // 读上一次累计（读不到 ⇒ 从 0 起，不阻断收尾）。
+    var prev = _UsageAccum.zero;
+    try {
+      final rows = await sessionStore.loadMessages(sid, limit: 0);
+      for (var i = rows.length - 1; i >= 0; i--) {
+        if (rows[i]['role'] == 'session_usage') {
+          prev = _UsageAccum.fromRow(rows[i]);
+          break;
+        }
+      }
+    } catch (_) {
+      // 读失败（通道异常/超大文件）⇒ 按首次累计；宁可少累计也不阻断 run。
+    }
+
+    final reported = tr.turnRecords.length;
+    final unreported = runTurns > reported ? runTurns - reported : 0;
+    final cachedReported = prev.cachedReported || tr.anyCachedReported;
+    final rate = tr.steadyHitRate ?? prev.steadyHitRate;
+
+    await sessionStore.appendMessage(sid, <String, dynamic>{
+      'role': 'session_usage',
+      'runs': prev.runs + 1,
+      'turns': prev.turns + runTurns,
+      'reportedTurns': prev.reportedTurns + reported,
+      'unreportedTurns': prev.unreportedTurns + unreported,
+      'prompt': prev.prompt + tr.totalPrompt,
+      'out': prev.out + tr.totalOutput,
+      // 只增字段：从没上报过缓存 ⇒ 不写键（不写假 0）。
+      if (cachedReported) 'cached': prev.cached + tr.totalCached,
+      // null 不写键（前端显示"不可用"，不是 0%）
+      'steadyHitRate': ?rate,
+      'ts': DateTime.now().millisecondsSinceEpoch,
+    });
+  }
+}
+
+/// **会话用量累计**（读 `role:"session_usage"` 行用）—— 纯数据。
+///
+/// 只包含汇总行里的已知键；缺键/坏值一律按 0（旧文件/手工改过的行不该让
+/// 收尾崩掉）。`cachedReported` 记"这一行有没有 cached 键"。
+class _UsageAccum {
+  const _UsageAccum({
+    required this.runs,
+    required this.turns,
+    required this.reportedTurns,
+    required this.unreportedTurns,
+    required this.prompt,
+    required this.out,
+    required this.cached,
+    required this.cachedReported,
+    required this.steadyHitRate,
+  });
+
+  static const zero = _UsageAccum(
+    runs: 0,
+    turns: 0,
+    reportedTurns: 0,
+    unreportedTurns: 0,
+    prompt: 0,
+    out: 0,
+    cached: 0,
+    cachedReported: false,
+    steadyHitRate: null,
+  );
+
+  final int runs;
+  final int turns;
+  final int reportedTurns;
+  final int unreportedTurns;
+  final int prompt;
+  final int out;
+  final int cached;
+  final bool cachedReported;
+  final double? steadyHitRate;
+
+  static int _intOf(Object? v) => v is num ? v.toInt() : 0;
+
+  factory _UsageAccum.fromRow(Map<String, dynamic> row) => _UsageAccum(
+        runs: _intOf(row['runs']),
+        turns: _intOf(row['turns']),
+        reportedTurns: _intOf(row['reportedTurns']),
+        unreportedTurns: _intOf(row['unreportedTurns']),
+        prompt: _intOf(row['prompt']),
+        out: _intOf(row['out']),
+        cached: _intOf(row['cached']),
+        cachedReported: row.containsKey('cached'),
+        steadyHitRate:
+            row['steadyHitRate'] is num ? (row['steadyHitRate'] as num).toDouble() : null,
+      );
 }
 
 /// `HeraclesEvent` → UI `AgentEvent` 的翻译器（带轮次/步骤状态）。

@@ -6,6 +6,7 @@ import 'dart:typed_data';
 import 'package:dio/dio.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart' show rootBundle;
+import 'package:shared_preferences/shared_preferences.dart';
 
 import '../models/jev.dart';
 import 'agent_bridge.dart';
@@ -137,6 +138,29 @@ const kBundledStreamingModelFiles = <VoiceModelFile>[
 int get kBundledStreamingModelTotalBytes =>
     kBundledStreamingModelFiles.fold(0, (sum, f) => sum + f.bytes);
 
+// ------------------------------------- 语音开关 / 卸载标记（T0-2，2026-10-31）
+//
+// "卸载"必须是**真卸载**：删模型目录 + 持久化标记 + 之后**绝不自动解压**。
+// 上一版的坑：`voice_input` 只要发现没解压就 `ensureStreamingReady()`，
+// 用户删完紧接着点麦克风又原地解压（假卸载）。所以标记必须落盘、并且
+// 所有自动解压入口（麦克风/ensure/启动校验）都先看它。
+//
+// 持久化用 SharedPreferences（与白名单/设置同源）：
+// · `heracles.voice.enabled`     —— 语音总开关（默认 true；卸载后 false）
+// · `heracles.voice.uninstalled` —— 用户卸载标记（true = 已卸载；安装时清）
+
+/// 语音功能总开关（SharedPreferences，默认 true）。
+const kVoiceEnabledPrefsKey = 'heracles.voice.enabled';
+
+/// 用户卸载语音模型标记（true = 已卸载；`installVoiceModels` 时清除）。
+const kVoiceUninstalledPrefsKey = 'heracles.voice.uninstalled';
+
+/// 已卸载 / 未启用时的**稳定错误码**（API 返回给前端，前端据此提示/恢复）。
+const kVoiceUninstalledError = 'E_VOICE_UNINSTALLED';
+
+/// 内置模型解压的人话错误前缀（测试与界面共用）。
+const kBundledExtractErrorMessage = '内置流式模型解压失败';
+
 /// 目录里是否「`.complete` 在 + 每个文件字节数精确对上」。
 bool voiceModelDirComplete(String? dir, List<VoiceModelFile> files) {
   if (dir == null || !File('$dir/.complete').existsSync()) return false;
@@ -162,6 +186,8 @@ Future<void> extractBundledModel({
   required String completeMarker,
   required String assetDir,
   required Future<Uint8List> Function(String assetKey) loadAsset,
+  /// 每落盘一个文件回调一次（已写字节, 总字节）—— 供界面显示解压进度。
+  void Function(int doneBytes, int totalBytes)? onProgress,
 }) async {
   if (voiceModelDirComplete(dir, files)) return;
   final directory = Directory(dir);
@@ -169,11 +195,17 @@ Future<void> extractBundledModel({
   // 标记在但字节不对（半成品/旧版本残留）⇒ 先删标记，避免被误判完整。
   final marker = File('$dir/.complete');
   if (marker.existsSync()) await marker.delete();
+  final totalBytes = files.fold<int>(0, (sum, f) => sum + f.bytes);
+  var doneBytes = 0;
   final tmpFiles = <File>[];
   try {
     for (final f in files) {
       final existing = File('$dir/${f.name}');
-      if (existing.existsSync() && existing.lengthSync() == f.bytes) continue;
+      if (existing.existsSync() && existing.lengthSync() == f.bytes) {
+        doneBytes += f.bytes;
+        onProgress?.call(doneBytes, totalBytes);
+        continue;
+      }
       final bytes = await loadAsset('$assetDir/${f.name}');
       if (bytes.length != f.bytes) {
         throw StateError(
@@ -184,6 +216,8 @@ Future<void> extractBundledModel({
       tmpFiles.add(tmp);
       await tmp.writeAsBytes(bytes, flush: true);
       await tmp.rename('$dir/${f.name}');
+      doneBytes += f.bytes;
+      onProgress?.call(doneBytes, totalBytes);
     }
     await marker.writeAsString(
       '$completeMarker\n${DateTime.now().toIso8601String()}',
@@ -196,6 +230,81 @@ Future<void> extractBundledModel({
     }
     rethrow;
   }
+}
+
+/// `ensureStreamingReady()` 的结果：`ok=false` 时 [errorCode] 是稳定错误码
+/// （例如 [kVoiceUninstalledError]），[message] 是人话原因。
+class VoiceEnsureResult {
+  const VoiceEnsureResult({
+    required this.ok,
+    this.errorCode,
+    this.message,
+    this.bundledReady = false,
+    this.attempts = 0,
+  });
+
+  final bool ok;
+  final String? errorCode;
+  final String? message;
+  final bool bundledReady;
+
+  /// 实际尝试解压的次数（正常 1；失败重试一次 = 2；已就绪/已卸载 = 0）。
+  final int attempts;
+
+  bool get uninstalled => errorCode == kVoiceUninstalledError;
+
+  @override
+  String toString() =>
+      'VoiceEnsureResult(ok: $ok, code: $errorCode, msg: $message, '
+      'bundled: $bundledReady, attempts: $attempts)';
+}
+
+/// [VoiceModelController.deleteAllVoiceModels] 的结果（只增结构）。
+class VoiceDeleteResult {
+  const VoiceDeleteResult({
+    required this.freedBytes,
+    required this.failures,
+    required this.removedDirs,
+  });
+
+  /// 实际释放的字节数（按文件长度累计；目录不存在记 0）。
+  final int freedBytes;
+
+  /// 删除/释放失败项（人话；空 = 全部成功）。
+  final List<String> failures;
+
+  /// 实际删掉的目录（绝对路径，便于诊断）。
+  final List<String> removedDirs;
+
+  bool get ok => failures.isEmpty;
+
+  @override
+  String toString() =>
+      'VoiceDeleteResult(freed: $freedBytes B, failures: $failures, '
+      'dirs: ${removedDirs.length})';
+}
+
+/// [VoiceModelController.installVoiceModels] 的结果。
+class VoiceInstallResult {
+  const VoiceInstallResult({
+    required this.bundledReady,
+    this.message,
+    this.attempts = 0,
+  });
+
+  /// 内置流式模型是否已就绪（可流式）。
+  final bool bundledReady;
+
+  /// 失败时的人话原因（null = 成功）。
+  final String? message;
+
+  final int attempts;
+
+  bool get ok => bundledReady;
+
+  @override
+  String toString() =>
+      'VoiceInstallResult(ok: $bundledReady, msg: $message, attempts: $attempts)';
 }
 
 
@@ -401,8 +510,38 @@ class VoiceModelController extends ChangeNotifier {
   /// 内置模型解压失败的人话原因（null = 没失败过；失败可重试）。
   String? bundledStreamingError;
 
+  /// 解压进度 0..1（null = 未开始/已完成）——界面可显示"正在准备语音模型"。
+  double? bundledStreamingProgress;
+
+  /// **语音总开关**（SharedPreferences `heracles.voice.enabled`，默认 true）。
+  /// 用户卸载后为 false；[installVoiceModels] 恢复。
+  bool voiceEnabled = true;
+
+  /// **用户卸载标记**（SharedPreferences `heracles.voice.uninstalled`）。
+  /// true 时所有自动解压入口都必须拒绝（返回 [kVoiceUninstalledError]）。
+  bool voiceUninstalled = false;
+
+  /// 上次 ensure 的尝试次数与稳定错误码（诊断/前端提示用）。
+  int lastEnsureAttempts = 0;
+  String? lastEnsureErrorCode;
+
+  /// 上次 [deleteAllVoiceModels] 实际释放的字节 / 失败项。
+  int lastFreedBytes = 0;
+  List<String> lastDeleteFailures = const <String>[];
+
+  /// 引擎释放钩子：`voice_asr` 的 OfflineRecognizer、流式解码器等外部缓存
+  /// 注册到这里 —— 真卸载时统一释放（避免 service ↔ asr 反向依赖）。
+  static final List<void Function()> engineReleaseHooks = <void Function()>[];
+
+  static void registerEngineRelease(void Function() hook) {
+    if (!engineReleaseHooks.contains(hook)) engineReleaseHooks.add(hook);
+  }
+
+  /// 首帧可读的「整段识别引擎就绪」（[engineReady] 的只读别名）。
+  bool get sherpaEngineReady => engineReady;
+
   /// 并发保护：同一时刻只解压一次；完成后置回 null（失败允许重试）。
-  Future<bool>? _ensureFuture;
+  Future<VoiceEnsureResult>? _ensureFuture;
 
   /// 测试注入（生产 = `rootBundle` + 常量）：资产加载器 / 文件清单 / 资产目录。
   @visibleForTesting
@@ -517,10 +656,30 @@ class VoiceModelController extends ChangeNotifier {
 
   /// **首次使用前确保内置流式模型已解压**（幂等、可重试、不抛）。
   ///
-  /// 并发调用**只解压一次**（共享同一个 Future）；失败返回 false 并记录
-  /// [bundledStreamingError]，下一次调用会重试。
-  Future<bool> ensureStreamingReady() {
-    if (bundledStreamingReady) return Future.value(true);
+  /// · 已卸载（[voiceUninstalled] / [voiceEnabled] == false）⇒ **绝不自动解压**，
+  ///   返回 [kVoiceUninstalledError]（T0-2 真卸载的核心闸门）；
+  /// · 并发调用**只解压一次**（共享同一个 Future）；
+  /// · 失败**自动重试一次**，仍失败则返回人话原因（[bundledStreamingError]），
+  ///   下一次调用还会重试（可观测、不崩）。
+  Future<VoiceEnsureResult> ensureStreamingReady() {
+    if (voiceUninstalled || !voiceEnabled) {
+      lastEnsureErrorCode = kVoiceUninstalledError;
+      bundledStreamingError = '语音模型已卸载（$kVoiceUninstalledError）';
+      bundledStreamingProgress = null;
+      notifyListeners();
+      return Future.value(
+        const VoiceEnsureResult(
+          ok: false,
+          errorCode: kVoiceUninstalledError,
+          message: '语音模型已卸载，请先在设置里重新安装',
+        ),
+      );
+    }
+    if (bundledStreamingReady) {
+      return Future.value(
+        const VoiceEnsureResult(ok: true, bundledReady: true),
+      );
+    }
     final inflight = _ensureFuture;
     if (inflight != null) return inflight;
     final future = _extractBundledStreaming();
@@ -530,34 +689,76 @@ class VoiceModelController extends ChangeNotifier {
     return _ensureFuture!;
   }
 
-  Future<bool> _extractBundledStreaming() async {
-    try {
-      profile ??= await AgentBridge().deviceProfile();
-      final dir = bundledStreamingModelDir;
-      if (dir == null) {
-        bundledStreamingReady = false;
-        bundledStreamingError = '拿不到本机存储目录（宿主未返回 deviceProfile）';
-        notifyListeners();
-        return false;
-      }
-      final files = _bundledFiles;
-      await extractBundledModel(
-        dir: dir,
-        files: files,
-        completeMarker: kBundledStreamingMarker,
-        assetDir: bundledAssetDirForTest ?? kBundledStreamingAssetDir,
-        loadAsset: bundledAssetLoaderForTest ?? _loadBundledAsset,
-      );
-      bundledStreamingReady = voiceModelDirComplete(dir, files);
-      bundledStreamingError =
-          bundledStreamingReady ? null : '内置流式模型解压后校验不通过';
-    } catch (e) {
+  Future<VoiceEnsureResult> _extractBundledStreaming() async {
+    lastEnsureAttempts = 0;
+    profile ??= await AgentBridge().deviceProfile();
+    final dir = bundledStreamingModelDir;
+    if (dir == null) {
       bundledStreamingReady = false;
-      bundledStreamingError = '内置流式模型解压失败：$e';
+      bundledStreamingError = '拿不到本机存储目录（宿主未返回 deviceProfile）';
+      lastEnsureErrorCode = 'E_NO_FILES_DIR';
+      bundledStreamingProgress = null;
+      notifyListeners();
+      return VoiceEnsureResult(
+        ok: false,
+        errorCode: lastEnsureErrorCode,
+        message: bundledStreamingError,
+        attempts: lastEnsureAttempts,
+      );
     }
+    final files = _bundledFiles;
+    final loader = bundledAssetLoaderForTest ?? _loadBundledAsset;
+    final assetDir = bundledAssetDirForTest ?? kBundledStreamingAssetDir;
+    var lastError = '';
+    // 失败**重试一次**：首次失败很可能是磁盘瞬时错误/并发写冲突。
+    for (var attempt = 1; attempt <= 2; attempt++) {
+      lastEnsureAttempts = attempt;
+      bundledStreamingProgress = 0;
+      notifyListeners();
+      try {
+        await extractBundledModel(
+          dir: dir,
+          files: files,
+          completeMarker: kBundledStreamingMarker,
+          assetDir: assetDir,
+          loadAsset: loader,
+          onProgress: (done, total) {
+            bundledStreamingProgress =
+                total <= 0 ? null : (done / total).clamp(0.0, 1.0);
+            notifyListeners();
+          },
+        );
+        bundledStreamingReady = voiceModelDirComplete(dir, files);
+        if (bundledStreamingReady) {
+          bundledStreamingError = null;
+          lastEnsureErrorCode = null;
+          bundledStreamingProgress = null;
+          refreshInstalled();
+          notifyListeners();
+          return VoiceEnsureResult(
+            ok: true,
+            bundledReady: true,
+            attempts: attempt,
+          );
+        }
+        lastError = '内置流式模型解压后字节校验不通过';
+      } catch (e) {
+        lastError = '$e';
+      }
+      bundledStreamingReady = false;
+      bundledStreamingError = '$kBundledExtractErrorMessage（尝试 $attempt/2）：$lastError';
+      bundledStreamingProgress = null;
+      notifyListeners();
+    }
+    lastEnsureErrorCode = 'E_VOICE_EXTRACT_FAILED';
     refreshInstalled();
     notifyListeners();
-    return bundledStreamingReady;
+    return VoiceEnsureResult(
+      ok: false,
+      errorCode: lastEnsureErrorCode,
+      message: bundledStreamingError,
+      attempts: lastEnsureAttempts,
+    );
   }
 
   static Future<Uint8List> _loadBundledAsset(String assetKey) async {
@@ -567,12 +768,64 @@ class VoiceModelController extends ChangeNotifier {
 
   Future<void> load() async {
     profile ??= await AgentBridge().deviceProfile();
+    await _loadVoicePrefs();
     refreshInstalled();
     loaded = true;
     notifyListeners();
+    if (voiceUninstalled || !voiceEnabled) return; // 已卸载：不准备引擎、不解压
     // 裸文件下好了但引擎产物还没备（老版本下载的）→ 懒补。
     if (installed && !engineReady) {
       unawaited(prepareEngine());
+    }
+    // 启动校验内置模型（字节数）：解压过但不完整 ⇒ 自动重试一次（可观测）。
+    unawaited(verifyBundledAtStartup());
+  }
+
+  /// 读持久化的语音开关 / 卸载标记（SharedPreferences）。
+  ///
+  /// prefs 不可用（测试环境/异常）时保持旧行为（可用），但**绝不**因此清标记。
+  Future<void> _loadVoicePrefs() async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      voiceUninstalled = prefs.getBool(kVoiceUninstalledPrefsKey) ?? false;
+      voiceEnabled = !voiceUninstalled &&
+          (prefs.getBool(kVoiceEnabledPrefsKey) ?? true);
+    } catch (_) {
+      // 读不到就保持内存现状（默认 true），不阻断 App。
+    }
+  }
+
+  /// 写持久化的开关/卸载标记。
+  Future<void> _persistVoiceFlags({
+    required bool uninstalled,
+    bool? enabled,
+  }) async {
+    voiceUninstalled = uninstalled;
+    voiceEnabled = !uninstalled && (enabled ?? !uninstalled);
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.setBool(kVoiceUninstalledPrefsKey, voiceUninstalled);
+      await prefs.setBool(kVoiceEnabledPrefsKey, voiceEnabled);
+    } catch (_) {
+      // 落盘失败不阻断：内存状态已改，界面仍能如实显示。
+    }
+  }
+
+  /// **启动校验内置模型字节数**：目录在但不完整 ⇒ 重试一次解压。
+  ///
+  /// 失败只记录人话原因（[bundledStreamingError]）并 notify，不抛、不阻断 App。
+  Future<void> verifyBundledAtStartup() async {
+    if (voiceUninstalled || !voiceEnabled) return;
+    final dir = bundledStreamingModelDir;
+    if (dir == null || !Directory(dir).existsSync()) return; // 还没解压过
+    if (voiceModelDirComplete(dir, _bundledFiles)) return;
+    bundledStreamingError = '内置流式模型校验不通过，正在自动重试一次…';
+    notifyListeners();
+    final result = await ensureStreamingReady();
+    if (!result.ok) {
+      bundledStreamingError =
+          '内置流式模型启动校验失败：${result.message ?? '未知原因'}';
+      notifyListeners();
     }
   }
 
@@ -589,10 +842,12 @@ class VoiceModelController extends ChangeNotifier {
   /// [streamingInstalled] = true（默认用内置，见 [activeStreamingModel]）。
   void refreshInstalled() {
     final dir = modelDir;
-    installed = voiceModelDirComplete(dir, kVoiceModelFiles);
+    // 已卸载/关闭 ⇒ 无论磁盘上有没有残留都按"不可用"呈现（不自动解压）。
+    final blocked = voiceUninstalled || !voiceEnabled;
+    installed = !blocked && voiceModelDirComplete(dir, kVoiceModelFiles);
     bundledStreamingReady =
-        voiceModelDirComplete(bundledStreamingModelDir, _bundledFiles);
-    final downloadedStreaming =
+        !blocked && voiceModelDirComplete(bundledStreamingModelDir, _bundledFiles);
+    final downloadedStreaming = !blocked &&
         voiceModelDirComplete(streamingModelDir, kStreamingVoiceModelFiles);
     streamingInstalled = bundledStreamingReady || downloadedStreaming;
     if (installed && download.phase != VoiceModelPhase.downloading) {
@@ -853,6 +1108,99 @@ class VoiceModelController extends ChangeNotifier {
     streamingInstalled = false;
     streamingDownload = const VoiceDownloadState();
     notifyListeners();
+  }
+
+  // ---------------------------------------------- 真卸载 / 重装（T0-2）
+
+  /// **真卸载**：删三个模型目录 + 释放引擎缓存 + 落盘卸载标记。
+  ///
+  /// 与旧的 `deleteModel()/deleteStreamingModel()` 的区别：
+  /// · 一次删干净（sensevoice-small / streaming-zipformer-zh-14m / streaming-zipformer）；
+  /// · 释放 `voice_asr` 的 OfflineRecognizer 等外部缓存（[engineReleaseHooks]）；
+  /// · **落盘 `voiceUninstalled=true`** ⇒ 之后 `ensureStreamingReady()` / 点麦克风
+  ///   **绝不自动解压**（返回 [kVoiceUninstalledError]），重启也保持不可用；
+  /// · 返回**实际释放字节**与失败项（失败不抛，界面可如实提示）。
+  ///
+  /// 幂等：目录已不存在时 freed=0、failures 空、标记仍为已卸载。
+  Future<VoiceDeleteResult> deleteAllVoiceModels() async {
+    final failures = <String>[];
+    final removed = <String>[];
+    var freed = 0;
+    for (final dir in <String?>[modelDir, bundledStreamingModelDir, streamingModelDir]) {
+      if (dir == null) continue;
+      try {
+        final directory = Directory(dir);
+        if (!directory.existsSync()) continue;
+        freed += await _dirBytes(directory);
+        await directory.delete(recursive: true);
+        removed.add(dir);
+      } catch (e) {
+        failures.add('删除 $dir 失败：$e');
+      }
+    }
+    // 释放外界缓存的引擎/解码器（voice_asr 的 recognizer、流式 session 等）。
+    for (final hook in List<void Function()>.of(engineReleaseHooks)) {
+      try {
+        hook();
+      } catch (e) {
+        failures.add('释放识别引擎失败：$e');
+      }
+    }
+    await _persistVoiceFlags(uninstalled: true);
+    installed = false;
+    bundledStreamingReady = false;
+    streamingInstalled = false;
+    engineReady = false;
+    prepareError = null;
+    bundledStreamingError = '语音模型已卸载（$kVoiceUninstalledError）';
+    bundledStreamingProgress = null;
+    lastEnsureErrorCode = kVoiceUninstalledError;
+    lastFreedBytes = freed;
+    lastDeleteFailures = List<String>.unmodifiable(failures);
+    notifyListeners();
+    return VoiceDeleteResult(
+      freedBytes: freed,
+      failures: List<String>.unmodifiable(failures),
+      removedDirs: List<String>.unmodifiable(removed),
+    );
+  }
+
+  /// **重新安装**：清卸载标记 + 幂等解压内置模型（字节校验）。
+  ///
+  /// [senseVoice] = true 时，若 SenseVoice 裸文件已齐还会顺手备好引擎产物；
+  /// SenseVoice 本体仍走原有下载流程（本方法**不**发起下载）。
+  Future<VoiceInstallResult> installVoiceModels({bool senseVoice = false}) async {
+    await _persistVoiceFlags(uninstalled: false, enabled: true);
+    bundledStreamingError = null;
+    lastEnsureErrorCode = null;
+    refreshInstalled();
+    notifyListeners();
+    final ensured = await ensureStreamingReady();
+    if (senseVoice && installed && !engineReady && !preparing) {
+      await prepareEngine();
+    }
+    refreshInstalled();
+    notifyListeners();
+    return VoiceInstallResult(
+      bundledReady: ensured.ok && bundledStreamingReady,
+      message: ensured.ok ? null : ensured.message,
+      attempts: ensured.attempts,
+    );
+  }
+
+  /// 目录里所有文件的字节数之和（用于"实际释放了多少"）。
+  Future<int> _dirBytes(Directory dir) async {
+    var total = 0;
+    try {
+      await for (final entity in dir.list(recursive: true, followLinks: false)) {
+        if (entity is File) {
+          try {
+            total += await entity.length();
+          } catch (_) {}
+        }
+      }
+    } catch (_) {}
+    return total;
   }
 }
 

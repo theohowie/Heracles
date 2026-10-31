@@ -196,6 +196,32 @@ abstract final class ContractWorkspace {
   static const int constitutionMaxChars = 20000;
 }
 
+/// **会话历史读取**（`SessionStore.loadMessages`，T0-4 长会话 tail 兜底）。
+///
+/// ## 为什么单独一组常量
+///
+/// 会话 `.jsonl` 是 append-only，越聊越长。通道 `fs.readText` 有 **1 MB** 文本
+/// 上限（Kotlin `DeviceFs.MAX_TEXT_BYTES`，超了只给**前** 1 MB 并置 `truncated`）。
+/// `limit=0` 的语义是"加载全部" —— 在超长会话上它**做不到**，必须改读**文件尾部**，
+/// 否则用户（和模型）看到的是**开头 1 MB**，最新消息反而丢了。
+///
+/// 这三个数都是**产品行为**（多少轮可见 / 什么算长会话），不是实现细节：
+/// 改它们会改变"用户切会话时看到多少"。
+abstract final class ContractSession {
+  /// `limit=0` 遇到超长会话时，改读**最后多少行**（含本轮的"更早未加载"提示窗）。
+  ///
+  /// 2000 的依据：真实会话一轮 ≈ 3–5 行（user / assistant / step / tool），
+  /// 2000 行 ≈ 最近 400–600 轮，覆盖"切会话继续聊"的全部现实需求；
+  /// 再早的历史由 UI 的"加载更早"分页（`offset`）按需取，仍从磁盘拿。
+  static const int tailLoadLines = 2000;
+
+  /// 通道 `fs.readText` 单次可返回的**字节**上限（与 Kotlin
+  /// `DeviceFs.MAX_TEXT_BYTES = 1_000_000` 同一数）。
+  ///
+  /// 文件超过它就一定被截断 ⇒ `limit=0` 直接走 tail，不白读 1 MB。
+  static const int channelTextMaxBytes = 1000 * 1000;
+}
+
 /// **命令执行能力**（`ProcessShellCapability`）。
 abstract final class ContractShell {
   /// 输出总量上限（1 MB）。
