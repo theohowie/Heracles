@@ -3,6 +3,7 @@ import 'dart:async';
 import 'package:flutter/material.dart';
 
 import '../services/sandbox_service.dart';
+import '../widgets/sandbox_env_section.dart';
 import '../theme/app_theme.dart';
 import '../theme/cupertino_kit.dart';
 import '../widgets/bw_approval.dart';
@@ -170,6 +171,9 @@ class _SandboxScreenState extends State<SandboxScreen> {
             const SizedBox(height: HSpace.lg),
             _sectionLabel(h, '编译环境'),
             _buildSuiteCard(h),
+            const SizedBox(height: HSpace.lg),
+            _sectionLabel(h, '环境'),
+            const SandboxEnvSection(),
             const SizedBox(height: HSpace.lg),
             _sectionLabel(h, '管理'),
             _resetCard(h),
