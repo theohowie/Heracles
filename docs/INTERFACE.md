@@ -497,6 +497,45 @@ class VoicePartial {
   Flutter 优先于 Android；**认不出 ⇒ unknown 且命令为空**（不编造）。
 - `defaultSystemPrompt(caps, {project})`：不传 project ⇒ 提示词字节与旧版一致。
 
+#### N15.6 文件夹选择器的结果找回（T0 修复 · 2026-11-02 · 只增不改）
+
+> 背景：SAF 选择器在前台时 Activity 可能被系统回收重建 ⇒ 旧实现把 pending 回调
+> 挂在 **Activity 实例**上，重建后结果**没有收件人**被丢弃；Dart 侧 `await` 又没有
+> 超时 ⇒ 用户看到"选好文件夹返回就黑屏/卡住"。
+
+`heracles/command` **只增 1 个可选入参 + 1 个方法 + 1 条反向推送**（不新开通道、
+不改已有语义、旧客户端照常工作）：
+
+| 项 | 形状 | 说明 |
+|---|---|---|
+| `pickWorkspace`（**入参只增**） | 入参 `{requestId?: String}` | Dart 每次调用生成；Kotlin 用它在**进程级**登记表里配对，Activity 重建后仍能对上 |
+| `consumePickWorkspaceResult`（**新方法**） | 入参 `{requestId: String}` → 出参 `Map?` | 取回该次请求**已产出但没送达**的结果；取过即作废。无结果 / 过期（5 min）/ requestId 不匹配 ⇒ `null`（**不匹配不会吃掉别人已有的结果**） |
+| `workspaceAdded`（**新推送**，Kotlin → Dart） | `{path, name}` | 宿主登记成功后推给**当前活着的引擎**。重建后 Dart 是全新 isolate，它启动时读的列表里没有新目录 —— 收到这条就重载 |
+
+- Kotlin 侧状态全部在**进程级单例** `PickRequestRegistry`（不在 `Activity` 上）；
+  `takeSink()` 取走即清空 ⇒ 同一请求绝不交付两遍。
+- ★ 收尾落库跑在 **进程级协程域**（不是 Activity 的 `scope`）：Activity 在
+  `onDestroy` 里 cancel 了自己的 scope，用它等于"结果永远登记不上"。
+- Dart 侧超时 `ContractFolderPicker.timeoutSeconds = 45`，**只计 App 在前台的时间**
+  （选择器盖住我们时停表 —— 真机实测用户可挑 70 s，按墙钟计会误报"结果已丢失"）；超时后**先回收**再报错
+  （避免把"其实选成功了"误报成失败）；回收仍无果才抛
+  `ContractFolderPicker.timeoutMessage`，UI 走「可操作失败」抽屉（重试 / 默认工作区）。
+- 取消仍回 `null`（**旧契约不变**）；受限/网盘仍回 `{ok:false, error, reasonCode?, suggest?}`。
+- ⚠️ 旧宿主没有 `consumePickWorkspaceResult` ⇒ Dart 侧 `MissingPluginException` 降级为超时提示，不抛未捕获异常。
+- **真机验证（2026-11-02，Redmi K60 / Android 17 / 1080×2400）**：
+  - 正常路径 ✔ 选 `.../tests`、`.../fixtures`、`.../magic-resume-2.0.12` 三个目录，均登记成功并出现在侧边栏；
+    logcat `onActivityResult req=18502 res=-1 data=true`（`res=-1` = RESULT_OK，data 非空）。
+  - 长时间挑选 ✔ 在选择器里停留 **70 s / 88 s** 后返回，**不再误报**"结果已丢失"（第一次真机跑出的缺陷，已按"只计前台时间"修正）。
+  - 取消 ✔ 返回系统上一级到根再退出 ⇒ 回 `null`，界面一行提示 + 重试，不卡死。
+  - 进程被杀 ✔ `am force-stop` 后冷启动：无黑屏（debug 包冷启动约 2–3 s 白屏属正常），
+    并恢复上次会话（SharedPreferences `last_session_v1`）。
+  - 首帧看门狗 ✔ logcat 出现 `watchdog: 首帧正常（返回前台后已渲染），不动作`（未误重建）。
+  - ⚠️ **未覆盖**：Activity 被系统回收重建（本机 MIUI 忽略 `settings put global always_finish_activities`，
+    设了也不重建 ⇒ 该分支只有单测覆盖，**真机未取证**）。
+- 首帧看门狗：`onPostResume` 后 2.5 s 若 `FlutterView.hasRenderedFirstFrame()` 仍为 false
+  且**本次进程曾渲染过**、**没有选择请求在飞**、**30 s 内没重建过** ⇒ `recreate()` 一次并打
+  `HeraclesAct` 日志说明原因（不用硬编码 sleep 掩盖）。
+
 ### N16 V0.4 收口：Skills / MCP / Automation / Search 通道（2026-11-02 · 只增契约）
 
 > 本节是 F1–F4 的**前端可见契约**。所有方法都加在既有 `heracles/command` 上（不新开通道）。

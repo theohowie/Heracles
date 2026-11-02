@@ -88,7 +88,28 @@ class FolderPickerBridge(private val activity: Activity) {
         )
     }
 
-    private var pendingResult: ((Map<String, Any?>?) -> Unit)? = null
+    /**
+     * ★★ 请求状态必须是**进程级**，不能是 Activity 实例字段 ★★
+     *
+     * ## 真机 bug（2026-11-02 用户报「选好文件夹返回 ⇒ App 黑屏」）
+     *
+     * SAF 选择器在前台时，本 Activity 可能被系统回收重建（低内存 / 开发者选项
+     * 「不保留活动」/ 部分 ROM 的激进回收）。旧实现把 pending 做成实例字段
+     * （`private var pendingResult`）：
+     *
+     * ```
+     * 选目录前：  activityA.folderPicker.pendingResult = { … }
+     * 重建后：    activityB.folderPicker.pendingResult = null   ← 全新实例
+     * 结果回来：  onActivityResult 落在 B ⇒ 没有收件人 ⇒ 结果被静默丢弃
+     * ```
+     *
+     * ⇒ Dart 那个 `await` 永远等不到回包，用户看到的就是黑屏/无响应。
+     * `CameraBridge`（2026-10-29 拍照结果丢失）踩过一模一样的坑。
+     *
+     * 现在状态全在进程级单例 [PickRequestRegistry.instance]：本类每次重建都会
+     * 新建一个，但它只是**门面**，登记表重建前后是同一份。
+     */
+    private val registry: PickRequestRegistry get() = PickRequestRegistry.instance
 
     /**
      * 用户选的目录是否落在系统限制范围内。
@@ -120,9 +141,16 @@ class FolderPickerBridge(private val activity: Activity) {
      *
      * @param lastUri 上次选中的 tree URI（用作 `EXTRA_INITIAL_URI` 起点）；
      *                空 = 不设起点（系统自己决定）
+     * @param requestId Dart 侧生成的调用标识（超时后凭它取回结果；空 = 老调用方）
+     * @param onResult 把结果交回 Dart 的回调；**所有分支都必须调到**，不留 pending
      */
-    fun launch(lastUri: String = "", onResult: (Map<String, Any?>?) -> Unit) {
-        pendingResult = onResult
+    fun launch(
+        lastUri: String = "",
+        requestId: String = "",
+        onResult: (Map<String, Any?>?) -> Unit,
+    ) {
+        // ★ 进程级登记：Activity 重建后新实例也能在 onActivityResult 里找到这条
+        registry.begin(requestId, onResult)
 
         val remembered = lastUri.ifBlank { loadLastUri() }
         val intent = Intent(Intent.ACTION_OPEN_DOCUMENT_TREE).apply {
@@ -154,27 +182,53 @@ class FolderPickerBridge(private val activity: Activity) {
         //      —— 界面看起来像"点了没反应"，其实是在等一个永不到来的结果。
         try {
             activity.startActivityForResult(intent, REQUEST_CODE)
-            println("[heracles][picker] startActivityForResult 已发出 requestCode=$REQUEST_CODE")
+            println(
+                "[heracles][picker] startActivityForResult 已发出 " +
+                    "requestCode=$REQUEST_CODE requestId=$requestId"
+            )
         } catch (e: Throwable) {
             println(
                 "[heracles][picker] startActivityForResult 失败：" +
                     "${e.javaClass.simpleName}: ${e.message}",
             )
-            pendingResult = null
+            registry.clearPending()
             onResult(null)
         }
     }
 
     fun onCancelled() {
-        val r = pendingResult
-        pendingResult = null
-        r?.invoke(null)
+        deliver(null)
+    }
+
+    /**
+     * 结果交付的**唯一出口**：取走收件人、清空、回调。
+     *
+     * - 没有收件人（Activity 重建且 Dart 已放弃 / 进程重启过）⇒ 只打日志，不崩；
+     * - 回调本身抛异常（旧引擎已销毁，`MethodChannel.Result` 失效）也**不许**
+     *   把 `onActivityResult` 带崩 —— 结果已经由 [recordCompleted] 存好，
+     *   Dart 超时后会自己来取。
+     */
+    private fun deliver(payload: Map<String, Any?>?) {
+        val r = registry.takeSink()
+        if (r == null) {
+            println("[heracles][picker] 结果已产出但没有收件人（Activity 重建 / 进程重启）")
+            return
+        }
+        runCatching { r.invoke(payload) }.onFailure { e ->
+            println(
+                "[heracles][picker] 回包失败（引擎可能已重建）：" +
+                    "${e.javaClass.simpleName}: ${e.message}",
+            )
+        }
     }
 
     fun onActivityResult(data: Intent?) {
-        val r = pendingResult
-        pendingResult = null
-        val uri = data?.data ?: run { r?.invoke(null); return }
+        val uri = data?.data
+        if (uri == null) {
+            // 用户取消：Dart 侧据 null 判"没选"（沿用旧契约，不改语义）
+            deliver(null)
+            return
+        }
 
         // 持久化授权 —— 否则重启后就没权限写这个目录了
         runCatching {
@@ -189,7 +243,7 @@ class FolderPickerBridge(private val activity: Activity) {
             // ★ 网盘 / 无本地路径：给一句能指导下一步的话，而不是干巴巴的 null。
             //   null 仍然要回（沿用旧契约：Dart 侧据此判"没选"），
             //   但附带的 reason 让 UI 能说清为什么。
-            r?.invoke(
+            deliver(
                 mapOf(
                     "ok" to false,
                     "reason" to "no_local_path",
@@ -204,7 +258,7 @@ class FolderPickerBridge(private val activity: Activity) {
         // ★ 受限目录：不返回成功，直接说清原因与下一步
         val restricted = checkRestricted(path)
         if (restricted != null) {
-            r?.invoke(
+            deliver(
                 mapOf(
                     "ok" to false,
                     "reason" to "restricted",
@@ -231,7 +285,7 @@ class FolderPickerBridge(private val activity: Activity) {
         // 记住这次的选择（下次用 EXTRA_INITIAL_URI 起点）
         saveLastUri(uri.toString())
 
-        r?.invoke(
+        deliver(
             mapOf(
                 "id" to path,
                 "name" to (dir.name.ifBlank { path }),
@@ -245,6 +299,32 @@ class FolderPickerBridge(private val activity: Activity) {
             )
         )
     }
+
+    /**
+     * 当前未完成请求的 requestId（诊断用；无 pending = null）。
+     */
+    fun pendingRequestId(): String? = registry.pendingRequestId()
+
+    /** 是否还有一次选择在飞 —— 「首帧看门狗」靠它避免在结果交付途中重建 Activity。 */
+    fun hasPending(): Boolean = registry.hasPending()
+
+    /**
+     * 记录"这次请求已经有结果了"（由 `MainActivity` 在**登记完成后**调用）。
+     *
+     * 存的是**最终 payload**（成功 = 已登记的工作区；失败/取消 = 对应 Map 或 null），
+     * 供 Dart 超时后用 `consumePickWorkspaceResult(requestId)` 取回。
+     */
+    fun recordCompleted(requestId: String, payload: Map<String, Any?>?) {
+        registry.recordCompleted(requestId, payload)
+    }
+
+    /**
+     * 取回并作废某个 requestId 的结果。
+     *
+     * @return 该请求已产出的结果；无/过期/requestId 不匹配 ⇒ null
+     */
+    fun consumeCompleted(requestId: String): Map<String, Any?>? =
+        registry.consumeCompleted(requestId)
 
     /**
      * 受限时给用户的**出路**（Dart/UI 直接展示）。

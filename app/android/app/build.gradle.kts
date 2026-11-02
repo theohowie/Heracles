@@ -172,6 +172,12 @@ dependencies {
     implementation(files("libs/sandbox-runtime-release.aar"))
     implementation(files("libs/sandbox-channel-release.aar"))
     implementation(files("libs/sandbox-file-release.aar"))
+
+    // ★ 2026-11-02（T0 SAF 黑屏）：JVM 单测。
+    //   `PickRequestRegistry` 刻意做成**纯 Kotlin（不 import 任何 android.*）**，
+    //   就是为了让它能在 PC 上直接跑单测 —— "Activity 重建后结果还能不能配对"
+    //   这种事，靠真机试是碰运气，靠单测是确定性的。
+    testImplementation("junit:junit:4.13.2")
 }
 
 flutter {
