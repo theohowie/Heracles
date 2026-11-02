@@ -652,6 +652,10 @@ class AgentBridge {
       sessionStore: SessionStore(workspaceRoot: workspacePath),
       askGate: askGate,
     );
+    // ★ V0.4 T0-2（2026-11-02）：注入"上次 run 被系统停止"的探针（构造后赋值 ——
+    //   测试工厂类型只有 4 个参数，不能加构造参数）。
+    executor.processKilledProbe = processKilled;
+    executor.processKilledConsume = consumeProcessKilled;
     _currentAskGate = askGate;
 
     try {

@@ -798,11 +798,23 @@ class LocalAgentExecutor {
     this.askGate,
     this.clientForTest,
     this.capabilitiesForTest,
+    this.processKilledProbe,
+    this.processKilledConsume,
   });
 
   final String workspacePath;
   final AppSettings settings;
   final SessionStore sessionStore;
+
+  /// **上次 run 是否被系统停止**（V0.4 T0-2；宿主注入，`null` = 不检查）。
+  ///
+  /// 由 `agent_bridge` 注入（避免 local_agent 反向依赖 bridge 造成循环 import）：
+  /// `() => AgentBridge.processKilled()`。读不到 ⇒ 无行为。
+  /// **非 final**：工厂类型（executorFactoryForTest）只有 4 个参数，宿主在构造后注入。
+  Future<({bool killed, int killedAt})> Function()? processKilledProbe;
+
+  /// 提示消费后清标记（`null` = 不清）。
+  Future<void> Function()? processKilledConsume;
 
   /// 提问/审批门禁（UI 注入）。`null` = 当前环境不能问用户。
   final AskGate? askGate;
@@ -1253,6 +1265,16 @@ class LocalAgentExecutor {
         );
 
     final tr = _Translator(controller.add);
+
+    // ---- ★ V0.4 T0-2（2026-11-02）：上次 run 被系统停止 ⇒ 如实提示 ----
+    //
+    // 前台服务被系统杀掉时写了 `process_killed` 标记；这里在**新 run 开始时**
+    // 读一次并：
+    //   ① 发 `run_stopped(process_killed)`（canContinue=true）让 UI 显示
+    //      "上次任务被系统停止，可从进度继续"——**不假装它还在跑**；
+    //   ② 清标记（避免每次打开都提示）。
+    // 读不到（旧 APK/通道缺失）⇒ 完全无行为（不影响主链路）。
+    unawaited(_reportProcessKilledIfAny(tr));
 
     // ---- 真正驱动（不 await，让 events 先被订阅）----
     final done = _driveWithAutoContinue(
@@ -2206,6 +2228,34 @@ class LocalAgentExecutor {
   /// 为什么要读 prefs 而不是 AppSettings：设置字段还没正式落 `AppSettings`
   /// （前端先用临时 prefs 键），backend 只认 `ContinuePolicy`；这里做映射，
   /// 等设置字段落地后只需把本方法改成读 settings。
+  /// **上次 run 被系统停止 ⇒ 如实提示**（V0.4 T0-2，2026-11-02）。
+  ///
+  /// 前台服务 `onTaskRemoved` 写 `process_killed` 标记；这里读一次、发
+  /// `run_stopped(process_killed)`（canContinue=true）并清标记。
+  ///
+  /// 为什么要发 run_stopped 而不是 failed：任务**不是出错**，是被系统杀掉；
+  /// 语义上是"可继续的停止"（配合 checkpoint 恢复）。**不假装它还在跑**。
+  Future<void> _reportProcessKilledIfAny(_Translator tr) async {
+    try {
+      final probe = processKilledProbe;
+      if (probe == null) return; // 宿主未注入 ⇒ 无行为
+      final r = await probe();
+      if (!r.killed) return;
+      tr.runStopped(
+        'process_killed',
+        round: 0,
+        maxRounds: ContractRunContinue.autoMaxRounds,
+        tokensSpent: 0,
+        tokensLimit: ContractRunContinue.runTokenLimit,
+        canContinue: true,
+        errorSummary: '上次任务被系统停止（不是出错），可从上次进度继续',
+      );
+      await processKilledConsume?.call();
+    } catch (_) {
+      // 通道缺失/旧 APK ⇒ 无行为（不影响主链路）
+    }
+  }
+
   Future<String> _readContinueMode() async {
     try {
       final p = await SharedPreferences.getInstance();
