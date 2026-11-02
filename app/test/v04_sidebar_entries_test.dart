@@ -71,9 +71,15 @@ void main() {
     await tester.pumpAndSettle();
 
     expect(find.byKey(const Key('automation-empty')), findsOneWidget);
-    // 语义红线文案
-    expect(find.textContaining('不会自动运行 agent'), findsOneWidget);
-    expect(find.textContaining('到点自动执行'), findsNothing);
+    // 语义红线文案（后端 §12，2026-11-02 改口径）：
+    //   到点写"待执行"标记；App 没打开时只提醒，下次打开/回到 App 时执行。
+    expect(find.textContaining('到点后在你下次打开/回到 App 时自动执行'),
+        findsOneWidget,
+        reason: '文案必须照后端 §12 写清"下次打开/回到 App 才执行"');
+    expect(find.textContaining('App 没打开时只提醒'), findsOneWidget,
+        reason: '必须说清 App 没打开时只提醒 —— 否则用户以为后台会自动跑');
+    expect(find.textContaining('到点自动执行'), findsNothing,
+        reason: '不许承诺"到点自动执行"（没有任何后台自动跑的路径）');
 
     await tester.tap(find.byKey(const Key('automation-add')));
     await tester.pumpAndSettle();
@@ -89,6 +95,43 @@ void main() {
     expect(find.textContaining('每 30 分钟'), findsOneWidget);
     final decoded = jsonDecode(stored) as List;
     expect(decoded.length, 1);
+  });
+
+  testWidgets('★★ 自动化：cron 入口置灰 + 明说未实现（不许静默忽略）', (tester) async {
+    await tester.pumpWidget(_wrap(AutomationScreen(
+      load: () async => '[]',
+      save: (_) async => true,
+    )));
+    await tester.pumpAndSettle();
+    await tester.tap(find.byKey(const Key('automation-add')));
+    await tester.pumpAndSettle();
+
+    // ① 入口在：用户要能看见"有 cron 这回事"，而不是被悄悄抹掉
+    expect(find.byKey(const Key('automation-cron-disabled')), findsOneWidget,
+        reason: 'cron 入口不许静默消失 —— 要置灰并说明，而不是藏起来');
+
+    // ② 明说未实现（原话要能读出来）
+    expect(find.textContaining('当前版本只支持固定间隔；cron 未实现'), findsOneWidget,
+        reason: '必须写明"只支持固定间隔、cron 未实现"');
+    expect(find.textContaining('按 cron 表达式'), findsOneWidget);
+
+    // ③ 真的不可用：开关 onChanged == null（点不动）且恒为关
+    final sw = tester.widget<Switch>(
+      find.descendant(
+        of: find.byKey(const Key('automation-cron-disabled')),
+        matching: find.byType(Switch),
+      ),
+    );
+    expect(sw.onChanged, isNull,
+        reason: 'cron 必须真的不可用 —— 能打开却没有调度实现，'
+            '等于给用户一条永远不跑的任务');
+    expect(sw.value, isFalse, reason: 'cron 不允许处于"已启用"状态');
+
+    // ④ 没有可填 cron 的输入框：只有 标题/提示词/间隔 三个。
+    //    这条防"以后有人顺手把 cron 输入加回来"。
+    expect(find.byType(TextField), findsNWidgets(3),
+        reason: '对话框只应有 标题/提示词/间隔 三个输入；'
+            '多一个就意味着 cron 又被放开了');
   });
 
   testWidgets('★★ 自动化：保存失败 ⇒ 显示原因且列表不新增（不假成功）', (tester) async {

@@ -412,6 +412,42 @@ void main() {
     expect(inputEnabled(tester), isTrue);
   });
 
+  // ==================================================================
+  // 顶栏品牌图标（**单独一条，不与别的断言混在一起**）
+  // ==================================================================
+
+  /// ★ 2026-11-02：**补回覆盖损失**（不是行为变更）。
+  ///
+  /// 上一轮把 `openDrawer` 的入口从「顶栏品牌图标」换成「输入条工作区名」时，
+  /// 连带删掉了原本挂在 `drawerOpener()` 上的那条
+  /// 「顶栏品牌图标必须存在（asset 含 `app_icon_source`）」断言 ——
+  /// 于是**现在没有任何用例守着这颗图标**。
+  ///
+  /// 它为什么必须有人守：点它是**唯一**能切「工作 / 决策」模式的入口
+  /// （`chat_screen.dart:5279`，产品明确"取代点图标开抽屉"）。
+  /// 图标被换掉、asset 改名、`leading` 被改，这个能力都会静默消失，
+  /// 而其它用例（走信息条开抽屉）一条都不会红。
+  ///
+  /// 只断这一件事：找到**恰好一个** asset 含 `app_icon_source` 的 Image。
+  phoneTest('★ 顶栏品牌图标仍在（asset 含 app_icon_source）', (tester) async {
+    final c = await freshController();
+    installMocks();
+
+    await tester.pumpWidget(wrap(c, ChatScreen(settings: c)));
+    await settle(tester);
+
+    final brand = find.byWidgetPredicate(
+      (w) =>
+          w is Image &&
+          w.image is AssetImage &&
+          (w.image as AssetImage).assetName.contains('app_icon_source'),
+      description: '顶栏品牌图标（asset 含 app_icon_source）',
+    );
+    expect(brand, findsOneWidget,
+        reason: '顶栏品牌图标必须存在 —— 点它是唯一能切「工作/决策」模式的入口；'
+            '找不到说明顶栏又改了（或 asset 改名），而这个能力会静默消失');
+  });
+
   phoneTest('★★ 切会话后事件流订阅确实被取消（B 不会被 A 的事件污染）',
       (tester) async {
     final c = await freshController();
