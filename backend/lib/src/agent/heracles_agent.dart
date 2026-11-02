@@ -161,6 +161,10 @@ class RunOptions {
     this.reflectOnFailures = 0,
     this.verifyGateCompletion = false,
     this.takeSteerMessage,
+    this.continuePolicy = ContinuePolicy.off,
+    this.maxRounds = ContractRunContinue.autoMaxRounds,
+    this.tokenLimit = ContractRunContinue.runTokenLimit,
+    this.resumeFromCheckpoint = const <String, Object?>{},
   });
 
   final int maxTurns;
@@ -362,6 +366,38 @@ class RunOptions {
   /// 不该持有可变队列。回调让"谁来取、什么时候取、取完怎么清"都留在宿主层。
   /// 空 `null`（默认）= 不装 hook ⇒ 行为与加这个字段之前**完全一致**。
   final String? Function()? takeSteerMessage;
+
+  /// **长任务续跑策略**（V0.4，2026-11-02；默认 [ContinuePolicy.off] = 旧行为）。
+  ///
+  /// `off` = 跑一轮就停（与今天完全一致）；`ask` = 每轮结束发 `run_stopped`
+  /// 等用户确认；`auto` = 自动续跑，最多 [maxRounds] 轮。
+  final ContinuePolicy continuePolicy;
+
+  /// 续跑轮数上限（`auto` 默认 [ContractRunContinue.autoMaxRounds] = 3）。
+  final int maxRounds;
+
+  /// 本次 run 的 token 上限（默认 [ContractRunContinue.runTokenLimit] = 200 万）。
+  /// **轮数与 token 谁先到停谁**。
+  final int tokenLimit;
+
+  /// **从 checkpoint 恢复**（V0.4；默认空 Map = 不恢复）。
+  ///
+  /// 宿主从会话 `.jsonl` 的最后一条 `role:"run_checkpoint"` 行读出来传进来；
+  /// backend 据此知道"上次跑到第几轮/花了多少 token/计划是什么"，**不重复消息**、
+  /// 不伪造用户消息（续跑用内部 continuation 状态）。
+  final Map<String, Object?> resumeFromCheckpoint;
+}
+
+/// **续跑策略**（V0.4）：三档，不能混成一个开关。
+enum ContinuePolicy {
+  /// 跑一轮就停（默认，与旧行为一致）。
+  off,
+
+  /// 每轮结束都发 `run_stopped`（`canContinue=true`），等用户确认再跑。
+  ask,
+
+  /// 自动续跑，最多 `RunOptions.maxRounds` 轮；到上限仍未完成 ⇒ 停下来问。
+  auto,
 }
 
 /// **组装好的 Agent**。
@@ -860,6 +896,8 @@ class HeraclesAgent {
     final emit = _Emitter(bridge);
     final wallClock = Stopwatch()..start();
     var totalToolCalls = 0;
+    var totalTokens = 0;
+    var runStoppedEmitted = false;
     var budgetReached = false;
 
     /// **最新计划步骤**（B8 P0，2026-10-30）：`PlanChangedEvent` 处缓存。
@@ -884,6 +922,43 @@ class HeraclesAgent {
       if (planClosedEmitted) return;
       planClosedEmitted = true;
       emit(HeraclesPlanClosed(reachedGoal: reachedGoal, reason: reason));
+    }
+
+    /// **V0.4：失败/超限收尾时发一次 `run_stopped`**（只增事件，不改旧 failed 语义）。
+    ///
+    /// 只对“不是普通错误”的停止发：轮次上限、token/工具预算、超时/网络、用户取消。
+    /// 普通异常仍只发 `failed`，避免 UI 同时显示“失败”和“可继续”两种终态。
+    void emitRunStoppedForFailure(String reason, {required bool cancelled}) {
+      if (runStoppedEmitted) return;
+      RunStopReason? stop;
+      var canContinue = _options.continuePolicy != ContinuePolicy.off;
+      if (cancelled) {
+        stop = RunStopReason.userCancel;
+      } else if (budgetReached) {
+        // 工具调用预算：wire 复用 token_budget（契约 8 值），摘要写清楚是工具预算。
+        stop = RunStopReason.tokenBudget;
+        canContinue = false;
+      } else if (reason.contains('Maximum turns') ||
+          reason.contains('最大轮次')) {
+        stop = RunStopReason.maxRounds;
+      } else if (reason.contains('timeout') || reason.contains('超时')) {
+        stop = RunStopReason.providerTimeout;
+      } else if (reason.contains('network') ||
+          reason.contains('Network') ||
+          reason.contains('连接')) {
+        stop = RunStopReason.network;
+      }
+      if (stop == null) return;
+      runStoppedEmitted = true;
+      emit(HeraclesRunStopped(
+        reason: stop,
+        round: 1,
+        maxRounds: _options.maxRounds,
+        tokensSpent: totalTokens,
+        tokensLimit: _options.tokenLimit,
+        canContinue: canContinue,
+        errorSummary: reason,
+      ));
     }
 
     /// **本轮模型最后一次给出的正文**（`AfterCallLLMEvent` 捕获）。
@@ -1052,6 +1127,7 @@ class HeraclesAgent {
         outputTokens: u.completionTokens,
         cachedTokens: _cachedFrom(u),
       ));
+      totalTokens += _fullPromptTokens(u) + u.completionTokens;
     });
     controller.on<OnAgentExceptionEvent>((e) {
       // ⚠️ 字段是 `error`（Exception），不是 `exception`
@@ -1481,6 +1557,10 @@ class HeraclesAgent {
             ? '用户停止'
             : (budgetReached ? '任务被中断：$reason' : '运行失败：$reason'),
       );
+      emitRunStoppedForFailure(
+        reason,
+        cancelled: e.code == AgentExceptionCode.cancelled,
+      );
       emit(HeraclesFailed(reason));
     } catch (e) {
       wallClock.stop();
@@ -1538,6 +1618,7 @@ class HeraclesAgent {
         reachedGoal: false,
         reason: budgetReached ? '任务被中断：$reason' : '运行失败：$reason',
       );
+      emitRunStoppedForFailure(reason, cancelled: false);
       emit(HeraclesFailed(reason));
     } finally {
       if (!finished) wallClock.stop();
@@ -2384,6 +2465,113 @@ Map<String, dynamic>? jsonDecodeLoose(String raw) => null;
 
 sealed class HeraclesEvent {
   const HeraclesEvent();
+}
+
+/// **一次 run 被停下**（V0.4，2026-11-02）—— 长任务续跑的"收尾+可续"信号。
+///
+/// ## 与 [HeraclesFailed] / [HeraclesFinished] 的区别
+///
+/// - `Finished` = 任务真的做完了（正常收尾）；
+/// - `Failed` = 出错了（模型/工具/框架错误）；
+/// - **`RunStopped` = 任务没做完，但**不是因为错误**，而是被策略停下**
+///   （轮数/token 预算/无进展/超时/被系统杀/用户取消），并且**可能可以继续**。
+///
+/// UI 拿到它应该显示"任务被中断：<人话原因>"+ 继续按钮（`canContinue` 决定可用），
+/// 而不是画成"完成"或"失败"。字段口径见 `docs/INTERFACE.md` §N14.1。
+final class HeraclesRunStopped extends HeraclesEvent {
+  const HeraclesRunStopped({
+    required this.reason,
+    required this.round,
+    required this.maxRounds,
+    required this.tokensSpent,
+    required this.tokensLimit,
+    this.nextEstimate,
+    required this.canContinue,
+    this.changedFiles = const <String>[],
+    this.errorSummary,
+    this.resumedFromRound,
+  });
+
+  /// 停止原因（8 值，见 [RunStopReason]）。
+  final RunStopReason reason;
+
+  /// 停在第几轮（从 1 计）。
+  final int round;
+
+  /// 当前策略的轮数上限。
+  final int maxRounds;
+
+  /// 本次 run 已花 token（与用量同一口径）。
+  final int tokensSpent;
+
+  /// token 上限。
+  final int tokensLimit;
+
+  /// 再跑一轮的估算 token；**无依据则 null（不编数）**。
+  final int? nextEstimate;
+
+  /// 是否可以继续（`false` 时 UI 禁用"继续"）。
+  final bool canContinue;
+
+  /// 本次 run 改动过的文件（相对路径，去重；取不到 = 空列表）。
+  final List<String> changedFiles;
+
+  /// 人话错误摘要（**不得是堆栈/内部 id**）。
+  final String? errorSummary;
+
+  /// 本次是从第几轮 checkpoint 恢复的（非恢复 = null）。
+  final int? resumedFromRound;
+}
+
+/// **run 停止原因**（V0.4）：8 值枚举（只增）。
+///
+/// 为什么不用字符串：UI/测试/统计都要按它分支，字符串会拼错且无法穷尽 switch。
+/// wire 名 = 枚举名（`max_rounds` 等下划线形式），见 [wireName]。
+enum RunStopReason {
+  /// 轮数到上限。
+  maxRounds,
+
+  /// token 到上限。
+  tokenBudget,
+
+  /// 连续 2 轮无进展（模型在打转）。
+  noProgress,
+
+  /// 模型侧超时（provider 超时）。
+  providerTimeout,
+
+  /// 网络不可恢复（重试耗尽）。
+  network,
+
+  /// 进程被杀（恢复后发现上次未收尾）。
+  processKilled,
+
+  /// 上下文压缩失败且无法继续。
+  contextCompressFailed,
+
+  /// 用户主动取消。
+  userCancel;
+
+  /// wire 名（`max_rounds` / `token_budget` / `no_progress` / `provider_timeout` /
+  /// `network` / `process_killed` / `context_compress_failed` / `user_cancel`）。
+  String get wireName => switch (this) {
+        RunStopReason.maxRounds => 'max_rounds',
+        RunStopReason.tokenBudget => 'token_budget',
+        RunStopReason.noProgress => 'no_progress',
+        RunStopReason.providerTimeout => 'provider_timeout',
+        RunStopReason.network => 'network',
+        RunStopReason.processKilled => 'process_killed',
+        RunStopReason.contextCompressFailed => 'context_compress_failed',
+        RunStopReason.userCancel => 'user_cancel',
+      };
+
+  /// 从 wire 名解析（不认识 ⇒ null，不猜）。
+  static RunStopReason? tryParse(String? raw) {
+    for (final r in RunStopReason.values) {
+      if (r.wireName == raw) return r;
+    }
+    return null;
+  }
 }
 
 /// **正文增量** —— 最终回答只认它。

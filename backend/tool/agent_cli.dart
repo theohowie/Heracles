@@ -138,6 +138,16 @@ Future<void> main(List<String> args) async {
         stdout.writeln(_dim(reachedGoal
             ? '（计划已达成）'
             : '（计划已中断${reason == null ? "" : "：$reason"}）'));
+      case HeraclesRunStopped(
+          :final reason,
+          :final round,
+          :final tokensSpent,
+          :final tokensLimit,
+          :final canContinue,
+        ):
+        // V0.4：长任务被策略停下（Headless 只打一行人话 + 是否可续）
+        stdout.writeln(_dim('（任务停在第 $round 轮：${reason.wireName}，'
+            '已用 $tokensSpent/$tokensLimit token，${canContinue ? "可继续" : "不可继续"}）'));
       case HeraclesContextCompressed():
         stdout.writeln(_dim('（上下文已自动压缩）'));
       case HeraclesBudgetWarning(:final used, :final limit):

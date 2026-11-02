@@ -1891,6 +1891,16 @@ class AgentEvent {
     this.stopReason,
     this.turnCount,
     this.message,
+    this.runStopReason,
+    this.runStopRound,
+    this.runStopMaxRounds,
+    this.runStopTokensSpent,
+    this.runStopTokensLimit,
+    this.runStopNextEstimate,
+    this.runStopCanContinue,
+    this.runStopChangedFiles = const <String>[],
+    this.runStopErrorSummary,
+    this.runStopResumedFromRound,
     this.stepId,
     this.title,
     this.delta,
@@ -2012,6 +2022,20 @@ class AgentEvent {
   /// `failed`：错误信息
   final String? message;
 
+  // ---- V0.4 `run_stopped`（N14；只增字段）----
+  /// 停止原因 wire 名（max_rounds/token_budget/no_progress/provider_timeout/
+  /// network/process_killed/context_compress_failed/user_cancel）。
+  final String? runStopReason;
+  final int? runStopRound;
+  final int? runStopMaxRounds;
+  final int? runStopTokensSpent;
+  final int? runStopTokensLimit;
+  final int? runStopNextEstimate;
+  final bool? runStopCanContinue;
+  final List<String> runStopChangedFiles;
+  final String? runStopErrorSummary;
+  final int? runStopResumedFromRound;
+
   // ---- token 级（2026-10-12 流式逐字；见 Kotlin 侧 `AgentEvent` 的
   //      "token 级事件" 段与 `docs/25-流式工作步骤.md` §5.3）----
 
@@ -2129,6 +2153,10 @@ class AgentEvent {
   static const kBlocked = 'blocked';
   static const kFinished = 'finished';
   static const kFailed = 'failed';
+
+  /// **V0.4 长任务被策略停下**（N14）：不是完成、也不是普通错误；
+  /// 后面可能紧跟 `failed`，UI 用 `runStopCanContinue` 决定“继续”是否可用。
+  static const kRunStopped = 'run_stopped';
 
   /// **用户插话被注入会话**（2026-10-13，思考间隙引导）——
   /// 到达时机 = 上一轮完整结束、下一轮开始前。
@@ -2252,6 +2280,7 @@ class AgentEvent {
     kBlocked,
     kFinished,
     kFailed,
+    kRunStopped,
     kInterrupted,
     kPlanCreated,
     kPlanAdvanced,

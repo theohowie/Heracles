@@ -390,6 +390,65 @@ class VoicePartial {
 
 > **2026-10-30 真机验收（B1）**：断网首次点麦克风 ⇒ 私有目录幂等解压出 4 文件 + `.complete`（字节与 assets 一致）；`[voice] partial` seq 0→14、chars 0→15、语音期间间隔 **200–300ms**；`isFinal=true` 只在真断句（2 次）与停止收尾（1 次）出现（VAD 静音期重复 final 已修）；停止后文本提交到输入框（截图留档，日志不含正文）。**未验证**：取消（前端无入口，仅单测）、整段 SenseVoice 回退出字（非本轮验收项）、逐字准确度（不承诺）。
 
+### N14 长任务续跑（V0.4 · 契约冻结 2026-11-02 · 后端落码中）
+
+> **前端已并行落 UI**：`widgets/run_stop_banner.dart`（适配层，先读 raw/args）与 `widgets/run_continue_mode_section.dart`（三档设置，prefs `heracles.run.continueMode`）。
+> 本节字段与前端适配层**逐字对齐**；后端强类型字段落地后前端可直接读 `e.reason/e.round/...`（适配层可随后删除）。
+
+#### N14.1 `run_stopped` 事件（`AgentEvent.kRunStopped = 'run_stopped'`）
+
+| 字段 | 类型 | 说明 |
+|---|---|---|
+| `reason` | String | 8 值枚举（见下） |
+| `round` | int | 本次停在第几轮（从 1 计） |
+| `maxRounds` | int | 当前策略的轮数上限 |
+| `tokensSpent` | int | 本次 run 已花 token（估算/上报口径与用量一致） |
+| `tokensLimit` | int | token 上限 |
+| `nextEstimate` | int? | 再跑一轮的估算 token（无依据则 null，**不编数**） |
+| `canContinue` | bool | 是否可续（`false` 时 UI 禁用继续） |
+| `changedFiles` | List<String> | 本次 run 改动文件（相对路径，去重；取不到=空列表） |
+| `errorSummary` | String? | 人话错误摘要（**不得是堆栈/内部 id**） |
+| `resumedFromRound` | int? | 本次是从第几轮 checkpoint 恢复的（非恢复=null） |
+
+`reason` 枚举（只增）：`max_rounds`（轮数到上限）· `token_budget`（token 到上限）· `no_progress`（连续 2 轮无进展）· `provider_timeout`（模型侧超时）· `network`（网络不可恢复）· `process_killed`（进程被杀后恢复发现）· `context_compress_failed`（压缩失败且无法继续）· `user_cancel`（用户取消）。
+
+#### N14.2 续跑策略 `ContinuePolicy`
+
+| 值 | 语义 |
+|---|---|
+| `off`（前端默认） | 跑一轮就停；停时发 `run_stopped`（`canContinue=false`） |
+| `ask` | 每轮结束都发 `run_stopped`（`canContinue=true`），等用户确认再跑下一轮 |
+| `auto` | 自动续跑，**默认 `maxRounds=3`**；到第 3 轮仍未完成 ⇒ 不自动续，发 `run_stopped(canContinue=true + nextEstimate)` 等确认 |
+
+- `tokenLimit` 默认 **2_000_000**（`ContractAgent.runTokenLimit`）；**轮数与 token 谁先到停谁**（先触发者决定 `reason`）。
+- 策略由宿主传入（前端 prefs `heracles.run.continueMode` 映射到 `RunOptions.continuePolicy`），后端不读 UI。
+
+#### N14.3 `run_checkpoint` 行（append-only）
+
+每轮结束追加一行（**只增行类型**，不改旧行）：
+
+```json
+{"role":"run_checkpoint","sessionId":"s…","runId":"r…","round":2,"plan":[…],
+ "toolCalls":7,"tokens":123456,"lastMessage":"…","progressSnapshot":{…},"ts":1793…}
+```
+
+- 恢复时从**最后一条** `run_checkpoint` 继续：已落盘的消息不重复追加、不伪造用户消息（续跑用内部 continuation 状态/系统注入说明，UI 只显示"自动续跑第 N 轮"）。
+- 旧文件无该行 ⇒ 正常从头跑，不假装有 checkpoint。
+
+#### N14.4 无进展检测 `ProgressSnapshot`
+
+`{filesHash, changedFiles[], testsPassed?, testsTotal?, errorSignature?}`：
+- 文件树 hash + 改动文件列表；
+- 测试通过数**仅**从可解析输出（pytest / jest / go test / gradle）提取；解析不到 ⇒ **不写数**（只用文件+错误）；
+- 错误签名 = 相同错误文本/堆栈 hash；
+- **连续 2 轮无进展 ⇒ 停 `no_progress`**，摘要给 UI（`errorSummary`/`changedFiles`）。
+
+#### N14.5 超时与恢复
+
+- 网络/流式超时：**分类重试**（backoff，最多 N 次，`ContractAgent.*Retry*` 常量），可恢复 ⇒ 续跑；不可恢复 ⇒ `run_stopped(provider_timeout|network)`。
+- 进程被杀：下次启动从最后 checkpoint 恢复，并如实提示（`process_killed` 语义，`canContinue=true`）。
+- 状态：⚠️ 后端落码中；真机（长任务 3 轮续跑/锁屏续跑）**未验证**。
+
 ## 5. 流式与渲染约定 —— ✅ 无异议
 
 后端保持原始粒度不节流；`approval_required`/`context_updated`/`plan_updated` 三类新事件已按 §6.1 登记到本文。

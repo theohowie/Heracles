@@ -59,6 +59,47 @@ abstract final class ContractAgent {
   static const int maxToolCalls = 200;
 }
 
+/// **长任务续跑（V0.4，2026-11-02）** —— 续跑策略/预算/重试的数值唯一来源。
+///
+/// ## 为什么轮数与 token 是两个上限
+///
+/// 轮数限制的是"模型来回次数"，token 限制的是"花多少钱"。两者谁都可能先到：
+/// 一次工具密集的任务可能 3 轮就烧掉几十万 token；一次纯推理任务可能轮数先到。
+/// **谁先到停谁**，`RunStopReason` 如实记原因（不混成一个"超限"）。
+abstract final class ContractRunContinue {
+  /// 自动续跑默认最多几轮（`ContinuePolicy.auto`）。
+  ///
+  /// 3 的依据：产品要求"第 3 轮仍未完成就停下来问用户"，而不是无限自动续。
+  static const int autoMaxRounds = 3;
+
+  /// 一次 run 的 token 上限（默认 200 万）。
+  ///
+  /// 依据：长任务实测单轮 5–20 万 token；200 万 ≈ 10–40 轮的量级，
+  /// 够覆盖一次真实长任务，又不至于让用户"睡一觉起来账单爆炸"。
+  static const int runTokenLimit = 2000000;
+
+  /// 网络/流式超时的最大重试次数（指数 backoff）。
+  static const int maxNetworkRetries = 3;
+
+  /// 重试基础间隔（毫秒）；第 n 次重试 = base * 2^(n-1)（上限 [retryMaxDelayMs]）。
+  static const int retryBaseDelayMs = 2000;
+
+  /// 重试间隔上限（毫秒），防止退避时间失控。
+  static const int retryMaxDelayMs = 30000;
+
+  /// **连续多少轮无进展就判 `no_progress`**。
+  ///
+  /// 2 的依据：1 轮无进展可能只是"读文件/探查"（正常），连续 2 轮完全相同
+  /// 才说明模型在打转。
+  static const int noProgressRounds = 2;
+
+  /// 每轮 checkpoint 行的 role 名（`role:"run_checkpoint"`）。
+  static const String checkpointRole = 'run_checkpoint';
+
+  /// `ProgressSnapshot` 里测试输出最多保留多少字符（防大日志进 checkpoint）。
+  static const int progressTestOutputMaxChars = 2000;
+}
+
 /// **模型请求层**（`BackendConfig` / `ModelConfig`）。
 abstract final class ContractModel {
   /// 默认模型窗口（token）。决定压缩阈值。

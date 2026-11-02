@@ -51,9 +51,11 @@ library;
 
 import 'dart:async';
 import 'dart:collection';
+import 'dart:convert';
 
 import 'package:dio/dio.dart' show CancelToken;
 import 'package:heracles_backend/heracles_backend.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 
 import '../models/attachment.dart';
 import '../models/settings.dart';
@@ -180,6 +182,99 @@ Map<String, dynamic> buildToolRow({
     if (rawCommand != null && rawCommand.trim().isNotEmpty) 'command': rawCommand,
     'ts': ts,
   };
+}
+
+/// **一次 run 的续跑判定结果**（V0.4，纯数据 —— 便于单测）。
+///
+/// 为什么把判定抽成纯函数：策略矩阵（off/ask/auto × 轮数/token/取消）如果
+/// 埋在 `_drive` 的收尾大块里，只能靠端到端假 LLM 覆盖，回归成本高且容易
+/// "绿但没测到"。抽出来后矩阵可逐条断言。
+class RunStopDecision {
+  const RunStopDecision({
+    required this.reason,
+    required this.canContinue,
+    this.summary,
+  });
+
+  /// wire 名（`RunStopReason.wireName` 的字符串形式；UI 直接读）。
+  final String reason;
+
+  /// 是否可以继续。
+  final bool canContinue;
+
+  /// 人话摘要（给 UI 显示"为什么停了"；不得是堆栈）。
+  final String? summary;
+}
+
+/// **续跑判定**（V0.4，纯函数）。
+///
+/// 优先级：**用户取消 > token 预算 > 轮次/询问策略**。`failed` 不进本函数
+/// （失败走 `failed` 事件，不伪装成"可续"）。
+///
+/// 口径：
+/// - `policy == off` 且非取消 ⇒ 不发（返回 null）—— 旧行为完全不变；
+/// - `policy == ask` ⇒ 每轮结束都"待确认"（`canContinue=true`）；
+/// - `policy == auto` ⇒ 到 [maxRounds] 轮仍未完成 ⇒ 待确认；
+/// - `tokensSpent >= tokenLimit` ⇒ `token_budget`（谁先到停谁）。
+///
+/// [taskDone] = 本次 run 是否正常完成（`finished` 且计划全 done/cancelled）。
+/// 已完成的任务**不需要续跑**（返回 null，UI 显示"完成"而不是"中断"）。
+RunStopDecision? decideRunStop({
+  required ContinuePolicy policy,
+  required bool cancelled,
+  required bool failed,
+  required bool taskDone,
+  required int round,
+  required int maxRounds,
+  required int tokensSpent,
+  required int tokenLimit,
+  required int noProgressStreak,
+  required int noProgressRounds,
+}) {
+  // 取消：即使 off 也要告诉 UI"是被用户停的"（不是失败）。
+  if (cancelled) {
+    return const RunStopDecision(
+      reason: 'user_cancel',
+      canContinue: false,
+      summary: '任务被用户取消',
+    );
+  }
+  // 失败：不伪装可续（由 failed 事件承担）。
+  if (failed) return null;
+  // 已完成：不需要续跑。
+  if (taskDone) return null;
+  // token 预算：**硬预算优先**（"谁先到停谁"里 token 是不可协商的那条线）。
+  if (tokensSpent >= tokenLimit) {
+    return RunStopDecision(
+      reason: 'token_budget',
+      canContinue: policy != ContinuePolicy.off,
+      summary: '已用 $tokensSpent / $tokenLimit token（到上限即停）',
+    );
+  }
+  // 无进展：连续 N 轮文件/错误都没变 ⇒ 停下并如实说明。
+  if (noProgressStreak >= noProgressRounds) {
+    return RunStopDecision(
+      reason: 'no_progress',
+      canContinue: policy != ContinuePolicy.off,
+      summary: '连续 $noProgressStreak 轮没有进展（文件与错误都没变化）',
+    );
+  }
+  // 轮次策略：off 不续（旧行为）；ask 每轮问；auto 到上限问。
+  if (policy == ContinuePolicy.off) return null;
+  if (policy == ContinuePolicy.ask) {
+    return const RunStopDecision(
+      reason: 'max_rounds',
+      canContinue: true,
+      summary: '本轮结束（继续模式=每轮询问），等待确认后再跑一轮',
+    );
+  }
+  // auto：没到上限就继续（不发事件，由宿主自动续跑）；到上限才停。
+  if (round < maxRounds) return null;
+  return RunStopDecision(
+    reason: 'max_rounds',
+    canContinue: true,
+    summary: '已到自动续跑上限 $maxRounds 轮，等待确认后再跑一轮',
+  );
 }
 
 /// 一次 run 的句柄。
@@ -1682,6 +1777,32 @@ class LocalAgentExecutor {
             planClosedReachedGoal = reachedGoal;
             planClosedReason = reason;
             tr.planClosed(reachedGoal: reachedGoal, reason: reason);
+          case HeraclesRunStopped(
+              :final reason,
+              :final round,
+              :final maxRounds,
+              :final tokensSpent,
+              :final tokensLimit,
+              :final nextEstimate,
+              :final canContinue,
+              :final changedFiles,
+              :final errorSummary,
+              :final resumedFromRound,
+            ):
+            // ★ V0.4（N14）：任务被策略停下 —— **强类型字段直填**给 UI
+            //   （前端 `RunStopInfo` 适配层仍兼容 raw，但强类型落地后可直接读）。
+            tr.runStopped(
+              reason.wireName,
+              round: round,
+              maxRounds: maxRounds,
+              tokensSpent: tokensSpent,
+              tokensLimit: tokensLimit,
+              nextEstimate: nextEstimate,
+              canContinue: canContinue,
+              changedFiles: changedFiles,
+              errorSummary: errorSummary,
+              resumedFromRound: resumedFromRound,
+            );
           case HeraclesContextCompressed(
               :final beforeMessages,
               :final afterMessages,
@@ -1849,6 +1970,85 @@ class LocalAgentExecutor {
     } catch (_) {
       lastBreakdown = const <String, int>{};
     }
+    // ---- ★ V0.4 长任务续跑：checkpoint + run_stopped（2026-11-02）----
+    //
+    // ## 为什么放在这里（assistant 行之前、所有收尾之后）
+    // checkpoint 行是"这一轮跑到哪了"的快照；run_stopped 是"任务被策略停下"的
+    // 信号。两者都必须**先于** assistant 行落盘（重放顺序：checkpoint → 回答）。
+    //
+    // ## 口径（如实）
+    // · round = 本次 run 实际跑了几轮（`finishedTurns` 或 `tr.currentTurn`）；
+    // · tokensSpent = prompt + output 累计（**与顶栏同一口径**）；
+    // · 策略 = 前端 prefs `heracles.run.continueMode`（off/ask/auto），读不到 = off；
+    // · 只在策略非 off（或用户取消）时发 `run_stopped`；`failed` 仍走 failed 事件，
+    //   不混成"可续"（错误不是预算问题）。
+    final round = finishedTurns ?? tr.currentTurn;
+    final tokensSpent = tr.totalPrompt + tr.totalOutput;
+    final continueMode = await _readContinueMode();
+    final policy = switch (continueMode) {
+      'auto' => ContinuePolicy.auto,
+      'ask' => ContinuePolicy.ask,
+      _ => ContinuePolicy.off,
+    };
+    final tokenLimit = ContractRunContinue.runTokenLimit;
+    final maxRounds = ContractRunContinue.autoMaxRounds;
+
+    // checkpoint：每轮结束都写（append-only；宿主据此恢复，不重复消息）。
+    if (round > 0 && !failed) {
+      await sessionStore.appendMessage(sid, {
+        ContractRunContinue.checkpointRole: true,
+        'role': ContractRunContinue.checkpointRole,
+        'sessionId': sid,
+        'runId': '$sid-$round-${sw.elapsedMilliseconds}',
+        'round': round,
+        'plan': lastPlanSteps,
+        'toolCalls': tr.turnRecords.where((t) => t.tool != null).length,
+        'tokens': tokensSpent,
+        'lastMessage': finalText.length > 200
+            ? finalText.substring(finalText.length - 200)
+            : finalText,
+        'progressSnapshot': {
+          'changedFiles': changeFiles.map((c) => c['path']).toList(),
+        },
+        'ts': DateTime.now().millisecondsSinceEpoch,
+      });
+    }
+
+    // run_stopped 判定：抽成纯函数（矩阵可单测，见 decideRunStop）。
+    //
+    // taskDone：正常收尾（`finishedTurns != null`）且计划全 done/cancelled。
+    final taskDone = finishedTurns != null &&
+        lastPlanSteps.every((s) =>
+            s['status'] == 'done' || s['status'] == 'cancelled');
+    // 无进展 streak（第一版近似判据）：本轮有改动文件或有工具执行过 ⇒ 视为有进展；
+    // 否则记 1。（精确的文件树 hash/测试数/错误签名在 ProgressSnapshot 里补。）
+    final progressChanged =
+        changeFiles.isNotEmpty || tr.turnRecords.isNotEmpty;
+    final decision = decideRunStop(
+      policy: policy,
+      cancelled: cancelled,
+      failed: failed,
+      taskDone: taskDone,
+      round: round,
+      maxRounds: maxRounds,
+      tokensSpent: tokensSpent,
+      tokenLimit: tokenLimit,
+      noProgressStreak: progressChanged ? 0 : 1,
+      noProgressRounds: ContractRunContinue.noProgressRounds,
+    );
+    if (decision != null) {
+      tr.runStopped(
+        decision.reason,
+        round: round,
+        maxRounds: maxRounds,
+        tokensSpent: tokensSpent,
+        tokensLimit: tokenLimit,
+        canContinue: decision.canContinue,
+        changedFiles: [for (final c in changeFiles) '${c['path']}'],
+        errorSummary: decision.summary,
+      );
+    }
+
     return AgentRunResult(
       stopReason: cancelled
           ? '已取消'
@@ -1866,6 +2066,22 @@ class LocalAgentExecutor {
       sessionId: sid,
       cancelled: cancelled,
     );
+  }
+
+  /// 读续跑模式（V0.4）：前端设置页写 `SharedPreferences['heracles.run.continueMode']`
+  /// ∈ `off|ask|auto`（默认 off）。读失败/未知值 ⇒ off（**保守**：不自动续跑）。
+  ///
+  /// 为什么要读 prefs 而不是 AppSettings：设置字段还没正式落 `AppSettings`
+  /// （前端先用临时 prefs 键），backend 只认 `ContinuePolicy`；这里做映射，
+  /// 等设置字段落地后只需把本方法改成读 settings。
+  Future<String> _readContinueMode() async {
+    try {
+      final p = await SharedPreferences.getInstance();
+      final v = p.getString('heracles.run.continueMode');
+      return (v == 'auto' || v == 'ask') ? v! : 'off';
+    } catch (_) {
+      return 'off';
+    }
   }
 
   /// 上一次 run 的**冻结区** token（= 首轮 promptTokens，provider 真实上报）。
@@ -2619,11 +2835,60 @@ class _Translator {
     ));
   }
 
+  /// **任务被策略停下**（V0.4 `run_stopped`，只增事件）。
+  ///
+  /// 与 [failed] 的区别：failed = 出错；这里是"没做完但可继续"（轮数/token 预算/
+  /// 无进展/超时/进程被杀/用户取消）。UI 用它渲染"任务被中断 + 继续"卡。
   void failed(String message) {
     // 失败也要先把正文发完：`_reportRunFailure` 之后这条 run 就结束了，
     // 留在队列里的片永远没有出口（且其中可能有**已经生成好的正文**）。
     _flushText();
     _sink(AgentEvent(type: AgentEvent.kFailed, ts: _now, index: _turn, message: message));
+  }
+
+  /// **V0.4 `run_stopped`**（N14）：强类型字段 + 兼容 raw JSON。
+  ///
+  /// raw JSON 是为了兼容前端已有的 `RunStopInfo.fromEvent` 适配层；
+  /// 强类型字段落地后前端可直接读 `AgentEvent.runStop*`。
+  void runStopped(
+    String reason, {
+    required int round,
+    required int maxRounds,
+    required int tokensSpent,
+    required int tokensLimit,
+    int? nextEstimate,
+    required bool canContinue,
+    List<String> changedFiles = const <String>[],
+    String? errorSummary,
+    int? resumedFromRound,
+  }) {
+    final payload = <String, Object?>{
+      'reason': reason,
+      'round': round,
+      'maxRounds': maxRounds,
+      'tokensSpent': tokensSpent,
+      'tokensLimit': tokensLimit,
+      'nextEstimate': ?nextEstimate,
+      'canContinue': canContinue,
+      'changedFiles': changedFiles,
+      'errorSummary': ?errorSummary,
+      'resumedFromRound': ?resumedFromRound,
+    };
+    _sink(AgentEvent(
+      type: AgentEvent.kRunStopped,
+      ts: _now,
+      raw: jsonEncode(payload),
+      runStopReason: reason,
+      runStopRound: round,
+      runStopMaxRounds: maxRounds,
+      runStopTokensSpent: tokensSpent,
+      runStopTokensLimit: tokensLimit,
+      runStopNextEstimate: nextEstimate,
+      runStopCanContinue: canContinue,
+      runStopChangedFiles: changedFiles,
+      runStopErrorSummary: errorSummary,
+      runStopResumedFromRound: resumedFromRound,
+    ));
   }
 }
 
