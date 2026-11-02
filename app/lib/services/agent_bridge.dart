@@ -288,16 +288,30 @@ class AgentBridge {
   /// **V0.4 T0-2 后台保活引导**（2026-11-02，只引导/只读，不改系统设置）。
   ///
   /// 三件事：
-  /// · [requestIgnoreBatteryOptimizations]：拉起系统"忽略电池优化"确认页（false = 系统不支持）；
+  /// · [requestIgnoreBatteryOptimizations]：拉起系统"忽略电池优化"确认页；
   /// · [autostartGuide]：返回 OEM 自启路径文案（**不自动跳转**）；
   /// · [processKilled] / [consumeProcessKilled]：上次 run 是否被系统停止（如实提示，
   ///   不假装继续；提示消费后清标记）。
-  Future<bool> requestIgnoreBatteryOptimizations() async {
+  ///
+  /// ★ 返回 `Future<bool?>`（2026-11-02 二次裁定）：三态**不许混** ——
+  /// · `null` = **当前版本不支持**（旧宿主没有这条通道，`MissingPluginException`）⇒
+  ///   UI 显示"当前版本不支持"，**不该引导用户"再试一次"**（试多少次都一样）；
+  /// · `false` = 没生效（`PlatformException` / 用户在授权页取消）⇒ UI 显示
+  ///   "没有生效，可再试"；
+  /// · `true` = 系统页已拉起并确认。
+  ///
+  /// ## 为什么不许吞成 false
+  ///
+  /// 旧实现把 `MissingPluginException` 也返回 `false` —— 旧宿主上用户点"去授权"
+  /// 会看到"没有生效，可再试"，于是反复重试一个**根本不存在的方法**。
+  /// "环境不支持"与"这次没成功"是两种失败，给用户的话术必须不同。
+  Future<bool?> requestIgnoreBatteryOptimizations() async {
     try {
       final ok = await _channel.invokeMethod<bool>('requestIgnoreBatteryOptimizations');
       return ok ?? false;
     } on MissingPluginException {
-      return false;
+      // 通道都不在 ⇒ 不是"这次失败"，是"没有这个能力"
+      return null;
     } on PlatformException {
       return false;
     }

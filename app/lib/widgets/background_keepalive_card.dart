@@ -14,7 +14,9 @@
 //   · 「自启动」行：调 `autostartGuide()` 拿 `{brand, path}`，路径文案
 //     **原样上屏**（契约是"只引导不自动跳转"，这里不加任何跳转）。
 //   · 全部调用不假成功：请求返回后状态仍以 `heracles.bg.batteryIgnored`
-//     （Android 侧写入）为准；没生效就明说"没有生效：系统不支持或已取消"。
+//     （Android 侧写入）为准；没生效就明说"没有生效：已在授权页取消或被系统拒绝"。
+//   · ★ 三态话术（2026-11-02 二次裁定）：`null`（旧宿主没有通道）⇒
+//     "当前版本不支持"，**不引导重试**；`false` ⇒ "没有生效，可再试"。
 //   · 系统授权页打开期间锁按钮（防连点叠 Intent，权限页同款闸门）。
 //
 // 上次任务被系统停止：读 `SharedPreferences['heracles.bg.lastKilled']`
@@ -61,6 +63,10 @@ class _BackgroundKeepaliveCardState extends State<BackgroundKeepaliveCard>
 
   /// 是否点过「去授权」——点过而状态仍未变 ⇒ 明说"没有生效"。
   bool _batteryAttempted = false;
+
+  /// ★ 通道缺失 ⇒ **当前版本不支持**（与"这次没成功"是两种失败，话术不同）。
+  /// `null` 结果（旧宿主没有这条通道）置 true；不许引导用户"再试"。
+  bool _batteryUnsupported = false;
 
   @override
   void initState() {
@@ -111,11 +117,15 @@ class _BackgroundKeepaliveCardState extends State<BackgroundKeepaliveCard>
   }
 
   /// 「去授权」：拉系统确认页；返回后**重读真实状态**（不乐观置位）。
+  ///
+  /// ★ 三态话术（2026-11-02）：`null` = 当前版本不支持（不引导重试）；
+  ///   `false` = 没生效（可再试）；`true` = 已确认（状态以 prefs 重读为准）。
   Future<void> _requestBattery() async {
     if (_openingBattery || _batteryIgnored == true) return;
     setState(() => _openingBattery = true);
     try {
-      await _bridge.requestIgnoreBatteryOptimizations();
+      final r = await _bridge.requestIgnoreBatteryOptimizations();
+      if (mounted) setState(() => _batteryUnsupported = r == null);
     } finally {
       if (mounted) {
         await _reloadPrefs();
@@ -189,7 +199,11 @@ class _BackgroundKeepaliveCardState extends State<BackgroundKeepaliveCard>
             Padding(
               padding: const EdgeInsets.only(top: 4),
               child: Text(
-                '没有生效：系统不支持或已在授权页取消。可再试一次。',
+                // ★ 三态话术：环境不支持 ≠ 这次没成功 —— 两种失败两种话
+                _batteryUnsupported
+                    ? '当前版本不支持「忽略电池优化」授权入口；'
+                        '后台保活仍可用，可在系统设置里手动配置。'
+                    : '没有生效：已在授权页取消或被系统拒绝。可再试一次。',
                 key: const Key('background-battery-note'),
                 style: TextStyle(
                     fontSize: 11, height: 1.4, color: h.textDim),

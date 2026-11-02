@@ -8,14 +8,15 @@
 //   · 未开启 ⇒ 必须有可点的「去授权」，且点击真的调通道（mock 断言调用数）；
 //   · 已开启 ⇒ 不给按钮；
 //   · autostartGuide 的路径**原样上屏**（契约：只引导，不自动跳转）；
-//   · 通道不返回（MissingPluginException 被 bridge 收敛为 false/null）⇒
-//     点了之后不许假成功 —— 明说「没有生效」。
+//   · 通道不返回（MissingPluginException 被 bridge 收敛为 null）⇒
+//     点了之后不许假成功 —— 明说「当前版本不支持」，不引导重试（见下方三态组）。
 
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
+import 'package:heracles/services/agent_bridge.dart';
 import 'package:heracles/theme/app_theme.dart';
 import 'package:heracles/widgets/background_keepalive_card.dart';
 
@@ -140,5 +141,96 @@ void main() {
     expect(find.textContaining('没有生效'), findsNothing,
         reason: '调用尚未返回时不得提前宣布失败');
     expect(find.byKey(const Key('background-battery-note')), findsNothing);
+  });
+
+  // ==========================================================================
+  // ★★ 2026-11-02 二次裁定：三态不许混（MissingPluginException ≠ false）
+  // ==========================================================================
+  // 旧实现把 MissingPluginException 吞成 false ⇒ 旧宿主上用户点「去授权」
+  // 会看到"没有生效，可再试"，于是反复重试一个**根本不存在的方法**。
+  // 「环境不支持」与「这次没成功」是两种失败，给用户的话术必须不同。
+  group('三态：null = 不支持 / false = 没生效 / true = 已确认', () {
+    test('★★★ bridge：通道缺失（MissingPluginException）⇒ null，不是 false', () async {
+      TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+          .setMockMethodCallHandler(_cmdChannel, (call) async {
+        if (call.method == 'requestIgnoreBatteryOptimizations') {
+          throw MissingPluginException('旧宿主没有这条通道');
+        }
+        return null;
+      });
+      addTearDown(() => TestDefaultBinaryMessengerBinding
+          .instance.defaultBinaryMessenger
+          .setMockMethodCallHandler(_cmdChannel, null));
+
+      final r = await AgentBridge().requestIgnoreBatteryOptimizations();
+      expect(r, isNull,
+          reason: 'null = "当前版本不支持"；吞成 false 会引导用户无限重试');
+    });
+
+    test('★★ bridge：PlatformException ⇒ false（这次没成功，不是"不支持"）', () async {
+      TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+          .setMockMethodCallHandler(_cmdChannel, (call) async {
+        if (call.method == 'requestIgnoreBatteryOptimizations') {
+          throw PlatformException(code: 'unavailable', message: '系统拒绝');
+        }
+        return null;
+      });
+      addTearDown(() => TestDefaultBinaryMessengerBinding
+          .instance.defaultBinaryMessenger
+          .setMockMethodCallHandler(_cmdChannel, null));
+
+      final r = await AgentBridge().requestIgnoreBatteryOptimizations();
+      expect(r, isFalse, reason: '调用失败 ≠ 环境不支持');
+    });
+
+    testWidgets('★★★ 通道缺失 ⇒ 明说"当前版本不支持"，不引导重试', (tester) async {
+      TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+          .setMockMethodCallHandler(_cmdChannel, (call) async {
+        if (call.method == 'requestIgnoreBatteryOptimizations') {
+          throw MissingPluginException('旧宿主没有这条通道');
+        }
+        return null;
+      });
+      addTearDown(() => TestDefaultBinaryMessengerBinding
+          .instance.defaultBinaryMessenger
+          .setMockMethodCallHandler(_cmdChannel, null));
+      SharedPreferences.setMockInitialValues(<String, Object>{});
+      await tester.pumpWidget(wrap(const BackgroundKeepaliveCard()));
+      await tester.pumpAndSettle();
+
+      await tester.tap(find.byKey(const Key('background-battery-action')));
+      await tester.pumpAndSettle();
+
+      expect(find.textContaining('当前版本不支持'), findsOneWidget,
+          reason: '环境不支持必须直说，让用户放弃重试这条死路');
+      expect(find.textContaining('可再试一次'), findsNothing,
+          reason: '方法根本不存在，"可再试"是把用户往死路上引');
+    });
+
+    testWidgets('★★ 返回 false ⇒ "没有生效，可再试"（不是"不支持"）', (tester) async {
+      TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+          .setMockMethodCallHandler(_cmdChannel, (call) async {
+        if (call.method == 'requestIgnoreBatteryOptimizations') {
+          // 模拟"用户在授权页取消"：通道在，但这次没成功
+          return false;
+        }
+        return null;
+      });
+      addTearDown(() => TestDefaultBinaryMessengerBinding
+          .instance.defaultBinaryMessenger
+          .setMockMethodCallHandler(_cmdChannel, null));
+      SharedPreferences.setMockInitialValues(<String, Object>{});
+      await tester.pumpWidget(wrap(const BackgroundKeepaliveCard()));
+      await tester.pumpAndSettle();
+
+      await tester.tap(find.byKey(const Key('background-battery-action')));
+      await tester.pumpAndSettle();
+
+      expect(find.textContaining('没有生效'), findsOneWidget);
+      expect(find.textContaining('可再试一次'), findsOneWidget,
+          reason: '通道在、只是这次没成功 ⇒ 应该鼓励再试');
+      expect(find.textContaining('当前版本不支持'), findsNothing,
+          reason: '明明有通道，说"不支持"是假信息');
+    });
   });
 }
