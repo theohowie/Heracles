@@ -411,6 +411,21 @@ class MainActivity : FlutterActivity() {
                 val (brand, path) = AgentChatService.autostartGuide()
                 result.success(mapOf("ok" to true, "brand" to brand, "path" to path))
             }
+            // ---- ★ V0.4 配套（2026-11-02，契约 §N18；只增方法，旧的都还在）----
+            //   keepaliveStatus：聚合真实状态（前台服务运行位 + 电池优化真实值 +
+            //   MIUI 口径提醒 + 自启动路径）。**查不到就 false/null + note，不编数据**。
+            "keepaliveStatus" -> result.success(AgentChatService.keepaliveStatus(this))
+            //   oemGuide(kind)：MIUI 保活三件套（自启动/后台弹出界面/锁屏显示）。
+            //   未知 kind ⇒ {ok:false}（Dart 侧已先行校验，这里是第二道闸）。
+            "oemGuide" -> {
+                val kind = call.argument<String>("kind") ?: ""
+                val g = AgentChatService.oemGuide(kind)
+                if (g == null) {
+                    result.success(mapOf("ok" to false, "error" to "未知的引导类型：$kind"))
+                } else {
+                    result.success(mapOf("ok" to true, "brand" to g.first, "path" to g.second))
+                }
+            }
             //   上次 run 是否被系统停止（如实提示，不假装继续）
             "processKilled" -> result.success(
                 mapOf(

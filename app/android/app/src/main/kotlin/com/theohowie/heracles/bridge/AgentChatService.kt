@@ -259,8 +259,37 @@ class AgentChatService : Service() {
          * 返回 `厂商 → 人话路径`；宿主设置页按厂商显示对应文案。
          * 认不出厂商 ⇒ 返回通用文案（**不编造具体路径**）。
          */
-        fun autostartGuide(): Pair<String, String> {
-            val brand = (Build.BRAND + " " + Build.MANUFACTURER).lowercase()
+        fun autostartGuide(): Pair<String, String> = oemGuide("autostart")
+            ?: ("通用" to "设置 → 电池 → 找到 Heracles → 允许后台运行/不受限制（不同机型路径不同）")
+
+        /**
+         * **MIUI 保活三件套引导**（2026-11-02，V0.4 配套；`docs/INTERFACE.md` §N18.2）。
+         *
+         * [kind]：`autostart`（自启动）/ `backgroundPopup`（后台弹出界面）/
+         * `lockScreenShow`（锁屏显示）。
+         *
+         * ## 只给数据，不自动跳转（契约红线）
+         *
+         * 返回 `厂商 → 人话路径`，UI 原样上屏。查不到的品牌给**通用兜底文案**
+         * （明说"本品牌没有公开统一入口"），**不编造具体路径**；
+         * 未知 [kind] ⇒ null（调用方给 `{ok:false}`）。
+         */
+        fun oemGuide(kind: String): Pair<String, String>? = when (kind) {
+            "autostart" -> autostartGuideByBrand()
+            "backgroundPopup" -> backgroundPopupGuide()
+            "lockScreenShow" -> lockScreenShowGuide()
+            else -> null
+        }
+
+        /** 设备品牌关键字（小写，BRAND + MANUFACTURER 双保险）。 */
+        private fun brandKey(): String =
+            (Build.BRAND + " " + Build.MANUFACTURER).lowercase()
+
+        private fun isXiaomi(): Boolean =
+            brandKey().contains("xiaomi") || brandKey().contains("redmi")
+
+        private fun autostartGuideByBrand(): Pair<String, String> {
+            val brand = brandKey()
             return when {
                 brand.contains("xiaomi") || brand.contains("redmi") ->
                     "小米/Redmi" to "设置 → 应用设置 → 应用管理 → Heracles → 自启动（允许）"
@@ -274,6 +303,75 @@ class AgentChatService : Service() {
                     "三星" to "设置 → 电池 → 后台使用限制 → 把 Heracles 加入「永不休眠」"
                 else -> "通用" to "设置 → 电池 → 找到 Heracles → 允许后台运行/不受限制（不同机型路径不同）"
             }
+        }
+
+        /**
+         * 「后台弹出界面」引导 —— **只有小米公开了统一入口**。
+         *
+         * 其它品牌各走各的（有的根本没有这个开关）⇒ 给通用兜底并**明说**，
+         * 不编一条看似具体的路径把用户带丢。
+         */
+        private fun backgroundPopupGuide(): Pair<String, String> =
+            if (isXiaomi()) {
+                "小米/Redmi" to "设置 → 应用设置 → 应用管理 → Heracles → 其他权限 → 后台弹出界面（允许）"
+            } else {
+                "通用" to "本品牌没有公开统一的「后台弹出界面」入口；" +
+                    "请到 系统设置 → 应用 → Heracles → 权限/其他权限 里查找" +
+                    "（找不到说明该品牌不需要此开关）"
+            }
+
+        /** 「锁屏显示」引导 —— 同上，只有小米公开了统一入口。 */
+        private fun lockScreenShowGuide(): Pair<String, String> =
+            if (isXiaomi()) {
+                "小米/Redmi" to "设置 → 应用设置 → 应用管理 → Heracles → 其他权限 → 锁屏显示（允许）"
+            } else {
+                "通用" to "本品牌没有公开统一的「锁屏显示」入口；" +
+                    "请到 系统设置 → 应用 → Heracles → 权限/其他权限 里查找" +
+                    "（多数品牌无需此开关）"
+            }
+
+        /**
+         * **保活状态聚合查询**（2026-11-02，V0.4 配套；`docs/INTERFACE.md` §N18.1）。
+         *
+         * ## 查不到就 false/null + note，不编数据
+         *
+         * · `foregroundServiceRunning`：[running] 真实位；读取异常 ⇒ false + note；
+         * · `batteryIgnored`：`PowerManager.isIgnoringBatteryOptimizations` 真实值；
+         *   异常 ⇒ false + note（**不把"读不到"当"没忽略"** —— note 里写明原因）；
+         * · `batteryNote`：小米/Redmi 且已忽略时必须提醒 **MIUI 口径差异** ——
+         *   省电策略「无限制」≠ 系统电池优化白名单（真机实测：MIUI 显示"无限制"
+         *   但 isIgnoring=false），防止用户以为开了无限制就等于进了白名单；
+         * · `autostart`：当前品牌自启动路径（通用兜底，不编路径）。
+         */
+        fun keepaliveStatus(context: Context): Map<String, Any?> {
+            var note: String? = null
+
+            val fs = runCatching { running }.getOrElse {
+                note = "无法读取前台服务状态（${it.javaClass.simpleName}）"
+                false
+            }
+
+            val battery = runCatching {
+                val pm = context.getSystemService(Context.POWER_SERVICE) as PowerManager
+                pm.isIgnoringBatteryOptimizations(context.packageName)
+            }.getOrElse {
+                note = "无法读取电池优化状态（${it.javaClass.simpleName}）"
+                false
+            }
+
+            if (battery && isXiaomi() && note == null) {
+                note = "MIUI 口径提醒：省电策略里的「无限制」≠ 系统电池优化白名单，" +
+                    "两者是不同开关；本状态只反映后者。"
+            }
+
+            val (brand, path) = autostartGuideByBrand()
+            return mapOf(
+                "ok" to true,
+                "foregroundServiceRunning" to fs,
+                "batteryIgnored" to battery,
+                "batteryNote" to note,
+                "autostart" to mapOf("brand" to brand, "path" to path),
+            )
         }
     }
 }

@@ -813,3 +813,59 @@ flutter analyze                                   # 期望 No issues found!
   ⑥ 仅用户明确要 APK + 不含 APK 中心表述 ⑦ 缺工具链指引两种宿主都在 ⑧ 无沙箱宿主 ⇒ 短版如实
 - 变异一组：删掉主战场段（改回旧句）⇒ ⑤⑥⑦ 红；还原后 sha256 一致（提交信息里报）
 - **未真机验证**（本机无设备/无真 Key）：新提示词对真实模型行为的实际影响未验证
+
+---
+
+## N18 保活引导后端配套（2026-11-02 · 只增契约）
+
+> `heracles/command` 只增 2 方法：`keepaliveStatus` 与 `oemGuide`（既有
+> `requestIgnoreBatteryOptimizations` / `autostartGuide` / `processKilled` 全部不变）。
+> 统一口径：**查不到就 false/null + note，不编数据**。
+
+### N18.1 keepaliveStatus（聚合真实状态，只读）
+
+| 入参 | 返回 |
+|---|---|
+| — | `{ok, foregroundServiceRunning: bool, batteryIgnored: bool, batteryNote: String?, autostart: {brand, path}?}` |
+
+- `foregroundServiceRunning`：**Kotlin 侧真实查**（`AgentChatService.running` 静态位）；
+  查不到/异常 ⇒ `false` + `batteryNote` 说明原因，**不编"在跑"**。
+- `batteryIgnored`：`PowerManager.isIgnoringBatteryOptimizations(packageName)` **真实值**；
+  读取异常 ⇒ `false` + `batteryNote`，不编。
+- `batteryNote`：**口径差异必须写明** —— MIUI 的省电策略「无限制」**≠** 系统电池优化白名单
+  （真机实测：MIUI 显示"无限制"但 `isIgnoringBatteryOptimizations=false`）。
+  小米/Redmi 且已忽略时附这条提醒，防止用户以为"开了无限制就等于白名单"。
+- `autostart`：当前品牌的自启动路径（同 `autostartGuide`；认不出的品牌给**通用兜底文案**，
+  **不编具体路径**）。
+- **Dart 侧**：`AgentBridge.keepaliveStatus()` → `KeepaliveStatus?`；**字段可空** ——
+  宿主**没给的字段保持 null**（缺的不编）；`MissingPluginException`/`PlatformException` ⇒ `null`
+  （整个状态不可用，UI 显示通用说明，**不编任何一项**）。
+
+### N18.2 oemGuide(kind)（MIUI 保活三件套 + 各品牌路径，只给数据不跳转）
+
+| 入参 | 返回 |
+|---|---|
+| `{kind: "autostart" \| "backgroundPopup" \| "lockScreenShow"}` | `{ok, brand, path}` / `{ok:false, error}` |
+
+- 三类：**自启动 / 后台弹出界面 / 锁屏显示**（MIUI 保活三件套）。
+- 每类给**品牌路径文案**；查不到的品牌给**通用兜底文案**（明说"本品牌没有公开统一入口"），
+  **不编路径**。
+- 未知 `kind`：宿主返回 `{ok:false, error}`；**Dart 侧先行拒绝**（`ArgumentError`，
+  且**不调通道**）。
+- 既有 `autostartGuide` **保留**（`oemGuide('autostart')` 的薄封装），旧调用方不变。
+- **契约红线不变**：只引导，**不自动跳转**。
+
+### N18.3 requestIgnoreBatteryOptimizations 三态（已在 `3cfe0af` 落码，此处补登记）
+
+- `null` = 当前版本不支持（`MissingPluginException`，**不引导重试**）；
+  `false` = 没生效（`PlatformException`/用户取消，可再试）；`true` = 已确认。
+- 旧宿主上不许把"通道不存在"吞成 false —— 那会让用户反复重试一个不存在的方法。
+
+### 验收
+
+- `cd backend && dart analyze` 干净 + `dart test` 全绿
+- Dart 契约测试：keepaliveStatus 三态（全有/部分缺/全缺，**缺的不编**）+
+  MissingPlugin 区分；oemGuide 三类 + 未知 kind 拒绝（且通道零调用）
+- 改 Kotlin ⇒ `flutter build apk --debug --target-platform android-arm64` 真编过
+  （三件套判成功：`√ Built` + 产物 mtime + sha256）
+- **未真机验证**：`AgentChatService.running` 实际值、MIUI 口径 note 的真机表现（无设备）
