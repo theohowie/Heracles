@@ -242,10 +242,17 @@ abstract class WebCapability {
   /// 默认实现 = **明确失败"未配置搜索服务"** —— 绝不返回假结果。
   /// 老宿主（App/CLI/测试替身）不改也能编译（契约只增）。
   ///
-  /// ⚠️ 实现方必须：返回**带来源 URL** 的结果；无 Key/未配置 ⇒ `CapabilityFailure`，
+  /// ⚠️ 实现方必须：返回**带来源 URL** 的结果；未配置 ⇒ `CapabilityFailure`，
   /// 文案人话（"未配置搜索服务"），不编造条目。
+  ///
+  /// ⚠️ **免鉴权（2026-11-02 裁定）**：当前版本只有免鉴权的搜索服务 ——
+  /// 能力接口**没有**自定义请求头的位置。Key 注入是下一轮任务
+  /// （`docs/INTERFACE.md` §N16.4 已登记待实现）。
   Future<CapabilityResult> search(String query, {int limit = 5}) async =>
-      const CapabilityFailure('未配置搜索服务（宿主未提供 web_search 能力）');
+      const CapabilityFailure(
+        '尚未配置搜索服务：请配置搜索 endpoint 后重试'
+        '（当前版本仅支持免鉴权搜索服务）。',
+      );
 }
 
 /// **本地通知能力**（V0.4 T1-4，2026-11-02）。

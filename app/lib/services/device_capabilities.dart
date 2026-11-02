@@ -2139,6 +2139,11 @@ class DeviceWebCapability implements WebCapability {
   ///
   /// 只有宿主显式配置了搜索服务才可用；未配置时 `search` **明确失败**
   /// （"未配置搜索服务"），**绝不编造结果** —— 见 docs/接口.md §10.4。
+  ///
+  /// ⚠️ **免鉴权（2026-11-02 裁定）**：本能力**没有自定义请求头的位置**，
+  /// 当前版本只支持免鉴权的搜索服务。Key 注入（`headers` 缝）是下一轮任务，
+  /// 已登记在 `docs/INTERFACE.md` §N16.4 —— 在那之前不要在这里加"顺手带个
+  /// Key"的逻辑：存了发不出去，就是"已保存却不生效"的半截功能。
   final String searchEndpoint;
 
   /// 最多跟几跳重定向。
@@ -2154,7 +2159,8 @@ class DeviceWebCapability implements WebCapability {
     final ep = searchEndpoint.trim();
     if (ep.isEmpty) {
       return const CapabilityFailure(
-        '未配置搜索服务（宿主未提供 web_search 能力）；请配置搜索 endpoint 后重试。',
+        '尚未配置搜索服务：请在设置里填写搜索 endpoint 后重试'
+        '（当前版本仅支持免鉴权搜索服务，无需 API Key）。',
         isRetryable: false,
       );
     }

@@ -586,6 +586,12 @@ class VoicePartial {
 - **`testMcpConnection` 不在通道上**：由 Dart 服务层真连，宿主不重复实现一份"假连接"。
   - `status ∈ not_configured | unsupported | failed | connected`；`connected` 必须带 `tools` 工具数。
   - `stdio` 传输在 Android 上**不支持**（没有可执行子进程环境）⇒ `status:'unsupported'` + 人话原因，**不假装连上**。
+  - ★ **偏离登记（2026-11-02，用户已确认口径）**：原始任务书写的是"`heracles/command` 只增
+    `testMcpConnection`"；实际落码为 **backend `probeMcpConnection(cfg)`（`backend/lib/src/agent/mcp_probe.dart`）**
+    —— **连接测试属于后端探活，不是通道方法**。理由：宿主没有 MCP 客户端，在 Kotlin 手搓
+    JSON-RPC 握手只能得到一个"看起来连上了"的假结果；backend 可以用真实本地
+    `HttpServer` 做测试（`backend/test/mcp_probe_test.dart`，含 SSE / 分页 / 脱敏）。
+    通道上**没有** `testMcpConnection` 方法，调用它会得到"未知方法"。
 
 **Dart 服务**（`app/lib/services/mcp_service.dart`）：
 `listServers()` / `saveServer(cfg)` / `deleteServer(name)` / `testConnection(name)` → `McpTestResult{status, tools, error, latencyMs}`。
@@ -611,9 +617,26 @@ class VoicePartial {
 
 - `SearchConfigService`：`read()` → `{endpoint, hasKey}`；`save(endpoint, {key})`；`clear()`；`masked()` → `{endpoint, keyMasked}`。
 - 校验：`endpoint` 必须 `http://`/`https://` 且能 `Uri.parse`；否则**拒绝保存**并回人话原因。
-- Key 存 secure storage，**只在请求头出现**；`masked()` 形如 `sk-***abcd`（长度 ≤ 8 全掩）。
 - 注入：`buildDeviceCapabilities(searchEndpoint: ...)` → `DeviceWebCapability.searchEndpoint`。
   ⚠️ **未配置** ⇒ `web_search` 明确失败（保持 N15.3 语义），**不编造结果**。
+
+> ★ **2026-11-02 晚 · 免鉴权收敛（用户裁定，覆盖上面第 3 条的旧说法）**
+>
+> `DeviceWebCapability` **没有自定义请求头的位置** ⇒ 存了 Key 也发不出去。
+> 本轮裁定**明确不支持鉴权**，不留半截：
+>
+> 1. `save(endpoint, {key})`：key 非空 ⇒ **整笔拒绝**（`E_SEARCH_KEY_UNSUPPORTED` +
+>    人话「当前版本仅支持免鉴权搜索服务…」），**endpoint 也不写** —— 绝不出现
+>    "已保存却不生效"的状态。先校验 endpoint、再谈 Key（地址错了先报地址）。
+> 2. 上一版本遗留的 Key：`read()` / `masked()` 读到即**迁移删除**，并如实回
+>    `hasKey:false` / `keyMasked:''`。发不出去的凭据不许躺在存储里装样子。
+> 3. 工具错误文案统一为「当前版本仅支持免鉴权搜索服务…」（`web_search` 未配置时）。
+> 4. 契约常量：`ContractSearch.keyHeaderSupported = false`（下一轮翻这个开关）。
+>
+> **⬜ 待实现（下一轮任务，不许写成已支持）**：给 `WebCapability` /
+> `DeviceWebCapability` 增加**自定义请求头（headers / apiKey）缝** +
+> 装配层从 secure storage 注入。在那之前，需要鉴权的搜索服务**不可用**，
+> UI 不得提供 Key 输入框（或置灰并说明"当前版本仅支持免鉴权搜索服务"）。
 
 ## 5. 流式与渲染约定 —— ✅ 无异议
 
