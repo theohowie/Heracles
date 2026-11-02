@@ -488,3 +488,156 @@ abstract final class ContractGit {
   /// 的折中；真需要更大仓库的用户可以显式放宽（将来若做设置项）。
   static const int maxCloneBytes = 200 * 1024 * 1024;
 }
+
+/// **SAF 目录选择器（`pickWorkspace`）的超时与兜底文案** —— 2026-11-02 T0 修复。
+///
+/// ## 为什么需要一组超时常量
+///
+/// `ACTION_OPEN_DOCUMENT_TREE` 把本 App 推到后台期间，Activity **可能被系统
+/// 回收重建**（低内存、开发者选项「不保留活动」、部分 ROM 的激进回收）。
+/// 一旦发生：
+/// - Kotlin 侧 pending 回调若挂在 Activity 实例上 ⇒ 新实例没有收件人，结果被丢弃；
+/// - Dart 侧那个 `await` **永远等不到回包** ⇒ 用户看到的是黑屏/无响应。
+///
+/// 所以 Dart 侧**必须**有超时：宁可给一句"被系统回收，请重试"，也不许永久挂起。
+/// ## ★ 计时口径（2026-11-02 真机纠错，别再按"墙钟"理解）
+///
+/// [timeoutSeconds] 是 **App 在前台** 的等待上限，**不是**从发起调用开始的墙钟。
+/// 系统选择器盖住我们时（App 进后台）**停表**。
+///
+/// 真机证据：用户在 DocumentsUI 里挑了 **70 秒**，结果正常返回
+/// （logcat `onActivityResult res=-1 data=true`），但按墙钟 45 s 的旧实现
+/// 早已判死 ⇒ UI 弹「选择结果已丢失」，而工作区其实登记成功了 —— **提示撒谎**。
+/// 计时器不该把"用户在别人的界面里挑文件夹"算作"我们的界面在干等"。
+///
+/// - [timeoutSeconds] 45 s —— 前台干等 45 秒已经远超正常回包（本地通道，毫秒级），
+///   只有"结果真的丢了"才会走到；后台不累计。
+/// - [recoverTimeoutSeconds] 3 s —— 超时后的**结果回收**是本地通道调用
+///   （不打网络），3 s 只为防通道本身卡死，不需要更久。
+///
+/// ⚠️ 口径：超时**不等于失败**。Kotlin 可能在我们超时之后才把结果交回来，
+/// 因此超时后要先尝试 [recoverMethod] 取回已完成的 payload，
+/// 取不到才报错 —— 否则会把"其实选成功了"误报成失败。
+abstract final class ContractFolderPicker {
+  /// Dart 侧等待 `pickWorkspace` 回包的上限（秒）。
+  static const int timeoutSeconds = 45;
+
+  /// 超时后回收已完成结果的上限（秒）。
+  static const int recoverTimeoutSeconds = 3;
+
+  /// 通道方法名：取回某个 requestId 已产生的结果（只增方法，旧实现无此方法时安全降级）。
+  static const String recoverMethod = 'consumePickWorkspaceResult';
+
+  /// 宿主 → Dart 的"工作区已新增"通知方法名（Activity 重建后靠它让新 UI 刷新）。
+  static const String addedPushMethod = 'workspaceAdded';
+
+  /// 超时且回收不到结果时给用户看的话。
+  ///
+  /// 措辞要求：说清**发生了什么**（系统把选择器回收了）+ **下一步**（重试），
+  /// 不用"未知错误/操作失败"这类没有信息量的话。
+  static const String timeoutMessage =
+      '系统回收了文件夹选择器，选择结果已丢失。请重试一次（或改用「默认工作区」）。';
+}
+
+/// **Skills 扩展面**（V0.4 F1，2026-11-02；契约见 `docs/INTERFACE.md` §N16.1）。
+///
+/// ## 为什么方法名也进契约
+///
+/// Kotlin 宿主与 Dart 两侧都按字符串方法名对话 —— 名字写死在两处就会漂。
+/// 这里做**唯一来源**：Dart 调通道时用常量，Kotlin 侧注释引用同一张表。
+///
+/// ## 为什么"已启用"存在宿主而不是 backend
+///
+/// backend 是纯函数式的编排层（无 IO、`dart test` 毫秒级）；启停状态是**用户偏好**，
+/// 生命周期跟着安装而不是跟着会话 ⇒ 落 SharedPreferences（宿主）。
+/// 但**开关的语义**（停用技能不注入系统提示）在 backend —— 见 `SkillRegistry.enabled`。
+abstract final class ContractSkills {
+  static const String channel = 'heracles/command';
+
+  static const String listMethod = 'skillsList';
+  static const String setEnabledMethod = 'skillsSetEnabled';
+  static const String installMethod = 'skillsInstall';
+  static const String removeMethod = 'skillsRemove';
+
+  /// 来源枚举：内置（backend 导出）与用户（工作区 `SKILL.md`）。
+  static const String sourceBuiltin = 'builtin';
+  static const String sourceUser = 'user';
+
+  /// 工作区内技能目录（相对工作区根）。
+  static const String skillsDir = '.heracles/skills';
+
+  /// 单个 `SKILL.md` 读取上限（512 KB）。
+  ///
+  /// 为什么有上限：技能正文会被注入系统提示，一个误放的巨大文件会直接吃光上下文，
+  /// 而用户看不到原因。超限 ⇒ 明确报错（进 `errors`），不静默截断。
+  static const int maxSkillFileBytes = 512 * 1024;
+
+  /// 递归扫描深度上限。
+  ///
+  /// 4 层足够「分类目录/技能名/SKILL.md」的常见形态，又能防住符号链接造出的环。
+  static const int maxScanDepth = 4;
+
+  static const String errNoWorkspace = 'E_SKILLS_NO_WORKSPACE';
+  static const String errSourceInvalid = 'E_SKILL_SOURCE_INVALID';
+  static const String errSourceUnreachable = 'E_SKILL_SOURCE_UNREACHABLE';
+  static const String errTooLarge = 'E_SKILL_TOO_LARGE';
+  static const String errNotFound = 'E_SKILL_NOT_FOUND';
+}
+
+/// **MCP 扩展面**（V0.4 F3，2026-11-02；契约见 `docs/INTERFACE.md` §N16.2）。
+abstract final class ContractMcp {
+  static const String channel = 'heracles/command';
+
+  static const String listMethod = 'mcpList';
+  static const String saveMethod = 'mcpSave';
+  static const String deleteMethod = 'mcpDelete';
+
+  /// 传输方式（与 `McpServerConfig.transport` 同一词表）。
+  static const String transportStdio = 'stdio';
+  static const String transportHttp = 'http';
+
+  /// 连接测试状态（**如实四态**，没有"大概连上了"）。
+  static const String statusNotConfigured = 'not_configured';
+  static const String statusUnsupported = 'unsupported';
+  static const String statusFailed = 'failed';
+  static const String statusConnected = 'connected';
+
+  /// 手机端 stdio 不可用的原因文案（给用户看，不许含糊成"不支持"）。
+  static const String stdioUnsupportedMessage =
+      '手机端无法启动 stdio 子进程（没有可执行的命令行环境）；请改用 http 传输的 MCP 服务器。';
+
+  static const String errSecretInEnv = 'E_MCP_SECRET_IN_ENV';
+  static const String errInvalidConfig = 'E_MCP_CONFIG_INVALID';
+}
+
+/// **Automation 消费闭环**（V0.4 F2，2026-11-02；契约见 `docs/INTERFACE.md` §N16.3）。
+abstract final class ContractAutomation {
+  /// 每个任务保留的运行历史条数（与 `AutomationStore.recordRun(keep:)` 同一口径）。
+  static const int historyKeep = 20;
+
+  /// 幂等闸：距上次运行**不到间隔的这个比例**就判为重复触发。
+  ///
+  /// 0.5 = 一半间隔。为什么不是"完全相同时间戳"：AlarmManager 的
+  /// `setInexactRepeating` 本来就有抖动，加上"启动 + 回前台"两次消费，
+  /// 用时间戳精确比对根本挡不住重复；一半间隔既能挡住抖动与二次消费，
+  /// 又不会误杀真的到了下一轮的任务。
+  static const double dedupeRatio = 0.5;
+
+  /// 历史里的失败原因最长保留字符数（防日志式膨胀）。
+  static const int maxErrorChars = 500;
+}
+
+/// **搜索服务配置**（V0.4 F4，2026-11-02；契约见 `docs/INTERFACE.md` §N16.4）。
+abstract final class ContractSearch {
+  /// secure storage 的键名（不含工作区 —— 搜索服务是 App 级配置）。
+  static const String endpointKey = 'heracles.search.endpoint';
+  static const String apiKeyKey = 'heracles.search.api_key';
+
+  /// 掩码保留的尾部字符数（`sk-***abcd` 这种）。
+  static const int maskVisibleTail = 4;
+
+  /// 短于等于此长度的 Key **全掩**（否则掩码本身就把 Key 泄完了）。
+  static const int maskFullBelow = 8;
+
+  static const String errInvalidEndpoint = 'E_SEARCH_ENDPOINT_INVALID';
+}

@@ -28,6 +28,9 @@ library;
 
 import 'package:dart_agent_core/dart_agent_core.dart';
 
+import '../agent/v4_extensions.dart';
+import '../contract/contract.dart';
+
 /// 内置技能的**唯一清单**（组装层读这里；测试断言也钉这里）。
 List<Skill> builtinSkills() => [
       _BuiltinSkill(
@@ -97,3 +100,28 @@ class _BuiltinSkill extends Skill {
     required super.systemPrompt,
   });
 }
+
+/// **导出内置技能清单**（V0.4 F1，2026-11-02；契约见 `docs/INTERFACE.md` §N16.1）。
+///
+/// ## 为什么要有这个函数
+///
+/// 前端 Skills 页需要列出**内置**技能才能做启停开关；此前内置三条只活在
+/// 系统提示的"技能目录"一行里，App 侧完全看不见 ⇒ 页面只能列出用户技能，
+/// 用户会以为"内置技能没了"。
+///
+/// ## 为什么从 [builtinSkills] 映射而不是再抄一份
+///
+/// 抄一份就有两个真相：改了正文忘了改清单 ⇒ 页面显示的描述和模型实际看到的
+/// 不一致，而且**测试抓不到**（两边各自绿）。这里直接映射，源头永远一个。
+///
+/// `source` 固定 `builtin`；`enabled` 给 `true` 只表示**出厂默认值** ——
+/// 用户改过的启停状态在宿主（见 `ContractSkills` 的说明），会覆盖这个默认。
+List<SkillEntry> builtinSkillEntries() => [
+      for (final s in builtinSkills())
+        SkillEntry(
+          name: s.name,
+          description: s.description,
+          body: s.systemPrompt,
+          source: ContractSkills.sourceBuiltin,
+        ),
+    ];

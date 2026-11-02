@@ -791,6 +791,8 @@ class _ChatScreenState extends State<ChatScreen> {
   /// 平台侧会一直持有 sink，每次进页面都多一条订阅。
   StreamSubscription<AgentEvent>? _eventSub;
   StreamSubscription<Map<String, String>>? _openSessionSub;
+  /// 宿主"刚登记了一个新工作区"的推送（SAF 期间 Activity 被回收时靠它刷新）。
+  StreamSubscription<Map<String, dynamic>>? _workspaceAddedSub;
 
   /// 当前「正在生成…」占位行的 id（同一轮复用，不重复插入）
   String? _progressId;
@@ -1113,6 +1115,13 @@ class _ChatScreenState extends State<ChatScreen> {
     _scroll.addListener(_onScroll);
     // ★ 通知点击定位会话（2026-10-19）：热启动走广播流，冷启动走 pending 兜底
     _openSessionSub = AgentBridge.openSessionRequests.listen(_onOpenSessionRequest);
+    // ★ 2026-11-02（T0）：SAF 期间 Activity 被系统回收 ⇒ Flutter 引擎一起重建，
+    //   本页面是**全新的一份**。新目录要等 Kotlin 在 onActivityResult 里登记完才
+    //   存在，而那时首屏的 `listWorkspaces()` 早跑过了。宿主登记成功会推一条，
+    //   收到就重载 —— 否则用户会以为"又没选上"。
+    _workspaceAddedSub = AgentBridge.workspaceAdded.listen((_) {
+      unawaited(_reload(silent: true));
+    });
     // ★ 2026-10-28：读 GitHub 连接状态（见 _githubAccount 的注释 ——
     //   不读的话底部永远显示「连接 Github」，即使已经连上了）
     unawaited(_loadGitHubAccount());
@@ -1120,7 +1129,15 @@ class _ChatScreenState extends State<ChatScreen> {
     unawaited(_refreshGitBranch());
     _restoreView();
     unawaited(_jev.load());
-    unawaited(_reload().then((_) => _consumePendingOpenSession()));
+    // ★ 2026-11-02（T0）：冷启动（含"进程被系统杀掉后重开"）要回到**上次那个
+    //   工作区的那个会话**，而不是第一个工作区的空态。顺序很重要：
+    //   先 `_reload` 拿到工作区与会话，再恢复选中，最后才处理通知点进来的请求
+    //   （外部请求优先级更高，不能被本地记录盖掉）。
+    unawaited(
+      _reload()
+          .then((_) => _restoreActiveSession())
+          .then((_) => _consumePendingOpenSession()),
+    );
     // ★ V0.4（#1）：续跑固定自动 3 轮，不读设置。
     // ★ T1-1（2026-10-31）：首屏进入就刷一次上下文占用 —— 冷启动时用户
     //   可能直接落在"上次的会话"上，不刷新顶栏就是「上下文 —」。
@@ -1194,6 +1211,76 @@ class _ChatScreenState extends State<ChatScreen> {
       }
     } catch (_) {
       // 忽略 —— 用默认值
+    }
+  }
+
+  // ------------------------------------------------ 上次会话的落盘与恢复（T0）
+
+  /// 「上次停在哪个会话」的存储键。
+  ///
+  /// 为什么需要它：进程被系统杀掉（`onDestroy`/`onCreate` 都可能没走全）后
+  /// 冷启动，`_activeSessionId` 是 null ⇒ 界面回到"第一个工作区 + 空聊天"。
+  /// 用户刚选完文件夹、以为工作没了，就会以为"是刚才那个 bug 又来了"。
+  static const _kLastSession = 'last_session_v1';
+
+  /// 记下"当前停在哪个工作区的哪个会话"。
+  ///
+  /// ⚠️ 没有选中会话时**什么都不做**（不是清除）。因为 `_reload()` 结束时会调
+  /// 它，而冷启动第一次 `_reload` 时 `_activeSessionId` 本来就是 null ——
+  /// 那时若"顺手清掉记录"，就永远恢复不了。清除只走显式的 [_clearLastSession]。
+  Future<void> _persistActiveSession() async {
+    final id = _activeSessionId;
+    if (id == null) return;
+    try {
+      final p = await SharedPreferences.getInstance();
+      await p.setString(
+        _kLastSession,
+        jsonEncode({'workspace': _activeWorkspace?.path ?? '', 'sessionId': id}),
+      );
+    } catch (_) {
+      // 落盘失败不该影响任何功能
+    }
+  }
+
+  /// 用户主动切到"没有会话"的状态（换工作区 / 删掉当前会话）时清记录。
+  Future<void> _clearLastSession() async {
+    try {
+      final p = await SharedPreferences.getInstance();
+      await p.remove(_kLastSession);
+    } catch (_) {
+      // 同上
+    }
+  }
+
+  /// 冷启动后恢复上次的会话。
+  ///
+  /// 三道校验，任一不满足就**安静放弃**（回到默认的空态，不弹错）：
+  /// 1. 已经有选中的会话（通知点进来等外部请求优先）；
+  /// 2. 记录里的工作区还在、且会话真的存在于该工作区（目录可能被删/被移除）；
+  /// 3. 恢复过程本身不抛（脏记录不该让首页打不开）。
+  Future<void> _restoreActiveSession() async {
+    if (_activeSessionId != null) return;
+    if (_pendingOpenRequest != null) return;
+    try {
+      final p = await SharedPreferences.getInstance();
+      final raw = p.getString(_kLastSession);
+      if (raw == null) return;
+      final m = jsonDecode(raw);
+      if (m is! Map) return;
+      final sid = (m['sessionId'] as String?) ?? '';
+      final wsPath = (m['workspace'] as String?) ?? '';
+      if (sid.isEmpty) return;
+      for (final w in _workspaces) {
+        if (wsPath.isNotEmpty && w.path != wsPath) continue;
+        if (!w.exists) continue;
+        if (!w.sessions.any((s) => s.id == sid)) continue;
+        if (!mounted) return;
+        // popFirst: false —— 这里是首页自己恢复，不是从抽屉点进来的
+        await _selectSession(w.id, sid, popFirst: false);
+        return;
+      }
+    } catch (_) {
+      // 忽略 —— 用默认（不选会话）状态
     }
   }
 
@@ -1276,6 +1363,9 @@ class _ChatScreenState extends State<ChatScreen> {
         _workspaces = list;
         _loading = false;
       });
+      // 列表刷新后顺手记下"当前停在哪个会话"—— 进程被杀后冷启动靠它恢复
+      // （`_persistActiveSession` 在没有选中会话时是 no-op，不会清掉记录）。
+      unawaited(_persistActiveSession());
     } catch (e) {
       if (!mounted) return;
       setState(() {
@@ -1378,10 +1468,36 @@ class _ChatScreenState extends State<ChatScreen> {
       //   否则上一个工作区某会话的结果会串进新工作区的列表。
       _switchContext();
       setState(() => _activeSessionId = null);
+      unawaited(_clearLastSession());
       await _reload();
     } catch (e) {
       if (!mounted) return;
-      setState(() => _error = '$e');
+      // ★ 2026-11-02（T0 SAF 黑屏）：**不许**只挂一行红字就完事。
+      //
+      // 两条路会走到这里：
+      // · 超时 —— 选择器期间 Activity 被系统回收，结果丢了（Kotlin 已用
+      //   进程级登记 + requestId 尽力找回，找不回才是这里）；
+      // · 桥接异常 —— 插件没就绪等。
+      //
+      // 两种都需要"下一步能点"，所以复用「可操作的失败提示」抽屉：
+      // 它自带两条出路（重试 / 改用默认工作区），比一句错误文本有用得多。
+      await _showPickWorkspaceFailure({
+        'ok': false,
+        'reasonCode': 'pick_failed',
+        'error': '$e',
+        'suggest': [
+          {
+            'action': 'pick_subfolder',
+            'title': '重试选择文件夹',
+            'detail': '再打开一次系统选择器。若仍被系统回收，改用「默认工作区」最稳。',
+          },
+          {
+            'action': 'use_app_workspace',
+            'title': '使用「默认工作区」',
+            'detail': 'App 自带目录，不经过系统选择器，不会再被回收。',
+          },
+        ],
+      });
     }
   }
 
@@ -1413,8 +1529,13 @@ class _ChatScreenState extends State<ChatScreen> {
   Future<void> _showPickWorkspaceFailure(Map<String, dynamic> ws) async {
     final error = (ws['error'] as String?)?.trim() ?? '';
     final reason = (ws['reasonCode'] as String?)?.trim() ?? '';
-    // 标题按原因分：网盘（无本地路径）与系统受限是两回事，措辞要准。
-    final title = reason == 'no_local_path' ? '这个位置没有本地文件夹' : '这个文件夹不能用作工作区';
+    // 标题按原因分：网盘（无本地路径）、系统受限、选择结果没回来，是三回事。
+    final title = switch (reason) {
+      'no_local_path' => '这个位置没有本地文件夹',
+      // 超时/桥接失败：不是"文件夹不行"，而是"根本没拿到文件夹"
+      'pick_failed' => '没能收到选择结果',
+      _ => '这个文件夹不能用作工作区',
+    };
 
     // Kotlin 给的出路；老版本/`no_local_path` 分支没带 ⇒ 用同样的两条兜底。
     final suggestions = <({String action, String title, String detail})>[];
@@ -2211,6 +2332,9 @@ class _ChatScreenState extends State<ChatScreen> {
         _messages.clear();
         _metrics.clear();
       });
+      // 当前会话被删 ⇒ 上次会话的记录也要一起清，否则下次冷启动会去恢复一个
+      // 已经不存在的会话（虽然会被校验挡住，但留脏数据没意义）。
+      unawaited(_clearLastSession());
     }
     await _reload();
   }
@@ -5169,6 +5293,8 @@ class _ChatScreenState extends State<ChatScreen> {
     _eventSub = null;
     _openSessionSub?.cancel();
     _openSessionSub = null;
+    _workspaceAddedSub?.cancel();
+    _workspaceAddedSub = null;
     // ★★ 16ms 帧定时器**必须**在这里取消 ★★
     //
     // `Timer.periodic` 不受 widget 生命周期管理：不取消的话，离开页面后

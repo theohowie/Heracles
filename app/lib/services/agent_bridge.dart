@@ -3,6 +3,7 @@ import 'dart:convert';
 import 'dart:io';
 
 import 'package:flutter/services.dart';
+import 'package:flutter/widgets.dart';
 import 'package:heracles_backend/heracles_backend.dart' as hb;
 import 'package:shared_preferences/shared_preferences.dart';
 
@@ -225,6 +226,24 @@ class AgentBridge {
   static Stream<Map<String, String>> get openSessionRequests =>
       _openSessionCtl.stream;
 
+  /// **Kotlin → Dart：刚登记了一个新工作区**（2026-11-02 T0）。
+  ///
+  /// ## 为什么需要这条反方向通知
+  ///
+  /// SAF 选择器期间 Activity 被系统回收时，Flutter 引擎也会一起重建 ⇒
+  /// **Dart isolate 是全新的**：原来那个 `await pickWorkspace()` 早就不存在了。
+  /// 新的 Dart 应用启动时会先 `listWorkspaces()`（此时新目录还没登记完），
+  /// 几百毫秒后 Kotlin 才在 `onActivityResult` 里把目录写进登记表 ——
+  /// 界面上的列表已经刷过去了，用户会以为"又没选上"。
+  ///
+  /// ⇒ 宿主登记成功后推一条 [hb.ContractFolderPicker.addedPushMethod]，
+  /// 界面收到就重载列表。旧宿主不推 ⇒ 只是少一次刷新，不报错。
+  static final StreamController<Map<String, dynamic>> _workspaceAddedCtl =
+      StreamController<Map<String, dynamic>>.broadcast();
+
+  static Stream<Map<String, dynamic>> get workspaceAdded =>
+      _workspaceAddedCtl.stream;
+
   void _installOpenSessionHandler() {
     if (_openHandlerInstalled) return;
     _openHandlerInstalled = true;
@@ -236,6 +255,12 @@ class AgentBridge {
           'sessionId': (args['sessionId'] as String?) ?? '',
           'workspacePath': (args['workspacePath'] as String?) ?? '',
         });
+      } else if (call.method == hb.ContractFolderPicker.addedPushMethod) {
+        final raw = call.arguments;
+        final args = raw is Map
+            ? raw.cast<String, dynamic>()
+            : const <String, dynamic>{};
+        _workspaceAddedCtl.add(args);
       }
       return null;
     });
@@ -408,14 +433,108 @@ class AgentBridge {
   ///
   /// 返回 null 表示用户取消，或选的位置没有本地路径
   /// （例如选了网盘 —— 那时无法用普通 File IO 写入）。
-  Future<Map<String, dynamic>?> pickWorkspace() async {
+  /// ## 为什么要带 requestId + 超时（2026-11-02 T0 修复）
+  ///
+  /// SAF 选择器在前台时，本 Activity 可能被系统回收重建。旧实现有两个叠加的
+  /// 死角，合起来就是用户报的"选完文件夹返回 ⇒ 黑屏"：
+  ///
+  /// 1. Kotlin 侧 pending 回调挂在 **Activity 实例**上 ⇒ 重建后新实例没有
+  ///    收件人，选好的结果被静默丢弃；
+  /// 2. Dart 侧这里**没有超时** ⇒ 上面那条一旦发生，这个 `await` 永久挂起，
+  ///    UI 就那么卡着。
+  ///
+  /// 现在：
+  /// - 每次调用生成 [requestId]，Kotlin 用它做**进程级**登记的键（Activity
+  ///   重建后仍能对上）；
+  /// - 等待超过 [hb.ContractFolderPicker.timeoutSeconds] 就**先回收**结果
+  ///   （[_consumePickWorkspaceResult]）—— 因为 Kotlin 可能在我们超时之后
+  ///   才把结果交回来，直接报失败会把"其实选成功了"误判成失败；
+  /// - 回收不到才抛 [AgentBridgeException]，带上人话提示（重试 / 换默认工作区）。
+  ///
+  /// [timeout] 仅供测试注入更短的超时；生产不传，用契约常量。
+  ///
+  /// ## ★★ 超时只计**前台**时间（2026-11-02 真机纠错）★★
+  ///
+  /// 第一版直接 `future.timeout(45s)`，真机一测就露馅：
+  ///
+  /// ```
+  /// 18:27:25.936  startActivityForResult 已发出
+  /// 18:28:35.514  onActivityResult req=18502 res=-1 data=true   ← 结果好好的
+  /// ```
+  ///
+  /// 系统选择器在前台停留了 **70 秒**（logcat：`visible->invisible(70217ms)`），
+  /// 于是 45 秒一到 Dart 就报「选择结果已丢失」，可用户**还在挑目录**。
+  /// 结果最后也真的登记成功了 —— UI 却在撒谎说失败。
+  ///
+  /// 计时器不该把"用户在系统选择器里挑文件夹"算作"我们的等待"。
+  /// ⇒ 改成 [_ForegroundDeadline]：App 一进后台（选择器盖住我们）就停表，
+  /// 回到前台再接着走。45 秒的真实含义变成「用户对着我们自己的界面干等 45 秒」，
+  /// 那才是需要兜底的情况。
+  Future<Map<String, dynamic>?> pickWorkspace({Duration? timeout}) async {
+    // requestId 只用于**同一次调用**的配对，不需要全局唯一性，微秒时间戳足够
+    // （同一时刻不可能发起两次选目录）。
+    final requestId = 'pk_${DateTime.now().microsecondsSinceEpoch}';
+    final limit =
+        timeout ?? const Duration(seconds: hb.ContractFolderPicker.timeoutSeconds);
+
+    final done = Completer<Map<String, dynamic>?>();
+    final deadline = _ForegroundDeadline(limit, () {
+      if (!done.isCompleted) {
+        done.completeError(TimeoutException('pickWorkspace', limit));
+      }
+    })..start();
+
+    // 通道回包 → 完成等待。**不 await**：先让 deadline 与回包并行跑。
+    _channel
+        .invokeMapMethod<String, dynamic>('pickWorkspace', {
+          'requestId': requestId,
+        })
+        .then(
+      (m) {
+        if (!done.isCompleted) done.complete(m?.cast<String, dynamic>());
+      },
+      onError: (Object e, StackTrace st) {
+        if (!done.isCompleted) done.completeError(e, st);
+      },
+    );
+
     try {
-      final m = await _channel.invokeMapMethod<String, dynamic>('pickWorkspace');
-      return m?.cast<String, dynamic>();
+      return await done.future;
+    } on TimeoutException {
+      // 超时 ≠ 失败：先问 Kotlin 要这次请求已产出的结果。
+      final recovered = await _consumePickWorkspaceResult(requestId);
+      if (recovered != null) return recovered;
+      throw const AgentBridgeException(hb.ContractFolderPicker.timeoutMessage);
     } on PlatformException catch (e) {
       throw AgentBridgeException(e.message ?? e.code);
     } on MissingPluginException {
       throw const AgentBridgeException('桥接未就绪');
+    } finally {
+      deadline.cancel();
+    }
+  }
+
+  /// 取回某个 `requestId` 已完成但**没送达**的选择结果（超时后的补救）。
+  ///
+  /// 通道方法由 Kotlin 侧 `MainActivity` 提供；旧版本 App / 纯单测环境没有这个
+  /// 方法 ⇒ [MissingPluginException]，返回 null 走超时错误分支，**不抛**。
+  Future<Map<String, dynamic>?> _consumePickWorkspaceResult(
+    String requestId,
+  ) async {
+    try {
+      final m = await _channel
+          .invokeMapMethod<String, dynamic>(hb.ContractFolderPicker.recoverMethod, {
+            'requestId': requestId,
+          })
+          .timeout(
+            const Duration(
+              seconds: hb.ContractFolderPicker.recoverTimeoutSeconds,
+            ),
+          );
+      return m?.cast<String, dynamic>();
+    } catch (_) {
+      // 回收本身失败不该盖住"超时"这个主因，交给上层给出超时提示。
+      return null;
     }
   }
 
@@ -2764,4 +2883,121 @@ enum ToolState {
         'none' => ToolState.none,
         _ => null,
       };
+}
+
+/// **只在前台走表的一次性超时**（2026-11-02 · T0 真机纠错）。
+///
+/// ## 为什么不能用 `Future.timeout`
+///
+/// 真机 logcat 摆在那儿：
+///
+/// ```
+/// 18:27:25.936  [heracles][picker] startActivityForResult 已发出
+/// 18:28:35.514  HeraclesAct: onActivityResult req=18502 res=-1 data=true
+/// ```
+///
+/// 结果**好好地回来了**（`res=-1` = RESULT_OK，`data` 非空），但系统选择器在前台
+/// 停留了 **70 秒**（`SmartPower: visible->invisible(70217ms)`）——
+/// `Future.timeout(45s)` 早在 45 秒时就判了死刑，UI 于是弹出
+/// 「系统回收了文件夹选择器，选择结果已丢失」，可工作区其实登记成功了。
+///
+/// **这不是"超时太长/太短"的问题，是计时口径错了**：用户在系统选择器里挑文件夹，
+/// 不该算作"我们的界面在干等"。
+///
+/// ⇒ App 进后台（选择器盖住我们）就停表，回到前台再接着走。
+/// 于是 45 秒的真实含义是「用户对着**我们自己的界面**干等 45 秒」，那才该兜底。
+class _ForegroundDeadline {
+  _ForegroundDeadline(this.total, this.onExpire);
+
+  final Duration total;
+  final void Function() onExpire;
+
+  Timer? _timer;
+  _DeadlineObserver? _observer;
+  bool _done = false;
+
+  void start() {
+    // 没有 WidgetsBinding（纯 Dart 单测）时退化成普通计时器 —— 功能不变，只是
+    // 少了"后台停表"这层保护，而单测本来也不会切前后台。
+    try {
+      _observer = _DeadlineObserver(this);
+      WidgetsBinding.instance.addObserver(_observer!);
+    } catch (_) {
+      _observer = null;
+    }
+    // ★ 按**当前**生命周期决定是否起表：调用点可能正好在后台
+    //   （例如用户刚切回来、结果还没到）。`lifecycleState == null` 表示
+    //   binding 还没收到第一次状态（冷启动早期）—— 按前台处理。
+    final state = _currentLifecycle();
+    if (state == null || state == AppLifecycleState.resumed) {
+      _arm();
+    }
+  }
+
+  AppLifecycleState? _currentLifecycle() {
+    if (_observer == null) return null;
+    try {
+      return WidgetsBinding.instance.lifecycleState;
+    } catch (_) {
+      return null;
+    }
+  }
+
+  void _arm() {
+    if (_done) return;
+    _timer?.cancel();
+    _timer = Timer(total, () {
+      if (_done) return;
+      _done = true;
+      onExpire();
+    });
+  }
+
+  void _disarm() {
+    _timer?.cancel();
+    _timer = null;
+  }
+
+  /// 生命周期回调：**只有 `resumed` 才走表**。
+  ///
+  /// `inactive`（下拉通知栏、来电话）与 `paused`（选择器/相机盖住我们）都停表：
+  /// 这两种状态里用户根本没在等我们的回包。
+  void onLifecycle(AppLifecycleState state) {
+    if (_done) return;
+    if (state == AppLifecycleState.resumed) {
+      _arm();
+    } else {
+      _disarm();
+    }
+  }
+
+  void cancel() {
+    _done = true;
+    _disarm();
+    final o = _observer;
+    if (o != null) {
+      runCatchingRemoveObserver(o);
+      _observer = null;
+    }
+  }
+
+  static void runCatchingRemoveObserver(WidgetsBindingObserver o) {
+    try {
+      WidgetsBinding.instance.removeObserver(o);
+    } catch (_) {
+      // binding 已销毁（测试收尾）—— 忽略
+    }
+  }
+}
+
+/// 把 App 生命周期转给 [_ForegroundDeadline] 的观察者。
+class _DeadlineObserver with WidgetsBindingObserver {
+  _DeadlineObserver(this.owner);
+
+  final _ForegroundDeadline owner;
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    owner.onLifecycle(state);
+  }
 }

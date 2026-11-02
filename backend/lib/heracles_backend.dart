@@ -44,6 +44,9 @@ export 'src/agent/tools/tool_aliases.dart';
 export 'src/agent/tools/v4_tools.dart';
 // ★ V0.4 T1-5：Skills 扫描 / MCP 配置 / Automation 存储（纯逻辑 + 校验）。
 export 'src/agent/v4_extensions.dart';
+// ★ V0.4 F3（2026-11-02）：MCP 探活 —— 真实 JSON-RPC 握手 + tools/list 发现（纯数据返回）。
+//   放 backend 是为了让 App 只依赖 backend 的公共面，不必直接 import dart_agent_core。
+export 'src/agent/mcp_probe.dart';
 // 会话历史 → 框架消息（2026-10-23）。宿主读会话文件后交给 `run(history:)`。
 export 'src/agent/session_history.dart';
 // 多模态输入边界类型（2026-10-23）。宿主演把图片压成 base64，框架类型不出 backend。
