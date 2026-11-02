@@ -310,6 +310,53 @@ class AgentBridge {
     }
   }
 
+  /// **自动化任务真调度**（V0.4 T1-5，2026-11-02）。
+  ///
+  /// Kotlin 侧用 **AlarmManager** 注册周期闹钟（无新依赖）；到点**只发通知 + 写 pending 标记**，
+  /// **不假装跑了 agent** —— 真正执行由 App 打开后 Dart 侧发起（进程死可恢复）。
+  ///
+  /// · [saveAutomationTasks]：保存任务清单（JSON 字符串）并重注册闹钟；
+  /// · [loadAutomationTasks]：读回任务清单；
+  /// · [consumePendingAutomation]：取出"到点待执行"的任务 id 列表（并清空）。
+  Future<bool> saveAutomationTasks(String tasksJson) async {
+    try {
+      final m = await _channel.invokeMapMethod<String, dynamic>(
+        'automationSave',
+        {'tasks': tasksJson},
+      );
+      return m?['ok'] == true;
+    } on MissingPluginException {
+      return false; // 旧宿主没有该方法 ⇒ 如实失败
+    } on PlatformException {
+      return false;
+    }
+  }
+
+  Future<String> loadAutomationTasks() async {
+    try {
+      final m = await _channel.invokeMapMethod<String, dynamic>('automationLoad');
+      return (m?['tasks'] as String?) ?? '[]';
+    } on MissingPluginException {
+      return '[]';
+    } on PlatformException {
+      return '[]';
+    }
+  }
+
+  Future<List<String>> consumePendingAutomation() async {
+    try {
+      final m = await _channel
+          .invokeMapMethod<String, dynamic>('automationConsumePending');
+      return ((m?['taskIds'] as List?) ?? const [])
+          .map((e) => e.toString())
+          .toList(growable: false);
+    } on MissingPluginException {
+      return const [];
+    } on PlatformException {
+      return const [];
+    }
+  }
+
   /// 提示消费后清标记（避免每次打开都提示）。
   Future<void> consumeProcessKilled() async {
     try {

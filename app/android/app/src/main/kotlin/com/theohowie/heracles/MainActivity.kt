@@ -19,6 +19,7 @@ import android.os.Handler
 import android.os.Looper
 import androidx.core.app.NotificationManagerCompat
 import com.theohowie.heracles.bridge.AgentChatService
+import com.theohowie.heracles.bridge.AutomationScheduler
 import com.theohowie.heracles.bridge.DeviceChannel
 import com.theohowie.heracles.bridge.DeviceFs
 import com.theohowie.heracles.bridge.DeviceHealth
@@ -331,6 +332,24 @@ class MainActivity : FlutterActivity() {
                 }
             }
 
+            // ---- ★ V0.4 T1-5（2026-11-02）：自动化任务真调度（AlarmManager）----
+            //   Dart 侧存任务清单 ⇒ 这里注册周期闹钟；到点只发通知 + 写 pending，
+            //   **不假装跑了 agent**（执行由 App 打开后 Dart 侧发起）。
+            "automationSave" -> {
+                val tasks = call.argument<String>("tasks") ?: "[]"
+                val ok = AutomationScheduler.saveTasks(this, tasks)
+                result.success(mapOf("ok" to ok, "error" to if (ok) null else "任务清单保存失败"))
+            }
+            "automationLoad" -> result.success(
+                mapOf("ok" to true, "tasks" to AutomationScheduler.loadTasks(this))
+            )
+            "automationConsumePending" -> result.success(
+                mapOf("ok" to true, "taskIds" to AutomationScheduler.consumePending(this))
+            )
+            "automationCancelAll" -> {
+                AutomationScheduler.cancelAll(this)
+                result.success(mapOf("ok" to true))
+            }
             else -> result.success(mapOf("ok" to false, "error" to "未知方法：${call.method}"))
         }
     }

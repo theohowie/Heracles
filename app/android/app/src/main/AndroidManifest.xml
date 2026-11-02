@@ -52,6 +52,8 @@
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <!-- V0.4 T1-5（2026-11-02）：自动化任务开机重注册（AlarmManager 周期闹钟重启后失效） -->
+    <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
     <!-- 2026-10-27 权限页扩容：相机（拍照上传，接口预留）/ 日历（后续
          自动化用）/ 媒体（图片与视频附件）/ 安装未知应用（装构建出的
          APK 时在安装流程里申请，本声明先行登记） -->
@@ -192,7 +194,22 @@
             android:exported="false"
             android:stopWithTask="false"
             android:foregroundServiceType="dataSync" />
-    </application>
+
+        <!-- ★ V0.4 T1-5（2026-11-02）：自动化任务真调度（AlarmManager，无新依赖） -->
+        <receiver
+            android:name=".bridge.AutomationReceiver"
+            android:exported="false">
+            <intent-filter>
+                <action android:name="com.theohowie.heracles.AUTOMATION_FIRE" />
+            </intent-filter>
+        </receiver>
+        <receiver
+            android:name=".bridge.AutomationBootReceiver"
+            android:exported="false">
+            <intent-filter>
+                <action android:name="android.intent.action.BOOT_COMPLETED" />
+            </intent-filter>
+        </receiver>    </application>
     <!-- Required to query activities that can process text, see:
          https://developer.android.com/training/package-visibility and
          https://developer.android.com/reference/android/content/Intent#ACTION_PROCESS_TEXT.

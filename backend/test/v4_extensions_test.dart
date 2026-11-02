@@ -144,8 +144,11 @@ description: 一句话说明
             id: 'a', title: 't', prompt: 'p', schedule: 'interval', intervalMinutes: 5)),
         isNull,
       );
-      expect(AutomationStore.schedulerImplemented, isFalse,
-          reason: '★ 调度器未接时不许声称能定时跑');
+      // ★ 2026-11-02：调度器已用 AlarmManager 实现（真实周期触发）；
+      //   但**执行**仍需要 App 在前台 —— 两条都必须如实标注，不许说成"后台自动跑完"。
+      expect(AutomationStore.schedulerImplemented, isTrue);
+      expect(AutomationStore.executionRequiresAppForeground, isTrue,
+          reason: '★ 到点只发通知+写 pending，真正 run 要 App 打开后发起');
     });
 
     test('⑦ 运行历史只留最近 N 条，只记真实结果', () {

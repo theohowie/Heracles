@@ -389,8 +389,14 @@ class AutomationStore {
 
   final Map<String, AutomationTask> _tasks;
 
-  /// 调度器是否已实现（宿主 WorkManager/前台服务接入前恒 false）。
-  static const bool schedulerImplemented = false;
+  /// 调度器是否已实现（2026-11-02：宿主用 **AlarmManager** 实现真实周期触发）。
+  ///
+  /// ⚠️ 但**执行**仍需要 App 在前台（到点只发通知 + 写 pending 标记，真正 run 由
+  /// App 打开后发起）—— 这条必须如实告诉 UI，不许说成"后台自动跑完"。
+  static const bool schedulerImplemented = true;
+
+  /// **执行**是否需要 App 在前台（2026-11-02 现状 = true，如实标注）。
+  static const bool executionRequiresAppForeground = true;
 
   List<AutomationTask> get all => _tasks.values.toList(growable: false);
 
