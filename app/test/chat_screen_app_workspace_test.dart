@@ -7,6 +7,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 import 'package:heracles/screens/chat_screen.dart';
 import 'package:heracles/services/settings_controller.dart';
 import 'package:heracles/theme/app_theme.dart';
+import 'package:heracles/widgets/input_bar.dart' show InputBar;
 
 import 'support/secure_storage_mock.dart';
 
@@ -175,16 +176,22 @@ void main() {
   /// **打开抽屉**：原型 01（`1f52b1d`，2026-10-25）之后顶栏左侧不再有 ☰ 线条图标，
   /// 换成**品牌图标**（真实 App 图标，点它开抽屉）。按 **asset 名**定位，
   /// 免得 finder 随 UI 改版再失效。
+  /// 打开抽屉（2026-11-02 修夹具：入口换了，断言未动）。
+  ///
+  /// 顶栏品牌图标已改为「切换工作/决策模式」（`chat_screen.dart:5279`，
+  /// 明写取代"点图标开抽屉"）。抽屉现在的按钮入口是**输入区信息条上的工作区名**
+  /// （`chat_screen.dart:5589` `onWorkspaceTap` ⇒ `openDrawer()`）。
   Future<void> openDrawer(WidgetTester tester) async {
-    final opener = find.byWidgetPredicate(
-      (w) =>
-          w is Image &&
-          w.image is AssetImage &&
-          (w.image as AssetImage).assetName.contains('app_icon_source'),
-      description: '顶栏左侧品牌图标（打开抽屉）',
+    // 本文件测的是**还没选工作区**的首屏 ⇒ 信息条第一格显示占位「工作区」
+    // （input_bar.dart `_EnvStrip`：`workspaceLabel ?? '工作区'`）。
+    // 锚在 InputBar 内部，避免命中空态文案里的同一串字。
+    final opener = find.descendant(
+      of: find.byType(InputBar),
+      matching: find.text('工作区'),
     );
     expect(opener, findsOneWidget,
-        reason: '顶栏左侧必须有品牌图标（点它开抽屉）—— 找不到说明顶栏又改了');
+        reason: '输入区信息条上必须有工作区入口（未选时显示「工作区」）—— '
+            '它现在是唯一可点的抽屉入口（顶栏图标已改成切模式）');
     await tester.tap(opener);
     await settle(tester);
   }

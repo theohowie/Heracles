@@ -694,10 +694,15 @@ class _InputBarState extends State<InputBar>
                         builder: (context, rowConstraints) {
                           // 行宽一半 − ＋(38) − 间距(4) − 胶囊内边距(24)；
                           // 下限 48：极窄容器下不能给负的 maxWidth（BoxConstraints 会断言）。
+                          final halfBudget = rowConstraints.maxWidth * 0.5 - 66;
+                          // ★ 还必须有硬上限：右侧固定件（10+38+8+38+8+38 = 140）
+                          //   在窄屏上**本身就超过半行**（320dp ⇒ 行 274，半行 137）——
+                          //   只按"半宽"给，刚修好的溢出会换成另一种溢出
+                          //   （input_bar_overflow_test 的 320dp 用例就是这么抓到的）。
+                          final hardBudget = rowConstraints.maxWidth - 206;
+                          final raw = halfBudget < hardBudget ? halfBudget : hardBudget;
                           final pillTextMax =
-                              (rowConstraints.maxWidth * 0.5 - 66)
-                                  .clamp(48.0, 240.0)
-                                  .toDouble();
+                              raw.clamp(48.0, 240.0).toDouble();
                           return Row(
                         children: [
                           _CircleButton(
