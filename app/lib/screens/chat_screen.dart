@@ -27,6 +27,9 @@ import '../theme/app_theme.dart';
 import '../theme/cupertino_kit.dart';
 import '../theme/pressable.dart';
 import 'settings_screen.dart';
+import 'automation_screen.dart';
+import 'mcp_screen.dart';
+import 'skills_screen.dart';
 import 'archived_sessions_screen.dart';
 import 'jev_settings_screen.dart';
 import '../widgets/bw_topbar.dart';
@@ -2459,6 +2462,23 @@ class _ChatScreenState extends State<ChatScreen> {
         onOpenArchived: _openArchivedPage,
       ),
     ));
+  }
+
+  /// **自动化任务页**（2026-11-02：入口从设置页移到抽屉 —— 用户裁定三个
+  /// 智能体入口放主页侧边栏，单一入口避免两处维护）。
+  void _openAutomation() => _openFromDrawer(const AutomationScreen());
+
+  void _openSkills() => _openFromDrawer(const SkillsScreen());
+
+  void _openMcp() => _openFromDrawer(const McpScreen());
+
+  /// 从抽屉进二级页的共用路径：先关抽屉（只有从抽屉进来才需要 ——
+  /// 同 [_openSettings] 里 2026-10-19 的坑），再 push。
+  void _openFromDrawer(Widget page) {
+    if (_scaffoldKey.currentState?.isDrawerOpen ?? false) {
+      Navigator.of(context).pop();
+    }
+    Navigator.of(context).push(MaterialPageRoute(builder: (_) => page));
   }
 
   /// **已归档对话页**（从设置打开）：快照取当前工作区列表里的
@@ -5368,6 +5388,10 @@ class _ChatScreenState extends State<ChatScreen> {
         onSelectSession: _selectSession,
         onNewSession: _newSession,
         onOpenSettings: _openSettings,
+        // ★ 技能 / MCP / 自动化入口（2026-11-02 用户裁定：放抽屉，不放设置页）
+        onOpenAutomation: _openAutomation,
+        onOpenSkills: _openSkills,
+        onOpenMcp: _openMcp,
         onAddWorkspace: _pickWorkspace,
         // ★ 内置「应用工作区」—— 与"选文件夹"并列的第二入口（2026-10-17）。
         //   两个入口互不兜底：一个选用户自己的项目，一个进能构建的内置目录。

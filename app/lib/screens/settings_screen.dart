@@ -23,9 +23,8 @@ import '../theme/theme_reveal.dart';
 import '../data/open_source_licenses.dart';
 import '../widgets/bw_approval.dart';
 import '../widgets/background_keepalive_card.dart';
-import 'automation_screen.dart';
-import 'mcp_screen.dart';
-import 'skills_screen.dart';
+// 技能 / MCP / 自动化三页的入口已移到主页抽屉（2026-11-02 用户裁定），
+// 这里不再 import（单一入口，避免两处维护）。
 import 'jev_settings_screen.dart';
 import 'oss_licenses_screen.dart';
 import 'voice_settings_screen.dart';
@@ -105,21 +104,9 @@ class SettingsScreen extends StatelessWidget {
                   _SandboxEntry(
                     onOpen: () => _push(context, const SandboxScreen()),
                   ),
-                  _HomeRow(
-                    title: '技能',
-                    subtitle: '内置技能已启用',
-                    onTap: () => _push(context, const SkillsScreen()),
-                  ),
-                  _HomeRow(
-                    title: 'MCP 服务器',
-                    subtitle: '未配置 · 接口未接通',
-                    onTap: () => _push(context, const McpScreen()),
-                  ),
-                  _HomeRow(
-                    title: '自动化任务',
-                    subtitle: '定时提醒（到点只发通知，不自动执行）',
-                    onTap: () => _push(context, const AutomationScreen()),
-                  ),
+                  // ★ 2026-11-02：技能 / MCP / 自动化三行**移出设置页**
+                  //   （用户裁定：三个智能体入口放主页抽屉 —— 单一入口，
+                  //   避免两处维护；本组还有记忆/权限/语音/沙箱/模型，标签不变）。
                   if (archivedCountLoader != null && onOpenArchived != null)
                     _ArchivedEntry(
                       countOf: archivedCountLoader!,
@@ -608,6 +595,21 @@ class _DevicePermissionPageState extends State<DevicePermissionPage>
       padding: const EdgeInsets.symmetric(vertical: 6),
       child: Column(
         children: [
+          // ★ F-A（2026-11-02）：「后台运行」入口行并入本卡（第一行），
+          //   视觉归组 —— 点击仍进 BackgroundKeepalivePage（内容不变）。
+          KeyedSubtree(
+            key: const Key('device-permission-background-row'),
+            child: _HomeRow(
+              title: '后台运行',
+              subtitle: '保活状态 · 电池优化 · 自启动',
+              onTap: () => Navigator.of(context).push(
+                CupertinoPageRoute(
+                  builder: (_) => const BackgroundKeepalivePage(),
+                ),
+              ),
+            ),
+          ),
+          Divider(height: 1, indent: 18, endIndent: 18, color: h.border),
           for (var i = 0; i < rows.length; i++) ...[
             if (i > 0)
               Divider(height: 1, indent: 18, endIndent: 18, color: h.border),
@@ -730,26 +732,28 @@ class _DevicePermissionPageState extends State<DevicePermissionPage>
           : ListView(
               padding: const EdgeInsets.all(HSpace.lg),
               children: [
-                // ---- 第一行：后台运行（二级页入口；UI 与权限页同一形态）----
-                _GroupCard(
-                  children: [
-                    KeyedSubtree(
-                      key: const Key('device-permission-background-row'),
-                      child: _HomeRow(
-                        title: '后台运行',
-                        subtitle: '保活状态 · 电池优化 · 自启动',
-                        onTap: () => Navigator.of(context).push(
-                          CupertinoPageRoute(
-                            builder: (_) => const BackgroundKeepalivePage(),
+                // ---- F-A（2026-11-02）：「后台运行」入口行**并入权限卡**
+                //   （视觉归组，不再单独一张卡割裂）。权限查询为空时才单独
+                //   兜底一张卡，保证入口恒在。点击仍进 BackgroundKeepalivePage。
+                if (_perms.isNotEmpty)
+                  _permOverview(h)
+                else
+                  _GroupCard(
+                    children: [
+                      KeyedSubtree(
+                        key: const Key('device-permission-background-row'),
+                        child: _HomeRow(
+                          title: '后台运行',
+                          subtitle: '保活状态 · 电池优化 · 自启动',
+                          onTap: () => Navigator.of(context).push(
+                            CupertinoPageRoute(
+                              builder: (_) => const BackgroundKeepalivePage(),
+                            ),
                           ),
                         ),
                       ),
-                    ),
-                  ],
-                ),
-                const SizedBox(height: HSpace.md),
-                // ---- 权限总览卡（概念图 07 形态）----
-                if (_perms.isNotEmpty) _permOverview(h),
+                    ],
+                  ),
                 // ---- 卡下说明：自愈状态 + 概念图 07 页脚 ----
                 const SizedBox(height: HSpace.md),
                 Text(
