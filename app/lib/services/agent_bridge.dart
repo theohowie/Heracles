@@ -260,6 +260,67 @@ class AgentBridge {
     }
   }
 
+  /// **V0.4 T0-2 后台保活引导**（2026-11-02，只引导/只读，不改系统设置）。
+  ///
+  /// 三件事：
+  /// · [requestIgnoreBatteryOptimizations]：拉起系统"忽略电池优化"确认页（false = 系统不支持）；
+  /// · [autostartGuide]：返回 OEM 自启路径文案（**不自动跳转**）；
+  /// · [processKilled] / [consumeProcessKilled]：上次 run 是否被系统停止（如实提示，
+  ///   不假装继续；提示消费后清标记）。
+  Future<bool> requestIgnoreBatteryOptimizations() async {
+    try {
+      final ok = await _channel.invokeMethod<bool>('requestIgnoreBatteryOptimizations');
+      return ok ?? false;
+    } on MissingPluginException {
+      return false;
+    } on PlatformException {
+      return false;
+    }
+  }
+
+  /// OEM 自启引导（`{brand, path}`）；通道不支持 ⇒ null（UI 显示通用说明）。
+  Future<({String brand, String path})?> autostartGuide() async {
+    try {
+      final m = await _channel.invokeMapMethod<String, dynamic>('autostartGuide');
+      if (m == null) return null;
+      final brand = (m['brand'] as String?) ?? '';
+      final path = (m['path'] as String?) ?? '';
+      if (brand.isEmpty || path.isEmpty) return null;
+      return (brand: brand, path: path);
+    } on MissingPluginException {
+      return null;
+    } on PlatformException {
+      return null;
+    }
+  }
+
+  /// 上次 run 是否被系统停止；`killedAt` = 毫秒时间戳（0 = 无记录）。
+  Future<({bool killed, int killedAt})> processKilled() async {
+    try {
+      final m = await _channel.invokeMapMethod<String, dynamic>('processKilled');
+      if (m == null) return (killed: false, killedAt: 0);
+      return (
+        killed: (m['killed'] as bool?) ?? false,
+        killedAt: (m['killedAt'] as int?) ?? 0,
+      );
+    } on MissingPluginException {
+      return (killed: false, killedAt: 0);
+    } on PlatformException {
+      return (killed: false, killedAt: 0);
+    }
+  }
+
+  /// 提示消费后清标记（避免每次打开都提示）。
+  Future<void> consumeProcessKilled() async {
+    try {
+      await _channel.invokeMethod('consumeProcessKilled');
+    } on MissingPluginException {
+      // 旧宿主没有这个方法 ⇒ 忽略
+    } on PlatformException {
+      // 忽略
+    }
+  }
+
   // ------------------------------------------------------------ 用量与上下文
 
   /// ★ 2026-10-22：这两个数**改由进程内 run 记账**（旧的 `usageInfo`

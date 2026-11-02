@@ -190,6 +190,7 @@
         <service
             android:name=".bridge.AgentChatService"
             android:exported="false"
+            android:stopWithTask="false"
             android:foregroundServiceType="dataSync" />
     </application>
     <!-- Required to query activities that can process text, see:

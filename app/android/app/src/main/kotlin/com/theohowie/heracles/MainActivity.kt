@@ -17,6 +17,7 @@ import android.os.Environment
 import android.os.Handler
 import android.os.Looper
 import androidx.core.app.NotificationManagerCompat
+import com.theohowie.heracles.bridge.AgentChatService
 import com.theohowie.heracles.bridge.DeviceChannel
 import com.theohowie.heracles.bridge.DeviceFs
 import com.theohowie.heracles.bridge.DeviceHealth
@@ -277,6 +278,30 @@ class MainActivity : FlutterActivity() {
                 val p = pendingOpenSession
                 pendingOpenSession = null
                 result.success(p)
+            }
+
+            // ---- ★ V0.4 T0-2 后台保活引导（2026-11-02；只引导/只读，不改系统设置）----
+            //   电池优化：拉起系统"忽略电池优化"确认页（false = 系统不支持）
+            "requestIgnoreBatteryOptimizations" -> reply(
+                result,
+                AgentChatService.requestIgnoreBatteryOptimizations(this),
+            )
+            //   OEM 自启：只返回 {brand, path} 给 UI 显示，**不自动跳转**
+            "autostartGuide" -> {
+                val (brand, path) = AgentChatService.autostartGuide()
+                result.success(mapOf("ok" to true, "brand" to brand, "path" to path))
+            }
+            //   上次 run 是否被系统停止（如实提示，不假装继续）
+            "processKilled" -> result.success(
+                mapOf(
+                    "ok" to true,
+                    "killed" to AgentChatService.processKilled(this),
+                    "killedAt" to AgentChatService.processKilledAt(this),
+                )
+            )
+            "consumeProcessKilled" -> {
+                AgentChatService.consumeProcessKilled(this)
+                result.success(mapOf("ok" to true))
             }
 
             else -> result.success(mapOf("ok" to false, "error" to "未知方法：${call.method}"))
