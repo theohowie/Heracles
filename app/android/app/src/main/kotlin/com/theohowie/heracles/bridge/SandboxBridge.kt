@@ -25,6 +25,7 @@ import com.heracles.sandbox.file.PathSemantics
 import com.heracles.sandbox.file.SandboxFileService
 import com.heracles.sandbox.file.ZeroWidthFileChannel
 import com.heracles.sandbox.runtime.SandboxDependencies
+import com.heracles.sandbox.runtime.SandboxEnvManager
 import com.heracles.sandbox.runtime.SandboxServiceCore
 import io.flutter.plugin.common.MethodCall
 import io.flutter.plugin.common.MethodChannel
@@ -563,6 +564,58 @@ class SandboxBridge(
                         )
                     },
                     onFailure = { e -> failure(e.message ?: e.javaClass.simpleName) },
+                ))
+            }
+
+            // ---- ★ V0.4 T0-3（2026-11-02）：沙箱环境管理（L1 only）----
+            //   `SandboxEnvManager` 是纯逻辑（配方/网络策略/项目识别），安装执行走沙箱 shell。
+            //   ⚠️ 真实安装（apk/npm/pip 到 /opt/envs/<name>）尚未接线 ⇒ installEnv 明确失败，
+            //   不假装装好（见 docs/接口.md §10.3）。
+            "envProfile" -> {
+                val n = com.heracles.sandbox.runtime.NetworkPolicy()
+                reply(result, mapOf(
+                    "ok" to true,
+                    "isolationTier" to "process",
+                    "tierImplemented" to true,
+                    "network" to mapOf(
+                        "whitelistOnly" to n.whitelistOnly,
+                        "allowAllOutbound" to n.allowAllOutbound,
+                        "riskLevel" to n.riskLevel,
+                        "riskNote" to n.riskNote,
+                        "hosts" to n.effectiveHosts(),
+                        "proxy" to n.proxy,
+                    ),
+                    // 已安装环境：安装执行未接线 ⇒ 恒空（不假装有）
+                    "envs" to emptyList<String>(),
+                ))
+            }
+
+            "installEnv" -> {
+                val name = call.argument<String>("name") ?: ""
+                val preview = SandboxEnvManager.installPreview(name)
+                reply(result, if (preview == null) {
+                    mapOf("ok" to false, "error" to "未知环境：$name（不猜）")
+                } else {
+                    mapOf(
+                        "ok" to false,
+                        "name" to name,
+                        "error" to "环境安装尚未接线（安装执行需沙箱 shell，见 docs/接口.md §10.3）",
+                        "approxBytes" to preview["approxBytes"],
+                        "message" to "可安装，但执行层未接：不会假装已装好",
+                    )
+                })
+            }
+
+            "uninstallEnv" -> reply(result, mapOf(
+                "ok" to false,
+                "error" to "环境卸载尚未接线（执行层未接）",
+            ))
+
+            "detectProjectEnv" -> {
+                val files = call.argument<List<String>>("files") ?: emptyList()
+                reply(result, mapOf(
+                    "ok" to true,
+                    "envs" to SandboxEnvManager.detectProject(files),
                 ))
             }
 
