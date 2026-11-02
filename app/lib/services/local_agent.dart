@@ -1216,6 +1216,12 @@ class LocalAgentExecutor {
       }
     }
 
+    // ---- ★ V0.4 T1-5（2026-11-02）：扫描用户技能（工作区 SKILL.md）----
+    //
+    // 扫描失败/没有技能 ⇒ 空列表（只有内置三技能，行为与旧版一致）。
+    // 放在 buildAgent 之前：技能是构造期参数（与 systemPrompts 同理）。
+    final userSkills = await _scanUserSkills(caps);
+
     // ---- ★ V0.4 自动续跑：agent 按轮构造（续跑轮追加"继续"内部说明）----
     //
     // 首轮 systemPrompts 与旧版**逐字节一致**（续跑说明为 null 不注入），
@@ -1253,6 +1259,9 @@ class LocalAgentExecutor {
             // ★ 内置技能（S1/S2，2026-10-24）：目录常驻（每条一行），
             //   模型按任务用 activate_skills 按需加载全文。
             enableSkills: true,
+            // ★ V0.4 T1-5（2026-11-02）：用户技能（扫描工作区 SKILL.md 得到；
+            //   空 = 只有内置三技能，行为与旧版一致）。
+            userSkills: userSkills,
             approvalMode: switch (settings.permission) {
               PermissionMode.manual => ApprovalMode.manual,
               PermissionMode.workspaceAuto => ApprovalMode.workspaceAuto,
@@ -2226,6 +2235,49 @@ class LocalAgentExecutor {
   /// 之前读 `SharedPreferences['heracles.run.continueMode']`（off/ask/auto），
   /// 用户明确「默认自动 3 轮，不能调」⇒ 不再读 prefs，始终 auto。
   Future<String> _readContinueMode() async => 'auto';
+
+  /// **扫描用户技能**（V0.4 T1-5，2026-11-02）。
+  ///
+  /// 在工作区里找 `**/SKILL.md`（约定目录 `.heracles/skills/`），逐个解析成
+  /// `SkillEntry` 交给 backend 注入（`RunOptions.userSkills`）。
+  ///
+  /// ## 不假装
+  ///
+  /// - 没有 `SKILL.md` ⇒ 空列表（只有内置三技能，行为与旧版一致）；
+  /// - 解析失败 ⇒ **跳过该文件**（不整体失败、也不假装它生效）；
+  /// - 扫描本身失败（能力缺失/通道异常）⇒ 空列表 + 不阻断 run。
+  ///
+  /// 为什么不在这里做"安装"：安装 = 下载/解压技能包，属宿主另一条链路；
+  /// 本方法只负责"已经躺在工作区里的技能"被真正加载。
+  Future<List<SkillEntry>> _scanUserSkills(Capabilities caps) async {
+    final ws = caps.workspace;
+    if (ws == null) return const <SkillEntry>[];
+    try {
+      final found = await ws.findFiles('.heracles/skills/**/SKILL.md', maxResults: 50);
+      if (found is! CapabilitySuccess) return const <SkillEntry>[];
+      final paths = found.data
+          .split('\n')
+          .map((l) => l.trim())
+          .where((l) => l.toLowerCase().endsWith('skill.md'))
+          .toList(growable: false);
+      if (paths.isEmpty) return const <SkillEntry>[];
+      final registry = SkillRegistry();
+      for (final p in paths) {
+        try {
+          final read = await ws.read(p);
+          if (read is! CapabilitySuccess) continue;
+          final r = parseSkillMd(read.data, source: 'user');
+          if (r.ok) registry.scan({p: read.data}, source: 'user');
+          // 解析失败 ⇒ 跳过（不假装生效）
+        } catch (_) {
+          // 单个文件失败不影响其它
+        }
+      }
+      return registry.enabled;
+    } catch (_) {
+      return const <SkillEntry>[];
+    }
+  }
 
   /// **上次 run 被系统停止 ⇒ 如实提示**（V0.4 T0-2，2026-11-02）。
   ///

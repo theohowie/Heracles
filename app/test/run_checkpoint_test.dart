@@ -68,7 +68,7 @@ class _OneTurnClient implements LLMClient {
           [StreamingMessage(modelMessage: _r(modelConfig))]);
 }
 
-class _Ws implements WorkspaceCapability {
+class _Ws extends WorkspaceCapability {
   @override
   Future<CapabilityResult> write(String path, String content) async =>
       CapabilitySuccess('已写入 $path');

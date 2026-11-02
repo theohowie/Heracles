@@ -134,7 +134,7 @@ class _ExplodeClient implements LLMClient {
       throw StateError('启动即失败');
 }
 
-class _Ws implements WorkspaceCapability {
+class _Ws extends WorkspaceCapability {
   @override
   Future<CapabilityResult> write(String path, String content) async =>
       CapabilitySuccess('已写入 $path');

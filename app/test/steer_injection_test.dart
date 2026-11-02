@@ -32,7 +32,7 @@ AppSettings _settings() => AppSettings(
       ],
     );
 
-class _FakeWs implements WorkspaceCapability {
+class _FakeWs extends WorkspaceCapability {
   final files = <String, String>{};
 
   @override
