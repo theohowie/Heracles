@@ -171,7 +171,9 @@ void main() {
           return {'killed': false, 'killedAt': 0};
         case 'requestIgnoreBatteryOptimizations':
           batteryCalls++;
-          return null; // 通道缺失
+          // ⚠️ 必须在 handler 里**抛**：mock 返回 null 会被当成"未处理"
+          //   而挂起（坑 36），不会变成 MissingPluginException。
+          throw MissingPluginException('no handler'); // 通道缺失
         case 'autostartGuide':
           return {
             'brand': '小米',
