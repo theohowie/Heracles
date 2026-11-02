@@ -40,6 +40,8 @@ export 'src/agent/project_detect.dart';
 // ★ 工具别名（V0.4 T1-4）：名字对齐、旧名不破（纯数据 + 解析函数）。
 export 'src/agent/tools/tool_aliases.dart';
 export 'src/agent/tools/v4_tools.dart';
+// ★ V0.4 T1-5：Skills 扫描 / MCP 配置 / Automation 存储（纯逻辑 + 校验）。
+export 'src/agent/v4_extensions.dart';
 // 会话历史 → 框架消息（2026-10-23）。宿主读会话文件后交给 `run(history:)`。
 export 'src/agent/session_history.dart';
 // 多模态输入边界类型（2026-10-23）。宿主演把图片压成 base64，框架类型不出 backend。
