@@ -425,4 +425,41 @@ class AutomationStore {
     _tasks[id] = t.copyWith(runHistory: trimmed);
     return true;
   }
+
+  /// **最近一次运行**（`null` = 从未跑过；**不预填假结果**）。
+  AutomationRun? lastRun(String id) {
+    final h = _tasks[id]?.runHistory;
+    if (h == null || h.isEmpty) return null;
+    return h.last;
+  }
+
+  /// **最近一次失败原因**（最近一条 `ok=false` 的 `error`；全成功/没跑过 ⇒ `null`）。
+  ///
+  /// 取"最近一条失败"而不是"最后一条"：最后一条成功不该把上一轮的失败原因抹掉 ——
+  /// 用户需要知道"上次为什么没跑成"，直到它真的被修好。
+  String? lastError(String id) {
+    final h = _tasks[id]?.runHistory;
+    if (h == null) return null;
+    for (var i = h.length - 1; i >= 0; i--) {
+      if (!h[i].ok) return h[i].error ?? '未知原因';
+    }
+    return null;
+  }
+
+  /// **下次预计运行时间**（毫秒时间戳；`null` = 算不出）。
+  ///
+  /// 算不出的三种情况，都返回 `null` 而不是编一个数：
+  /// ① 任务不存在；② 已停用；③ **从未跑过**（interval 任务的首轮由闹钟决定，
+  /// Dart 侧并不知道宿主何时注册了第一个闹钟）。
+  ///
+  /// cron 任务返回 `null`：cron 解析**未实现**（宿主的 AlarmManager 只支持 interval），
+  /// 编一个"下次时间"就是假信息。
+  int? nextRunAt(String id) {
+    final t = _tasks[id];
+    if (t == null || !t.enabled) return null;
+    if (t.schedule != 'interval' || t.intervalMinutes <= 0) return null;
+    final last = lastRun(id);
+    if (last == null) return null;
+    return last.ts + t.intervalMinutes * 60 * 1000;
+  }
 }

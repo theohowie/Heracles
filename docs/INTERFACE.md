@@ -484,7 +484,10 @@ class VoicePartial {
 - MCP：服务器配置 `{name, transport(stdio|http), command, url, args, env, enabled}`；校验拒绝非法配置与
   **密钥进 env**；CRUD。
 - Automation：任务 `{id,title,prompt,schedule(interval|cron),intervalMinutes,cron,enabled,runHistory}`；
-  校验必填；运行历史最近 20 条、只记真实结果；**`schedulerImplemented=false`（不假调度）**。
+  校验必填；运行历史最近 20 条、只记真实结果；~~`schedulerImplemented=false`（不假调度）~~
+  → **❌ 该行已过期，2026-11-02 更正**：宿主已用 **AlarmManager** 真调度（`AutomationScheduler`），
+  但**执行**仍需 App 在前台 ⇒ 真实口径是 `schedulerImplemented=true` +
+  `executionRequiresAppForeground=true`；消费闭环见 **N16.3**。cron 仍未实现（只支持 interval，不假装支持）。
 
 #### N15.5 定位（任意代码项目）
 
@@ -493,6 +496,85 @@ class VoicePartial {
 - `detectProject(fileNames)` → `{kind, label, manifest, buildCommands, testCommands, notes}`；
   Flutter 优先于 Android；**认不出 ⇒ unknown 且命令为空**（不编造）。
 - `defaultSystemPrompt(caps, {project})`：不传 project ⇒ 提示词字节与旧版一致。
+
+### N16 V0.4 收口：Skills / MCP / Automation / Search 通道（2026-11-02 · 只增契约）
+
+> 本节是 F1–F4 的**前端可见契约**。所有方法都加在既有 `heracles/command` 上（不新开通道）。
+> **只增不改**：旧方法形状不变。
+> 统一返回：成功 `{ok: true, ...}`；失败 `{ok: false, error: <人话>, code: <E_...>}`。
+> ⚠️ 通道**不抛 PlatformException**（与 `heracles/command` 既有风格一致），Dart 侧一律判 `ok`。
+
+#### N16.1 Skills（F1）
+
+`heracles/command` 只增 4 方法（宿主只做**文件系统**，解析/校验/合并都在 Dart）：
+
+| 方法 | 入参 | 返回 |
+|---|---|---|
+| `skillsList` | `{workspace: String}` | `{ok, entries: [{path, raw}], enabled: {name: bool}}` |
+| `skillsSetEnabled` | `{name: String, enabled: bool}` | `{ok}` |
+| `skillsInstall` | `{workspace: String, source: String}` | `{ok, installed: [{path, raw}], errors: [String]}` |
+| `skillsRemove` | `{workspace: String, name: String, path?: String}` | `{ok, removed: bool}` |
+
+- 扫描路径：`<workspace>/.heracles/skills/**/SKILL.md`（递归，最多 4 层；超过 512 KB 的单个文件不读，报 `errors`）。
+- **启停状态唯一存在宿主**（`SharedPreferences` 的 `name → bool`，缺省 `true`）。`builtin` 与 `user` 共用这一张表。
+- `skillsInstall` 来源校验：`https://` URL 或**绝对路径**（`/` 开头）；拒绝 `http://` 明文、拒绝 `..` 穿越、拒绝落到工作区之外；
+  目标目录 `<workspace>/.heracles/skills/<slug>/SKILL.md`，同名已存在 ⇒ 覆盖并如实返回。
+- **非法 `SKILL.md` 逐条报错**：宿主只搬字节不判语义；Dart 用 backend `parseSkillMd` 逐条解析，
+  失败项进 `errors`（形如 `<path>: <原因>`），**不整体失败**。
+- `skillsRemove`：优先用 `path` 定位（更准）；只给 `name` 时由 Dart 从已解析清单里取路径再传。
+
+**Dart 服务**（`app/lib/services/skills_service.dart`）：
+
+- `listSkills()` → `SkillsSnapshot{builtin: List<SkillView>, user: List<SkillView>, errors: List<String>}`
+- `SkillView{name, description, source('builtin'|'user'), enabled, path}`
+- `setSkillEnabled(name, enabled)` / `installSkill(source)` / `removeSkill(name)`
+- 内置清单一律来自 backend `builtinSkillEntries()`（**唯一来源**，不在 App 里硬编码）。
+
+#### N16.2 MCP（F3）
+
+`heracles/command` 只增 3 方法：
+
+| 方法 | 入参 | 返回 |
+|---|---|---|
+| `mcpList` | — | `{ok, servers: [{name, transport, command, url, args, env, enabled}]}` |
+| `mcpSave` | `{server: {name, transport, command, url, args, env, enabled}}` | `{ok}` / `{ok:false, error, code}` |
+| `mcpDelete` | `{name: String}` | `{ok, deleted: bool}` |
+
+- 持久化：`SharedPreferences("heracles_mcp")` 的单个 JSON 数组键 `servers`。
+- **密钥不进 env**：宿主二次拦截（键名含 `KEY`/`TOKEN`/`SECRET`/`PASSWORD` ⇒ `E_MCP_SECRET_IN_ENV`）；
+  第一道是 backend `validateMcpServer`（Dart 在保存前调用）。
+- 日志脱敏：宿主**不打印** `env` 与 `url` 的 query 段；错误信息里只出现 `name` 与状态码。
+- **`testMcpConnection` 不在通道上**：由 Dart 服务层真连，宿主不重复实现一份"假连接"。
+  - `status ∈ not_configured | unsupported | failed | connected`；`connected` 必须带 `tools` 工具数。
+  - `stdio` 传输在 Android 上**不支持**（没有可执行子进程环境）⇒ `status:'unsupported'` + 人话原因，**不假装连上**。
+
+**Dart 服务**（`app/lib/services/mcp_service.dart`）：
+`listServers()` / `saveServer(cfg)` / `deleteServer(name)` / `testConnection(name)` → `McpTestResult{status, tools, error, latencyMs}`。
+
+#### N16.3 Automation 消费闭环（F2）
+
+**通道不变**（`automationSave` / `automationLoad` / `automationConsumePending` 既有）；改的是**语义与任务 JSON 的只增字段**：
+
+- 任务 JSON 只增三个键（旧读者忽略即可）：
+  `lastRun: {ts, ok, error?, durationMs}` · `nextRunAt: int(ms)` · `lastError: String?`；
+  `runHistory: [{ts, ok, error?, durationMs}]`（**最近 20 条**，只记真实结果）。
+- **到点 → 真执行**：App 启动 / 回前台消费 pending ⇒ 用真实 run 执行 `task.prompt`
+  （走审批门禁 / 预算 / 沙箱，与手动发送**同一条路径**）。
+- **幂等**：pending 由宿主原子取走（取即清）；Dart 侧再加两道闸 ——
+  内存 `_running` 集合（同进程不并发同任务）+ `lastRun.ts` 距上次 < 间隔一半 ⇒ 判为重复触发跳过。
+- ⚠️ **UI 文案必须同步改**：旧文案"到点只发通知，不会自动执行"在 F2 落地后**不再成立**。
+  新文案口径：**"到点后在你下次打开/回到 App 时自动执行；App 未打开时只提醒"**。
+  （文案在 `screens/`，**移交前端**；后端不越界改。）
+
+#### N16.4 搜索服务 endpoint（F4）
+
+**纯 Dart，无通道方法**（`flutter_secure_storage`）：
+
+- `SearchConfigService`：`read()` → `{endpoint, hasKey}`；`save(endpoint, {key})`；`clear()`；`masked()` → `{endpoint, keyMasked}`。
+- 校验：`endpoint` 必须 `http://`/`https://` 且能 `Uri.parse`；否则**拒绝保存**并回人话原因。
+- Key 存 secure storage，**只在请求头出现**；`masked()` 形如 `sk-***abcd`（长度 ≤ 8 全掩）。
+- 注入：`buildDeviceCapabilities(searchEndpoint: ...)` → `DeviceWebCapability.searchEndpoint`。
+  ⚠️ **未配置** ⇒ `web_search` 明确失败（保持 N15.3 语义），**不编造结果**。
 
 ## 5. 流式与渲染约定 —— ✅ 无异议
 
