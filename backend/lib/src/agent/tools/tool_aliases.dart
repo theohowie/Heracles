@@ -16,6 +16,8 @@
 // - 别名表是**纯数据**，执行层的转调由宿主/框架决定（本文件只做解析）。
 library;
 
+import 'package:dart_agent_core/dart_agent_core.dart';
+
 /// 正式工具名 → 允许的别名（**只增**）。
 ///
 /// 键 = 现有正式名（与 `tool_factory` 里 `name:` 逐字一致）；值 = 额外接受的写法。
@@ -55,3 +57,36 @@ String? resolveToolName(String raw) {
 
 /// 该写法是否是已知别名（用于"旧名仍可用、别名也算合法"的断言）。
 bool isKnownToolName(String raw) => resolveToolName(raw) != null;
+
+/// **为已注册工具生成"别名转调工具"**（V0.4 T1-4，执行层接线）。
+///
+/// ## 为什么要生成独立 Tool 而不是只做字符串解析
+///
+/// 框架按 **`Tool.name` 精确匹配**调用 —— 光有解析函数，模型写 `Read` 仍然会
+/// 报"未知工具"。所以别名必须作为**独立 Tool 注册**，执行体转调正式工具。
+///
+/// ## 纪律
+///
+/// - 只给**已存在**的正式名生成别名（不凭空造工具）；
+/// - 别名的 schema/描述**完全复制**正式工具（模型看到的参数说明一致）；
+/// - 转调失败（正式工具不存在）⇒ 明确失败，不静默成功。
+List<Tool> buildAliasTools(List<Tool> tools) {
+  final byName = {for (final t in tools) t.name: t};
+  final out = <Tool>[];
+  for (final entry in toolAliases.entries) {
+    final canonical = byName[entry.key];
+    if (canonical == null) continue; // 该环境下没有这个正式工具 ⇒ 不生成
+    for (final alias in entry.value) {
+      if (byName.containsKey(alias)) continue; // 别名与正式名冲突 ⇒ 跳过（安全）
+      out.add(Tool(
+        name: alias,
+        description: canonical.description,
+        parameters: canonical.parameters,
+        parameterMode: canonical.parameterMode,
+        resultIsError: canonical.resultIsError,
+        executable: canonical.executable,
+      ));
+    }
+  }
+  return out;
+}

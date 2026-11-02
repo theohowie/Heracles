@@ -63,6 +63,16 @@ bool _failed(AgentToolResult r) {
 Tool _tool(List<Tool> tools, String name) =>
     tools.firstWhere((t) => t.name == name);
 
+/// 取 AgentToolResult 里给模型看的文本（工具层失败用文本前缀表示）。
+String _textOfToolResult(dynamic r) {
+  if (r is AgentToolResult) {
+    final parts = r.contents ??
+        (r.content == null ? const <UserContentPart>[] : <UserContentPart>[r.content!]);
+    return parts.map((p) => p is TextPart ? p.text : p.toString()).join('\n');
+  }
+  return r.toString();
+}
+
 void main() {
   group('web_search', () {
     test('① 无 Web 能力 ⇒ 工具仍在列表但一调用就失败（明说不支持）', () async {
@@ -149,6 +159,32 @@ void main() {
               reason: '别名 $a 与正式名冲突');
         }
       }
+    });
+
+    test('⑦ 执行层：别名作为独立 Tool 注册且能真正转调正式工具', () async {
+      final caps = Capabilities(web: _WorkingSearch());
+      final base = buildV4Tools(ToolFactory(caps), caps);
+      final all = [...base, ...buildAliasTools(base)];
+      // 正式名仍在
+      expect(all.any((t) => t.name == 'web_search'), isTrue);
+      // 别名已注册（框架按 name 精确匹配，光有解析函数不够）
+      final alias = all.firstWhere((t) => t.name == 'WebSearch');
+      expect(alias.description, _tool(base, 'web_search').description,
+          reason: '别名应复制正式工具的描述/schema');
+      // 别名能真正跑（转调正式工具的执行体）
+      final r = await alias.executable!(const <String, dynamic>{'query': 'dart'});
+      final text = _textOfToolResult(r);
+      expect(text, contains('https://'), reason: '转调后结果与正式工具一致');
+    });
+
+    test('⑦b 未存在的正式工具不生成别名（不凭空造工具）', () {
+      // 只有 web_search 的极小工具集 ⇒ 不应出现 Read/Grep 等别名
+      final caps = Capabilities(web: _WorkingSearch());
+      final base = buildV4Tools(ToolFactory(caps), caps);
+      final all = [...base, ...buildAliasTools(base)];
+      expect(all.any((t) => t.name == 'Read'), isFalse,
+          reason: '★ 没有 read_file 时不许造 Read 别名');
+      expect(all.any((t) => t.name == 'Grep'), isFalse);
     });
   });
 }

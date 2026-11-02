@@ -57,6 +57,7 @@ import 'tools/file_tools.dart';
 import 'tools/info_tools.dart';
 import 'tools/interaction_tools.dart';
 import 'tools/shell_tools.dart';
+import 'tools/tool_aliases.dart';
 import 'tools/v4_tools.dart';
 
 /// 模型配置（后端视角）。
@@ -706,7 +707,7 @@ class HeraclesAgent {
     //   App 每次 run 新建 agent ⇒ 恰好 run 级；CLI/测试复用实例 ⇒ 会话级
     //   （从宽取向：读过的文件跨 run 仍算读过）。
     final tracker = EditReadTracker();
-    return [
+    final base = [
       ...buildFileTools(factory, _caps, tracker: tracker, verify: verify),        // 8 个：读/写/编辑/补丁/列/建目录/找/搜
       ...buildShellTools(factory, _caps),       // 1 个：run_shell_command
       ...buildFileManageTools(factory, _caps, tracker: tracker),  // 3 个：删除/移动/复制（有破坏性）
@@ -719,6 +720,10 @@ class HeraclesAgent {
       //   （能力缺失 ⇒ 一调用就失败并明说；不返回假结果）
       ...buildV4Tools(factory, _caps),
     ];
+    // ★ V0.4 T1-4 别名执行层（2026-11-02）：框架按 `Tool.name` 精确匹配，
+    //   所以别名必须作为**独立 Tool 注册**（执行体转调正式工具），光有解析函数不够。
+    //   只给已存在的正式工具生成；旧正式名一个不动（别名只增）。
+    return [...base, ...buildAliasTools(base)];
   }
 
   /// **组装 system prompts** —— 默认提示 → 宿主追加 → 长期记忆（三段记忆）。
