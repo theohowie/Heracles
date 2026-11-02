@@ -57,6 +57,7 @@ import 'tools/file_tools.dart';
 import 'tools/info_tools.dart';
 import 'tools/interaction_tools.dart';
 import 'tools/shell_tools.dart';
+import 'v4_extensions.dart';
 import 'tools/tool_aliases.dart';
 import 'tools/v4_tools.dart';
 
@@ -167,6 +168,7 @@ class RunOptions {
     this.maxRounds = ContractRunContinue.autoMaxRounds,
     this.tokenLimit = ContractRunContinue.runTokenLimit,
     this.resumeFromCheckpoint = const <String, Object?>{},
+    this.userSkills = const [],
   });
 
   final int maxTurns;
@@ -368,6 +370,13 @@ class RunOptions {
   /// 不该持有可变队列。回调让"谁来取、什么时候取、取完怎么清"都留在宿主层。
   /// 空 `null`（默认）= 不装 hook ⇒ 行为与加这个字段之前**完全一致**。
   final String? Function()? takeSteerMessage;
+
+  /// **用户自定义技能**（V0.4 T1-5，2026-11-02；默认空 = 只有内置三技能）。
+  ///
+  /// 由宿主从工作区扫描 `SKILL.md` 得到（`SkillRegistry.scan` 的已启用项）。
+  /// 注入时与 [builtinSkills] **合并**（内置在前、用户在後；同名时用户覆盖）。
+  /// 只增字段 ⇒ 空列表时行为与旧版完全一致。
+  final List<SkillEntry> userSkills;
 
   /// **长任务续跑策略**（V0.4，2026-11-02；默认 [ContinuePolicy.off] = 旧行为）。
   ///
@@ -1376,7 +1385,9 @@ class HeraclesAgent {
       subAgents: _options.enableSubAgents ? [_workerSubAgent()] : null,
       // ★ 技能目录（S1/S2，2026-10-24）：非空时框架追加 activate/deactivate
       //   工具 + 目录系统提示（渐进披露）。
-      skills: _options.enableSkills ? builtinSkills() : null,
+      skills: _options.enableSkills
+          ? [...builtinSkills(), for (final s in _options.userSkills) s.toFrameworkSkill()]
+          : null,
       disableSubAgents: !_options.enableSubAgents,
       // 框架自带循环检测（相同调用重复 + 周期性 LLM 诊断）。
       // 旧实现只有"相同调用重复"且阈值 2；这里用框架默认（5），

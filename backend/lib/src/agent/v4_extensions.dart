@@ -16,6 +16,8 @@
 // 解析失败 ⇒ 明确错误；配置非法 ⇒ 明确原因；调度器未接 ⇒ 返回 `schedulerImplemented=false`。
 library;
 
+import 'package:dart_agent_core/dart_agent_core.dart';
+
 /// **一个技能**（从 `SKILL.md` 解析）。
 class SkillEntry {
   const SkillEntry({
@@ -43,6 +45,13 @@ class SkillEntry {
         'enabled': enabled,
       };
 
+  /// **转成框架 Skill**（注入 StatefulAgent(skills:) 用；只用于已启用技能）。
+  Skill toFrameworkSkill() => _UserSkill(
+        name: name,
+        description: description,
+        systemPrompt: body,
+      );
+
   SkillEntry copyWith({bool? enabled}) => SkillEntry(
         name: name,
         description: description,
@@ -50,6 +59,18 @@ class SkillEntry {
         source: source,
         enabled: enabled ?? this.enabled,
       );
+}
+
+/// **把用户技能转成框架 Skill**（V0.4：注入 `StatefulAgent(skills:)` 用）。
+///
+/// 框架的 `Skill` 是抽象类（`name`/`description`/`systemPrompt`），这里用一个
+/// 极简子类承载 SKILL.md 的正文 —— 与 `_BuiltinSkill` 同形状，行为一致。
+class _UserSkill extends Skill {
+  _UserSkill({
+    required super.name,
+    required super.description,
+    required super.systemPrompt,
+  });
 }
 
 /// **SKILL.md 解析结果**（成功/失败都明确）。
