@@ -23,7 +23,6 @@ import '../theme/theme_reveal.dart';
 import '../data/open_source_licenses.dart';
 import '../widgets/bw_approval.dart';
 import '../widgets/background_keepalive_card.dart';
-import '../widgets/run_continue_mode_section.dart';
 import 'jev_settings_screen.dart';
 import 'oss_licenses_screen.dart';
 import 'voice_settings_screen.dart';
@@ -80,14 +79,6 @@ class SettingsScreen extends StatelessWidget {
                         context, GeneralSettingsPage(controller: controller)),
                   ),
                 ],
-              ),
-              const _SectionLabel('任务续跑'),
-              // ★ V0.4（#1）：续跑模式三档（关闭 / 每轮询问 / 自动续跑）
-              const _GroupCard(children: [RunContinueModeSection()]),
-              const _SectionLabel('后台运行'),
-              const Padding(
-                padding: EdgeInsets.symmetric(horizontal: HSpace.md),
-                child: BackgroundKeepaliveCard(),
               ),
               const _SectionLabel('智能体'),
               _GroupCard(
@@ -311,6 +302,35 @@ class _VoiceEntryState extends State<_VoiceEntry> {
 /// 检测 + 引导 —— 不做配对执行器（完整 shell 能力下批）。
 /// `WRITE_SECURE_SETTINGS` 是无障碍自愈的钥匙（ADR-016，P0），
 /// 授权一次三类能力全解锁（pm grant 的效果是复用的）。
+/// **后台运行二级页**（2026-11-02 用户裁定）：入口在「设备权限」第一行，
+/// 点进来是独立页；卡片形态与权限页一致，不再占设置主页。
+class BackgroundKeepalivePage extends StatelessWidget {
+  const BackgroundKeepalivePage({super.key});
+
+  @override
+  Widget build(BuildContext context) {
+    final h = Hue.of(context);
+    return Scaffold(
+      appBar: AppBar(
+        title: const Text('后台运行'),
+        leading: _iosBackLeading(context),
+      ),
+      body: ListView(
+        padding: const EdgeInsets.all(HSpace.lg),
+        children: [
+          Text(
+            '长任务在后台继续跑需要的系统设置。Android 不保证永不被杀；'
+            '这里只显示真实状态与引导，不假装“开了就一直跑”。',
+            style: TextStyle(fontSize: 12.5, height: 1.55, color: h.textFaint),
+          ),
+          const SizedBox(height: HSpace.md),
+          const BackgroundKeepaliveCard(),
+        ],
+      ),
+    );
+  }
+}
+
 class DevicePermissionPage extends StatefulWidget {
   const DevicePermissionPage({super.key});
 
@@ -692,6 +712,24 @@ class _DevicePermissionPageState extends State<DevicePermissionPage>
           : ListView(
               padding: const EdgeInsets.all(HSpace.lg),
               children: [
+                // ---- 第一行：后台运行（二级页入口；UI 与权限页同一形态）----
+                _GroupCard(
+                  children: [
+                    KeyedSubtree(
+                      key: const Key('device-permission-background-row'),
+                      child: _HomeRow(
+                        title: '后台运行',
+                        subtitle: '保活状态 · 电池优化 · 自启动',
+                        onTap: () => Navigator.of(context).push(
+                          CupertinoPageRoute(
+                            builder: (_) => const BackgroundKeepalivePage(),
+                          ),
+                        ),
+                      ),
+                    ),
+                  ],
+                ),
+                const SizedBox(height: HSpace.md),
                 // ---- 权限总览卡（概念图 07 形态）----
                 if (_perms.isNotEmpty) _permOverview(h),
                 // ---- 卡下说明：自愈状态 + 概念图 07 页脚 ----

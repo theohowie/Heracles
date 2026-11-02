@@ -631,10 +631,8 @@ class _ChatScreenState extends State<ChatScreen> {
   // ---- ★ V0.4 长任务续跑（#1，2026-11-02）----
   //
   // 任务被中断时后端发 `run_stopped`；这里存下来渲染「任务被中断」卡。
-  // `_continueMode` ∈ off|ask|auto（设置页「续跑模式」三档，存
-  // SharedPreferences `heracles.run.continueMode`；待正式设置字段后迁走）。
+  // 续跑固定自动 3 轮（2026-11-02 用户裁定，不开放设置）。
   RunStopInfo? _runStop;
-  String _continueMode = 'off';
 
   /// 事件流 `kFailed` 带回来的原始失败原因（V0.4 T0）。
   /// 即使 `run()` 正常返回，也要靠它把原因写进会话流。
@@ -1123,8 +1121,7 @@ class _ChatScreenState extends State<ChatScreen> {
     _restoreView();
     unawaited(_jev.load());
     unawaited(_reload().then((_) => _consumePendingOpenSession()));
-    // ★ V0.4（#1）：读「续跑模式」三档（off|ask|auto）
-    unawaited(_loadContinueMode());
+    // ★ V0.4（#1）：续跑固定自动 3 轮，不读设置。
     // ★ T1-1（2026-10-31）：首屏进入就刷一次上下文占用 —— 冷启动时用户
     //   可能直接落在"上次的会话"上，不刷新顶栏就是「上下文 —」。
     unawaited(_refreshContextUsage());
@@ -6005,18 +6002,8 @@ class _ChatScreenState extends State<ChatScreen> {
     final info = RunStopInfo.fromEvent(e);
     if (info == null || !mounted) return;
     setState(() => _runStop = info);
-    // 自动续跑：最多 3 轮；第 3 轮仍未完成 ⇒ 弹「继续会额外消耗 token」
-    if (_continueMode == 'auto' &&
-        info.continueEnabled &&
-        (info.round ?? 0) >= 3) {
-      final go = await showAutoContinueConfirm(
-        context,
-        tokensSpent: info.tokensSpent,
-        tokensLimit: info.tokensLimit,
-        nextEstimate: info.nextEstimate,
-      );
-      if (go == true) unawaited(_continueRun());
-    }
+    // 自动续跑由 backend 固定跑满 3 轮；到上限后只显示中断卡，
+    // 由用户点「继续」明确同意再消耗 token —— 不再弹自动确认。
   }
 
   /// 「继续」：当前会话 + 工作区仍在 ⇒ 以一条**可见的用户消息**“继续未完成的任务”
@@ -6034,16 +6021,7 @@ class _ChatScreenState extends State<ChatScreen> {
     await _runAgent('继续未完成的任务');
   }
 
-  /// 读「续跑模式」三档（设置页写入；待正式设置字段后迁到 AppSettings）。
-  Future<void> _loadContinueMode() async {
-    try {
-      final p = await SharedPreferences.getInstance();
-      final mode = p.getString('heracles.run.continueMode') ?? 'off';
-      if (mounted) setState(() => _continueMode = mode);
-    } catch (_) {
-      // 读不到就按"关闭续跑"—— 默认不自动消耗 token
-    }
-  }
+  /// 续跑模式：**固定自动 3 轮**（2026-11-02 用户裁定，不开放设置）。
 
   /// **权限档位变更**（2026-10-29 第 5 条 P1）。
   ///

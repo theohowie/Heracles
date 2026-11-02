@@ -55,7 +55,6 @@ import 'dart:convert';
 
 import 'package:dio/dio.dart' show CancelToken;
 import 'package:heracles_backend/heracles_backend.dart';
-import 'package:shared_preferences/shared_preferences.dart';
 
 import '../models/attachment.dart';
 import '../models/settings.dart';
@@ -2222,12 +2221,12 @@ class LocalAgentExecutor {
       '不要重复已完成的工作；先确认当前进展（看计划/文件/测试），再继续下一步。'
       '如果你判断任务已经完成，请直接给出最终回答。';
 
-  /// 读续跑模式（V0.4）：前端设置页写 `SharedPreferences['heracles.run.continueMode']`
-  /// ∈ `off|ask|auto`（默认 off）。读失败/未知值 ⇒ off（**保守**：不自动续跑）。
+  /// 续跑模式（V0.4，2026-11-02 用户裁定）：**固定自动 3 轮，不开放设置**。
   ///
-  /// 为什么要读 prefs 而不是 AppSettings：设置字段还没正式落 `AppSettings`
-  /// （前端先用临时 prefs 键），backend 只认 `ContinuePolicy`；这里做映射，
-  /// 等设置字段落地后只需把本方法改成读 settings。
+  /// 之前读 `SharedPreferences['heracles.run.continueMode']`（off/ask/auto），
+  /// 用户明确「默认自动 3 轮，不能调」⇒ 不再读 prefs，始终 auto。
+  Future<String> _readContinueMode() async => 'auto';
+
   /// **上次 run 被系统停止 ⇒ 如实提示**（V0.4 T0-2，2026-11-02）。
   ///
   /// 前台服务 `onTaskRemoved` 写 `process_killed` 标记；这里读一次、发
@@ -2253,16 +2252,6 @@ class LocalAgentExecutor {
       await processKilledConsume?.call();
     } catch (_) {
       // 通道缺失/旧 APK ⇒ 无行为（不影响主链路）
-    }
-  }
-
-  Future<String> _readContinueMode() async {
-    try {
-      final p = await SharedPreferences.getInstance();
-      final v = p.getString('heracles.run.continueMode');
-      return (v == 'auto' || v == 'ask') ? v! : 'off';
-    } catch (_) {
-      return 'off';
     }
   }
 

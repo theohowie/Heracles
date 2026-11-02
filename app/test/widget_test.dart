@@ -2,6 +2,7 @@ import 'dart:convert';
 import 'package:flutter/cupertino.dart';
 
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
@@ -266,6 +267,61 @@ void main() {
     await tester.scrollUntilVisible(find.text('外观'), 120);
     await tester.pumpAndSettle();
     expect(find.text('外观'), findsOneWidget);
+
+    // ★ 2026-11-02 用户裁定：续跑固定自动 3 轮，设置主页**不许**再有续跑三档；
+    //   后台运行也不在主页，改为「设备权限」第一行。
+    expect(find.text('任务续跑'), findsNothing,
+        reason: '续跑固定自动 3 轮，不开放设置');
+    expect(find.text('后台运行'), findsNothing,
+        reason: '后台运行入口在设备权限页第一行，不在设置主页');
+  });
+
+  testWidgets('设备权限页第一行是「后台运行」，点进去是独立设置页', (tester) async {
+    // 权限页加载要读命令通道；测试里没有原生实现 ⇒ 不 mock 会一直转圈。
+    const commandChannel = MethodChannel('heracles/command');
+    final messenger =
+        TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger;
+    messenger.setMockMethodCallHandler(commandChannel, (call) async {
+      if (call.method == 'devicePermission') {
+        return <String, dynamic>{
+          'writeSecureSettings': false,
+          'guidance': '',
+          'shizuku': <String, dynamic>{},
+        };
+      }
+      if (call.method == 'devicePermissions') {
+        return <String, String>{'shizuku': 'unknown', 'notifications': 'granted'};
+      }
+      return null;
+    });
+    addTearDown(() => messenger.setMockMethodCallHandler(commandChannel, null));
+
+    final c = await _freshController();
+    await tester.pumpWidget(_wrap(c, SettingsScreen(controller: c)));
+    // 「设备权限」在智能体组里，默认视口在屏外 —— 先滚到可见再点。
+    await tester.scrollUntilVisible(find.text('设备权限'), 120);
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('设备权限'));
+    // 权限页有加载转圈（无通道时也可能一直转）⇒ 用固定 pump，不等 settle。
+    await tester.pump();
+    await tester.pump(const Duration(seconds: 1));
+
+    // 第一行必须是后台运行（用户明确「在第一行」）：权限总览卡在它下面。
+    expect(find.byKey(const Key('device-permission-background-row')),
+        findsOneWidget);
+    final rowTop = tester.getTopLeft(
+      find.byKey(const Key('device-permission-background-row')),
+    );
+    final pageTop = tester.getTopLeft(find.text('设备权限'));
+    expect(rowTop.dy, greaterThan(pageTop.dy));
+    expect(rowTop.dy, lessThan(400),
+        reason: '后台运行必须在权限页最上方第一行');
+
+    await tester.tap(find.text('后台运行'));
+    await tester.pump();
+    await tester.pump(const Duration(seconds: 1));
+    expect(find.byKey(const Key('background-keepalive-card')), findsOneWidget);
+    expect(find.textContaining('Android 不保证永不被杀'), findsWidgets);
   });
 
   testWidgets('权限档位描述会被展示', (tester) async {

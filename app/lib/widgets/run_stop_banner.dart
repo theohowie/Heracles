@@ -302,9 +302,11 @@ class RunStopBanner extends StatelessWidget {
       );
 }
 
-/// 自动续跑第 3 轮后的确认弹层（item 1「继续会额外消耗 token」）。
+/// 自动续跑第 3 轮后的确认弹层 —— **已停用**（2026-11-02 用户裁定：
+/// 续跑固定自动 3 轮，不弹自动确认；到上限只显示中断卡，由用户点「继续」）。
 ///
-/// 返回 true = 再续一轮；false/null = 停止。
+/// 保留函数供旧测试/引用编译；生产路径不再调用。
+@Deprecated('2026-11-02: 续跑固定自动 3 轮，不再弹自动确认')
 Future<bool?> showAutoContinueConfirm(
   BuildContext context, {
   int? tokensSpent,
