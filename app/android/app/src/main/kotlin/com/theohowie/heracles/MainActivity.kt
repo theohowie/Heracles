@@ -17,6 +17,7 @@ import android.provider.Settings
 import android.os.Environment
 import android.os.Handler
 import android.os.Looper
+import android.util.Log
 import androidx.core.app.NotificationManagerCompat
 import com.theohowie.heracles.bridge.AgentChatService
 import com.theohowie.heracles.bridge.AutomationScheduler
@@ -32,9 +33,12 @@ import com.theohowie.heracles.bridge.VoiceRecorder
 import com.theohowie.heracles.bridge.FilePickerBridge
 import com.theohowie.heracles.bridge.FolderPickerBridge
 import com.theohowie.heracles.bridge.MemoryStore
+import com.theohowie.heracles.bridge.McpConfigBridge
 import com.theohowie.heracles.bridge.SandboxBridge
+import com.theohowie.heracles.bridge.SkillsBridge
 import com.theohowie.heracles.bridge.WorkspaceRegistry
 import io.flutter.embedding.android.FlutterActivity
+import io.flutter.embedding.android.FlutterView
 import io.flutter.embedding.engine.FlutterEngine
 import io.flutter.plugin.common.EventChannel
 import io.flutter.plugin.common.MethodCall
@@ -104,6 +108,12 @@ class MainActivity : FlutterActivity() {
     private lateinit var voiceRecorder: VoiceRecorder
     private lateinit var folderPicker: FolderPickerBridge
 
+    /** ★ V0.4 F1（2026-11-02）：技能目录的文件系统操作（**不解析** front-matter）。 */
+    private lateinit var skillsBridge: SkillsBridge
+
+    /** ★ V0.4 F3（2026-11-02）：MCP 配置的持久化（**不做连接测试**）。 */
+    private lateinit var mcpBridge: McpConfigBridge
+
     /** `heracles/command` 通道引用 —— 通知点击回跳要往 Dart 推送。 */
     private var commandChannel: MethodChannel? = null
 
@@ -115,10 +125,30 @@ class MainActivity : FlutterActivity() {
     @Volatile
     private var appInForeground = false
 
+    // ---------------------------------------------------- 首帧看门狗的状态
+
+    /** 当前 Flutter surface 上是否正显示着首帧（`onFlutterUiDisplayed` 的镜像）。 */
+    @Volatile
+    private var flutterFirstFrameVisible = false
+
+    /** 这个 Activity 实例已经布过一次防（一次只救一次）。 */
+    private var firstFrameWatchdogArmed = false
+
+    /** 最近一次重建是不是"系统恢复"（`savedInstanceState != null`）—— 只用于日志归因。 */
+    private var lastSavedStateHadState = false
+
     // ------------------------------------------------------------ 生命周期
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        // ★ 归因用：savedInstanceState != null ⇒ 这次是**系统恢复**（App 被回收过），
+        //   不是用户主动冷启动。黑屏问题的 logcat 里这条很关键。
+        lastSavedStateHadState = savedInstanceState != null
+        Log.i(
+            TAG,
+            "onCreate: savedState=${savedInstanceState != null} " +
+                "instance=${hashCode()} process=${android.os.Process.myPid()}",
+        )
         // ★ 仅 debug：沙箱自检（由 adb 触发，用户可见行为零变化）
         //   adb shell am start -n com.theohowie.heracles/.MainActivity --ez sandbox.selftest true
         if (BuildConfig.DEBUG && intent?.getBooleanExtra("sandbox.selftest", false) == true) {
@@ -173,6 +203,81 @@ class MainActivity : FlutterActivity() {
         super.onPause()
     }
 
+    /**
+     * ★ 首帧看门狗（2026-11-02 T0）：**返回前台 2.5 s 还没有 Flutter 首帧 ⇒ 重建一次**。
+     *
+     * ## 它治的是什么
+     *
+     * 用户报「选好文件夹返回 ⇒ 黑屏（不是回到聊天页）」。除了"结果丢失"那个数据层
+     * 缺陷，还有一层**渲染层**可能：从 SAF 回来时 Activity/FlutterSurface 被重建，
+     * 首帧迟迟不渲染 ⇒ 用户只看到 `LaunchTheme` 的黑底。
+     *
+     * ## 为什么不能用"硬编码延时"糊过去
+     *
+     * 加 `sleep(500)` 之类只是赌一次时机，慢设备/低内存下照样黑，而且把正常路径
+     * 也拖慢了。这里改成**先观测再动作**：只在"确实没有首帧"时重建，并**记下原因**，
+     * 让根因留在 logcat 里可追。
+     *
+     * ## 三道闸（防误伤）
+     *
+     * 1. 只有在**本次进程曾渲染过首帧**之后才布防 —— 冷启动本来就慢，别去插手；
+     * 2. 有**选择请求在飞**（[FolderPickerBridge.hasPending]）时不动手 ——
+     *    重建会把刚要交付的结果打断，那是雪上加霜；
+     * 3. 进程级 30 s 冷却，一个实例只救一次 —— 防"重建→还黑→再重建"的循环。
+     */
+    override fun onPostResume() {
+        super.onPostResume()
+        // `hasRenderedFirstFrame()` 是 FlutterView 的公开 API（本版本引擎上
+        // FlutterEngine 已没有 addIsDisplayingFlutterUiListener，别再照旧文档写）。
+        val rendered = flutterViewRendered()
+        if (rendered) {
+            flutterFirstFrameVisible = true
+            everRenderedFirstFrame = true
+            return // 已经在显示 ⇒ 没什么可看的（普通后台切回来走这条，零开销）
+        }
+        flutterFirstFrameVisible = false
+        if (!everRenderedFirstFrame || firstFrameWatchdogArmed) return
+        firstFrameWatchdogArmed = true
+        mainHandler.postDelayed({
+            if (isFinishing || isDestroyed) return@postDelayed
+            if (flutterViewRendered()) {
+                Log.i(TAG, "watchdog: 首帧正常（返回前台后已渲染），不动作")
+                flutterFirstFrameVisible = true
+                // 归还布防权：下一次 resume 还能再观测
+                firstFrameWatchdogArmed = false
+                return@postDelayed
+            }
+            if (::folderPicker.isInitialized && folderPicker.hasPending()) {
+                Log.w(
+                    TAG,
+                    "watchdog: 无首帧，但有一次文件夹选择在飞 ⇒ 不重建（避免打断结果交付）",
+                )
+                return@postDelayed
+            }
+            val now = System.currentTimeMillis()
+            if (now - lastWatchdogRecoverAt < WATCHDOG_COOLDOWN_MS) {
+                Log.w(TAG, "watchdog: 无首帧，但 ${WATCHDOG_COOLDOWN_MS}ms 内已重建过 ⇒ 不再重建")
+                return@postDelayed
+            }
+            lastWatchdogRecoverAt = now
+            // ★ 根因证据：把"为什么判它卡住"写清楚，别只留一句 recreate()
+            Log.w(
+                TAG,
+                "watchdog: onPostResume 后 ${WATCHDOG_DELAY_MS}ms 仍无 Flutter 首帧 " +
+                    "⇒ 判定 surface 未恢复，recreate() 一次。" +
+                    "pending=${::folderPicker.isInitialized} " +
+                    "savedState=${lastSavedStateHadState} " +
+                    "hasFocus=${hasWindowFocus()}",
+            )
+            runCatching { recreate() }
+        }, WATCHDOG_DELAY_MS)
+    }
+
+    /** `FlutterView` 这一帧到底渲染出来没有（看门狗的唯一判据）。 */
+    private fun flutterViewRendered(): Boolean = runCatching {
+        findViewById<FlutterView>(FlutterActivity.FLUTTER_VIEW_ID)?.hasRenderedFirstFrame() == true
+    }.getOrDefault(false)
+
     override fun onDestroy() {
         scope.cancel()
         super.onDestroy()
@@ -190,6 +295,10 @@ class MainActivity : FlutterActivity() {
         cameraBridge = CameraBridge(this)
         voiceRecorder = VoiceRecorder(this)
         folderPicker = FolderPickerBridge(this)
+
+        // ★ V0.4 F1/F3（2026-11-02）：技能目录 + MCP 配置（都是"只有宿主能做"的重活）
+        skillsBridge = SkillsBridge(ctx)
+        mcpBridge = McpConfigBridge(ctx)
 
         // ★ 设备能力通道（`heracles/device`）—— 协议见 [DeviceChannel]
         DeviceChannel(
@@ -225,7 +334,14 @@ class MainActivity : FlutterActivity() {
         MethodChannel(
             flutterEngine.dartExecutor.binaryMessenger,
             CHANNEL,
-        ).also { commandChannel = it }.setMethodCallHandler { call, result -> handle(call, result) }
+        ).also {
+            commandChannel = it
+            // ★ 进程级"当前活着的通道"引用（2026-11-02 T0）：
+        //   选择结果到达时，发起这次选择的那个 Activity 可能已经死了，
+        //   它捕获的 commandChannel 指向旧引擎。要推 `workspaceAdded` 给
+        //   **重建后的新引擎**，只能查这一份。
+        liveCommandChannel = it
+    }.setMethodCallHandler { call, result -> handle(call, result) }
 
         // ★ 流式语音事件流（`heracles/voice`）—— Kotlin → Dart，契约 §N13.2
         //   只增不改：旧包没有这条通道 ⇒ Dart 订阅失败/收不到 chunk。
@@ -251,6 +367,8 @@ class MainActivity : FlutterActivity() {
         when (call.method) {
             // ---- 工作区（登记表在本地 prefs，SAF/POSIX 由 DeviceFs 自行路由） ----
             "pickWorkspace" -> handlePickWorkspace(call, result)
+            // 只增（2026-11-02 T0）：Dart 超时后取回已产出的选择结果
+            "consumePickWorkspaceResult" -> handleConsumePickWorkspaceResult(call, result)
             "listWorkspaces" -> handleListWorkspaces(result)
             "removeWorkspace" -> handleRemoveWorkspace(call, result)
             "ensureAppWorkspace" -> handleEnsureAppWorkspace(result)
@@ -350,6 +468,46 @@ class MainActivity : FlutterActivity() {
                 AutomationScheduler.cancelAll(this)
                 result.success(mapOf("ok" to true))
             }
+
+            // ---- ★ V0.4 F1（2026-11-02）：Skills 通道（契约 §N16.1）----
+            //   宿主只搬字节 + 存启停表；**合法性由 Dart 的 parseSkillMd 判**
+            //   —— 解析器只能有一份，否则会出现"装上了但列表里没有"。
+            //   安装要下载/遍历目录 ⇒ 切 IO。
+            "skillsList" -> {
+                val ws = call.argument<String>("workspace") ?: ""
+                scope.launch(Dispatchers.IO) { reply(result, skillsBridge.list(ws)) }
+            }
+            "skillsSetEnabled" -> {
+                val name = call.argument<String>("name") ?: ""
+                val enabled = call.argument<Boolean>("enabled") ?: true
+                reply(result, skillsBridge.setEnabled(name, enabled))
+            }
+            "skillsInstall" -> {
+                val ws = call.argument<String>("workspace") ?: ""
+                val source = call.argument<String>("source") ?: ""
+                scope.launch(Dispatchers.IO) { reply(result, skillsBridge.install(ws, source)) }
+            }
+            "skillsRemove" -> {
+                val ws = call.argument<String>("workspace") ?: ""
+                val name = call.argument<String>("name") ?: ""
+                val path = call.argument<String>("path")
+                scope.launch(Dispatchers.IO) { reply(result, skillsBridge.remove(ws, name, path)) }
+            }
+
+            // ---- ★ V0.4 F3（2026-11-02）：MCP 配置通道（契约 §N16.2）----
+            //   ⚠️ **没有 mcpTest**：宿主没有 MCP 客户端，真连接测试在 Dart 侧
+            //   （框架 McpManager）。在 Kotlin 手搓一个握手只能得到假结果。
+            "mcpList" -> reply(result, mcpBridge.list())
+            "mcpSave" -> {
+                @Suppress("UNCHECKED_CAST")
+                val server = call.argument<Map<*, *>>("server")
+                reply(result, mcpBridge.save(server))
+            }
+            "mcpDelete" -> {
+                val name = call.argument<String>("name") ?: ""
+                reply(result, mcpBridge.delete(name))
+            }
+
             else -> result.success(mapOf("ok" to false, "error" to "未知方法：${call.method}"))
         }
     }
@@ -441,50 +599,96 @@ otify_user 工具的宿主实现，2026-11-02）。
      * 否则 [DeviceFs] 查不到 SAF 记录，后续读这个目录会用 `java.io.File` 撞 `EPERM`。
      *
      * 用户取消时回 `null`（**沿用旧契约**：Dart 侧据此判断"没选"而不是"出错"）。
+     *
+     * ## ★★ 为什么回调里跑的是 [processScope] 而不是 [scope]（2026-11-02 T0）★★
+     *
+     * 这条闭包会被 `FolderPickerBridge` 存进**进程级**登记表，可能在**本 Activity
+     * 已经 onDestroy 之后**才被调用（SAF 期间被系统回收 ⇒ 结果落到重建后的新实例）。
+     * 而 [scope] 在 `onDestroy` 里被 `cancel()` 了：
+     *
+     * ```
+     * scope.launch { … }        // 协程根本不会启动（scope 已取消）
+     * ⇒ 目录永远登记不上，completed 也永远不会被记录
+     * ⇒ 用户选了半天，工作区列表里什么都没有
+     * ```
+     *
+     * 换成进程级 scope 后，Activity 死活都不影响"把结果落库"这件纯数据工作。
      */
     private fun handlePickWorkspace(call: MethodCall, result: MethodChannel.Result) {
         // 上次用的目录作为选择器起点（Dart 可传，避免 UI 侧还要存一份）
         val lastUri = call.argument<String>("lastUri").orEmpty()
+        // ★ Dart 为每次调用生成 requestId：超时后凭它把结果取回去。
+        //   Activity 重建时那条 MethodChannel 已经失效，但结果不能因此丢失。
+        val requestId = call.argument<String>("requestId").orEmpty()
         runOnUiThread {
             try {
-                folderPicker.launch(lastUri) { ws ->
-                    if (ws == null) {
-                        // 用户取消，或选的位置没有本地路径（如网盘）
-                        reply(result, null)
-                        return@launch
-                    }
-                    // ★ 受限目录（Android 11+ 系统不授权）/ 网盘：
-                    //   把**原因 + 出路**原样交给 Dart，让它能显示人话并给出按钮。
-                    //   不再回 null（那会退化成一句笼统的"请换一个"）。
-                    if (ws["ok"] == false) {
-                        val payload = mutableMapOf<String, Any?>(
-                            "ok" to false,
-                            "error" to ((ws["error"] as? String)
-                                ?: "这个位置无法用作工作区"),
-                        )
-                        (ws["reason"] as? String)?.let { payload["reasonCode"] = it }
-                        (ws["suggest"] as? List<*>)?.let { payload["suggest"] = it }
-                        reply(result, payload)
-                        return@launch
-                    }
-                    val path = ws["path"] as? String
-                    if (path.isNullOrBlank()) {
-                        reply(result, null)
-                        return@launch
-                    }
-                    val name = (ws["name"] as? String).orEmpty()
-                    val treeUri = (ws["treeUri"] as? String).orEmpty()
-                    scope.launch {
-                        val saved = withContext(Dispatchers.IO) {
-                            registry.add(path, name, treeUri)
+                folderPicker.launch(lastUri, requestId) { ws ->
+                    processScope.launch {
+                        val payload = completePickWorkspace(ws)
+                        // 先落 completed（在 completePickWorkspace 里）再回包：
+                        // 回包打到死通道上也不会丢结果 —— Dart 超时会自己来取。
+                        folderPicker.recordCompleted(requestId, payload)
+                        runCatching { reply(result, payload) }
+                        if (payload != null && payload["ok"] != false) {
+                            // ★ Activity 重建后 Dart 是**全新 isolate**，它启动时读的
+                            //   工作区列表里没有这个新目录 —— 推一条让它重载。
+                            runCatching {
+                                liveCommandChannel?.invokeMethod(
+                                    "workspaceAdded",
+                                    mapOf(
+                                        "path" to (payload["path"] as? String).orEmpty(),
+                                        "name" to (payload["name"] as? String).orEmpty(),
+                                    ),
+                                )
+                            }
                         }
-                        // 登记失败（目录不存在且无 SAF 授权）→ 如实回 null，不假装成功
-                        reply(result, saved)
                     }
                 }
             } catch (e: Throwable) {
+                folderPicker.recordCompleted(requestId, null)
                 reply(result, null)
             }
+        }
+    }
+
+    /**
+     * 取回某个 requestId **已产出但没送达**的选择结果（Dart 超时后的补救）。
+     *
+     * 没有结果 ⇒ 回 null，Dart 据此走"选择器被系统回收，请重试"分支。
+     * 取过即作废（幂等消费，防同一个结果被两次使用）。
+     */
+    private fun handleConsumePickWorkspaceResult(
+        call: MethodCall,
+        result: MethodChannel.Result,
+    ) {
+        val requestId = call.argument<String>("requestId").orEmpty()
+        reply(result, folderPicker.consumeCompleted(requestId))
+    }
+
+    /**
+     * 把 picker 的原始结果落成**给 Dart 的最终 payload**（含工作区登记）。
+     *
+     * 成功 = 已登记的工作区 Map；取消 = null；失败 = `{ok:false, error, reasonCode?, suggest?}`。
+     */
+    private suspend fun completePickWorkspace(
+        ws: Map<String, Any?>?,
+    ): Map<String, Any?>? {
+        if (ws == null) return null // 用户取消，或选的位置没有本地路径
+        // ★ 受限目录（Android 11+ 系统不授权）/ 网盘：
+        //   把**原因 + 出路**原样交给 Dart，让它能显示人话并给出按钮。
+        if (ws["ok"] == false) {
+            return buildMap {
+                put("ok", false)
+                put("error", (ws["error"] as? String) ?: "这个位置无法用作工作区")
+                (ws["reason"] as? String)?.let { put("reasonCode", it) }
+                (ws["suggest"] as? List<*>)?.let { put("suggest", it) }
+            }
+        }
+        val path = ws["path"] as? String
+        if (path.isNullOrBlank()) return null
+        // 登记失败（目录不存在且无 SAF 授权）→ 如实回 null，不假装成功
+        return withContext(Dispatchers.IO) {
+            registry.add(path, (ws["name"] as? String).orEmpty(), (ws["treeUri"] as? String).orEmpty())
         }
     }
 
@@ -1082,6 +1286,46 @@ otify_user 工具的宿主实现，2026-11-02）。
     }
 
     companion object {
+        private const val TAG = "HeraclesAct"
+
+        /**
+         * ★ **进程级协程域**（2026-11-02 T0）—— 专给"必须活过 Activity"的收尾工作。
+         *
+         * 与实例字段 [scope] 的区别：`scope` 在 `onDestroy` 被 cancel，而 SAF 结果
+         * 恰恰可能落在 onDestroy **之后**（Activity 被回收重建）。用 `scope` 去
+         * 落库 = 协程根本不启动 = 工作区永远登记不上。
+         *
+         * ⚠️ 这里**只许放纯数据工作**（写 prefs / 登记表 / 回包）。任何碰窗口、
+         *    碰 View、要求 Activity 存活的活儿都不许放进来。
+         */
+        private val processScope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
+
+        /** 重建后**新引擎**上的 `heracles/command`（推送 `workspaceAdded` 用）。 */
+        @Volatile
+        private var liveCommandChannel: MethodChannel? = null
+
+        /** 首帧看门狗：判定"卡住"的等待时长。 */
+        private const val WATCHDOG_DELAY_MS = 2_500L
+
+        /** 首帧看门狗：两次自救之间的冷却（防"重建→还黑→再重建"）。 */
+        private const val WATCHDOG_COOLDOWN_MS = 30_000L
+
+        /** 上次自救时刻（进程级）。 */
+        @Volatile
+        private var lastWatchdogRecoverAt = 0L
+
+        /**
+         * 本**进程**曾经渲染过 Flutter 首帧。
+         *
+         * 必须是进程级而不是实例字段：Activity 被系统回收重建后，新实例的
+         * 实例字段是 false —— 而那正是"返回前台黑屏"要治的场景，用实例字段
+         * 等于看门狗在最需要它的时候不布防。
+         *
+         * 同时它保证**冷启动慢**（进程还没渲染过首帧）不会被误判成黑屏。
+         */
+        @Volatile
+        private var everRenderedFirstFrame = false
+
         /**
          * 命令通道名（**保留旧名**）。
          *

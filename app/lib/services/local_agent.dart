@@ -66,6 +66,9 @@ import 'global_memory.dart' show runMemoryMigrationOnce;
 import 'image_input.dart';
 import 'memory_service.dart';
 import 'session_store.dart';
+import 'search_config_service.dart';
+import 'skill_gating.dart';
+import 'skills_service.dart';
 
 /// **执行面 → 历史命令卡口径**（D6，2026-10-29）。**纯函数**，便于单测。
 ///
@@ -968,12 +971,29 @@ class LocalAgentExecutor {
     //
     // ★ 记忆能力带**寻址**（2026-10-29）：workspace + 已解析的 sid。
     //   没有这个上下文，save_memory 就不知道写哪个作用域（旧实现写全局）。
+    // ★ 搜索服务 endpoint（V0.4 F4，2026-11-02）：从安全存储读出来注入能力。
+    //
+    // 为什么在这里读而不是在 `buildDeviceCapabilities` 里读：那是**装配函数**
+    // （纯同步、无 IO），在里面 await secure storage 会让它在测试里无法构造。
+    //
+    // 读不到（首次 / 存储异常）⇒ 传空串 ⇒ `web_search` 保持"未配置搜索服务"
+    // 的**明确失败**（不是编个结果，也不是静默成功）。
+    var searchEndpoint = '';
+    if (capabilitiesForTest == null) {
+      try {
+        searchEndpoint = (await SearchConfigService().read()).endpoint;
+      } catch (_) {
+        // 存储损坏/被清 ⇒ 当没配置（run 不该因为搜索配置读不出来而失败）
+        searchEndpoint = '';
+      }
+    }
     final caps = capabilitiesForTest ??
         buildDeviceCapabilities(
           workspaceRoot: workspacePath,
           includeSandbox: true,
           memorySessionId: sid,
           memoryService: memoryService,
+          searchEndpoint: searchEndpoint,
         );
 
     // ---- 模型配置 ----
@@ -2273,9 +2293,39 @@ class LocalAgentExecutor {
           // 单个文件失败不影响其它
         }
       }
-      return registry.enabled;
+
+      // ★ V0.4 F1（2026-11-02）：启停开关**必须在这里生效**。
+      //
+      // 在此之前，用户在 Skills 页关掉的技能照样被注入 —— 开关看着生效、
+      // 实际无效。闸门的判断见 `skill_gating.dart`（纯函数，带边界测试）：
+      // 读不到启停表（旧宿主/通道缺失/读失败）⇒ 传 null ⇒ **不筛**，
+      // 保持旧行为；读到才按名字过滤。
+      return filterEnabledSkills(
+        registry.enabled,
+        await _enabledSkillNamesOrNull(),
+      );
     } catch (_) {
       return const <SkillEntry>[];
+    }
+  }
+
+  /// 读"已启用技能名"集合；**任何异常/通道缺失都返回 null**（= 不筛）。
+  ///
+  /// 为什么用 `SkillsService.listSkills()` 而不是自己调通道：解析、降级、
+  /// 错误码那一套逻辑已经在那边了，这里再写一份就会漂。代价是每次 run 多
+  /// 一次通道往返（毫秒级，且只在有 `SKILL.md` 时才发生）。
+  Future<Set<String>?> _enabledSkillNamesOrNull() async {
+    try {
+      final snap = await SkillsService(workspace: workspacePath).listSkills();
+      // 通道缺失 ⇒ 这份快照里根本没有用户技能（user 为空、builtin 恒 true），
+      // 拿它去筛会把所有用户技能误杀 ⇒ 明确当作"读不到"。
+      if (snap.code == SkillsService.errChannelMissing) return null;
+      return <String>{
+        for (final s in [...snap.builtin, ...snap.user])
+          if (s.enabled) s.name,
+      };
+    } catch (_) {
+      return null;
     }
   }
 

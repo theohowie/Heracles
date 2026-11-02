@@ -2858,6 +2858,22 @@ Capabilities buildDeviceCapabilities({
   String? memorySessionId,
   /// 三作用域记忆服务（测试可注入假实现；默认按通道构造）。
   ScopedMemoryService? memoryService,
+  /// **搜索服务 endpoint**（V0.4 F4，2026-11-02；空 = 未配置）。
+  ///
+  /// ## 为什么由调用方注入，而不是这里直接读 `SearchConfigService`
+  ///
+  /// 1. 本函数是**同步装配函数**（一堆 `const` 构造 + 一行 `Capabilities`），
+  ///    secure storage 是异步 IO。为了读一个字符串把它改成 `Future`，
+  ///    会让所有测试/CLI 调用点跟着变形，收益却是零 —— 装配层不该做 IO。
+  /// 2. 装配函数是**纯的**：同样的入参永远给出同样的能力组合。一旦在这里
+  ///    读全局存储，单元测试就会依赖真机 KeyStore 的残留状态。
+  /// 3. 读失败要**能被上层看见**（"存储坏了" ≠ "没配置"），而这里没有
+  ///    把错误往上抛的位置：返回值是 `Capabilities`，不是结果类型。
+  ///    交给调用方（`local_agent` / 设置页）去 `read()`，它知道该显示什么。
+  ///
+  /// 不传 ⇒ 空字符串 ⇒ [DeviceWebCapability.search] 仍然**明确失败**
+  /// 「未配置搜索服务」，与改动前字节等价（不编造结果）。
+  String searchEndpoint = '',
 }) {
   final ch = channel ?? const DeviceChannelClient();
   return Capabilities(
@@ -2866,7 +2882,11 @@ Capabilities buildDeviceCapabilities({
     deviceHealth:
         includeHealth ? ChannelHealthCapability(channel: ch) : null,
     apk: includeApk ? const DeviceApkCapability() : null,
-    web: includeWeb ? const DeviceWebCapability() : null,
+    // ★ F4（2026-11-02）：endpoint 由调用方注入（见 [searchEndpoint] 的 KDoc）。
+    //   不传时是空串 ⇒ `search()` 仍明确失败，行为与旧代码一致。
+    web: includeWeb
+        ? DeviceWebCapability(searchEndpoint: searchEndpoint)
+        : null,
     memory: includeMemory
         ? ScopedMemoryCapability(
             workspacePath: workspaceRoot,

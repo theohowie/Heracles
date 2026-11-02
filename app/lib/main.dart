@@ -5,6 +5,7 @@ import 'package:flutter/services.dart';
 
 import 'models/settings.dart';
 import 'screens/chat_screen.dart';
+import 'services/automation_wiring.dart';
 import 'services/sandbox_service.dart';
 import 'services/settings_controller.dart';
 import 'theme/app_theme.dart';
@@ -55,6 +56,13 @@ Future<void> main() async {
   }
 
   runApp(HeraclesApp(settings: settings));
+
+  // ★ V0.4 F2（2026-11-02）：定时任务的「到点待执行」消费。
+  //
+  // 放在 runApp 之后：它要读工作区/设置，可能触发一次真实 run ——
+  // 让它排在首帧之后，用户先看到界面而不是白屏等任务跑完。
+  // 幂等：`AutomationWiring` 自己防重复注册。
+  AutomationWiring.start();
 }
 
 class HeraclesApp extends StatelessWidget {
