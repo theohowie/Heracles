@@ -633,6 +633,21 @@ abstract final class ContractSearch {
   static const String endpointKey = 'heracles.search.endpoint';
   static const String apiKeyKey = 'heracles.search.api_key';
 
+  /// **本版本是否支持把 Key 注入请求头**（2026-11-02 用户裁定：**不支持**）。
+  ///
+  /// 为什么做成常量而不是散在文案里：`DeviceWebCapability` 目前**没有自定义
+  /// 请求头的位置**，存了 Key 也发不出去 —— 那就是"已保存却不生效"的半截功能。
+  /// 裁定是"明确不支持"：保存 Key 直接拒绝、遗留 Key 读取时迁移清掉。
+  /// 下一轮给能力层加 `headers` 缝后，把这个值翻成 `true` 并恢复 Key 的保存。
+  static const bool keyHeaderSupported = false;
+
+  static const String errKeyUnsupported = 'E_SEARCH_KEY_UNSUPPORTED';
+
+  /// 带 Key 保存被拒时的人话（设置页直接上屏）。
+  static const String keyUnsupportedMessage =
+      '当前版本仅支持免鉴权搜索服务：API Key 不会被保存，也不会被使用。'
+      '请改用免鉴权的搜索服务地址。';
+
   /// 掩码保留的尾部字符数（`sk-***abcd` 这种）。
   static const int maskVisibleTail = 4;
 

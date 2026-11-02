@@ -56,7 +56,7 @@ void main() {
   const useKey = 'sk-1234567890abcd';
 
   group('① 保存后读取', () {
-    test('★★★ 保存 endpoint + Key，read 回两者（hasKey 为真）', () async {
+    test('★★★ 带 Key 保存 ⇒ 整个拒绝，一个字节都不写（本版本免鉴权）', () async {
       final store = _MemoryStore();
       final svc = SearchConfigService(store: store);
 
@@ -64,25 +64,25 @@ void main() {
         'https://api.example.com/search',
         key: useKey,
       );
-      expect(saved.ok, isTrue, reason: '合法 https 地址不该被拒：${saved.message}');
-      expect(saved.message, isEmpty);
-
-      final cfg = await svc.read();
-      expect(cfg.endpoint, 'https://api.example.com/search');
-      expect(cfg.hasKey, isTrue);
-
-      // 键名必须是契约常量：拼错一个字，设置页存了、能力层也读不到。
-      expect(store.data[ContractSearch.endpointKey],
-          'https://api.example.com/search');
-      expect(store.data[ContractSearch.apiKeyKey], useKey);
+      // 不许"存了 endpoint 却丢掉 Key"的半截成功 —— 那会让设置页显示
+      // "已保存"，而请求根本没有鉴权，用户只会看到 401。
+      expect(saved.ok, isFalse, reason: '带 Key 保存必须被明确拒绝');
+      expect(saved.code, ContractSearch.errKeyUnsupported);
+      expect(saved.message, contains('免鉴权'));
+      // endpoint 也没写进去（整笔拒绝，不是部分成功）
+      expect(store.data.containsKey(ContractSearch.endpointKey), isFalse);
+      expect(store.data.containsKey(ContractSearch.apiKeyKey), isFalse);
+      expect(store.writes, isEmpty, reason: '拒绝时不得落任何一笔写');
     });
 
-    test('★ 先写 Key 再写 endpoint（endpoint 是"配置生效"的提交点）', () async {
+    test('不带 Key ⇒ 只写 endpoint（本版本没有"先 Key 后 endpoint"的顺序）', () async {
       final store = _MemoryStore();
-      await SearchConfigService(store: store)
-          .save('https://api.example.com/search', key: useKey);
-      expect(store.writes,
-          <String>[ContractSearch.apiKeyKey, ContractSearch.endpointKey]);
+      final svc = SearchConfigService(store: store);
+      expect(
+        (await svc.save('https://api.example.com/search')).ok,
+        isTrue,
+      );
+      expect(store.writes, <String>[ContractSearch.endpointKey]);
     });
 
     test('不给 Key ⇒ hasKey 为假（但 endpoint 仍然存下）', () async {
@@ -96,25 +96,28 @@ void main() {
       expect(store.data.containsKey(ContractSearch.apiKeyKey), isFalse);
     });
 
-    test('★ 已有 Key 时再 save（不传 key）⇒ 旧 Key 保留，不被空值删掉', () async {
+    test('★★★ 上一版本遗留的 Key 会在 read 时被清掉（迁移，不留半截）', () async {
       final store = _MemoryStore();
-      final svc = SearchConfigService(store: store);
-      await svc.save('https://a.example.com/s', key: useKey);
-      // 用户只改了路径：输入框里的 Key 是空的
-      await svc.save('https://b.example.com/s2');
+      // 上一版本存过 Key：它发不出去（能力层没有请求头的位置），
+      // 留着只会让人以为"鉴权生效了"。
+      store.data[ContractSearch.apiKeyKey] = useKey;
+      store.data[ContractSearch.endpointKey] = 'https://api.example.com/s';
 
+      final svc = SearchConfigService(store: store);
       final cfg = await svc.read();
-      expect(cfg.endpoint, 'https://b.example.com/s2');
-      expect(cfg.hasKey, isTrue, reason: '空输入不等于"删除 Key"（手滑就丢凭据）');
-      expect(store.data[ContractSearch.apiKeyKey], useKey);
+
+      expect(cfg.hasKey, isFalse, reason: '免鉴权版本必须如实报"没有 Key"');
+      expect(cfg.endpoint, 'https://api.example.com/s');
+      expect(store.data.containsKey(ContractSearch.apiKeyKey), isFalse,
+          reason: '发不出去的凭据必须删掉，不能躺在存储里装样子');
     });
 
-    test('传空白字符串 key 也不改 Key', () async {
+    test('传空白字符串 key 等于没传（不拒、不写）', () async {
       final store = _MemoryStore();
       final svc = SearchConfigService(store: store);
-      await svc.save('https://a.example.com/s', key: useKey);
-      await svc.save('https://a.example.com/s', key: '   ');
-      expect(store.data[ContractSearch.apiKeyKey], useKey);
+      final saved = await svc.save('https://a.example.com/s', key: '   ');
+      expect(saved.ok, isTrue);
+      expect(store.writes, <String>[ContractSearch.endpointKey]);
     });
 
     test('endpoint 两端空白被裁掉（否则存进去的地址没法直接用）', () async {
@@ -164,16 +167,18 @@ void main() {
       expect(SearchConfigService.maskKey('   '), '');
     });
 
-    test('★ masked() 端到端：endpoint 脱敏 + Key 掩码', () async {
+    test('★★★ masked() 端到端：endpoint 脱敏；遗留 Key 被迁移清掉', () async {
       final store = _MemoryStore();
       final svc = SearchConfigService(store: store);
-      await svc.save('https://api.example.com/search?token=SHOULD_NOT_SHOW',
-          key: useKey);
+      // 上一版本留下的 Key（免鉴权版本必须清掉，不能显示成"有 Key"）
+      store.data[ContractSearch.apiKeyKey] = useKey;
+      await svc.save('https://api.example.com/search?token=SHOULD_NOT_SHOW');
 
       final m = await svc.masked();
       expect(m.endpoint, 'https://api.example.com/search',
           reason: 'query 里可能有 token，回显时必须丢掉');
-      expect(m.keyMasked, 'sk-***abcd');
+      expect(m.keyMasked, '', reason: '免鉴权版本永远显示"没有 Key"');
+      expect(store.data.containsKey(ContractSearch.apiKeyKey), isFalse);
     });
 
     test('masked() 在没配 Key 时 keyMasked 为空串', () async {
@@ -298,7 +303,7 @@ void main() {
       final store = _MemoryStore()..throwOnWrite = StateError('disk full');
       final svc = SearchConfigService(store: store);
 
-      final r = await svc.save('https://api.example.com/search', key: useKey);
+      final r = await svc.save('https://api.example.com/search');
       expect(r.ok, isFalse);
       expect(r.message, contains('保存搜索服务配置失败'));
       expect(r.message, contains('未生效'));
@@ -335,11 +340,11 @@ void main() {
   group('⑥ 脱敏：toString / 错误消息 / 回显', () {
     test('★★★ toString 不含 Key 明文，也不含 endpoint 的 query', () async {
       const secret = 'sk-1234567890abcd';
-      final svc = SearchConfigService(store: _MemoryStore());
-      await svc.save(
-        'https://api.example.com/search?token=URL_SECRET_42',
-        key: secret,
-      );
+      final store = _MemoryStore();
+      // 模拟上一版本遗留的 Key：免鉴权版本必须保证它进不了任何输出
+      store.data[ContractSearch.apiKeyKey] = secret;
+      final svc = SearchConfigService(store: store);
+      await svc.save('https://api.example.com/search?token=URL_SECRET_42');
 
       final s = svc.toString();
       expect(s.contains(secret), isFalse, reason: 'Key 绝不能进日志');
@@ -412,6 +417,43 @@ void main() {
         searchEndpoint: 'https://api.example.com/search',
       );
       expect(caps.web, isNull);
+    });
+  });
+
+  group('⑧ 免鉴权收敛（本轮裁定：明确不支持，不留半截）', () {
+    test('★★★ 拒绝文案直接可上屏（说明为什么 + 用户该怎么做）', () async {
+      final svc = SearchConfigService(store: _MemoryStore());
+      final saved = await svc.save('https://api.example.com/s', key: 'sk-abc');
+
+      expect(saved.ok, isFalse);
+      expect(saved.message, contains('免鉴权'));
+      expect(saved.message, contains('不会被保存'),
+          reason: '必须说清"Key 没存"，否则用户以为鉴权已生效');
+    });
+
+    test('★★★ 遗留 Key 在 masked() 里同样被清（两条读路径口径一致）', () async {
+      final store = _MemoryStore();
+      store.data[ContractSearch.apiKeyKey] = useKey;
+      final svc = SearchConfigService(store: store);
+
+      final m = await svc.masked();
+      expect(m.keyMasked, '');
+      expect(store.data.containsKey(ContractSearch.apiKeyKey), isFalse);
+    });
+
+    test('★ userInfo 拒绝文案不再指向"Key 一栏"（那一栏已经不存在）', () {
+      final r = SearchConfigService.endpointRejection(
+          'https://user:pass@api.example.com/s');
+      expect(r, isNotNull);
+      expect(r!, contains('免鉴权'));
+      expect(r.contains('请填到 Key 一栏'), isFalse,
+          reason: '旧文案会引导用户去找一个已经移除的输入框');
+    });
+
+    test('★ 契约常量钉死：keyHeaderSupported=false（下一轮要改的就是它）', () {
+      expect(ContractSearch.keyHeaderSupported, isFalse);
+      expect(ContractSearch.errKeyUnsupported, 'E_SEARCH_KEY_UNSUPPORTED');
+      expect(ContractSearch.keyUnsupportedMessage, contains('免鉴权'));
     });
   });
 }

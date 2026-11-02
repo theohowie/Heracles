@@ -10,9 +10,13 @@
 ///
 /// ## 三条硬约束（为什么这么设计）
 ///
-/// 1. **Key 只在 secure storage 与请求头出现**：本文件不提供任何"取明文
-///    Key"的公开接口（[masked] 只回掩码），也不把 Key 拼进 [toString] 或
-///    异常消息 —— 日志脱敏靠"根本拿不到"比靠"记得打码"可靠。
+/// 1. **免鉴权收敛（2026-11-02 裁定）**：本版本**不支持鉴权** ——
+///    `DeviceWebCapability` 没有自定义请求头的位置，存了 Key 也发不出去。
+///    所以：带 Key 保存**整笔拒绝**（[ContractSearch.errKeyUnsupported]）、
+///    上一版本遗留的 Key 在读取时**迁移清掉**。宁可明确说"不支持"，
+///    也不留一个"已保存却不生效"的半截功能。
+///    下一轮给能力层加 `headers` 缝后，翻 [ContractSearch.keyHeaderSupported]
+///    并恢复 Key 的保存路径。
 /// 2. **存储访问是可注入的**（[SearchCredStore]）：`FlutterSecureStorage`
 ///    在单测里没有平台通道，真读真写会直接抛 `MissingPluginException`。
 ///    把存储抽象出来，测试就能塞内存实现，验证的是**本文件的分支与脱敏
@@ -138,7 +142,16 @@ class SearchConfigService {
   ///
   /// 返回 `(endpoint: '', hasKey: false)` = **还没配**（不是错误）。
   /// 存储读不出来 ⇒ 抛 [SearchConfigException]（**不要**当成未配置）。
-  Future<({String endpoint, bool hasKey})> read() async {
+  ///
+  /// **免鉴权收敛（2026-11-02 裁定）**：本版本不支持把 Key 注入请求头
+  /// （[ContractSearch.keyHeaderSupported] = false）⇒ 读到遗留 Key 会**顺手删掉**
+  /// 并如实回 `hasKey:false`。理由：发不出去的凭据留在存储里，只会让人以为
+  /// "鉴权已生效"，然后对着 401 排查半天 —— 那是半截功能，不是兼容。
+  Future<({String endpoint, bool hasKey})> read() async =>
+      _readMigrateKey();
+
+  /// [read] / [masked] 共用的读取 + 遗留 Key 迁移。
+  Future<({String? endpoint, String? key})> _readRawMigrating() async {
     final String? ep;
     final String? key;
     try {
@@ -150,22 +163,33 @@ class SearchConfigService {
         '这不是"未配置"——请检查系统安全存储/权限，或重装应用。',
       );
     }
-    _lastEndpoint = ep?.trim() ?? '';
-    return (endpoint: _lastEndpoint, hasKey: (key ?? '').trim().isNotEmpty);
+    if ((key ?? '').trim().isNotEmpty) {
+      // 迁移：删除发不出去的遗留凭据（失败不阻断 —— 下次读还会再试）
+      try {
+        await _store.delete(ContractSearch.apiKeyKey);
+      } catch (_) {}
+      return (endpoint: ep, key: null);
+    }
+    return (endpoint: ep, key: key);
+  }
+
+  Future<({String endpoint, bool hasKey})> _readMigrateKey() async {
+    final r = await _readRawMigrating();
+    _lastEndpoint = (r.endpoint ?? '').trim();
+    return (endpoint: _lastEndpoint, hasKey: false);
   }
 
   /// 保存配置。
   ///
   /// - [endpoint] 必须是 `http://` / `https://` 且带主机名，否则**拒绝保存**
   ///   （回 [ContractSearch.errInvalidEndpoint] + 人话原因）。
-  /// - [key] 传 `null` 或空白 ⇒ **保持原 Key 不动**。理由：用户改 endpoint
-  ///   时输入框是空的，若把空值当成"删 Key"，一次手滑就悄悄删掉了凭据；
-  ///   要清空请用 [clear]。
-  ///
-  /// 写入顺序：**先 Key，后 endpoint**。endpoint 是"这套配置生效"的提交点 ——
-  /// 中途失败时，最坏情况是 Key 已换而 endpoint 还是旧的（请求会 401，
-  /// 用户看得见、改得动），而不是"界面显示保存成功、实际没有 Key"。
+  /// - [key] **本版本一律拒绝**（[ContractSearch.keyHeaderSupported] = false）：
+  ///   能力层没有自定义请求头的位置，存了也发不出去。拒绝是**整笔**的 ——
+  ///   endpoint 也不会写（绝不出现"已保存但不生效"的半截状态）。
+  ///   空白 [key] 视为没传（向后兼容旧调用方）。
   Future<SearchSaveResult> save(String endpoint, {String? key}) async {
+    // 先校验 endpoint（主字段），再谈 Key —— 地址本身就是错的时，
+    // "不支持鉴权"是噪音，用户该先看到地址哪里不对。
     final trimmed = endpoint.trim();
     final rejection = endpointRejection(trimmed);
     if (rejection != null) {
@@ -175,10 +199,13 @@ class SearchConfigService {
       );
     }
     final newKey = key?.trim() ?? '';
+    if (newKey.isNotEmpty) {
+      return SearchSaveResult.failed(
+        ContractSearch.keyUnsupportedMessage,
+        code: ContractSearch.errKeyUnsupported,
+      );
+    }
     try {
-      if (newKey.isNotEmpty) {
-        await _store.write(ContractSearch.apiKeyKey, newKey);
-      }
       await _store.write(ContractSearch.endpointKey, trimmed);
     } catch (e) {
       return SearchSaveResult.failed(
@@ -210,25 +237,17 @@ class SearchConfigService {
   ///   userinfo**。为什么不回全量：endpoint 的 query 里经常塞 token
   ///   （`?api_key=...`），回显到 UI 就等于把它摊在截图里；要编辑请用 [read]
   ///   拿到原值自己填进输入框（输入框本身可以做成密码样式）。
-  /// - `keyMasked`：`sk-***abcd`；长度 ≤ [ContractSearch.maskFullBelow] ⇒
-  ///   全掩 `***`；没有 Key ⇒ 空串（"空"和"有但不显示"必须能区分）。
+  /// - `keyMasked`：**本版本恒为空串** —— 免鉴权收敛（2026-11-02）后没有
+  ///   任何路径能存进 Key，遗留 Key 会在读取时被迁移清掉。保留这个字段是
+  ///   为了下一轮加 `headers` 缝时 UI 形状不用再变。
   ///
   /// 存储读不出来 ⇒ 抛 [SearchConfigException]（同 [read]）。
   Future<({String endpoint, String keyMasked})> masked() async {
-    final String? ep;
-    final String? key;
-    try {
-      ep = await _store.read(ContractSearch.endpointKey);
-      key = await _store.read(ContractSearch.apiKeyKey);
-    } catch (e) {
-      throw SearchConfigException(
-        '读取搜索服务配置失败（存储不可用）：${_reasonOf(e)}。',
-      );
-    }
-    _lastEndpoint = ep?.trim() ?? '';
+    final r = await _readRawMigrating();
+    _lastEndpoint = (r.endpoint ?? '').trim();
     return (
       endpoint: redactEndpoint(_lastEndpoint),
-      keyMasked: maskKey(key ?? ''),
+      keyMasked: maskKey(r.key ?? ''),
     );
   }
 
@@ -266,8 +285,7 @@ class SearchConfigService {
       return '搜索服务地址的主机名不合法（不能含空格或转义字符）。';
     }
     if (uri.userInfo.isNotEmpty) {
-      return '不要把账号密码写进 URL；如果需要密钥，请填到 Key 一栏'
-          '（Key 只存在安全存储里，且只在请求头出现）。';
+      return '不要把账号密码写进 URL（当前版本仅支持免鉴权搜索服务）。';
     }
     return null;
   }
@@ -290,6 +308,11 @@ class SearchConfigService {
   }
 
   /// Key 掩码。
+  ///
+  /// ⚠️ **本版本生产路径到不了这里**：免鉴权收敛（2026-11-02）后没有任何
+  /// 路径能存进 Key，遗留 Key 在读取时就被清掉了。保留这个纯函数是因为
+  /// 下一轮给 `DeviceWebCapability` 加 `headers` 缝时要用（届时 UI 形状
+  /// 与掩码规则都不用改）—— 单测继续钉住它，防止到时候规则漂移。
   ///
   /// - 空 ⇒ `''`（没有 Key，不是"有但看不见"）；
   /// - 长度 ≤ [ContractSearch.maskFullBelow] ⇒ `***`（再留尾部就等于把
