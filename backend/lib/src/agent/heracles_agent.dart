@@ -909,6 +909,14 @@ class HeraclesAgent {
     var runStoppedEmitted = false;
     var budgetReached = false;
 
+    /// **V0.4 重试记账**：框架 `LLMRetryingEvent` 次数 + 最后一次重试原因。
+    ///
+    /// 用来判断"**重试耗尽**"：框架只有 5 个异常码（无 timeout/network），
+    /// 所以超时/网络只能靠"重试发生过且最终仍失败"来归类 —— 否则
+    /// `provider_timeout`/`network` 这两个 reason 永远没有来源。
+    var retryCount = 0;
+    String? lastRetryReason;
+
     /// **V0.4 checkpoint 恢复**：上次跑到第几轮（null = 不是恢复）。
     ///
     /// 宿主从会话最后一条 `role:"run_checkpoint"` 行读出 `round` 传进来；
@@ -949,25 +957,16 @@ class HeraclesAgent {
     /// 普通异常仍只发 `failed`，避免 UI 同时显示“失败”和“可继续”两种终态。
     void emitRunStoppedForFailure(String reason, {required bool cancelled}) {
       if (runStoppedEmitted) return;
-      RunStopReason? stop;
-      var canContinue = _options.continuePolicy != ContinuePolicy.off;
-      if (cancelled) {
-        stop = RunStopReason.userCancel;
-      } else if (budgetReached) {
-        // 工具调用预算：wire 复用 token_budget（契约 8 值），摘要写清楚是工具预算。
-        stop = RunStopReason.tokenBudget;
-        canContinue = false;
-      } else if (reason.contains('Maximum turns') ||
-          reason.contains('最大轮次')) {
-        stop = RunStopReason.maxRounds;
-      } else if (reason.contains('timeout') || reason.contains('超时')) {
-        stop = RunStopReason.providerTimeout;
-      } else if (reason.contains('network') ||
-          reason.contains('Network') ||
-          reason.contains('连接')) {
-        stop = RunStopReason.network;
-      }
-      if (stop == null) return;
+      final classified = classifyFailureStop(
+        reason: reason,
+        cancelled: cancelled,
+        budgetReached: budgetReached,
+        retryCount: retryCount,
+        lastRetryReason: lastRetryReason,
+        policyOff: _options.continuePolicy == ContinuePolicy.off,
+      );
+      final stop = classified.reason;
+      final canContinue = classified.canContinue;      if (stop == null) return;
       runStoppedEmitted = true;
       emit(HeraclesRunStopped(
         reason: stop,
@@ -1040,6 +1039,10 @@ class HeraclesAgent {
     controller.on<LLMRetryingEvent>((e) {
       // ⚠️ 字段是 `reason`（String），不是 `error`
       emit(HeraclesRetrying(e.reason));
+      // ★ V0.4（2026-11-02）：累计重试次数 + 记最后一次重试原因 ——
+      //   用于判断"是否重试耗尽"（耗尽后 provider_timeout/network 才有来源）。
+      retryCount++;
+      lastRetryReason = e.reason;
     });
     controller.on<AfterToolCallEvent>((e) {
       totalToolCalls++;
@@ -2594,6 +2597,92 @@ enum RunStopReason {
   }
 }
 
+/// **失败收尾的分类结果**（V0.4，纯数据 —— 便于单测）。
+class FailureStopClassification {
+  const FailureStopClassification(
+      {required this.reason, required this.canContinue});
+
+  /// null = 普通失败（不归为"可继续的停止"，仍走 `failed` 事件）。
+  final RunStopReason? reason;
+  final bool canContinue;
+}
+
+/// **把一次失败收尾归类成 `RunStopReason`**（V0.4 纯函数）。
+///
+/// ## 为什么要"重试耗尽"这个判据
+///
+/// 框架的 `AgentExceptionCode` 只有 5 个（unknown/loopDetection/resumeFailed/
+/// stopByController/cancelled）—— **没有 timeout / network**。所以超时与网络
+/// 只能靠"**框架确实重试过、且最终仍失败**"来认定，否则 `provider_timeout` /
+/// `network` 这两个 reason 永远不会有来源（等于死枚举）。
+///
+/// 优先级：取消 > 工具预算 > **重试耗尽(超时/网络)** > 文本匹配(轮次/超时/网络) > 普通失败。
+FailureStopClassification classifyFailureStop({
+  required String reason,
+  required bool cancelled,
+  required bool budgetReached,
+  required int retryCount,
+  String? lastRetryReason,
+  required bool policyOff,
+}) {
+  final canContinueWhenOn = !policyOff;
+  if (cancelled) {
+    return const FailureStopClassification(
+      reason: RunStopReason.userCancel,
+      canContinue: false,
+    );
+  }
+  if (budgetReached) {
+    // 工具调用预算：wire 复用 token_budget（契约 8 值），摘要写清是工具预算。
+    return const FailureStopClassification(
+      reason: RunStopReason.tokenBudget,
+      canContinue: false,
+    );
+  }
+  final retriesExhausted = retryCount >= ContractRunContinue.maxNetworkRetries;
+  final retryText = lastRetryReason ?? '';
+  if (retriesExhausted &&
+      (retryText.contains('timeout') ||
+          retryText.contains('Timeout') ||
+          retryText.contains('超时'))) {
+    return FailureStopClassification(
+      reason: RunStopReason.providerTimeout,
+      canContinue: canContinueWhenOn,
+    );
+  }
+  if (retriesExhausted &&
+      (retryText.contains('network') ||
+          retryText.contains('Network') ||
+          retryText.contains('connection') ||
+          retryText.contains('连接'))) {
+    return FailureStopClassification(
+      reason: RunStopReason.network,
+      canContinue: canContinueWhenOn,
+    );
+  }
+  if (reason.contains('Maximum turns') || reason.contains('最大轮次')) {
+    return FailureStopClassification(
+      reason: RunStopReason.maxRounds,
+      canContinue: canContinueWhenOn,
+    );
+  }
+  if (reason.contains('timeout') || reason.contains('超时')) {
+    return FailureStopClassification(
+      reason: RunStopReason.providerTimeout,
+      canContinue: canContinueWhenOn,
+    );
+  }
+  if (reason.contains('network') ||
+      reason.contains('Network') ||
+      reason.contains('连接')) {
+    return FailureStopClassification(
+      reason: RunStopReason.network,
+      canContinue: canContinueWhenOn,
+    );
+  }
+  // 普通错误 ⇒ 不归为"可继续的停止"（仍走 failed）。
+  return const FailureStopClassification(reason: null, canContinue: false);
+}
 /// **正文增量** —— 最终回答只认它。
 final class HeraclesTextDelta extends HeraclesEvent {
   const HeraclesTextDelta(this.delta);
