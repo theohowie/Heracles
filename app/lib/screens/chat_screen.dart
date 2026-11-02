@@ -7234,6 +7234,20 @@ class _Hint extends StatelessWidget {  const _Hint({
 
 /// **默认空态**（2026-10-26，用户发 TRAE 首页截图定版）：
 ///
+/// **V0.4 定位文案**（2026-11-02，对应 #6）：主叙事是"任意代码项目"，
+/// Android/APK 只是能力之一。抽成公开常量便于测试钉住（不再写死在私有类里）。
+const String kWelcomeGreeting =
+    '今天想做些什么？\n任意代码项目都能交给我';
+
+/// 首屏建议：覆盖 看项目 / 写脚本 / 搭工具 / 修 bug / 写文档，并保留一条 Android 示例。
+const List<(IconData, String)> kWelcomeSuggestions = <(IconData, String)>[
+  (CupertinoIcons.folder_fill, '快速看懂这个项目'),
+  (CupertinoIcons.chevron_left_slash_chevron_right, '帮我写个脚本'),
+  (CupertinoIcons.hammer_fill, '帮我搭个小工具'),
+  (CupertinoIcons.wrench_fill, '帮我修一个 bug'),
+  (CupertinoIcons.doc_text_fill, '帮我写一份文档'),
+  (CupertinoIcons.device_phone_portrait, '做个 Android 小工具'),
+];
 /// 左上顶格两行大字问候，下面一列描边建议胶囊（填充式图标），
 /// 大量留白。点胶囊 = 把文案填进输入框由用户补全/发送，不自动发。
 class _WelcomeState extends StatelessWidget {
@@ -7242,13 +7256,7 @@ class _WelcomeState extends StatelessWidget {
   final Hue h;
   final ValueChanged<String> onSuggest;
 
-  static const _suggestions = <(IconData, String)>[
-    (CupertinoIcons.folder_fill, '快速看懂这个项目'),
-    (CupertinoIcons.chevron_left_slash_chevron_right, '帮我写个脚本'),
-    (CupertinoIcons.hammer_fill, '帮我搭个小工具'),
-    (CupertinoIcons.lightbulb_fill, '碰撞一下灵感'),
-    (CupertinoIcons.doc_text_fill, '帮我整理一份文档'),
-  ];
+  static const _suggestions = kWelcomeSuggestions;
 
   @override
   Widget build(BuildContext context) {
@@ -7266,7 +7274,7 @@ class _WelcomeState extends StatelessWidget {
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
                 Text(
-                  '今天想做些什么？\n找我，我都可以帮你！',
+                  kWelcomeGreeting,
             style: TextStyle(
               fontSize: 30,
               fontWeight: FontWeight.w700,

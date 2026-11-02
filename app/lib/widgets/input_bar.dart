@@ -432,16 +432,10 @@ class _InputBarState extends State<InputBar>
     _focus.requestFocus();
   }
 
-  /// 模型胶囊里名字文本的最大宽度（build 时按屏宽赋值）：
-  /// 胶囊右缘不越输入框中线 —— 行宽 = 屏宽 − 页边 32 − 行内边距 20，
-  /// 一半再扣＋（38）+ 间距（4）+ 胶囊内边距（24）。
-  double _pillTextMax = 200;
 
   @override
   Widget build(BuildContext context) {
     final h = Hue.of(context);
-    _pillTextMax =
-        (MediaQuery.sizeOf(context).width - 32 - 20) * 0.5 - 66;
     // ★ 悬浮容器（2026-10-12，用户强调"悬浮悬浮悬浮"）：
     //   · **去掉顶部分隔线**（参考图输入框上方没有线 —— 那根线让容器
     //     看起来"焊死"在底部）
@@ -688,7 +682,28 @@ class _InputBarState extends State<InputBar>
                     //   发送/排队（用户原话「有字时暂停按钮变发送」）。
                     Padding(
                       padding: const EdgeInsets.fromLTRB(10, 0, 10, 10),
-                      child: Row(
+                      // ★ 2026-11-02 修：胶囊可用宽度改按**本行实际约束**算，
+                      //   不再按 MediaQuery 屏宽。
+                      //   旧写法拿屏宽当行长 ⇒ 输入条一旦装在比窗口窄的容器里
+                      //   （分屏 / 平板侧栏 / 整屏测试的 surface），两者不等价：
+                      //   本行实际只有 344 宽，却按 800 屏宽放出 308 的文字宽，
+                      //   整行 391 ⇒ RenderFlex overflowed by 47 pixels
+                      //   （session_guard / chat_screen_app_workspace 20 条全红）。
+                      //   设计意图不变：胶囊右缘不越过输入框中线。
+                      child: LayoutBuilder(
+                        builder: (context, rowConstraints) {
+                          // 行宽一半 − ＋(38) − 间距(4) − 胶囊内边距(24)；
+                          // 下限 48：极窄容器下不能给负的 maxWidth（BoxConstraints 会断言）。
+                          final halfBudget = rowConstraints.maxWidth * 0.5 - 66;
+                          // ★ 还必须有硬上限：右侧固定件（10+38+8+38+8+38 = 140）
+                          //   在窄屏上**本身就超过半行**（320dp ⇒ 行 274，半行 137）——
+                          //   只按"半宽"给，刚修好的溢出会换成另一种溢出
+                          //   （input_bar_overflow_test 的 320dp 用例就是这么抓到的）。
+                          final hardBudget = rowConstraints.maxWidth - 206;
+                          final raw = halfBudget < hardBudget ? halfBudget : hardBudget;
+                          final pillTextMax =
+                              raw.clamp(48.0, 240.0).toDouble();
+                          return Row(
                         children: [
                           _CircleButton(
                             icon: AppIcons.add,
@@ -701,8 +716,8 @@ class _InputBarState extends State<InputBar>
                               // 胶囊右缘不越过输入框中线（用户令）：
                               // 要算上胶囊前面的＋（38）+ 间距（4）+
                               // 胶囊自身内边距（24），一并从一半里扣；
-                              // 宽度在 build 顶部按屏宽算好（_pillTextMax）
-                              maxTextWidth: _pillTextMax,
+                              // 宽度按**本行约束**算好（见上方 LayoutBuilder）
+                              maxTextWidth: pillTextMax,
                               label: widget.providerLabel,
                               reasoningLevel: widget.reasoningLevel,
                               h: h,
@@ -748,6 +763,8 @@ _PermissionIconButton(
                                 : _send,
                           ),
                         ],
+                          );
+                        },
                       ),
                     ),
                             ],

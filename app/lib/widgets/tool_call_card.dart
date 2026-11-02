@@ -7,6 +7,7 @@ import 'package:flutter/services.dart';
 import '../models/message.dart';
 import '../models/settings.dart';
 import '../theme/app_theme.dart';
+import 'v04_tool_card.dart';
 import '../theme/cupertino_kit.dart';
 
 // ============================================================================
@@ -109,6 +110,21 @@ const double kStepRowVPad = HSpace.xs;
           summary: '执行了命令'
         ),
       'web_fetch' => (run: '正在抓取网页', done: '抓取了网页', summary: '抓取了网页'),
+      'web_search' => (
+          run: '正在联网搜索',
+          done: '联网搜索了',
+          summary: '联网搜索了'
+        ),
+      'read_document' => (
+          run: '正在读取文档',
+          done: '读取了文档',
+          summary: '读取了文档'
+        ),
+      'notify_user' => (
+          run: '正在发送通知',
+          done: '发送了通知',
+          summary: '发送了通知'
+        ),
       'check_device_state' => (
           run: '正在读取设备状态',
           done: '读取了设备状态',
@@ -327,6 +343,9 @@ String friendlyToolName(String tool) => switch (tool) {
       'move_path' => '移动文件',
       'copy_path' => '复制文件',
       'search_tools' => '查找可用工具',
+      'web_search' => '联网搜索',
+      'read_document' => '读取文档',
+      'notify_user' => '发送通知',
       'scaffold_android' => '生成 Android 工程',
       'build_apk' => '构建 APK',
       'apk_decompile' => '反编译 APK',
@@ -361,6 +380,9 @@ String runningToolName(String tool) => switch (tool) {
       'move_path' => '正在移动文件',
       'copy_path' => '正在复制文件',
       'search_tools' => '正在查找可用工具',
+      'web_search' => '正在联网搜索',
+      'read_document' => '正在读取文档',
+      'notify_user' => '正在发送通知',
       'scaffold_android' => '正在生成 Android 工程',
       'build_apk' => '正在构建 APK',
       'apk_decompile' => '正在反编译 APK',
@@ -972,6 +994,7 @@ class _ToolCallCardState extends State<ToolCallCard> {
                   // 放在参数**之前**：用户最想看的是"改了什么代码"，
                   // 而不是"调用时传了哪几个参数名"。
                   if (isFileWritingTool(call.tool)) _diffSection(h, call),
+                      if (v04ToolDetail(h, call) != null) v04ToolDetail(h, call)!,
 
                   // ---- 参数 ----
                   if (detail.showArgs)

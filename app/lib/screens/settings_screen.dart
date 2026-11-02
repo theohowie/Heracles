@@ -23,6 +23,9 @@ import '../theme/theme_reveal.dart';
 import '../data/open_source_licenses.dart';
 import '../widgets/bw_approval.dart';
 import '../widgets/background_keepalive_card.dart';
+import 'automation_screen.dart';
+import 'mcp_screen.dart';
+import 'skills_screen.dart';
 import 'jev_settings_screen.dart';
 import 'oss_licenses_screen.dart';
 import 'voice_settings_screen.dart';
@@ -101,6 +104,21 @@ class SettingsScreen extends StatelessWidget {
                   //   是按更早的版本改的，把它覆盖掉了 —— 合并后沙箱页没了入口。
                   _SandboxEntry(
                     onOpen: () => _push(context, const SandboxScreen()),
+                  ),
+                  _HomeRow(
+                    title: '技能',
+                    subtitle: '内置技能已启用',
+                    onTap: () => _push(context, const SkillsScreen()),
+                  ),
+                  _HomeRow(
+                    title: 'MCP 服务器',
+                    subtitle: '未配置 · 接口未接通',
+                    onTap: () => _push(context, const McpScreen()),
+                  ),
+                  _HomeRow(
+                    title: '自动化任务',
+                    subtitle: '定时提醒（到点只发通知，不自动执行）',
+                    onTap: () => _push(context, const AutomationScreen()),
                   ),
                   if (archivedCountLoader != null && onOpenArchived != null)
                     _ArchivedEntry(
