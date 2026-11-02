@@ -272,6 +272,26 @@ void main() {
       expect(t.description.contains('@workspace'), isTrue);
     });
 
+    // ★ 2026-11-02 用户裁定（沙箱优先）：工具的用途定位必须写在 description 里
+    //   —— 模型对工具的第一印象来自前几句；定位退回"什么都往手机 shell 上跑"
+    //   就背离了"沙箱是主战场"的产品裁定。
+    test('★★★ run_shell_command：description 写明"沙箱优先 + 宿主侧只做交付"（裁定）', () {
+      final t = buildShellTools(ToolFactory(capsBoth), capsBoth)
+          .firstWhere((t) => t.name == 'run_shell_command');
+      expect(t.description.contains('沙箱优先'), isTrue,
+          reason: '用途定位必须在描述开头');
+      expect(t.description.contains('工作台'), isTrue);
+      expect(t.description.contains('把产物交付给用户'), isTrue,
+          reason: '宿主（手机）侧的第一职责是交付');
+      expect(t.description.contains('力所能及的系统查询'), isTrue,
+          reason: '宿主（手机）侧的第二职责');
+      expect(t.description.contains('自己写脚本'), isTrue,
+          reason: '缺工具不许放弃，要自写脚本');
+      // 定位句是**加在前面**的（模型权重靠前），不许挤掉原有事实句
+      expect(t.description.indexOf('沙箱优先'),
+          lessThan(t.description.indexOf('两套文件系统')));
+    });
+
     test('★★ 只有手机 shell 的宿主：不许承诺"沙箱优先/激活沙箱"', () {
       final p = defaultSystemPrompt(Capabilities(shell: _FakeShell()));
       expect(p.contains('沙箱优先'), isFalse,

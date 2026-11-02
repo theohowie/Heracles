@@ -69,7 +69,14 @@ List<Tool> buildShellTools(ToolFactory f, Capabilities caps) {
       // guest cwd 恒为沙箱 `/workspace`（ProotEngine.kt:931 / SandboxBridge.kt:366），
       // 模型信了旧文案就用 pwd/ls/find 探测用户工作区，必然扑空（实测白烧 3 轮）。
       // 这里只改文案；执行逻辑/路由/审批一行不动。
+      // ★ 2026-11-02 用户裁定（沙箱优先）：description 开头先给**用途定位**，
+      //   再给事实细节 —— 模型对工具的第一印象来自 description 前几句。
+      //   定位：这是工作台执行面；宿主（手机）侧只做交付与力所能及的查询。
+      //   wire 不变（只改 description 文案）⇒ 不触发真 Key 门禁。
       description: '执行一条 shell 命令，返回标准输出与错误输出。'
+          '**沙箱优先（这是工作台执行面）**：改代码、跑脚本、处理文档的执行'
+          '默认在这里完成；宿主（手机）侧只用于把产物交付给用户与力所能及的系统查询。'
+          '缺工具链先在沙箱里装（apk add），装不了就自己写脚本（python 等）在沙箱跑。'
           '返回：合并的 stdout/stderr 文本 + 退出码；超时附超时说明。'
           '适合跑构建、测试、git、文件操作等。'
           '⚠️ shell **不在用户工作区里跑**：默认在**沙箱**（Alpine Linux / ash）里执行，'
