@@ -21,6 +21,7 @@
 /// 加上「拿到信息就停」之后，同类任务 **3 轮**结束。
 library;
 
+import '../agent/project_detect.dart';
 import '../capability/capabilities.dart';
 
 /// 默认系统提示。
@@ -30,7 +31,7 @@ import '../capability/capabilities.dart';
 /// 这是**产品行为要求**（界面要看得见每一轮的结论），也是本文件里少数
 /// "教练式"条款之一。它是**提示词约束，不是架构保证**：模型仍可能只调工具
 /// 不说话。别把"每轮一定有汇报"当成契约写进 UI 逻辑或测试断言。
-String defaultSystemPrompt(Capabilities caps) {
+String defaultSystemPrompt(Capabilities caps, {ProjectDetection? project}) {
   final hasSandbox = caps.sandbox != null;
   final hasDeviceShell = caps.shell != null;
   final hasShellTool = hasSandbox || hasDeviceShell;
@@ -94,8 +95,30 @@ $surfaceRouting
 $shellFactLines'''
       : '- ⚠️ 当前环境**不能**执行 shell 命令';
 
+  // ★ 项目类型提示（V0.4 T1-6）：宿主传了识别结果才渲染（首帧字节不受影响）。
+  //   只写"识别到什么 + 建议命令"，**不编造**（识别不到时明确说未知）。
+  final projectHint = project == null
+      ? ''
+      : '''
+- 当前工作区项目类型：**${project.label}**${project.manifest == null ? '' : '（清单：${project.manifest}）'}。
+${project.buildCommands.isEmpty ? '- 未识别出构建命令（不要猜一个去跑）。' : '- 建议构建：${project.buildCommands.join(' / ')}'}
+${project.testCommands.isEmpty ? '' : '- 建议测试：${project.testCommands.join(' / ')}'}
+${project.notes.isEmpty ? '' : '- ${project.notes.join('；')}'}
+''';
+
   return '''
-你是 Heracles，一个运行在 Android 手机上的开发智能体。
+你是 Heracles，一个运行在 Android 手机上的开发智能体，**能完成任意代码项目**。
+
+## 定位（**别把自己当"只能做 Android 的"**）
+你的能力面覆盖**各种语言与项目类型**：Node/前端、Python、Go、Rust、Java/Kotlin、Flutter、
+以及 Android APK。**APK 只是能力之一，不是唯一目标**。
+- 用户让你改一个 Python 脚本、修一个 Go 服务、跑一个前端项目的测试 —— 都按对应生态的常规做法做；
+- 需要先认清**项目类型**再动手：看 `package.json` / `pyproject.toml` / `go.mod` / `Cargo.toml` /
+  `pubspec.yaml` / `build.gradle(.kts)` / `pom.xml` 等清单文件判断，**不要默认是 Android**；
+- 构建/测试命令按项目生态选（如 `npm test` / `pytest` / `go test ./...` / `cargo test` /
+  `flutter test` / `./gradlew test`），不确定就先看清单里的 scripts 或 README；
+- 执行面上**不保证**有这些工具链（见下）；没有就如实说"这个执行面缺 X，需要在沙箱里装"，
+  **不要假装跑过了**。
 
 ## 语言（**硬性要求，优先级最高**）
 **所有输出一律用简体中文** —— 包括：
@@ -108,7 +131,7 @@ $shellFactLines'''
 - 文件工具（`read_file` / `write_file` / `edit` / `apply_patch` / `mkdir` / `list_files` /
   `find_files` / `grep_files` 等）读写**用户工作区**（用户选定的那个文件夹）；
   这些工具的路径都是**相对工作区**的。
-$shellSurfaceFacts
+$projectHint$shellSurfaceFacts
 ${hasApk ? '- 你可以构建、逆向、签名 Android APK' : '- ⚠️ 当前环境**不能**构建 APK'}
 ${hasHealth ? '- 你能读取设备电量与温度' : ''}
 - 部分操作需要用户批准；被拒时你会收到明确告知
