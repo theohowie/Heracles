@@ -514,6 +514,46 @@ class DeviceWorkspaceCapability implements WorkspaceCapability {
     );
   }
 
+  // ------------------------------------------------------------------ readBytes
+
+  /// **读二进制文件**（V0.4 T1-4）：给 `read_document` 用（zip/PDF 需字节）。
+  ///
+  /// 走 `fs.readBytes`（Kotlin 侧有 `MAX_BINARY_BYTES` 硬上限）；
+  /// 通道缺失/读失败 ⇒ **明确失败**（不返回空 bytes 假装成功）。
+  @override
+  Future<CapabilityResult> readBytes(
+    String path, {
+    int maxBytes = 20 * 1024 * 1024,
+  }) async {
+    final abs = resolve(path);
+    if (abs == null) return _fail();
+    try {
+      final raw = await _ch.call('fs.readBytes', <String, Object?>{'path': abs});
+      final err = errorOf(raw);
+      if (err != null) return CapabilityFailure(err);
+      final bytes = raw['bytes'];
+      final list = bytes is List
+          ? [for (final b in bytes) if (b is int) b]
+          : const <int>[];
+      if (list.isEmpty) {
+        return const CapabilityFailure('读取二进制失败（通道未返回 bytes）');
+      }
+      if (list.length > maxBytes) {
+        return CapabilityFailure(
+          '文件过大（${list.length} 字节，上限 $maxBytes）——请先拆分',
+        );
+      }
+      return CapabilitySuccess(
+        '已读取 ${list.length} 字节',
+        metadata: {'bytes': list},
+      );
+    } on MissingPluginException {
+      return const CapabilityFailure('当前环境不支持二进制读取（通道缺失）');
+    } on PlatformException catch (e) {
+      return CapabilityFailure('读取二进制失败：${e.message ?? e.code}');
+    }
+  }
+
   // ------------------------------------------------------------------ write
 
   @override

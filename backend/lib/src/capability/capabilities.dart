@@ -161,6 +161,16 @@ abstract class WorkspaceCapability {
 
   /// 复制（保留源文件）。
   Future<CapabilityResult> copy(String from, String to);
+
+  /// **读二进制文件**（V0.4 T1-4，2026-11-02；**只增，带默认实现**）。
+  ///
+  /// 用途：`read_document` 要按字节解 zip / PDF —— 文本 `read` 拿不到二进制。
+  ///
+  /// 默认实现 = **明确失败"宿主不支持二进制读取"**，老宿主不改也能编译
+  /// （契约只增纪律）。实现方应返回 `CapabilitySuccess` 且 metadata 带
+  /// `bytes`（`List<int>`）—— 见 `document_tools.dart`。
+  Future<CapabilityResult> readBytes(String path, {int maxBytes = 20 * 1024 * 1024}) async =>
+      const CapabilityFailure('宿主不支持二进制读取（readBytes 未实现）');
 }
 
 /// **进程执行能力**。

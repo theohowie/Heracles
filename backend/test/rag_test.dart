@@ -67,7 +67,7 @@ void main() {
   });
 }
 
-class _IdxWs implements WorkspaceCapability {
+class _IdxWs extends WorkspaceCapability {
   final files = <String, String>{
     'lib/math.dart': 'int add(int a, int b) => a + b;'
         '\nint multiply(int a, int b) => a * b;',

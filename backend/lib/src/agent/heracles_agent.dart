@@ -58,6 +58,7 @@ import 'tools/info_tools.dart';
 import 'tools/interaction_tools.dart';
 import 'tools/shell_tools.dart';
 import 'v4_extensions.dart';
+import 'tools/document_tools.dart';
 import 'tools/tool_aliases.dart';
 import 'tools/v4_tools.dart';
 
@@ -728,6 +729,8 @@ class HeraclesAgent {
       // ★ V0.4 T1-4（2026-11-02）：2 个 —— web_search / notify_user
       //   （能力缺失 ⇒ 一调用就失败并明说；不返回假结果）
       ...buildV4Tools(factory, _caps),
+      // ★ V0.4 T1-4（2026-11-02）：read_document（docx/xlsx/pptx/pdf 文本提取）
+      ...buildDocumentTools(factory, _caps),
     ];
     // ★ V0.4 T1-4 别名执行层（2026-11-02）：框架按 `Tool.name` 精确匹配，
     //   所以别名必须作为**独立 Tool 注册**（执行体转调正式工具），光有解析函数不够。

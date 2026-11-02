@@ -74,7 +74,7 @@ void main() {
 }
 
 /// 内容存内存的最小工作区。
-class _MemWorkspace implements WorkspaceCapability {
+class _MemWorkspace extends WorkspaceCapability {
   final files = <String, String>{};
 
   Capabilities get capabilities => Capabilities(workspace: this);

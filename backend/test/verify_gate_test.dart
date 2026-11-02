@@ -146,7 +146,7 @@ class _SeqShell implements ShellCapability {
 }
 
 /// 最小内存工作区。
-class _Ws implements WorkspaceCapability {
+class _Ws extends WorkspaceCapability {
   final files = <String, String>{};
 
   @override

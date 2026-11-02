@@ -765,6 +765,39 @@ class LocalWorkspaceCapability implements WorkspaceCapability {
     }
   }
 
+  /// **读二进制文件**（V0.4 T1-4）：给 `read_document` 用（zip/PDF 需字节）。
+  ///
+  /// 超 [maxBytes] ⇒ 明确失败（不 OOM）；路径越界/不存在 ⇒ 明确失败。
+  @override
+  Future<CapabilityResult> readBytes(
+    String path, {
+    int maxBytes = 20 * 1024 * 1024,
+  }) async {
+    final abs = _resolve(path);
+    if (abs == null) {
+      return const CapabilityFailure('路径越界或非法（相对工作区）');
+    }
+    try {
+      final file = File(abs);
+      if (!await file.exists()) {
+        return CapabilityFailure('文件不存在：$path');
+      }
+      final len = await file.length();
+      if (len > maxBytes) {
+        return CapabilityFailure(
+          '文件过大（$len 字节，上限 $maxBytes）——请先拆分',
+        );
+      }
+      final bytes = await file.readAsBytes();
+      return CapabilitySuccess(
+        '已读取 ${bytes.length} 字节',
+        metadata: {'bytes': bytes},
+      );
+    } catch (e) {
+      return CapabilityFailure('读取失败：${e.runtimeType}');
+    }
+  }
+
   @override
   Future<bool> exists(String path) async {
     final abs = _resolve(path);

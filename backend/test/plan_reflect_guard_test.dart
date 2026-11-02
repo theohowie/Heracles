@@ -167,7 +167,7 @@ void main() {
 // 测试替身
 // ============================================================================
 
-class _PlanWs implements WorkspaceCapability {
+class _PlanWs extends WorkspaceCapability {
   final files = <String, String>{};
 
   @override

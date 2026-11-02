@@ -144,7 +144,7 @@ void main() {
 }
 
 /// 内容存内存的最小工作区 —— 只实现本文件用到的方法。
-class _MemWorkspace implements WorkspaceCapability {
+class _MemWorkspace extends WorkspaceCapability {
   final files = <String, String>{};
 
   /// 自我引用的能力聚合（组装工具时用）

@@ -132,7 +132,7 @@ void main() {
 // 测试替身
 // ============================================================================
 
-class _FakeWs implements WorkspaceCapability {
+class _FakeWs extends WorkspaceCapability {
   final files = <String, String>{};
 
   @override

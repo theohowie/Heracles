@@ -144,7 +144,7 @@ void main() {
 // 测试替身
 // ============================================================================
 
-class _Ws implements WorkspaceCapability {
+class _Ws extends WorkspaceCapability {
   _Ws({this.failWrite = false});
   final bool failWrite;
   final files = <String, String>{};

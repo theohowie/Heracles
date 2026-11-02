@@ -217,7 +217,7 @@ void main() {
 // 测试替身
 // ============================================================================
 
-class _FakeWorkspace implements WorkspaceCapability {
+class _FakeWorkspace extends WorkspaceCapability {
   @override
   Future<CapabilityResult> list(String path,
           {bool recursive = false, int maxEntries = 200}) async =>

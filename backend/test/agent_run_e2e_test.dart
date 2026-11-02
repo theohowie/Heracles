@@ -150,7 +150,7 @@ class _ScriptedClient implements LLMClient {
 // 一个只在内存里的工作区能力（不碰文件系统）
 // ============================================================================
 
-class _MemWorkspace implements WorkspaceCapability {
+class _MemWorkspace extends WorkspaceCapability {
   _MemWorkspace([Map<String, String>? initial]) : files = {...?initial};
 
   final Map<String, String> files;

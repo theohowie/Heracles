@@ -438,7 +438,7 @@ class _FakeShell implements ShellCapability {
 }
 
 /// 最小伪造工作区：只有 [write] 有实现，其余方法不应被本文件用到。
-class _FakeWorkspace implements WorkspaceCapability {
+class _FakeWorkspace extends WorkspaceCapability {
   final List<String> wrote = [];
 
   @override

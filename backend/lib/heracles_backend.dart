@@ -35,6 +35,8 @@ library;
 export 'src/agent/heracles_agent.dart';
 // ★ 进展快照（V0.4，2026-11-02）：长任务"连续 N 轮无进展"的判据来源。
 export 'src/agent/progress_snapshot.dart';
+// ★ 文档读取（V0.4 T1-4）：docx/xlsx/pptx/pdf 文本提取（零依赖 zip 解析）。
+export 'src/agent/document_read.dart';
 // ★ 项目类型识别（V0.4 T1-6，2026-11-02）："任意代码项目"定位的落地（纯函数）。
 export 'src/agent/project_detect.dart';
 // ★ 工具别名（V0.4 T1-4）：名字对齐、旧名不破（纯数据 + 解析函数）。
