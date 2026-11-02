@@ -26,6 +26,49 @@ import '../theme/cupertino_kit.dart';
 import '../services/agent_bridge.dart' show AgentEvent;
 import '../theme/app_theme.dart';
 
+/// **把后端/网络的原始失败文本变成人话**（V0.4 T0，2026-11-02）。
+///
+/// 用户要求：**每次非用户主动中断都要看到本轮失败原因**。但后端/中转站
+/// 的原始 400 JSON 又长又技术（`CONTEXT_WINDOW_EXCEEDED` / requestId），
+/// 直接塞进会话流不可读。这里只做**分类翻译**；匹配不到就原样截断，
+/// 绝不吞掉原因、也绝不编造。
+String humanizeRunFailure(String raw) {
+  final s = raw.trim();
+  if (s.isEmpty) return '运行失败（后端未上报原因）';
+  final lower = s.toLowerCase();
+
+  if (lower.contains('context_window_exceeded') ||
+      lower.contains('prompt is too long') ||
+      lower.contains('context length') ||
+      lower.contains('maximum context') ||
+      s.contains('上下文') ||
+      s.contains('超过模型')) {
+    return '上下文超出模型窗口：本次输入 + 历史对话太长。'
+        '请精简内容、删除大附件或新建任务；换账号不会解决。';
+  }
+  if (lower.contains('401') ||
+      lower.contains('403') ||
+      lower.contains('unauthorized') ||
+      lower.contains('invalid api key') ||
+      lower.contains('invalid_api_key')) {
+    return '模型认证失败：API Key 无效或无权限。请到「设置 → 模型」检查 Key。';
+  }
+  if (lower.contains('429') || lower.contains('rate limit')) {
+    return '模型服务限流：请求太频繁，请稍后重试。';
+  }
+  if (lower.contains('timeout') || lower.contains('timed out') || s.contains('超时')) {
+    return '模型服务超时：网络或服务端响应太慢，本轮已中断。';
+  }
+  if (lower.contains('network') ||
+      lower.contains('connection') ||
+      lower.contains('failed host lookup') ||
+      s.contains('网络')) {
+    return '网络连接失败：请检查网络后重试。';
+  }
+  // 未匹配：保留原文（截断），不隐藏真正原因。
+  return s.length > 300 ? '${s.substring(0, 300)}…' : s;
+}
+
 /// 一次 `run_stopped` 的结构化信息（字段可空 = 后端未上报）。
 class RunStopInfo {
   const RunStopInfo({

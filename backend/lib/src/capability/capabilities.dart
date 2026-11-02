@@ -226,6 +226,29 @@ abstract class WebCapability {
   /// `10./172.16-31./192.168.`、`file://` 等。理由：模型可能被网页内容
   /// 诱导去读内网服务（提示注入），那一层必须在能力层挡，不能靠提示词。
   Future<CapabilityResult> fetch(String url, {int maxChars = 50000});
+
+  /// **联网搜索**（V0.4 T1-4，2026-11-02；**只增，带默认实现**）。
+  ///
+  /// 默认实现 = **明确失败"未配置搜索服务"** —— 绝不返回假结果。
+  /// 老宿主（App/CLI/测试替身）不改也能编译（契约只增）。
+  ///
+  /// ⚠️ 实现方必须：返回**带来源 URL** 的结果；无 Key/未配置 ⇒ `CapabilityFailure`，
+  /// 文案人话（"未配置搜索服务"），不编造条目。
+  Future<CapabilityResult> search(String query, {int limit = 5}) async =>
+      const CapabilityFailure('未配置搜索服务（宿主未提供 web_search 能力）');
+}
+
+/// **本地通知能力**（V0.4 T1-4，2026-11-02）。
+///
+/// 用途：长任务跑完/需要用户回来时发一条本地通知（`notify_user` 工具）。
+/// **权限失败必须如实回告**（`CapabilityFailure`），绝不假装发送成功 ——
+/// 用户在等通知，假成功比没有通知更糟。
+abstract class NotificationCapability {
+  /// 发一条本地通知。
+  ///
+  /// [title] / [body] 都是人话；[id] 用于去重/覆盖（同 id 覆盖上一条）。
+  /// 返回成功 = **确实已交给系统通知栏**；权限拒绝/无通知通道 ⇒ 失败 + 原因。
+  Future<CapabilityResult> notify(String title, String body, {String? id});
 }
 
 /// **长期记忆能力**（三作用域，2026-10-29 重设计）。
@@ -318,6 +341,7 @@ class Capabilities {
     this.memory,
     this.git,
     this.sandbox,
+    this.notification,
   });
 
   final WorkspaceCapability? workspace;
@@ -326,6 +350,9 @@ class Capabilities {
   final ApkCapability? apk;
   final WebCapability? web;
   final MemoryCapability? memory;
+
+  /// **本地通知**（V0.4 T1-4）：`null` ⇒ `notify_user` 工具一调用就失败并明说原因。
+  final NotificationCapability? notification;
 
   /// **内置 git**（2026-10-27，Step 1）。
   ///

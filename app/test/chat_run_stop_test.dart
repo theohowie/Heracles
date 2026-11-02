@@ -88,6 +88,7 @@ void main() {
     messenger.setMockMethodCallHandler(deviceChannel, null);
     AgentBridge.executorFactoryForTest = null;
     pushRef = null;
+    _FakeExecutor.failureReasonForTest = null;
   });
 
   Future<SettingsController> freshController() async {
@@ -220,6 +221,26 @@ void main() {
     hold.complete();
     await settle(tester, times: 20);
   });
+
+  testWidgets('★★ 非用户中断：400 上下文超限必须显示人话原因（T0）',
+      (tester) async {
+    _FakeExecutor.failureReasonForTest =
+        '400: {"message":"workbuddy 上游失败：请求被上游拒绝 '
+        '(code 11115) prompt is too long (upstream code 11115) '
+        'CONTEXT_WINDOW_EXCEEDED","type":"client","code":"client"}';
+    await pumpChat(tester);
+    await send(tester, '跑个长任务');
+
+    hold.complete();
+    await settle(tester, times: 25);
+
+    expect(find.textContaining('上下文超出模型窗口'), findsWidgets,
+        reason: '原始 400 JSON 必须翻译成人话，且不能被吞掉');
+    expect(find.textContaining('运行失败：'), findsOneWidget,
+        reason: '非用户主动中断必须在会话流留下失败原因');
+    expect(find.textContaining('CONTEXT_WINDOW_EXCEEDED'), findsNothing,
+        reason: '不要把原始 JSON 直接糊到用户脸上');
+  });
 }
 
 class _FakeExecutor extends LocalAgentExecutor {
@@ -232,6 +253,9 @@ class _FakeExecutor extends LocalAgentExecutor {
   });
 
   final void Function(Future<void> Function(AgentEvent)) onReady;
+
+  /// 测试注入：本次 fake run 的失败原因（T0 用例用）。
+  static String? failureReasonForTest;
 
   @override
   Future<LocalRunHandle> run({
@@ -250,14 +274,14 @@ class _FakeExecutor extends LocalAgentExecutor {
       await _holdFuture();
       if (!controller.isClosed) unawaited(controller.close());
       if (!done.isCompleted) {
-        done.complete(const AgentRunResult(
+        done.complete(AgentRunResult(
           stopReason: '已停止',
           finalText: '已停止',
           turns: [],
           totalCachedTokens: 0,
           totalPromptTokens: 0,
           totalOutputTokens: 0,
-          sessionId: 'sess-A',
+          failureReason: _FakeExecutor.failureReasonForTest,
         ));
       }
     }));

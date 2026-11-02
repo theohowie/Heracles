@@ -62,7 +62,7 @@ void main() {
   });
 }
 
-class _FakeWeb implements WebCapability {
+class _FakeWeb extends WebCapability {
   CapabilityResult next = const CapabilitySuccess('');
 
   Capabilities get capabilities => Capabilities(web: this);

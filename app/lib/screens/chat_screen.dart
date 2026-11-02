@@ -636,6 +636,10 @@ class _ChatScreenState extends State<ChatScreen> {
   RunStopInfo? _runStop;
   String _continueMode = 'off';
 
+  /// 事件流 `kFailed` 带回来的原始失败原因（V0.4 T0）。
+  /// 即使 `run()` 正常返回，也要靠它把原因写进会话流。
+  String? _lastFailureMessage;
+
   /// 忙时输入框是否仍可用 —— 由用户的 `BusySendBehavior` 决定。
   ///
   /// `queue`（默认）与 `interrupt` 都让输入框保持可用：
@@ -3283,6 +3287,7 @@ class _ChatScreenState extends State<ChatScreen> {
       // 避免同一条回答出现两次。
       case AgentEvent.kFinished:
       case AgentEvent.kFailed:
+        _lastFailureMessage = e.message;
         setState(() {
           _appendAllPendingRaw();
           final pid = _progressId;
@@ -4648,6 +4653,7 @@ class _ChatScreenState extends State<ChatScreen> {
     }
     // ★ V0.4（#1）：新一轮开始 ⇒ 上一轮的中断卡作废（别让旧"被中断"常驻）
     if (_runStop != null) setState(() => _runStop = null);
+    _lastFailureMessage = null;
     // ★ 2026-10-30 P0：新一轮开始前撤掉上一轮**已完成**的计划 ——
     //   否则旧计划的完成态会盖住新任务（灵动岛常驻的另一种表现）。
     _clearCompletedPlanOnNewRun();
@@ -4981,12 +4987,27 @@ class _ChatScreenState extends State<ChatScreen> {
       // 所以即使用户切走了（`stillHere == false`），这笔账也要记到 A，
       // 而不是丢掉 —— 否则 A 的用量会随"切走时机"随机少算。
       _accrueRunUsage(origin, result);
+
+      // ★ V0.4 T0（2026-11-02）：**非用户主动中断必须把失败原因写进会话流**。
+      //
+      // 旧实现只在 `catch` 里报错；但 `AgentBridge.run()` 在 backend 发
+      // `HeraclesFailed` 后是**正常返回**的（stopReason='运行失败'）——
+      // 于是 UI 只收尾、不显示原因，用户只看到任务“停了”。这里用
+      // `failureReason`（或事件流 kFailed.message）兜底；有 run_stop 卡时
+      // 由卡片展示原因，不重复画失败消息。
+      final failureText = result.failureReason ?? _lastFailureMessage;
+      if (!wasCancelled &&
+          _runStop == null &&
+          failureText != null &&
+          failureText.trim().isNotEmpty) {
+        _reportRunFailure(humanizeRunFailure(failureText), origin);
+      }
     } on AgentBridgeException catch (e) {
       if (!mounted) return;
-      _reportRunFailure(e.message, origin);
+      _reportRunFailure(humanizeRunFailure(e.message), origin);
     } catch (e) {
       if (!mounted) return;
-      _reportRunFailure('$e', origin);
+      _reportRunFailure(humanizeRunFailure('$e'), origin);
     } finally {
       // ★★ 收尾必须**无条件**执行 ★★
       //
@@ -5080,6 +5101,9 @@ class _ChatScreenState extends State<ChatScreen> {
   /// 它**不往 `_messages` 里插任何东西**，因此不会污染当前会话，
   /// 同时又让用户知道"刚才那次是失败的"。
   void _reportRunFailure(String message, _RunOrigin origin) {
+    // ★ V0.4 T0（2026-11-02）：所有非用户主动中断统一人话化 —— 原始 400
+    //   JSON / provider 长错误不能直接糊到会话流；但**原因本身绝不吞掉**。
+    final human = humanizeRunFailure(message);
     // ★ 与结果渲染用**同一套**判据（2026-10-11）
     //
     // 必须是 `_isViewingRun` 而不是"上下文代号变没变" ——
@@ -5090,15 +5114,15 @@ class _ChatScreenState extends State<ChatScreen> {
     if (stillHere) {
       // 没切走 —— 照旧内联显示（这是用户最需要看到失败的地方）
       setState(() {
-        _error = message;
+        _error = human;
         _messages
-            .add(HAssistantMessage(id: _nextId(), text: '运行失败：$message'));
+            .add(HAssistantMessage(id: _nextId(), text: '运行失败：$human'));
       });
       return;
     }
 
     // 已切走 —— 用 SnackBar，**不碰** _messages / _error
-    showIosToast(context, '上一个会话的运行失败：$message');
+    showIosToast(context, '上一个会话的运行失败：$human');
     _logDroppedRun(origin);
   }
 
@@ -5995,10 +6019,19 @@ class _ChatScreenState extends State<ChatScreen> {
     }
   }
 
-  /// 「继续」：后端续跑接口未就绪 ⇒ 如实告知（不假装已续上）。
+  /// 「继续」：当前会话 + 工作区仍在 ⇒ 以一条**可见的用户消息**“继续未完成的任务”
+  /// 发起下一轮（手动续跑；自动续跑由 executor 内部 continuation 负责，不伪造用户消息）。
   Future<void> _continueRun() async {
     if (!mounted) return;
-    showIosToast(context, '续跑接口未就绪（已移交后端）');
+    if (_activeSessionId == null) {
+      showIosToast(context, '当前还没有可续跑的会话记录');
+      return;
+    }
+    if (_activeWorkspace == null) {
+      showIosToast(context, '请先选择一个工作区再继续');
+      return;
+    }
+    await _runAgent('继续未完成的任务');
   }
 
   /// 读「续跑模式」三档（设置页写入；待正式设置字段后迁到 AppSettings）。

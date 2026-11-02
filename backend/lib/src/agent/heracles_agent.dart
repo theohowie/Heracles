@@ -57,6 +57,7 @@ import 'tools/file_tools.dart';
 import 'tools/info_tools.dart';
 import 'tools/interaction_tools.dart';
 import 'tools/shell_tools.dart';
+import 'tools/v4_tools.dart';
 
 /// 模型配置（后端视角）。
 class BackendConfig {
@@ -714,6 +715,9 @@ class HeraclesAgent {
       ...buildInteractionTools(factory,         // 3 个：ask_user / save_memory / propose_global_memory
           askGate: _askGate, caps: _caps),
       ...buildGitTools(factory, _caps),         // 11 个：5 只读 + 4 改本地 + push + init
+      // ★ V0.4 T1-4（2026-11-02）：2 个 —— web_search / notify_user
+      //   （能力缺失 ⇒ 一调用就失败并明说；不返回假结果）
+      ...buildV4Tools(factory, _caps),
     ];
   }
 

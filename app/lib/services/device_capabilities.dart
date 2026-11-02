@@ -2454,6 +2454,12 @@ class DeviceWebCapability implements WebCapability {
     });
     return out;
   }
+
+  /// **联网搜索**（V0.4 T1-4）：App 侧尚未接入搜索 API ⇒ **明确失败**，
+  /// 绝不返回假结果（工具层会如实回告模型）。
+  @override
+  Future<CapabilityResult> search(String query, {int limit = 5}) async =>
+      const CapabilityFailure('未配置搜索服务（App 未接入搜索 API）');
 }
 
 /// 一次抓取的结果（内部用，**不抛**）。

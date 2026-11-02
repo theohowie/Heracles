@@ -718,6 +718,26 @@ class AgentBridge {
   /// ```
   /// ~endkeep~
 
+  /// **V0.4 手动续跑入口**（契约 N14）：同一会话再跑一轮。
+  ///
+  /// 语义：用户点「继续」= 明确同意继续消耗 token；实现上是**一条可见的
+  /// 用户消息**（“继续未完成的任务”）+ 正常 run —— 历史保持 append-only，
+  /// 不伪造“自动续跑”那种不可见用户行。自动续跑（`ContinuePolicy.auto`）
+  /// 由 `LocalAgentExecutor` 内部 continuation 处理，不调用本方法。
+  Future<AgentRunResult> continueRun({
+    required String workspacePath,
+    required AppSettings settings,
+    required String sessionId,
+    String treeUri = '',
+  }) =>
+      run(
+        workspacePath: workspacePath,
+        request: '继续未完成的任务',
+        settings: settings,
+        sessionId: sessionId,
+        treeUri: treeUri,
+      );
+
   /// **停止当前在跑的那一轮**（2026-10-13）。
   ///
   /// 用户实测反馈：「暂停不了？」—— 停止按钮画出来了，但点下去
@@ -2433,6 +2453,7 @@ class AgentRunResult {
     this.sessionId,
     this.cancelled = false,
     this.changeFiles,
+    this.failureReason,
   });
 
   final String stopReason;
@@ -2489,6 +2510,12 @@ class AgentRunResult {
   /// 空 `finalText` 当成"模型回答完了" —— 那会显示一条空回复。
   final bool cancelled;
 
+  /// **本轮失败的人话原因**（V0.4 T0，2026-11-02）。
+  ///
+  /// `null` = 成功/取消/后端未上报；非 null 时 UI **必须**在会话流里显示，
+  /// 不能只闪一下红条或只写「运行失败」。来源 = 事件流里的 `kFailed.message`。
+  final String? failureReason;
+
   factory AgentRunResult.fromMap(Map<String, dynamic> m) {
     final rawTurns = (m['turns'] as List?) ?? const [];
     return AgentRunResult(
@@ -2506,6 +2533,7 @@ class AgentRunResult {
       taskWallMs: (m['taskWallMs'] as num?)?.toInt() ?? 0,
       sessionId: m['sessionId'] as String?,
       cancelled: (m['cancelled'] as bool?) ?? false,
+      failureReason: m['failureReason'] as String?,
     );
   }
 }

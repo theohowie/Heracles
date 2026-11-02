@@ -103,7 +103,7 @@ void main() {
   });
 }
 
-class _FakeWeb implements WebCapability {
+class _FakeWeb extends WebCapability {
   @override
   Future<CapabilityResult> fetch(String url, {int maxChars = 50000}) async =>
       const CapabilitySuccess('page');
