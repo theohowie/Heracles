@@ -182,4 +182,78 @@ object SandboxEnvManager {
             "verifyCommand" to r.verifyCommand,
         )
     }
+
+    /**
+     * **真实安装一个环境**（V0.4 T0-3 执行层，2026-11-02）。
+     *
+     * 在沙箱里按配方跑安装命令，再跑 `--version` 校验：
+     * · 安装命令失败 ⇒ **如实失败**（带输出尾部），不假装装好；
+     * · 校验命令跑不起来 / 没输出 ⇒ 失败（"装了但校验不过"也是问题）；
+     * · 成功 ⇒ 返回 `verifiedVersion`（真实 `--version` 输出）。
+     *
+     * ⚠️ 调用方必须先展示 [installPreview]（体积/来源）让用户确认，再调本方法。
+     *
+     * @param exec 沙箱命令执行器（`SandboxServiceCore.executeAndWait` 的薄封装，返回 stdout）。
+     * @param onProgress 进度回调（人话阶段，如"正在安装 node…"）。
+     */
+    suspend fun installEnv(
+        name: String,
+        exec: suspend (command: String, timeoutMillis: Long) -> String,
+        onProgress: (String) -> Unit = {},
+    ): Map<String, Any?> {
+        val r = recipe(name)
+            ?: return mapOf(
+                "ok" to false,
+                "name" to name,
+                "error" to "未知环境（不猜）；支持：${RECIPES.joinToString("/") { it.name }}",
+            )
+        onProgress("开始安装 ${r.name}（来源：${r.source}）")
+        for (cmd in r.installCommands) {
+            onProgress("执行：$cmd")
+            val out = try {
+                exec(cmd, 10L * 60L * 1000L)
+            } catch (e: Exception) {
+                return mapOf(
+                    "ok" to false,
+                    "name" to r.name,
+                    "error" to "安装命令失败：${e.message ?: e.javaClass.simpleName}",
+                    "approxBytes" to r.approxBytes,
+                )
+            }
+            if (out.contains("ERROR:") || out.contains("failed", ignoreCase = true)) {
+                return mapOf(
+                    "ok" to false,
+                    "name" to r.name,
+                    "error" to "安装命令报错：${out.takeLast(400)}",
+                    "approxBytes" to r.approxBytes,
+                )
+            }
+        }
+        onProgress("校验：${r.verifyCommand}")
+        val verifyOut = try {
+            exec(r.verifyCommand, 60_000L)
+        } catch (e: Exception) {
+            return mapOf(
+                "ok" to false,
+                "name" to r.name,
+                "error" to "安装后校验失败（命令跑不起来）：${e.message ?: e.javaClass.simpleName}",
+            )
+        }
+        val version = verifyOut.lines().firstOrNull { it.isNotBlank() }?.trim().orEmpty()
+        if (version.isEmpty()) {
+            return mapOf(
+                "ok" to false,
+                "name" to r.name,
+                "error" to "安装后校验没有输出（可能没装成功）",
+            )
+        }
+        onProgress("完成：$version")
+        return mapOf(
+            "ok" to true,
+            "name" to r.name,
+            "message" to "已安装 ${r.name}",
+            "verifiedVersion" to version,
+            "approxBytes" to r.approxBytes,
+        )
+    }
 }

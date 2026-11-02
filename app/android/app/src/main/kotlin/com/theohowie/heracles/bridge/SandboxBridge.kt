@@ -592,24 +592,109 @@ class SandboxBridge(
 
             "installEnv" -> {
                 val name = call.argument<String>("name") ?: ""
-                val preview = SandboxEnvManager.installPreview(name)
-                reply(result, if (preview == null) {
-                    mapOf("ok" to false, "error" to "未知环境：$name（不猜）")
-                } else {
-                    mapOf(
-                        "ok" to false,
-                        "name" to name,
-                        "error" to "环境安装尚未接线（安装执行需沙箱 shell，见 docs/接口.md §10.3）",
-                        "approxBytes" to preview["approxBytes"],
-                        "message" to "可安装，但执行层未接：不会假装已装好",
-                    )
-                })
+                // ★ 2026-11-02：**真实安装**（沙箱内跑配方命令 + --version 校验）。
+                //   失败如实返回（不假装装好）；进度推到流式通道。
+                val progressId = nextExecutionId()
+                scope.launch {
+                    val out = withContext(Dispatchers.IO) {
+                        runCatching {
+                            SandboxEnvManager.installEnv(
+                                name,
+                                exec = { cmd, timeoutMs ->
+                                    val r = core.executeAndWait(
+                                        ExecutionRequest(
+                                            command = cmd,
+                                            workingDirectory = "/",
+                                            timeoutMillis = timeoutMs,
+                                        ),
+                                        object : com.heracles.sandbox.runtime.ExecutionSink {
+                                            override fun onOutput(
+                                                stream: Int,
+                                                chunk: String,
+                                                sequence: Long,
+                                            ) = Unit
+
+                                            override fun onProgress(percent: Int, message: String) = Unit
+                                            override fun onExit(result: ExecutionResult) = Unit
+                                            override fun onError(code: Int, message: String) = Unit
+                                            override fun isCancelled(): Boolean = false
+                                        },
+                                    )
+                                    r.stdout
+                                },
+                                onProgress = { msg -> emitProgress(progressId, 0, 0, msg) },
+                            )
+                        }.getOrElse { e ->
+                            mapOf(
+                                "ok" to false,
+                                "name" to name,
+                                "error" to "安装异常：${e.message ?: e.javaClass.simpleName}",
+                            )
+                        }
+                    }
+                    reply(result, out)
+                }
             }
 
-            "uninstallEnv" -> reply(result, mapOf(
-                "ok" to false,
-                "error" to "环境卸载尚未接线（执行层未接）",
-            ))
+            "uninstallEnv" -> {
+                val name = call.argument<String>("name") ?: ""
+                val recipe = SandboxEnvManager.recipe(name)
+                if (recipe == null) {
+                    reply(result, mapOf("ok" to false, "error" to "未知环境：$name（不猜）"))
+                } else {
+                    // 卸载：按配方的安装来源反向删（apk 装的用 apk del；其它明确未接）
+                    scope.launch {
+                        val out = withContext(Dispatchers.IO) {
+                            runCatching {
+                                val isApk = recipe.installCommands.any { it.startsWith("apk add") }
+                                if (!isApk) {
+                                    mapOf(
+                                        "ok" to false,
+                                        "name" to name,
+                                        "error" to "该环境的卸载方式未接线（非 apk 来源：${recipe.source}）",
+                                    )
+                                } else {
+                                    val pkg = recipe.installCommands
+                                        .first { it.startsWith("apk add") }
+                                        .removePrefix("apk add")
+                                        .trim()
+                                    val r = core.executeAndWait(
+                                        ExecutionRequest(
+                                            command = "apk del $pkg",
+                                            workingDirectory = "/",
+                                            timeoutMillis = 120_000L,
+                                        ),
+                                        object : com.heracles.sandbox.runtime.ExecutionSink {
+                                            override fun onOutput(
+                                                stream: Int,
+                                                chunk: String,
+                                                sequence: Long,
+                                            ) = Unit
+
+                                            override fun onProgress(percent: Int, message: String) = Unit
+                                            override fun onExit(result: ExecutionResult) = Unit
+                                            override fun onError(code: Int, message: String) = Unit
+                                            override fun isCancelled(): Boolean = false
+                                        },
+                                    )
+                                    if (r.exitCode == 0) {
+                                        mapOf("ok" to true, "name" to name, "message" to "已卸载 $pkg")
+                                    } else {
+                                        mapOf(
+                                            "ok" to false,
+                                            "name" to name,
+                                            "error" to "apk del 失败（exit=${r.exitCode}）：${r.stderr.takeLast(300)}",
+                                        )
+                                    }
+                                }
+                            }.getOrElse { e ->
+                                mapOf("ok" to false, "error" to "卸载异常：${e.message ?: e.javaClass.simpleName}")
+                            }
+                        }
+                        reply(result, out)
+                    }
+                }
+            }
 
             "detectProjectEnv" -> {
                 val files = call.argument<List<String>>("files") ?: emptyList()
