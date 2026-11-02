@@ -449,6 +449,51 @@ class VoicePartial {
 - 进程被杀：下次启动从最后 checkpoint 恢复，并如实提示（`process_killed` 语义，`canContinue=true`）。
 - 状态：⚠️ 后端落码中；真机（长任务 3 轮续跑/锁屏续跑）**未验证**。
 
+### N15 V0.4 扩展面（2026-11-02 · 只增契约）
+
+> 本节登记 T0-2/3 + T1-4/5/6 的**前端可见契约**；实现进度与"未接"项逐条如实标注。
+
+#### N15.1 后台保活（Android）
+
+- 前台服务 `AgentChatService`：`START_STICKY`、`onTaskRemoved`、`PARTIAL_WAKE_LOCK`（2h 超时兜底、结束必释放）、
+  Manifest `android:stopWithTask="false"`；通知显示**真实步骤文案** + 点击回跳。
+- `heracles/command` 只增 4 方法：`requestIgnoreBatteryOptimizations`（返回 bool，只引导不改设置）/
+  `autostartGuide`（`{brand, path}`，**不自动跳转**）/ `processKilled`（`{killed, killedAt}`）/
+  `consumeProcessKilled`。Dart 同名封装（通道缺失安全降级）。
+
+#### N15.2 沙箱环境管理（L1 only）
+
+- `SandboxProfile{isolationTier, network, mirrors}`：`isolationTier ∈ process|container|vm`，**只实现 process**；
+  container/vm 明确 `tierImplemented=false` + `tierNote`（不假实现）。
+- `network`：`whitelistOnly`（默认 true）、`allowAllOutbound`（**显式开关**）、`riskLevel(low|high)`、
+  `riskNote`（**必须含"策略级，非硬隔离"**）、`hosts`（默认白名单 + 可追加企业源）、`proxy`。
+- Dart：`SandboxService.envProfile()/installEnv()/uninstallEnv()/detectProjectEnv()`；返回
+  `SandboxEnvProfile` / `SandboxEnvInstallResult`（失败带人话；`verifiedVersion` 拿不到=null）。
+- ⚠️ sandbox-channel 方法未实现 ⇒ 调用明确失败（不返回假数据）。
+
+#### N15.3 工具面
+
+- `web_search`（未配置搜索服务 ⇒ **明确报错不编结果**；结果必须带来源 URL）；
+  `notify_user`（权限被拒 ⇒ **如实失败**）。
+- 别名：`Read/Write/Edit/Glob/Grep/Exec/WebFetch/WebSearch/Memory/Ask/Notify` 等可解析到正式工具名；
+  **旧正式名全部仍可用**；未知名字 ⇒ 不猜（报未知工具）。
+
+#### N15.4 Skills / MCP / Automation（后端能力，宿主执行层未接）
+
+- Skills：`SKILL.md`（front-matter：`name`/`description` + 正文）解析；批量扫描逐条报错；启停/卸载。
+- MCP：服务器配置 `{name, transport(stdio|http), command, url, args, env, enabled}`；校验拒绝非法配置与
+  **密钥进 env**；CRUD。
+- Automation：任务 `{id,title,prompt,schedule(interval|cron),intervalMinutes,cron,enabled,runHistory}`；
+  校验必填；运行历史最近 20 条、只记真实结果；**`schedulerImplemented=false`（不假调度）**。
+
+#### N15.5 定位（任意代码项目）
+
+- 系统提示：**能完成任意代码项目**（Node/Python/Go/Rust/Java/Flutter/APK；**APK 只是能力之一**）；
+  先认项目类型、按生态选构建/测试命令、缺工具链如实说。
+- `detectProject(fileNames)` → `{kind, label, manifest, buildCommands, testCommands, notes}`；
+  Flutter 优先于 Android；**认不出 ⇒ unknown 且命令为空**（不编造）。
+- `defaultSystemPrompt(caps, {project})`：不传 project ⇒ 提示词字节与旧版一致。
+
 ## 5. 流式与渲染约定 —— ✅ 无异议
 
 后端保持原始粒度不节流；`approval_required`/`context_updated`/`plan_updated` 三类新事件已按 §6.1 登记到本文。
