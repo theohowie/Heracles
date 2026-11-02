@@ -2093,10 +2093,72 @@ class DeviceApkCapability implements ApkCapability {
 /// SSRF 闸（[checkUrl]）与文本抽取（[_htmlToText]）都不用动。
 /// 类名因此不叫 `DioWebCapability` —— 它内部确实没用 dio。
 class DeviceWebCapability implements WebCapability {
-  const DeviceWebCapability();
+  const DeviceWebCapability({this.searchEndpoint = ''});
+
+  /// **搜索服务 endpoint**（V0.4 T1-4；空 = 未配置）。
+  ///
+  /// 只有宿主显式配置了搜索服务才可用；未配置时 `search` **明确失败**
+  /// （"未配置搜索服务"），**绝不编造结果** —— 见 docs/接口.md §10.4。
+  final String searchEndpoint;
 
   /// 最多跟几跳重定向。
   static const int _maxRedirects = 5;
+
+  /// **联网搜索**（V0.4 T1-4）。
+  ///
+  /// 未配置 endpoint ⇒ 明确失败（不编结果）。
+  /// 配置后：GET `endpoint?q=<query>&limit=<n>`，期望返回 JSON
+  /// `{"results":[{"title","snippet","url"}]}`；解析失败/网络失败都**如实失败**。
+  @override
+  Future<CapabilityResult> search(String query, {int limit = 5}) async {
+    final ep = searchEndpoint.trim();
+    if (ep.isEmpty) {
+      return const CapabilityFailure(
+        '未配置搜索服务（宿主未提供 web_search 能力）；请配置搜索 endpoint 后重试。',
+        isRetryable: false,
+      );
+    }
+    final Uri uri;
+    try {
+      uri = Uri.parse(ep).replace(queryParameters: {
+        'q': query,
+        'limit': '$limit',
+      });
+    } catch (e) {
+      return CapabilityFailure('搜索 endpoint 非法：`$ep`（${_humanize(e)}）');
+    }
+    // 搜索 endpoint 也必须过 SSRF 闸（同一套纪律）
+    final rejection = await checkUrl(uri);
+    if (rejection != null) return CapabilityFailure(rejection, isRetryable: false);
+
+    final fetched = await _fetchRaw(uri);
+    if (fetched.error != null) {
+      return CapabilityFailure('搜索请求失败：${fetched.error}', isRetryable: true);
+    }
+    final body = _decodeBody(fetched.body, fetched.charset);
+    try {
+      final decoded = jsonDecode(body);
+      final results = decoded is Map ? decoded['results'] : null;
+      if (results is! List || results.isEmpty) {
+        return const CapabilityFailure('搜索服务返回空结果（没有可用条目）。');
+      }
+      final lines = <String>[];
+      for (final raw in results.take(limit)) {
+        if (raw is! Map) continue;
+        final title = (raw['title'] as String?)?.trim() ?? '';
+        final snippet = (raw['snippet'] as String?)?.trim() ?? '';
+        final url = (raw['url'] as String?)?.trim() ?? '';
+        if (url.isEmpty) continue; // ★ 没有来源的条目不展示（无法核对）
+        lines.add('${lines.length + 1}. $title\n   $snippet\n   来源：$url');
+      }
+      if (lines.isEmpty) {
+        return const CapabilityFailure('搜索服务返回的条目缺少来源 URL（无法核对，已丢弃）。');
+      }
+      return CapabilitySuccess(lines.join('\n'));
+    } catch (e) {
+      return CapabilityFailure('搜索服务返回格式不合法（${_humanize(e)}）。');
+    }
+  }
 
   /// 抓取网页并转成可读文本。
   @override
@@ -2455,11 +2517,42 @@ class DeviceWebCapability implements WebCapability {
     return out;
   }
 
-  /// **联网搜索**（V0.4 T1-4）：App 侧尚未接入搜索 API ⇒ **明确失败**，
-  /// 绝不返回假结果（工具层会如实回告模型）。
+  /// **联网搜索**：实现见类顶部 `search`（V0.4 T1-4，支持配置 endpoint +
+  /// SSRF 闸；未配置时明确失败，不编结果）。
+}
+
+/// **本地通知能力**（V0.4 T1-4，2026-11-02）—— `notify_user` 工具的宿主实现。
+///
+/// 走 `heracles/command` 的 `notifyUser`（Kotlin 侧 `postUserNotification`）。
+/// **权限被拒/通知被关 ⇒ 如实失败**（不假装发送成功）—— 用户在等通知，
+/// 假成功比没通知更糟。
+class DeviceNotificationCapability implements NotificationCapability {
+  const DeviceNotificationCapability({required this.channel});
+
+  final MethodChannel channel;
+
   @override
-  Future<CapabilityResult> search(String query, {int limit = 5}) async =>
-      const CapabilityFailure('未配置搜索服务（App 未接入搜索 API）');
+  Future<CapabilityResult> notify(String title, String body, {String? id}) async {
+    try {
+      final m = await channel.invokeMapMethod<String, dynamic>('notifyUser', {
+        'title': title,
+        'body': body,
+        if (id != null && id.isNotEmpty) 'id': id,
+      });
+      if (m == null) return const CapabilityFailure('通知通道无响应（未发送）');
+      if (m['ok'] == true) {
+        return CapabilitySuccess((m['message'] as String?) ?? '已发送通知');
+      }
+      return CapabilityFailure(
+        (m['error'] as String?) ?? '发送通知失败（原因未知）',
+        isRetryable: false,
+      );
+    } on MissingPluginException {
+      return const CapabilityFailure('当前环境不支持本地通知（通道缺失）');
+    } on PlatformException catch (e) {
+      return CapabilityFailure('发送通知失败：${e.message ?? e.code}');
+    }
+  }
 }
 
 /// 一次抓取的结果（内部用，**不抛**）。
@@ -2773,6 +2866,12 @@ Capabilities buildDeviceCapabilities({
             workspacePath: workspaceRoot,
           )
         : null,
+    // ★ V0.4 T1-4（2026-11-02）：本地通知能力 —— `notify_user` 工具的宿主实现。
+    //   走 `heracles/command` 的 `notifyUser`；权限被拒/通道缺失 ⇒ 工具如实失败
+    //   （装配层**不能漏传**，否则工具永远不可用 —— 与 git 那次漏传同类）。
+    notification: DeviceNotificationCapability(
+      channel: const MethodChannel('heracles/command'),
+    ),
   );
 }
 

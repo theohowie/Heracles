@@ -2,6 +2,7 @@ package com.theohowie.heracles
 
 import android.Manifest
 import android.app.ActivityManager
+import android.annotation.SuppressLint
 import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
@@ -304,6 +305,32 @@ class MainActivity : FlutterActivity() {
                 result.success(mapOf("ok" to true))
             }
 
+            // ---- ★ V0.4 T1-4（2026-11-02）：`notify_user` 工具的宿主能力 ----
+            //   权限被拒/通知被关 ⇒ **如实失败**（不假装发送成功）。
+            "notifyUser" -> {
+                val title = call.argument<String>("title") ?: ""
+                val body = call.argument<String>("body") ?: ""
+                val id = call.argument<String>("id")
+                if (title.isBlank() || body.isBlank()) {
+                    result.success(mapOf("ok" to false, "error" to "标题与正文都不能为空"))
+                } else if (!notificationsAvailable(this)) {
+                    result.success(mapOf(
+                        "ok" to false,
+                        "error" to "通知权限未开启（请在系统设置里允许 Heracles 发通知）",
+                    ))
+                } else {
+                    val posted = runCatching {
+                        postUserNotification(title, body, id)
+                        true
+                    }.getOrDefault(false)
+                    if (posted) {
+                        result.success(mapOf("ok" to true, "message" to "已发送通知"))
+                    } else {
+                        result.success(mapOf("ok" to false, "error" to "发送通知失败（系统拒绝）"))
+                    }
+                }
+            }
+
             else -> result.success(mapOf("ok" to false, "error" to "未知方法：${call.method}"))
         }
     }
@@ -338,9 +365,47 @@ class MainActivity : FlutterActivity() {
         return runtimeOk && NotificationManagerCompat.from(ctx).areNotificationsEnabled()
     }
 
+    /**
+     * **发一条用户通知**（V0.4 T1-4 
+otify_user 工具的宿主实现，2026-11-02）。
+     *
+     * 独立通道 heracles_user_notify（与"任务执行中"2000 / "完成"2001 都不同，
+     * 三者可并存）。id 非空时用它做通知 id（同 id 覆盖），否则固定 2002。
+     *
+     * ⚠️ 调用方**必须先确认** [notificationsAvailable] —— 权限/开关没开时
+     * 这里会抛 SecurityException 或静默不发，那是"假成功"的来源。
+     */
+    @SuppressLint("MissingPermission")
+    private fun postUserNotification(title: String, body: String, id: String?) {
+        val nm = getSystemService(NOTIFICATION_SERVICE) as NotificationManager
+        if (nm.getNotificationChannel(USER_NOTIFY_CHANNEL_ID) == null) {
+            nm.createNotificationChannel(
+                NotificationChannel(
+                    USER_NOTIFY_CHANNEL_ID,
+                    "任务提醒",
+                    NotificationManager.IMPORTANCE_DEFAULT,
+                ).apply { description = "任务完成 / 需要你回来确认时的提醒" }
+            )
+        }
+        val open = PendingIntent.getActivity(
+            this,
+            3,
+            Intent(this, MainActivity::class.java),
+            PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT,
+        )
+        val notifyId = if (id.isNullOrBlank()) USER_NOTIFY_ID else (id.hashCode() and 0x7fffffff)
+        val n = Notification.Builder(this, USER_NOTIFY_CHANNEL_ID)
+            .setContentTitle(title)
+            .setContentText(body)
+            .setStyle(Notification.BigTextStyle().bigText(body))
+            .setSmallIcon(android.R.drawable.stat_notify_chat)
+            .setContentIntent(open)
+            .setAutoCancel(true)
+            .build()
+        NotificationManagerCompat.from(this).notify(notifyId, n)
+    }
     /** 打开本 App 的通知设置页（永久拒绝 / 关闭通知 / 低版本都走这里）。 */
-    private fun openNotificationSettings() {
-        startActivity(
+    private fun openNotificationSettings() {        startActivity(
             Intent(Settings.ACTION_APP_NOTIFICATION_SETTINGS).apply {
                 putExtra(Settings.EXTRA_APP_PACKAGE, packageName)
                 addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
@@ -1008,6 +1073,10 @@ class MainActivity : FlutterActivity() {
         /** 聊天完成通知（2026-10-19）：通道 + 通知 id（固定 id ⇒ 新任务覆盖旧提醒）。 */
         private const val CHAT_CHANNEL_ID = "heracles_chat_done"
         private const val CHAT_NOTIFY_ID = 2001
+
+        /** 用户通知（V0.4 `notify_user` 工具）：独立通道 + 固定兜底 id。 */
+        private const val USER_NOTIFY_CHANNEL_ID = "heracles_user_notify"
+        private const val USER_NOTIFY_ID = 2002
 
         /** 完成通知点击时要打开的会话（2026-10-19） */
         private const val EXTRA_NOTIFY_SESSION = "heracles_notify_session"
