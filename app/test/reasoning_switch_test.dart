@@ -3,6 +3,7 @@ import 'dart:convert';
 
 import 'package:flutter/cupertino.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
@@ -726,9 +727,44 @@ void main() {
     /// 也顺带解决本文件的一个老问题：本机 **ChatScreen 的 widget 测试一律
     /// 卡首帧**（`实测-03` 坑 35），所以这两条**不走 ChatScreen**，
     /// 直接调 `AgentBridge().run()`。
+    /// ★★ 2026-11-02：**必须**给 `heracles/device` 的 `fs.*` 装 handler ★★
+    ///
+    /// `AgentBridge().run()` 真的会经由 `SessionStore` 写会话（走 `fs.*`）。
+    /// 本文件此前**从未** mock 这条通道，而未装 handler 时
+    /// `MethodChannel.invokeMethod` 的 Future **永不完成**（不是抛异常 ——
+    /// 同一机制在 `support/secure_storage_mock.dart` 开头写得很清楚）。
+    /// 后果：`★★★ 交给执行器的设置里真的带上了 maxTurns` 直接 `did not complete`，
+    /// 并且**整个文件挂死**（实测单跑 78s 超时被 kill，整批 480s 超时），
+    /// 连带 `flutter test` 全量门禁一起废掉。
+    void installFsMock() {
+      final messenger =
+          TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger;
+      const deviceChannel = MethodChannel('heracles/device');
+      messenger.setMockMethodCallHandler(deviceChannel, (call) async {
+        switch (call.method) {
+          case 'fs.stat':
+            return {'ok': true, 'exists': false}; // 新会话 id 探测：永不撞
+          case 'fs.readText':
+            return {'ok': true, 'text': '[]', 'truncated': false};
+          case 'fs.readTailLines':
+            return {'ok': true, 'lines': <String>[]};
+          case 'fs.appendText':
+          case 'fs.writeText':
+          case 'fs.mkdir':
+            return {'ok': true};
+          default:
+            return {'ok': false, 'error': '测试 mock：未知方法 ${call.method}'};
+        }
+      });
+      addTearDown(() {
+        messenger.setMockMethodCallHandler(deviceChannel, null);
+      });
+    }
+
     void installCaptureExecutor(List<AppSettings> sink) {
       // 白名单读取走 SharedPreferences —— 给个空 mock，避免依赖真通道
       SharedPreferences.setMockInitialValues({});
+      installFsMock();
       AgentBridge.executorFactoryForTest =
           ({required workspacePath, required settings, required sessionStore, askGate}) {
         sink.add(settings);
@@ -752,16 +788,44 @@ void main() {
     /// `session_guard_test.dart` 同款）：断言"**真正交给执行器的
     /// `AppSettings`** 带上了这两个成本参数" —— 这正是它们今天的流向
     /// （`AppSettings` → `BackendConfig`）。**断言意图未变**。
+    /// ★★ 2026-11-02：`testWidgets` 里**不能**直接 `await AgentBridge().run()`
+    ///
+    /// `run()` 的返回路径上有 `await Future<void>.delayed(Duration.zero)`
+    /// （`agent_bridge.dart` 的 finally：2026-10-30 为「先让已排队事件投递完
+    /// 再退订」加的）。`testWidgets` 用的是 fake-async：**计时器不会自己走**，
+    /// 只有 `tester.pump()` 才推进 —— 于是 `await run()` **永不返回**，
+    /// 用例报 `did not complete` 并拖死整个文件（实测 180s 超时被 kill）。
+    ///
+    /// 修法（测试侧，产品不动）：发起后边 `pump` 边等，直到它完成。
+    /// 这不是"放宽" —— 跑完照样 `expect` 拿到结果，拿不到就断言失败。
+    Future<AgentRunResult> runAndDrive(WidgetTester tester,
+        {required AppSettings settings}) async {
+      AgentRunResult? result;
+      var done = false;
+      final f = AgentBridge()
+          .run(workspacePath: '/w', request: 'hi', settings: settings)
+          .whenComplete(() => done = true)
+          .then((r) => result = r);
+      // ⚠️ 必须带时长：`pump()` 不带参数只推进一帧、**不跑计时器**，
+      //    而 run() 的返回路径上有 `Future.delayed(Duration.zero)`（见 doc）。
+      //    实测：不带时长的 pump 20 次仍然卡死（'delayed done' 永不打印）。
+      for (var i = 0; i < 200 && !done; i++) {
+        await tester.pump(const Duration(milliseconds: 1));
+      }
+      expect(done, isTrue,
+          reason: 'run() 必须在有限次 pump 内收尾 —— 卡住说明返回路径上又多了'
+              '一个 fake-async 走不动的等待点（例如又一个 Future.delayed）');
+      await f;
+      expect(result, isNotNull, reason: 'run() 必须给出结果');
+      return result!;
+    }
+
     testWidgets('★★★ 交给执行器的设置里真的带上了 maxTurns', (tester) async {
       final captured = <AppSettings>[];
       installCaptureExecutor(captured);
 
       // 「自动」= 0，也必须显式带着（让"自动"这个选择可观测）
-      await AgentBridge().run(
-        workspacePath: '/w',
-        request: 'hi',
-        settings: withProvider(maxTurns: 0),
-      );
+      await runAndDrive(tester, settings: withProvider(maxTurns: 0));
       expect(captured, hasLength(1));
       expect(captured.single.maxTurns, 0,
           reason: '0 = 按后端自动（Contract.Budget：本地 8 / 云端 40）');
@@ -769,11 +833,7 @@ void main() {
           reason: '必须是 int —— 类型错了会静默回落');
 
       // 用户显式选的档位必须原样送到
-      await AgentBridge().run(
-        workspacePath: '/w',
-        request: 'hi',
-        settings: withProvider(maxTurns: 40),
-      );
+      await runAndDrive(tester, settings: withProvider(maxTurns: 40));
       expect(captured, hasLength(2));
       expect(captured.last.maxTurns, 40,
           reason: '用户选的那一档必须原样传下去，不能被界面吞掉');
@@ -784,9 +844,8 @@ void main() {
       final captured = <AppSettings>[];
       installCaptureExecutor(captured);
 
-      await AgentBridge().run(
-        workspacePath: '/w',
-        request: 'hi',
+      await runAndDrive(
+        tester,
         settings: withProvider(
           maxTurns: 16,
           reasoningLevel: ReasoningLevel.high,

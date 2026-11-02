@@ -434,8 +434,20 @@ void main() {
       // ★ 秒级（用户要求）+ 「不含工具」口径
       expect(find.textContaining('模型耗时（不含工具）：5.2 秒'), findsOneWidget);
       expect(find.textContaining('5172 ms'), findsNothing);
-      // ★ 单轮口径写明「本轮」—— 与侧栏累计命中率不再同名
-      expect(find.textContaining('本轮缓存命中：96%'), findsOneWidget);
+      // ★★ 2026-11-02 更正口径：卡片里**已经没有命中率这一行**了。
+      //   2026-10-27 用户拍板（`message_row.dart:894`）：「这里不再显示命中率，
+      //   改显示本轮用量」—— 因为缓存命中率在这里与顶栏累计口径打架（94% vs 96%），
+      //   命中率只看顶栏累计。旧断言还在找「本轮缓存命中：96%」，那行今天不存在。
+      //
+      //   所以这里**双钉**：命中率必须不在（钉住那次拍板，防它回潮），
+      //   本轮用量必须在（这是今天该有的信息，1476 = 1000 + 476）。
+      expect(find.textContaining('本轮缓存命中'), findsNothing,
+          reason: '消息卡片不许再出现命中率 —— 2026-10-27 用户拍板：'
+              '命中率只看顶栏累计，卡片里显示本轮用量');
+      //   1476 = 1000 + 476，按 `formatTokenCount`（`message.dart:512`）
+      //   >1000 走 K 格式、一位小数 ⇒ 「1.5K」。
+      expect(find.textContaining('本轮用量：1.5K tokens'), findsOneWidget,
+          reason: '卡片要显示本轮总用量（prompt + output，K/M 格式）');
       expect(find.textContaining('输出：476 tokens'), findsOneWidget);
     });
   });
