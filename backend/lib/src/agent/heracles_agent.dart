@@ -900,6 +900,16 @@ class HeraclesAgent {
     var runStoppedEmitted = false;
     var budgetReached = false;
 
+    /// **V0.4 checkpoint 恢复**：上次跑到第几轮（null = 不是恢复）。
+    ///
+    /// 宿主从会话最后一条 `role:"run_checkpoint"` 行读出 `round` 传进来；
+    /// 这里用它算 `resumedFromRound` 并作为轮次基准（不重复已完成的轮）。
+    final resumedFromRound =
+        _options.resumeFromCheckpoint['round'] is num
+            ? (_options.resumeFromCheckpoint['round'] as num).toInt()
+            : null;
+    final roundBase = resumedFromRound ?? 0;
+
     /// **最新计划步骤**（B8 P0，2026-10-30）：`PlanChangedEvent` 处缓存。
     ///
     /// 终态收尾时据此判断"计划是否真的做完了"（全部 `done`/`cancelled`）。
@@ -952,12 +962,13 @@ class HeraclesAgent {
       runStoppedEmitted = true;
       emit(HeraclesRunStopped(
         reason: stop,
-        round: 1,
+        round: roundBase + 1,
         maxRounds: _options.maxRounds,
         tokensSpent: totalTokens,
         tokensLimit: _options.tokenLimit,
         canContinue: canContinue,
         errorSummary: reason,
+        resumedFromRound: resumedFromRound,
       ));
     }
 

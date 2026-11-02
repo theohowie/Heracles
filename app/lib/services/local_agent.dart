@@ -1205,55 +1205,62 @@ class LocalAgentExecutor {
       }
     }
 
-    final agent = HeraclesAgent(
-      config: config,
-      capabilities: caps,
-      options: RunOptions(
-        maxTurns: maxTurns,
-        maxToolCalls: ContractAgent.maxToolCalls,
-        // ★ 三作用域记忆（2026-10-29）：结构化传入，排序/预算/渲染在 backend。
-        //   非空即优先（即使三段都空也不回落旧 memoryNote —— 旧字段已 @Deprecated）。
-        memory: memoryContext,
-        // ★ 插队发送（P0，2026-10-30）：轮结束取一条插话 ⇒ backend `_SteerHook`
-        //   注入成 UserMessage；不打断在途流/工具。队列在本实例（每 run 一个）。
-        takeSteerMessage: takeSteer,
-        // ★ 工作区宪法（H4，2026-10-24）：注入 system prompt
-        //  （默认提示之后、长期记忆之前 —— 两段稳定字节之间的新段，
-        //   只有宪法内容本身变化时才动前缀）。
-        systemPrompts: [
-          ?constitutionNote,
-          ?snapshotNote,
-          ?ragNote,
-        ],
-        // ★ 审批档位（2026-10-24 接线）：从设置显式映射。
-        //   backend 库默认 fullAccess（不拦，库没有 UI 可问）；
-        //   App 是有 UI 的宿主，**必须**把用户选的档位传下去 ——
-        //   拦截在 backend 的 `_ApprovalHook`，"问谁"在 [LocalAskGate]。
-        // ★ 子代理（H6，2026-10-24）：App 显式开启 —— 探索/核对类子任务
-        //   在干净上下文里跑，主上下文只收结论。
-        enableSubAgents: true,
-        // ★ 内置技能（S1/S2，2026-10-24）：目录常驻（每条一行），
-        //   模型按任务用 activate_skills 按需加载全文。
-        enableSkills: true,
-        approvalMode: switch (settings.permission) {
-          PermissionMode.manual => ApprovalMode.manual,
-          PermissionMode.workspaceAuto => ApprovalMode.workspaceAuto,
-          PermissionMode.fullAccess => ApprovalMode.fullAccess,
-        },
-      ),
-      askGate: gate,
-      client: clientForTest, // 测试缝（生产 null ⇒ 用 config 建真实 client）
-    );
+    // ---- ★ V0.4 自动续跑：agent 按轮构造（续跑轮追加"继续"内部说明）----
+    //
+    // 首轮 systemPrompts 与旧版**逐字节一致**（续跑说明为 null 不注入），
+    // 因此前缀缓存不受影响；续跑轮才多一段。
+    HeraclesAgent buildAgent({bool continuation = false, int round = 1}) =>
+        HeraclesAgent(
+          config: config,
+          capabilities: caps,
+          options: RunOptions(
+            maxTurns: maxTurns,
+            maxToolCalls: ContractAgent.maxToolCalls,
+            // ★ 三作用域记忆（2026-10-29）：结构化传入，排序/预算/渲染在 backend。
+            //   非空即优先（即使三段都空也不回落旧 memoryNote —— 旧字段已 @Deprecated）。
+            memory: memoryContext,
+            // ★ 插队发送（P0，2026-10-30）：轮结束取一条插话 ⇒ backend `_SteerHook`
+            //   注入成 UserMessage；不打断在途流/工具。队列在本实例（每 run 一个）。
+            takeSteerMessage: takeSteer,
+            // ★ 工作区宪法（H4，2026-10-24）：注入 system prompt
+            //  （默认提示之后、长期记忆之前 —— 两段稳定字节之间的新段，
+            //   只有宪法内容本身变化时才动前缀）。
+            systemPrompts: [
+              ?constitutionNote,
+              ?snapshotNote,
+              ?ragNote,
+              // ★ 续跑说明（只增段；首轮 null ⇒ 前缀不变）
+              if (continuation) continuationNoteStatic(round),
+            ],
+            // ★ 审批档位（2026-10-24 接线）：从设置显式映射。
+            //   backend 库默认 fullAccess（不拦，库没有 UI 可问）；
+            //   App 是有 UI 的宿主，**必须**把用户选的档位传下去 ——
+            //   拦截在 backend 的 `_ApprovalHook`，"问谁"在 [LocalAskGate]。
+            // ★ 子代理（H6，2026-10-24）：App 显式开启 —— 探索/核对类子任务
+            //   在干净上下文里跑，主上下文只收结论。
+            enableSubAgents: true,
+            // ★ 内置技能（S1/S2，2026-10-24）：目录常驻（每条一行），
+            //   模型按任务用 activate_skills 按需加载全文。
+            enableSkills: true,
+            approvalMode: switch (settings.permission) {
+              PermissionMode.manual => ApprovalMode.manual,
+              PermissionMode.workspaceAuto => ApprovalMode.workspaceAuto,
+              PermissionMode.fullAccess => ApprovalMode.fullAccess,
+            },
+          ),
+          askGate: gate,
+          client: clientForTest, // 测试缝（生产 null ⇒ 用 config 建真实 client）
+        );
 
     final tr = _Translator(controller.add);
 
     // ---- 真正驱动（不 await，让 events 先被订阅）----
-    final done = _drive(
-      agent,
-      tr,
-      request,
-      sid, // 2026-10-29：sid 已在构造前解析（记忆寻址的前置条件）
-      controller,
+    final done = _driveWithAutoContinue(
+      buildAgent: buildAgent,
+      tr: tr,
+      request: request,
+      sid: sid, // 2026-10-29：sid 已在构造前解析（记忆寻址的前置条件）
+      controller: controller,
       images: images,
       imageNotes: imageNotes,
       attachments: attachments,
@@ -1431,6 +1438,66 @@ class LocalAgentExecutor {
   }
 
   /// 执行体：把 `HeraclesAgent.run()` 的事件逐条翻译并落盘。
+  /// **带自动续跑的驱动**（V0.4）：`auto` 模式在未完成任务时自动再跑一轮。
+  ///
+  /// ## 循环条件（只有 `auto` 会循环）
+  ///
+  /// 每轮 `_drive` 返回 `AgentRunResult`；这里只看**还要不要下一轮**：
+  /// 取消/失败/完成/非 auto/到上限 ⇒ 停。
+  ///
+  /// `ask` 不循环（每轮发 `run_stopped` 等用户点"继续"，由 UI 再发一次 run）。
+  /// 续跑轮：`continuation=true`（**不写 user 行**）+ 内部说明注入 system 提示。
+  Future<AgentRunResult> _driveWithAutoContinue({
+    required HeraclesAgent Function({bool continuation, int round}) buildAgent,
+    required _Translator tr,
+    required String request,
+    required String sid,
+    required StreamController<AgentEvent> controller,
+    List<ImageInput>? images,
+    List<String> imageNotes = const [],
+    List<HAttachment> attachments = const [],
+    CancelToken? cancelToken,
+  }) async {
+    final mode = await _readContinueMode();
+    final maxRounds = mode == 'auto' ? ContractRunContinue.autoMaxRounds : 1;
+    AgentRunResult? last;
+    for (var round = 1; round <= maxRounds; round++) {
+      final agent = buildAgent(continuation: round > 1, round: round);
+      last = await _drive(
+        agent,
+        tr,
+        request,
+        sid,
+        controller,
+        images: images,
+        imageNotes: imageNotes,
+        attachments: attachments,
+        cancelToken: cancelToken,
+        continuation: round > 1,
+        continuationRound: round,
+      );
+      if (_cancelled || last.cancelled) break;
+      if (last.stopReason == '运行失败') break;
+      if (mode != 'auto') break;
+      if (round >= maxRounds) break;
+      if (last.stopReason == '已给出最终回答') break;
+    }
+    return last ??
+        const AgentRunResult(
+          stopReason: '未执行',
+          finalText: '',
+          turns: <AgentTurn>[],
+          totalCachedTokens: 0,
+          totalPromptTokens: 0,
+          totalOutputTokens: 0,
+          steadyHitRate: null,
+          changeFiles: null,
+          taskWallMs: 0,
+          sessionId: null,
+          cancelled: false,
+        );
+  }
+
   Future<AgentRunResult> _drive(
     HeraclesAgent agent,
     _Translator tr,
@@ -1441,6 +1508,14 @@ class LocalAgentExecutor {
     List<String> imageNotes = const [],
     List<HAttachment> attachments = const [],
     CancelToken? cancelToken,
+    /// **V0.4 自动续跑的第 N 轮**（`true` ⇒ 不落盘用户消息）。
+    ///
+    /// 续跑是宿主自动发起的，不是用户说的；写一条 user 行等于**伪造历史**
+    /// （回放时用户会看到自己没说过的话）。改为把"继续上次未完成的任务"
+    /// 作为内部说明注入 system 提示。
+    bool continuation = false,
+    /// 续跑轮次（1 = 首轮；>1 = 自动续跑第 N 轮）。
+    int continuationRound = 1,
   }) async {
     final sw = Stopwatch()..start();
 
@@ -1503,22 +1578,25 @@ class LocalAgentExecutor {
     }
 
     // 用户消息先落盘（与旧 Kotlin 的顺序一致：用户消息先于一切）
+    // ★ V0.4：**续跑不落用户消息**（continuation=true 跳过）—— 续跑不是用户说的。
     // ★ 附件结构化落盘（2026-10-29）：path/name/kind —— 读回时
     //   气泡能把图片渲染成图。只增字段，老版本读到会原样保留
     //   （_normalizeEntry 未知键透传），不破坏兼容。
-    await sessionStore.appendMessage(sid, {
-      'role': 'user',
-      'text': request,
-      if (attachments.isNotEmpty)
-        'attachments': attachments
-            .map((a) => <String, dynamic>{
-                  'path': a.path,
-                  'name': a.name,
-                  'kind': a.kind.name,
-                })
-            .toList(),
-      'ts': DateTime.now().millisecondsSinceEpoch,
-    });
+    if (!continuation) {
+      await sessionStore.appendMessage(sid, {
+        'role': 'user',
+        'text': request,
+        if (attachments.isNotEmpty)
+          'attachments': attachments
+              .map((a) => <String, dynamic>{
+                    'path': a.path,
+                    'name': a.name,
+                    'kind': a.kind.name,
+                  })
+              .toList(),
+        'ts': DateTime.now().millisecondsSinceEpoch,
+      });
+    }
 
     tr.sessionId = sid;
 
@@ -1600,6 +1678,15 @@ class LocalAgentExecutor {
       'write_file', 'edit', 'apply_patch', 'mkdir',
       'delete_path', 'move_path', 'copy_path',
     };
+
+    // ---- ★ V0.4 进展快照（2026-11-02）----
+    //
+    // 每个工具完成时采样（改动文件签名 + 最近失败输出的错误签名 + 输出里的测试数），
+    // 与上一帧比：没变化就累加 streak；连续 2 轮 ⇒ 收尾判 `no_progress`。
+    // **拿不到的信号留 null，绝不编数**（见 backend `progress_snapshot.dart`）。
+    ProgressSnapshot? lastProgress;
+    int noProgressStreak = 0;
+    String? lastErrorOutput;
 
     try {
       // ★ 跨轮记忆在这里生效：`history` 成为 state 的开头，
@@ -1746,6 +1833,19 @@ class LocalAgentExecutor {
                 ts: DateTime.now().millisecondsSinceEpoch,
               ),
             );
+            // ★ V0.4 进展快照采样（每个工具完成时）：
+            //   改动文件签名 + 失败错误签名 + 输出里的测试数；与上一帧比 ⇒ 累加 streak。
+            if (isError) lastErrorOutput = output;
+            final counts = parseTestCounts(output);
+            final snap = ProgressSnapshot(
+              filesSignature: filesSignatureOf(changes.keys.toList()),
+              changedFiles: changes.keys.toList(),
+              testsPassed: counts?.passed,
+              testsTotal: counts?.total,
+              errorSignature: errorSignatureOf(lastErrorOutput),
+            );
+            noProgressStreak = snap.progressedFrom(lastProgress) ? 0 : noProgressStreak + 1;
+            lastProgress = snap;
           case HeraclesFallback(:final from, :final to, :final reason):
             tr.fallbackNotice(from, to, reason);
           case HeraclesBudgetWarning(:final used, :final limit):
@@ -1933,6 +2033,98 @@ class LocalAgentExecutor {
       runTurns: finishedTurns ?? tr.currentTurn,
     );
 
+    // ---- 组装 AgentRunResult（UI 的权威结果）----
+    //
+    // 2026-10-22：`turns` 与三个 token 总数、稳态命中率**全部换成真实记账**
+    // （此前 turns 恒空、token 恒 0 —— 顶栏与侧栏"不可用"的根因）。
+    lastFrozenTokens = tr.firstTurnPrompt;
+    // ★ C5（2026-10-24）：上下文构成 —— 侧栏"构成"三行的数据源（估算）。
+    try {
+      lastBreakdown = agent.contextBreakdown();
+    } catch (_) {
+      lastBreakdown = const <String, int>{};
+    }
+    // ---- ★ V0.4 长任务续跑：checkpoint + run_stopped（2026-11-02）----
+    //
+    // ## 为什么放在这里（assistant 行之前、所有收尾之后）
+    // checkpoint 行是"这一轮跑到哪了"的快照；run_stopped 是"任务被策略停下"的
+    // 信号。两者都必须**先于** assistant 行落盘（重放顺序：checkpoint → 回答）。
+    //
+    // ## 口径（如实）
+    // · round = 本次 run 实际跑了几轮（`finishedTurns` 或 `tr.currentTurn`）；
+    // · tokensSpent = prompt + output 累计（**与顶栏同一口径**）；
+    // · 策略 = 前端 prefs `heracles.run.continueMode`（off/ask/auto），读不到 = off；
+    // · 只在策略非 off（或用户取消）时发 `run_stopped`；`failed` 仍走 failed 事件，
+    //   不混成"可续"（错误不是预算问题）。
+    // round 口径：本次 run 内部轮次；**续跑轮按"累计轮"记**（continuationRound）
+    // —— 恢复时看到的是"这个任务总共跑到第几轮"，而不是"这一轮内部跑了几圈"。
+    final round = continuationRound > 1
+        ? continuationRound + (finishedTurns ?? tr.currentTurn) - 1
+        : (finishedTurns ?? tr.currentTurn);
+    final tokensSpent = tr.totalPrompt + tr.totalOutput;
+    final continueMode = await _readContinueMode();
+    final policy = switch (continueMode) {
+      'auto' => ContinuePolicy.auto,
+      'ask' => ContinuePolicy.ask,
+      _ => ContinuePolicy.off,
+    };
+    final tokenLimit = ContractRunContinue.runTokenLimit;
+    final maxRounds = ContractRunContinue.autoMaxRounds;
+
+    // checkpoint：每轮结束都写（append-only；宿主据此恢复，不重复消息）。
+    if (round > 0 && !failed) {
+      await sessionStore.appendMessage(sid, {
+        ContractRunContinue.checkpointRole: true,
+        'role': ContractRunContinue.checkpointRole,
+        'sessionId': sid,
+        'runId': '$sid-$round-${sw.elapsedMilliseconds}',
+        'round': round,
+        'plan': lastPlanSteps,
+        'toolCalls': tr.turnRecords.where((t) => t.tool != null).length,
+        'tokens': tokensSpent,
+        'lastMessage': finalText.length > 200
+            ? finalText.substring(finalText.length - 200)
+            : finalText,
+        'progressSnapshot': lastProgress?.toJson() ??
+            {
+              'changedFiles': changeFiles.map((c) => c['path']).toList(),
+            },
+        'ts': DateTime.now().millisecondsSinceEpoch,
+      });
+    }
+
+    // run_stopped 判定：抽成纯函数（矩阵可单测，见 decideRunStop）。
+    //
+    // taskDone：正常收尾（`finishedTurns != null`）且计划全 done/cancelled。
+    final taskDone = finishedTurns != null &&
+        lastPlanSteps.every((s) =>
+            s['status'] == 'done' || s['status'] == 'cancelled');
+    final decision = decideRunStop(
+      policy: policy,
+      cancelled: cancelled,
+      failed: failed,
+      taskDone: taskDone,
+      round: round,
+      maxRounds: maxRounds,
+      tokensSpent: tokensSpent,
+      tokenLimit: tokenLimit,
+      // 真实 streak：由工具完成时的 ProgressSnapshot 比较累加（见采样处）。
+      noProgressStreak: noProgressStreak,
+      noProgressRounds: ContractRunContinue.noProgressRounds,
+    );
+    if (decision != null) {
+      tr.runStopped(
+        decision.reason,
+        round: round,
+        maxRounds: maxRounds,
+        tokensSpent: tokensSpent,
+        tokensLimit: tokenLimit,
+        canContinue: decision.canContinue,
+        changedFiles: [for (final c in changeFiles) '${c['path']}'],
+        errorSummary: decision.summary,
+      );
+    }
+
     // ---- 最终结果落盘（助手回答）----
     //
     // ★ 2026-10-22：`prompt/out/cached` 从**恒 0** 改为真实上报值
@@ -1959,96 +2151,6 @@ class LocalAgentExecutor {
     }
 
 
-    // ---- 组装 AgentRunResult（UI 的权威结果）----
-    //
-    // 2026-10-22：`turns` 与三个 token 总数、稳态命中率**全部换成真实记账**
-    // （此前 turns 恒空、token 恒 0 —— 顶栏与侧栏"不可用"的根因）。
-    lastFrozenTokens = tr.firstTurnPrompt;
-    // ★ C5（2026-10-24）：上下文构成 —— 侧栏"构成"三行的数据源（估算）。
-    try {
-      lastBreakdown = agent.contextBreakdown();
-    } catch (_) {
-      lastBreakdown = const <String, int>{};
-    }
-    // ---- ★ V0.4 长任务续跑：checkpoint + run_stopped（2026-11-02）----
-    //
-    // ## 为什么放在这里（assistant 行之前、所有收尾之后）
-    // checkpoint 行是"这一轮跑到哪了"的快照；run_stopped 是"任务被策略停下"的
-    // 信号。两者都必须**先于** assistant 行落盘（重放顺序：checkpoint → 回答）。
-    //
-    // ## 口径（如实）
-    // · round = 本次 run 实际跑了几轮（`finishedTurns` 或 `tr.currentTurn`）；
-    // · tokensSpent = prompt + output 累计（**与顶栏同一口径**）；
-    // · 策略 = 前端 prefs `heracles.run.continueMode`（off/ask/auto），读不到 = off；
-    // · 只在策略非 off（或用户取消）时发 `run_stopped`；`failed` 仍走 failed 事件，
-    //   不混成"可续"（错误不是预算问题）。
-    final round = finishedTurns ?? tr.currentTurn;
-    final tokensSpent = tr.totalPrompt + tr.totalOutput;
-    final continueMode = await _readContinueMode();
-    final policy = switch (continueMode) {
-      'auto' => ContinuePolicy.auto,
-      'ask' => ContinuePolicy.ask,
-      _ => ContinuePolicy.off,
-    };
-    final tokenLimit = ContractRunContinue.runTokenLimit;
-    final maxRounds = ContractRunContinue.autoMaxRounds;
-
-    // checkpoint：每轮结束都写（append-only；宿主据此恢复，不重复消息）。
-    if (round > 0 && !failed) {
-      await sessionStore.appendMessage(sid, {
-        ContractRunContinue.checkpointRole: true,
-        'role': ContractRunContinue.checkpointRole,
-        'sessionId': sid,
-        'runId': '$sid-$round-${sw.elapsedMilliseconds}',
-        'round': round,
-        'plan': lastPlanSteps,
-        'toolCalls': tr.turnRecords.where((t) => t.tool != null).length,
-        'tokens': tokensSpent,
-        'lastMessage': finalText.length > 200
-            ? finalText.substring(finalText.length - 200)
-            : finalText,
-        'progressSnapshot': {
-          'changedFiles': changeFiles.map((c) => c['path']).toList(),
-        },
-        'ts': DateTime.now().millisecondsSinceEpoch,
-      });
-    }
-
-    // run_stopped 判定：抽成纯函数（矩阵可单测，见 decideRunStop）。
-    //
-    // taskDone：正常收尾（`finishedTurns != null`）且计划全 done/cancelled。
-    final taskDone = finishedTurns != null &&
-        lastPlanSteps.every((s) =>
-            s['status'] == 'done' || s['status'] == 'cancelled');
-    // 无进展 streak（第一版近似判据）：本轮有改动文件或有工具执行过 ⇒ 视为有进展；
-    // 否则记 1。（精确的文件树 hash/测试数/错误签名在 ProgressSnapshot 里补。）
-    final progressChanged =
-        changeFiles.isNotEmpty || tr.turnRecords.isNotEmpty;
-    final decision = decideRunStop(
-      policy: policy,
-      cancelled: cancelled,
-      failed: failed,
-      taskDone: taskDone,
-      round: round,
-      maxRounds: maxRounds,
-      tokensSpent: tokensSpent,
-      tokenLimit: tokenLimit,
-      noProgressStreak: progressChanged ? 0 : 1,
-      noProgressRounds: ContractRunContinue.noProgressRounds,
-    );
-    if (decision != null) {
-      tr.runStopped(
-        decision.reason,
-        round: round,
-        maxRounds: maxRounds,
-        tokensSpent: tokensSpent,
-        tokensLimit: tokenLimit,
-        canContinue: decision.canContinue,
-        changedFiles: [for (final c in changeFiles) '${c['path']}'],
-        errorSummary: decision.summary,
-      );
-    }
-
     return AgentRunResult(
       stopReason: cancelled
           ? '已取消'
@@ -2067,6 +2169,36 @@ class LocalAgentExecutor {
       cancelled: cancelled,
     );
   }
+
+  /// **读会话最后一条 checkpoint**（V0.4 进程被杀恢复）。
+  ///
+  /// 只读最后一条 `role:"run_checkpoint"` 行（倒扫），拿 `round`/`tokens`/`plan`。
+  /// 读不到/旧文件没有 ⇒ 空 Map（行为与没有恢复功能时完全一致）。
+  Future<Map<String, Object?>> _lastCheckpointOf(String sid) async {
+    try {
+      final rows = await sessionStore.loadMessages(sid, limit: 0);
+      for (final row in rows.reversed) {
+        if (row['role'] == ContractRunContinue.checkpointRole) return row;
+      }
+    } catch (_) {
+      // 读失败 ⇒ 不恢复（恢复是增强，不该拖垮主链路）
+    }
+    return const <String, Object?>{};
+  }
+
+  /// **测试缝**：暴露"读最后一条 checkpoint"（V0.4 恢复逻辑）。
+  Future<Map<String, Object?>> lastCheckpointForTest(String sid) =>
+      _lastCheckpointOf(sid);
+
+  /// **测试缝**：续跑内部说明（验证它进 system 提示而不是 user 文本）。
+  static String continuationNoteForTest(int round) =>
+      continuationNoteStatic(round);
+
+  /// 续跑内部说明的**唯一定义**（实例方法也调它）。
+  static String continuationNoteStatic(int round) =>
+      '【自动续跑第 $round 轮】上一轮的输出还没完成任务。请接着上一轮的历史继续，'
+      '不要重复已完成的工作；先确认当前进展（看计划/文件/测试），再继续下一步。'
+      '如果你判断任务已经完成，请直接给出最终回答。';
 
   /// 读续跑模式（V0.4）：前端设置页写 `SharedPreferences['heracles.run.continueMode']`
   /// ∈ `off|ask|auto`（默认 off）。读失败/未知值 ⇒ off（**保守**：不自动续跑）。
