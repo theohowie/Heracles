@@ -41,8 +41,12 @@ void main() {
         case 'requestIgnoreBatteryOptimizations':
           batteryCalls.add(1);
           return true;
+        // ★ 2026-11-02：autostartGuide 已改为 oemGuide('autostart') 的薄封装
+        //   （契约 §N18.2，只增）—— mock 跟着通道走，断言本身不变
         case 'autostartGuide':
+        case 'oemGuide':
           return {
+            'ok': true,
             'brand': '小米',
             'path': '设置→应用设置→应用管理→本应用→自启动',
           };

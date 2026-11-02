@@ -318,14 +318,57 @@ class AgentBridge {
   }
 
   /// OEM 自启引导（`{brand, path}`）；通道不支持 ⇒ null（UI 显示通用说明）。
-  Future<({String brand, String path})?> autostartGuide() async {
+  Future<({String brand, String path})?> autostartGuide() =>
+      oemGuide('autostart');
+
+  /// **MIUI 保活三件套引导**（2026-11-02，只给数据**不自动跳转** —— 契约红线）。
+  ///
+  /// [kind] ∈ `autostart`（自启动）/ `backgroundPopup`（后台弹出界面）/
+  /// `lockScreenShow`（锁屏显示）。
+  ///
+  /// · **未知 kind 在 Dart 侧先行拒绝**（`ArgumentError`，通道零调用）——
+  ///   拼错的 kind 打到宿主只会得到一句"未知方法"，排障绕远路；
+  /// · 宿主认不出的品牌给**通用兜底文案**（明说没有统一入口），**不编路径**；
+  /// · `null` = 不可用（`MissingPluginException`/`PlatformException`/宿主
+  ///   `ok:false`/brand 或 path 为空）—— 半截数据当没有，UI 显示通用说明。
+  Future<({String brand, String path})?> oemGuide(String kind) async {
+    const kinds = <String>{'autostart', 'backgroundPopup', 'lockScreenShow'};
+    if (!kinds.contains(kind)) {
+      throw ArgumentError.value(
+          kind, 'kind', '未知的引导类型（必须是 ${kinds.toList()..sort()} 之一）');
+    }
     try {
-      final m = await _channel.invokeMapMethod<String, dynamic>('autostartGuide');
-      if (m == null) return null;
+      final m = await _channel
+          .invokeMapMethod<String, dynamic>('oemGuide', {'kind': kind});
+      if (m == null || m['ok'] != true) return null;
       final brand = (m['brand'] as String?) ?? '';
       final path = (m['path'] as String?) ?? '';
       if (brand.isEmpty || path.isEmpty) return null;
       return (brand: brand, path: path);
+    } on MissingPluginException {
+      return null;
+    } on PlatformException {
+      return null;
+    }
+  }
+
+  /// **保活状态聚合查询**（2026-11-02，只读 —— 不拉系统页、不改设置）。
+  ///
+  /// 对应通道 `keepaliveStatus`：Kotlin 侧**真实查**（前台服务运行位 /
+  /// `PowerManager.isIgnoringBatteryOptimizations`），并附 MIUI 口径提醒
+  /// （省电策略「无限制」≠ 系统电池优化白名单，真机实测存在）。
+  ///
+  /// ## 缺的不编
+  ///
+  /// · **字段级**：宿主没给的字段保持 null（[`KeepaliveStatus`] 全字段可空）；
+  /// · **整体级**：`MissingPluginException`/`PlatformException`/宿主 `ok:false`
+  ///   ⇒ 返回 null —— 状态**不可用**，UI 显示通用说明，**不许编一个全 false 的
+  ///   状态假装查到了**。
+  Future<KeepaliveStatus?> keepaliveStatus() async {
+    try {
+      final m = await _channel.invokeMapMethod<String, dynamic>('keepaliveStatus');
+      if (m == null || m['ok'] != true) return null;
+      return KeepaliveStatus.fromMap(m);
     } on MissingPluginException {
       return null;
     } on PlatformException {
@@ -2870,6 +2913,60 @@ class AgentTurn {
       toolState: ToolState.parse(m['toolState'] as String?),
     );
   }
+}
+
+/// **保活状态聚合**（`keepaliveStatus` 的 Dart 形状）。
+///
+/// ## 全字段可空是刻意的
+///
+/// 宿主"没给"的字段必须保持 null —— 这与"查到了、值是 false"是两回事。
+/// 把缺字段补成 `false`，UI 就会把"查不到"渲染成"没在跑/没忽略"，
+/// 那是编数据（`docs/INTERFACE.md` §N18.1 的"缺的不编"）。
+class KeepaliveStatus {
+  const KeepaliveStatus({
+    this.foregroundServiceRunning,
+    this.batteryIgnored,
+    this.batteryNote,
+    this.autostart,
+  });
+
+  /// 前台服务是否在跑（`AgentChatService.running` 真实位；null = 宿主没给）。
+  final bool? foregroundServiceRunning;
+
+  /// 是否已忽略电池优化（`PowerManager` 真实值；null = 宿主没给）。
+  final bool? batteryIgnored;
+
+  /// 口径差异提醒（如 MIUI「无限制」≠ 白名单）或读取失败原因；null = 没有提醒。
+  final String? batteryNote;
+
+  /// 当前品牌的自启动路径（null = 宿主没给/通用兜底也没拿到）。
+  final ({String brand, String path})? autostart;
+
+  /// 宽松解析：**缺的字段就是 null**（不做任何默认值补偿）。
+  factory KeepaliveStatus.fromMap(Map<String, dynamic> m) {
+    final auto = m['autostart'];
+    final ({String brand, String path})? autostart;
+    if (auto is Map) {
+      final brand = (auto['brand'] as String?) ?? '';
+      final path = (auto['path'] as String?) ?? '';
+      autostart =
+          (brand.isEmpty || path.isEmpty) ? null : (brand: brand, path: path);
+    } else {
+      autostart = null;
+    }
+    return KeepaliveStatus(
+      foregroundServiceRunning: m['foregroundServiceRunning'] as bool?,
+      batteryIgnored: m['batteryIgnored'] as bool?,
+      batteryNote: m['batteryNote'] as String?,
+      autostart: autostart,
+    );
+  }
+
+  @override
+  String toString() =>
+      'KeepaliveStatus(fg: $foregroundServiceRunning, battery: $batteryIgnored, '
+      'note: ${batteryNote == null ? '-' : '有'}, '
+      'autostart: ${autostart == null ? '-' : autostart!.brand})';
 }
 
 /// 工具在一轮里的**三态**（对应 Kotlin 侧 `ToolState`）。
