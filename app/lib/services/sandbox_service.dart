@@ -418,6 +418,45 @@ class SandboxService {
 
   // -------------------------------------------------------------- T2 编译环境
 
+  /// **T0-3 沙箱环境画像（只增 API，2026-11-02）**。
+  ///
+  /// 语义（与 backend/sandbox `SandboxProfile` 对齐）：
+  /// · `isolationTier`：当前**只支持** `process`(L1)；`container`/`vm` 会明确返回
+  ///   `E_TIER_UNIMPLEMENTED`（**不假实现**，见 ADR-041）；
+  /// · `network`：白名单/自由出网/风险标记；强制力是**策略级**（不是硬隔离）；
+  /// · `envs`：已安装环境清单（Kotlin 侧 `SandboxEnvManager` 落地后返回真实值）。
+  ///
+  /// ⚠️ 当前 sandbox-channel 尚未实现 `envProfile` 方法 ⇒ 调用会抛
+  /// `SandboxChannelException`（**明确失败，不返回假数据**）。
+  Future<SandboxEnvProfile> envProfile() async {
+    final raw = await _client.call('envProfile');
+    return SandboxEnvProfile.fromMap(raw);
+  }
+
+  /// 安装环境（Node/Python3/Deno/Bun/Go 配方）。
+  ///
+  /// 未实现时明确失败（不假装装好）。
+  Future<SandboxEnvInstallResult> installEnv(String name) async {
+    final raw = await _client.call('installEnv', <String, Object?>{'name': name});
+    return SandboxEnvInstallResult.fromMap(raw);
+  }
+
+  /// 卸载环境。
+  Future<SandboxEnvInstallResult> uninstallEnv(String name) async {
+    final raw = await _client.call('uninstallEnv', <String, Object?>{'name': name});
+    return SandboxEnvInstallResult.fromMap(raw);
+  }
+
+  /// 项目识别：给一组文件名，返回推荐环境（空 = 认不出，**不猜**）。
+  Future<List<String>> detectProjectEnv(List<String> fileNames) async {
+    final raw = await _client.call('detectProjectEnv', <String, Object?>{
+      'files': fileNames,
+    });
+    return ((raw['envs'] as List?) ?? const [])
+        .map((e) => e.toString())
+        .toList(growable: false);
+  }
+
   /// T2 编译环境状态（**只读**，不触发下载）。
   Future<SandboxBuildSuiteStatus> buildSuiteStatus() async {
     final raw = await _client.call('buildSuiteStatus');
@@ -679,6 +718,89 @@ class SandboxSnapshotResult {
   final String? error;
 
   bool get ok => error == null;
+}
+
+/// **T0-3 沙箱环境画像**（2026-11-02，只增结构）。
+///
+/// 字段口径见 backend/sandbox `SandboxProfile`：`isolationTier` 只支持 `process`，
+/// 其它等级明确未实现；`network.riskLevel` 与 `riskNote` 必须给 UI 展示
+/// （**策略级、非硬隔离**）。
+class SandboxEnvProfile {
+  const SandboxEnvProfile({
+    required this.isolationTier,
+    required this.tierImplemented,
+    this.tierNote,
+    required this.whitelistOnly,
+    required this.allowAllOutbound,
+    required this.riskLevel,
+    required this.riskNote,
+    required this.hosts,
+    this.proxy = '',
+    required this.envs,
+  });
+
+  final String isolationTier;
+  final bool tierImplemented;
+  final String? tierNote;
+  final bool whitelistOnly;
+  final bool allowAllOutbound;
+  final String riskLevel;
+  final String riskNote;
+  final List<String> hosts;
+  final String proxy;
+  final List<String> envs;
+
+  factory SandboxEnvProfile.fromMap(Map<String, dynamic> m) {
+    final net = (m['network'] as Map?) ?? const {};
+    return SandboxEnvProfile(
+      isolationTier: (m['isolationTier'] as String?) ?? 'process',
+      tierImplemented: (m['tierImplemented'] as bool?) ?? true,
+      tierNote: m['tierNote'] as String?,
+      whitelistOnly: (net['whitelistOnly'] as bool?) ?? true,
+      allowAllOutbound: (net['allowAllOutbound'] as bool?) ?? false,
+      riskLevel: (net['riskLevel'] as String?) ?? 'low',
+      riskNote: (net['riskNote'] as String?) ??
+          '强制力为策略级（代理环境变量 + 包管理器配置 + DNS 约束），非硬隔离',
+      hosts: ((net['hosts'] as List?) ?? const [])
+          .map((e) => e.toString())
+          .toList(growable: false),
+      proxy: (net['proxy'] as String?) ?? '',
+      envs: ((m['envs'] as List?) ?? const [])
+          .map((e) => e.toString())
+          .toList(growable: false),
+    );
+  }
+}
+
+/// **T0-3 环境安装/卸载结果**（只增结构；失败必须带人话原因）。
+class SandboxEnvInstallResult {
+  const SandboxEnvInstallResult({
+    required this.ok,
+    this.name,
+    this.error,
+    this.message,
+    this.approxBytes = 0,
+    this.verifiedVersion,
+  });
+
+  final bool ok;
+  final String? name;
+  final String? error;
+  final String? message;
+  final int approxBytes;
+
+  /// 安装后 `--version` 校验得到的版本号（校验失败 = null，不编）。
+  final String? verifiedVersion;
+
+  factory SandboxEnvInstallResult.fromMap(Map<String, dynamic> m) =>
+      SandboxEnvInstallResult(
+        ok: (m['ok'] as bool?) ?? false,
+        name: m['name'] as String?,
+        error: m['error'] as String?,
+        message: m['message'] as String?,
+        approxBytes: (m['approxBytes'] as num?)?.toInt() ?? 0,
+        verifiedVersion: m['verifiedVersion'] as String?,
+      );
 }
 
 /// T2 编译环境状态。

@@ -1,0 +1,185 @@
+package com.heracles.sandbox.runtime
+
+/**
+ * **沙箱环境画像（V0.4 T0-3，2026-11-02）** —— 隔离等级 + 网络策略 + 镜像/代理。
+ *
+ * ## 为什么先只做 process(L1)
+ *
+ * `container` / `vm` 在 Android 上需要额外内核能力（namespace/cgroup 或虚拟化），
+ * PRoot 给不了（见 ADR-041）。**只留枚举与接口、明确"未实现"**，比假装支持安全得多。
+ *
+ * ## L1 的强制力是**策略级**，不是硬隔离
+ *
+ * 能做到的是：代理环境变量、包管理器配置（npm/pip/apk 指向白名单镜像）、DNS 约束。
+ * 做不到的是：阻止一个程序自己 `socket()` 连任意 IP。**文档/UI 必须如实写"策略级"**。
+ */
+enum class IsolationTier(val wire: String) {
+    PROCESS("process"),
+    CONTAINER("container"),
+    VM("vm");
+
+    companion object {
+        fun parse(raw: String?): IsolationTier =
+            entries.firstOrNull { it.wire == raw } ?: PROCESS
+    }
+}
+
+/** 网络策略（默认白名单 = 官方源 + 常见国内镜像）。 */
+data class NetworkPolicy(
+    /** 只允许白名单（默认 true）。 */
+    val whitelistOnly: Boolean = true,
+    /** 自由出网开关（**显式打开**；打开后带风险标记）。 */
+    val allowAllOutbound: Boolean = false,
+    /** 追加的企业 registry/镜像（host 形如 `registry.npmjs.org`）。 */
+    val extraHosts: List<String> = emptyList(),
+    /** 代理（`http://host:port`；空 = 不设）。 */
+    val proxy: String = "",
+) {
+    /** 风险等级：自由出网 = high；否则 low。 */
+    val riskLevel: String get() = if (allowAllOutbound) "high" else "low"
+
+    /** 给 UI 的如实说明（**必须**显示"策略级"）。 */
+    val riskNote: String get() = if (allowAllOutbound)
+        "已允许自由出网：L1 只能靠代理/包管理器配置约束，无法阻止程序直连任意地址（策略级，非硬隔离）"
+    else
+        "仅允许白名单源（官方源 + 国内镜像）；强制力为策略级（代理环境变量 + 包管理器配置 + DNS 约束），非硬隔离"
+
+    /** 有效白名单（默认 + 追加）。 */
+    fun effectiveHosts(): List<String> =
+        (DEFAULT_HOSTS + extraHosts).map { it.trim().lowercase() }.filter { it.isNotEmpty() }.distinct()
+
+    companion object {
+        /** 默认白名单：npm / PyPI / Alpine apk 官方源 + 常见国内镜像。 */
+        val DEFAULT_HOSTS = listOf(
+            "registry.npmjs.org",
+            "registry.npmmirror.com",
+            "pypi.org",
+            "files.pythonhosted.org",
+            "pypi.tuna.tsinghua.edu.cn",
+            "mirrors.aliyun.com",
+            "dl-cdn.alpinelinux.org",
+            "mirrors.tuna.tsinghua.edu.cn",
+            "goproxy.cn",
+            "proxy.golang.org",
+            "crates.io",
+            "static.crates.io",
+        )
+    }
+}
+
+/** 沙箱环境画像（profile）。 */
+data class SandboxProfile(
+    val isolationTier: IsolationTier = IsolationTier.PROCESS,
+    val network: NetworkPolicy = NetworkPolicy(),
+    /** 镜像覆盖：包管理器 → 镜像 URL（空 = 用默认白名单）。 */
+    val mirrors: Map<String, String> = emptyMap(),
+) {
+    /** 该 tier 是否已实现（container/vm = false，**不假实现**）。 */
+    val implemented: Boolean get() = isolationTier == IsolationTier.PROCESS
+
+    /** 未实现时的明确说明。 */
+    val unimplementedNote: String? get() = if (implemented) null else
+        "隔离等级 ${isolationTier.wire} 尚未实现（Android 上 PRoot 无 namespace/cgroup/虚拟化能力，见 ADR-041）；当前只能用 process(L1)"
+}
+
+/**
+ * **环境安装配方**（Node/Python/Deno/Bun/Go）。
+ *
+ * 每个配方 = 安装命令 + 来源 + 体积估算 + 校验命令。**估算体积是量级参考，不是承诺**。
+ */
+data class EnvRecipe(
+    val name: String,
+    val installCommands: List<String>,
+    val verifyCommand: String,
+    val source: String,
+    val approxBytes: Long,
+    val projectManifests: List<String> = emptyList(),
+)
+
+object SandboxEnvManager {
+    /** 支持的配方（只增）。 */
+    val RECIPES: List<EnvRecipe> = listOf(
+        EnvRecipe(
+            name = "node",
+            installCommands = listOf("apk add nodejs npm"),
+            verifyCommand = "node --version",
+            source = "alpine apk（dl-cdn.alpinelinux.org）",
+            approxBytes = 60L * 1024 * 1024,
+            projectManifests = listOf("package.json"),
+        ),
+        EnvRecipe(
+            name = "python3",
+            installCommands = listOf("apk add python3 py3-pip"),
+            verifyCommand = "python3 --version",
+            source = "alpine apk（dl-cdn.alpinelinux.org）",
+            approxBytes = 90L * 1024 * 1024,
+            projectManifests = listOf("pyproject.toml", "setup.py", "requirements.txt"),
+        ),
+        EnvRecipe(
+            name = "deno",
+            installCommands = listOf("apk add deno"),
+            verifyCommand = "deno --version",
+            source = "alpine apk（社区仓库）",
+            approxBytes = 45L * 1024 * 1024,
+            projectManifests = listOf("deno.json"),
+        ),
+        EnvRecipe(
+            name = "bun",
+            installCommands = listOf("npm install -g bun"),
+            verifyCommand = "bun --version",
+            source = "npm registry（registry.npmjs.org）",
+            approxBytes = 35L * 1024 * 1024,
+            projectManifests = listOf("bun.lockb", "package.json"),
+        ),
+        EnvRecipe(
+            name = "go",
+            installCommands = listOf("apk add go"),
+            verifyCommand = "go version",
+            source = "alpine apk（dl-cdn.alpinelinux.org）",
+            approxBytes = 120L * 1024 * 1024,
+            projectManifests = listOf("go.mod"),
+        ),
+    )
+
+    /** 按名字取配方（不认识 ⇒ null，**不猜**）。 */
+    fun recipe(name: String): EnvRecipe? =
+        RECIPES.firstOrNull { it.name.equals(name.trim(), ignoreCase = true) }
+
+    /**
+     * **项目识别**：根据清单文件名推荐环境（空 = 认不出，**不猜**）。
+     *
+     * 判断顺序：
+     * 1. Flutter（`pubspec.yaml`）先于 Android（gradle）—— Flutter 项目里也有 gradle；
+     * 2. **专用清单优先**：`bun.lockb` ⇒ bun、`deno.json` ⇒ deno、`go.mod` ⇒ go、
+     *    `pyproject.toml`/`setup.py`/`requirements.txt` ⇒ python3；
+     * 3. 最后才用**通用清单** `package.json` ⇒ node（bun 也读 package.json，但只有
+     *    出现 `bun.lockb` 时才认 bun —— 否则一个普通 Node 项目会被同时推荐 bun）。
+     */
+    fun detectProject(fileNames: List<String>): List<String> {
+        val names = fileNames.mapNotNull { raw ->
+            raw.trim().takeIf { it.isNotEmpty() }?.split('/', '\\')?.last()
+        }.toSet()
+        if ("pubspec.yaml" in names) return listOf("flutter")
+        if ("build.gradle" in names || "build.gradle.kts" in names) return listOf("android")
+
+        val specific = RECIPES.filter { r ->
+            r.projectManifests.any { it in names && it != "package.json" }
+        }.map { it.name }
+        if (specific.isNotEmpty()) return specific
+        // 只有 package.json（无 bun.lockb）⇒ node
+        if ("package.json" in names) return listOf("node")
+        return emptyList()
+    }
+
+    /** 安装前的体积/来源确认文案（UI 展示后用户确认再装）。 */
+    fun installPreview(name: String): Map<String, Any?>? {
+        val r = recipe(name) ?: return null
+        return mapOf(
+            "name" to r.name,
+            "source" to r.source,
+            "approxBytes" to r.approxBytes,
+            "installCommands" to r.installCommands,
+            "verifyCommand" to r.verifyCommand,
+        )
+    }
+}
