@@ -22,6 +22,7 @@ import '../theme/stretch_segmented.dart';
 import '../theme/theme_reveal.dart';
 import '../data/open_source_licenses.dart';
 import '../widgets/bw_approval.dart';
+import '../widgets/run_continue_mode_section.dart';
 import 'jev_settings_screen.dart';
 import 'oss_licenses_screen.dart';
 import 'voice_settings_screen.dart';
@@ -79,6 +80,9 @@ class SettingsScreen extends StatelessWidget {
                   ),
                 ],
               ),
+              const _SectionLabel('任务续跑'),
+              // ★ V0.4（#1）：续跑模式三档（关闭 / 每轮询问 / 自动续跑）
+              const _GroupCard(children: [RunContinueModeSection()]),
               const _SectionLabel('智能体'),
               _GroupCard(
                 children: [

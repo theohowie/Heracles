@@ -40,6 +40,7 @@ import '../services/github_auth.dart';
 import '../services/git_service.dart';
 import '../services/github_config.dart';
 import '../widgets/bw_approval.dart';
+import '../widgets/run_stop_banner.dart';
 import '../widgets/themed_background.dart';
 import '../widgets/input_bar.dart';
 import '../widgets/message_row.dart';
@@ -627,6 +628,14 @@ class _ChatScreenState extends State<ChatScreen> {
   /// 提问抽屉此刻是否开着（开着时不重复弹，气泡先隐藏）。
   bool _askSheetOpen = false;
 
+  // ---- ★ V0.4 长任务续跑（#1，2026-11-02）----
+  //
+  // 任务被中断时后端发 `run_stopped`；这里存下来渲染「任务被中断」卡。
+  // `_continueMode` ∈ off|ask|auto（设置页「续跑模式」三档，存
+  // SharedPreferences `heracles.run.continueMode`；待正式设置字段后迁走）。
+  RunStopInfo? _runStop;
+  String _continueMode = 'off';
+
   /// 忙时输入框是否仍可用 —— 由用户的 `BusySendBehavior` 决定。
   ///
   /// `queue`（默认）与 `interrupt` 都让输入框保持可用：
@@ -1110,6 +1119,8 @@ class _ChatScreenState extends State<ChatScreen> {
     _restoreView();
     unawaited(_jev.load());
     unawaited(_reload().then((_) => _consumePendingOpenSession()));
+    // ★ V0.4（#1）：读「续跑模式」三档（off|ask|auto）
+    unawaited(_loadContinueMode());
     // ★ T1-1（2026-10-31）：首屏进入就刷一次上下文占用 —— 冷启动时用户
     //   可能直接落在"上次的会话"上，不刷新顶栏就是「上下文 —」。
     unawaited(_refreshContextUsage());
@@ -3242,6 +3253,12 @@ class _ChatScreenState extends State<ChatScreen> {
       case AgentEvent.kAskClosed:
         _onAskClosed(e.outcome);
 
+      // ★ V0.4（2026-11-02，对应 #1）：长任务被中断。
+      //   `run_stopped`（只增事件）—— 字段见 `RunStopInfo.fromEvent` 的契约适配。
+      //   收到后显示「任务被中断：<人话原因>」+ 继续按钮（canContinue 决定可用）。
+      case RunStopInfo.kRunStoppedEvent:
+        unawaited(_onRunStopped(e));
+
       // ---- ★ 危险工具审批（2026-10-19）----
       //
       // 到达时机：Kotlin 侧已经**挂起**在审批队列上（工具返回 NeedsApproval）。
@@ -3793,6 +3810,8 @@ class _ChatScreenState extends State<ChatScreen> {
       _historyHasEarlier = false;
       _historyLinesLoaded = 0;
       _historyLoadingEarlier = false;
+      // ★ V0.4（#1）：中断卡属于**旧会话/旧 run** —— 切上下文必须清掉
+      _runStop = null;
       // 压缩提示是**实时流**的瞬态提示（不落盘）：换会话后不该残留 ——
       // 它是"那个会话当时发生过"的事，锚点也属于旧列表。
       _compressedNotes.clear();
@@ -4627,6 +4646,8 @@ class _ChatScreenState extends State<ChatScreen> {
       await _doCompact();
       return;
     }
+    // ★ V0.4（#1）：新一轮开始 ⇒ 上一轮的中断卡作废（别让旧"被中断"常驻）
+    if (_runStop != null) setState(() => _runStop = null);
     // ★ 2026-10-30 P0：新一轮开始前撤掉上一轮**已完成**的计划 ——
     //   否则旧计划的完成态会盖住新任务（灵动岛常驻的另一种表现）。
     _clearCompletedPlanOnNewRun();
@@ -5482,6 +5503,13 @@ class _ChatScreenState extends State<ChatScreen> {
               summary: _pendingAsk!.summary,
               onTap: _reopenPendingAsk,
             ),
+          // ★ V0.4（#1）：任务被中断卡（原因 + 已用/上限 + 继续按钮）
+          if (_runStop != null)
+            RunStopBanner(
+              info: _runStop!,
+              onContinue: () => unawaited(_continueRun()),
+              onDismiss: () => setState(() => _runStop = null),
+            ),
           InputBar(
             // ★ 输入可用性按【当前会话】判，不是全局 `_busy`（2026-10-11 修 t14）
             //
@@ -5944,6 +5972,44 @@ class _ChatScreenState extends State<ChatScreen> {
     final p = _pendingAsk;
     if (p == null) return;
     unawaited(_showAskDialog(context, p.questions, p.fallbackText));
+  }
+
+  // ---- ★ V0.4 续跑（#1，2026-11-02）----
+
+  /// 收到 `run_stopped`：显示中断卡；自动续跑模式下满 3 轮弹确认。
+  Future<void> _onRunStopped(AgentEvent e) async {
+    final info = RunStopInfo.fromEvent(e);
+    if (info == null || !mounted) return;
+    setState(() => _runStop = info);
+    // 自动续跑：最多 3 轮；第 3 轮仍未完成 ⇒ 弹「继续会额外消耗 token」
+    if (_continueMode == 'auto' &&
+        info.continueEnabled &&
+        (info.round ?? 0) >= 3) {
+      final go = await showAutoContinueConfirm(
+        context,
+        tokensSpent: info.tokensSpent,
+        tokensLimit: info.tokensLimit,
+        nextEstimate: info.nextEstimate,
+      );
+      if (go == true) unawaited(_continueRun());
+    }
+  }
+
+  /// 「继续」：后端续跑接口未就绪 ⇒ 如实告知（不假装已续上）。
+  Future<void> _continueRun() async {
+    if (!mounted) return;
+    showIosToast(context, '续跑接口未就绪（已移交后端）');
+  }
+
+  /// 读「续跑模式」三档（设置页写入；待正式设置字段后迁到 AppSettings）。
+  Future<void> _loadContinueMode() async {
+    try {
+      final p = await SharedPreferences.getInstance();
+      final mode = p.getString('heracles.run.continueMode') ?? 'off';
+      if (mounted) setState(() => _continueMode = mode);
+    } catch (_) {
+      // 读不到就按"关闭续跑"—— 默认不自动消耗 token
+    }
   }
 
   /// **权限档位变更**（2026-10-29 第 5 条 P1）。
