@@ -1,3 +1,7 @@
+// vendored: modified by Heracles
+// 上游缺陷补丁（Windows 路径分隔符）：见 [_comparisonPath] 与 [_runJavaScriptScript]。
+// 上游 memex-lab/dart_agent_core @ 09c88ef（2.1.8）原样内联；本文件改动只为修
+// 「技能目录白名单前缀判断在 Windows 上恒假」。POSIX 下行为不变。
 import 'dart:async';
 import 'dart:convert';
 import 'package:dart_agent_core/src/agent/controller.dart';
@@ -715,7 +719,11 @@ class StatefulAgent {
       final path = rawPath.trim();
       if (path.isEmpty) continue;
       final absolutePath = fsAbsolutePath(path);
-      if (seen.add(absolutePath)) {
+      // 去重用「比较形态」做键（统一分隔符 + 折叠 `..`），但**存原生路径**——
+      // 这个 list 还会被 _prepareDirectorySkills 拿去真正读目录，
+      // 不能把平台分隔符换掉。见 _comparisonPath 的说明。
+      final key = _comparisonPath(absolutePath) ?? absolutePath;
+      if (seen.add(key)) {
         normalized.add(absolutePath);
       }
     }
@@ -753,13 +761,20 @@ class StatefulAgent {
 
     final resolvedAbsolute = fsAbsolutePath(scriptPath);
     final rootPaths = _normalizedSkillDirectoryPaths;
-    final matchedRoot = rootPaths.firstWhere((root) {
-      final rootWithSep = root.endsWith(fsPathSeparator)
-          ? root
-          : '$root$fsPathSeparator';
-      return resolvedAbsolute == root ||
-          resolvedAbsolute.startsWith(rootWithSep);
-    }, orElse: () => '');
+    // ★ 比较两侧必须同形态：Windows 上 `File(x).absolute.path` 保留 `\`，
+    //   而 skill.dart 的 `_normalizePath` 把技能路径落成 `/`；直接前缀比会恒假
+    //   ⇒ 工作区内的合法脚本全被拒。这里把「脚本路径」与「白名单根」都折成
+    //   比较形态（统一 `/` + 折叠 `.`/`..`）再比。POSIX 下是 no-op。
+    //   `resolvedAbsolute`（原生形态）仍原样交给运行时，不参与回传。
+    final resolvedForComparison = _comparisonPath(resolvedAbsolute);
+    final matchedRoot = resolvedForComparison == null
+        ? ''
+        : rootPaths.firstWhere((root) {
+            final rootForComparison = _comparisonPath(root);
+            return rootForComparison != null &&
+                (resolvedForComparison == rootForComparison ||
+                    resolvedForComparison.startsWith('$rootForComparison/'));
+          }, orElse: () => '');
     if (matchedRoot.isEmpty) {
       return 'Error: script path must stay under one of the skillDirectoryPaths.';
     }
@@ -809,6 +824,34 @@ class StatefulAgent {
     final isAbsolute =
         path.startsWith('/') || (path.length >= 2 && path[1] == ':');
     return isAbsolute;
+  }
+
+  /// 把路径折成「仅用于比较」的规范形态：统一分隔符为 `/`，并折叠 `.` / `..`。
+  ///
+  /// 为什么需要：Windows 上 `File(path).absolute.path` 保留 `\`，而 skill.dart 的
+  /// `_normalizePath` 会把技能文件路径统一成 `/`；两边直接前缀比较在 Windows 上恒假
+  /// （工作区内的脚本全被拒）。POSIX 下本函数是 no-op。
+  ///
+  /// ★ 安全：**只用于比较，绝不回传给运行时**（执行与存在性检查仍用原生路径）。
+  /// ★ `..` 必须折叠：如果只做分隔符替换，`<root>/../outside.js` 会以 `<root>/` 为
+  ///   前缀通过白名单检查（探针实测），等于开出一条越权通道。折叠后若 `..` 越过
+  ///   根/盘符，无法折叠 ⇒ 返回 null，调用方按「不在白名单内」拒绝（fail-closed）。
+  static String? _comparisonPath(String path) {
+    final unified = path.replaceAll(r'\', '/');
+    final rooted = unified.startsWith('/');
+    final segments = <String>[];
+    for (final segment in unified.split('/')) {
+      if (segment.isEmpty || segment == '.') continue;
+      if (segment == '..') {
+        if (segments.isEmpty) return null;
+        // 不许把盘符（`F:`）折掉 —— 那已经越出该盘根。
+        if (segments.last.endsWith(':')) return null;
+        segments.removeLast();
+        continue;
+      }
+      segments.add(segment);
+    }
+    return rooted ? '/${segments.join('/')}' : segments.join('/');
   }
 
   String? _javaScriptArgsAsString(dynamic rawArgs) {
