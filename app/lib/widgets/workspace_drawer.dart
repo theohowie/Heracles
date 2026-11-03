@@ -111,6 +111,29 @@ List<String>? manualOrderAfterMove(
   return changed ? out : null;
 }
 
+/// **「当前所在工作区」的唯一判据**（2026-11-03 用户实报 bug 后定）。
+///
+/// 只认「选中会话所在的那个工作区」：
+///   · 有会话 id 且能在某个工作区的会话列表里找到它 ⇒ 返回那个工作区的 id；
+///   · 否则返回 `null` —— **绝不回退到第一个/默认工作区**。
+///
+/// 为什么不猜：侧边栏头部 ⊕「新建会话」原先写死 `workspaces.first.id`，
+/// 用户在 AAA 工作区干活、点 + 却在别的（甚至默认）工作区里建了会话
+/// （2026-11-03 用户原话："默认添加的不是我当前工作区的会话"）。
+/// 猜错的代价是**会话归属错了**；宁可多问一句"在哪个工作区建"。
+String? currentWorkspaceIdForSession(
+  List<HWorkspace> workspaces,
+  String? sessionId,
+) {
+  if (sessionId == null || sessionId.isEmpty) return null;
+  for (final w in workspaces) {
+    for (final s in w.sessions) {
+      if (s.id == sessionId) return w.id;
+    }
+  }
+  return null;
+}
+
 /// 工作区抽屉（公开外壳）：本体渲染在 [_WorkspaceDrawerBody]，
 /// 这里只持有**多选模式**的状态（是否在选、选了哪些），
 /// 这样本体保持无状态、既有构造参数一个不变。
@@ -120,6 +143,7 @@ class WorkspaceDrawer extends StatefulWidget {
     required this.workspaces,
     required this.onSelectSession,
     required this.onNewSession,
+    this.activeWorkspaceId,
     required this.onOpenSettings,
     required this.viewOptions,
     required this.onViewOptionsChanged,
@@ -146,6 +170,16 @@ class WorkspaceDrawer extends StatefulWidget {
   final List<HWorkspace> workspaces;
   final void Function(String workspaceId, String sessionId) onSelectSession;
   final void Function(String workspaceId) onNewSession;
+
+  /// **当前所在工作区**（用户正在哪个工作区干活）—— 由宿主按
+  /// [currentWorkspaceIdForSession] 算好传入，`null` 表示"没有选中会话、
+  /// 无法确定归属"。
+  ///
+  /// 只为**头部 ⊕ 新建会话**服务：有它就直接在那个工作区建，
+  /// 没有它就让用户自己选（见 `_onHeaderAdd`）。**不要**在这里回退到
+  /// `workspaces.first` —— 那正是 2026-11-03 用户报的 bug。
+  final String? activeWorkspaceId;
+
   final VoidCallback onOpenSettings;
   final ViewOptions viewOptions;
   final void Function(ViewOptions) onViewOptionsChanged;
@@ -210,6 +244,7 @@ class _WorkspaceDrawerState extends State<WorkspaceDrawer> {
       workspaces: widget.workspaces,
       onSelectSession: widget.onSelectSession,
       onNewSession: widget.onNewSession,
+      activeWorkspaceId: widget.activeWorkspaceId,
       onOpenSettings: widget.onOpenSettings,
       viewOptions: widget.viewOptions,
       onViewOptionsChanged: widget.onViewOptionsChanged,
@@ -254,6 +289,7 @@ class _WorkspaceDrawerBody extends StatelessWidget {
     required this.workspaces,
     required this.onSelectSession,
     required this.onNewSession,
+    this.activeWorkspaceId,
     required this.onOpenSettings,
     required this.viewOptions,
     required this.onViewOptionsChanged,
@@ -287,6 +323,10 @@ class _WorkspaceDrawerBody extends StatelessWidget {
 
   final void Function(String workspaceId, String sessionId) onSelectSession;
   final void Function(String workspaceId) onNewSession;
+
+  /// 当前所在工作区（见 [WorkspaceDrawer.activeWorkspaceId]）；`null` = 不确定。
+  final String? activeWorkspaceId;
+
   final VoidCallback onOpenSettings;
 
   /// 技能 / MCP / 自动化入口（同 [WorkspaceDrawer.onOpenAutomation] 等）。
@@ -916,14 +956,10 @@ class _WorkspaceDrawerBody extends StatelessWidget {
               color: h.text,
               borderRadius: BorderRadius.circular(10),
               child: InkWell(
-                // 语义沿用旧大按钮：无工作区时先去加工作区
-                onTap: () {
-                  if (workspaces.isEmpty) {
-                    onAddWorkspace?.call();
-                    return;
-                  }
-                  onNewSession(workspaces.first.id);
-                },
+                // ★ 2026-11-03 用户报 bug 修：这里**原先写死 `workspaces.first.id`**，
+                //   于是"在 AAA 工作、点 + 却在别的/默认工作区里建了会话"。
+                //   现在归属见 [_onHeaderAdd]：只认当前工作区，不确定就让用户选。
+                onTap: () => _onHeaderAdd(context),
                 borderRadius: BorderRadius.circular(10),
                 child: SizedBox(
                   width: 34,
@@ -939,6 +975,92 @@ class _WorkspaceDrawerBody extends StatelessWidget {
           ],
         ),
       );
+
+  /// 头部 ⊕ = **快捷新建会话**（2026-11-03 用户口径：它"就是一个快捷添加
+  /// 新会话的方式而已"，归属必须跟着用户当前所在的工作区走）。
+  ///
+  /// 三条分支，**每一条都不猜归属**：
+  ///   1. 有当前工作区（选中会话所在的那个，且文件夹还在）⇒ 直接在那里建；
+  ///   2. 没当前工作区、但还有可用工作区 ⇒ **弹选择抽屉让用户自己选**，
+  ///      绝不回退到"第一个/默认/任意一个"；
+  ///   3. 一个可用工作区都没有 ⇒ 退化到"加工作区"（与空态语义一致）。
+  Future<void> _onHeaderAdd(BuildContext context) async {
+    // 失效工作区（文件夹已被删）不能承接会话 —— 建了也写不进去。
+    final usable = [for (final w in workspaces) if (w.exists) w];
+    if (usable.isEmpty) {
+      onAddWorkspace?.call();
+      return;
+    }
+    final current = activeWorkspaceId;
+    if (current != null) {
+      for (final w in usable) {
+        if (w.id == current) {
+          onNewSession(current);
+          return;
+        }
+      }
+    }
+    final picked = await _pickWorkspaceForNewSession(context, usable);
+    if (picked != null) onNewSession(picked.id);
+  }
+
+  /// 没有当前工作区时，**让用户自己决定**新会话归到哪个工作区。
+  ///
+  /// 形态按 DESIGN.md §4.4：`BwSheetShell` 外壳 + `BwOptionCard` 选项卡
+  /// （唯一单选形态，不自画）；因为没有"已选项"，这里所有卡片都是未选中态
+  /// —— 不预选中第一个，否则又变成"替你猜"。
+  Future<HWorkspace?> _pickWorkspaceForNewSession(
+    BuildContext context,
+    List<HWorkspace> usable,
+  ) {
+    final h = Hue.of(context);
+    return showModalBottomSheet<HWorkspace>(
+      context: context,
+      backgroundColor: Colors.transparent,
+      isScrollControlled: true,
+      shape: const RoundedRectangleBorder(),
+      builder: (sheetCtx) => BwSheetShell(
+        onDismissRequest: () => Navigator.of(sheetCtx).pop(),
+        child: SafeArea(
+          child: SingleChildScrollView(
+            child: Padding(
+              padding: const EdgeInsets.fromLTRB(20, 10, 20, 18),
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    '在哪个工作区新建会话？',
+                    style: TextStyle(
+                        fontSize: 17,
+                        fontWeight: FontWeight.w700,
+                        color: h.text),
+                  ),
+                  const SizedBox(height: 2),
+                  Text(
+                    '当前没有选中的会话，所以不替你挑工作区',
+                    style: TextStyle(fontSize: 12, color: h.textFaint),
+                  ),
+                  const SizedBox(height: 12),
+                  for (final w in usable) ...[
+                    BwOptionCard(
+                      h: h,
+                      selected: false,
+                      title: w.name,
+                      // 副行放路径：两个文件夹同名时还能分清是哪一个
+                      subtitle: w.path,
+                      onTap: () => Navigator.of(sheetCtx).pop(w),
+                    ),
+                    const SizedBox(height: 8),
+                  ],
+                ],
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
 
   Widget _searchBanner(Hue h) => Padding(
         padding: const EdgeInsets.fromLTRB(HSpace.lg, 0, HSpace.lg, HSpace.sm),
