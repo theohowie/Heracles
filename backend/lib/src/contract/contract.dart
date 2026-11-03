@@ -656,3 +656,70 @@ abstract final class ContractSearch {
 
   static const String errInvalidEndpoint = 'E_SEARCH_ENDPOINT_INVALID';
 }
+
+/// **BotGateway（V0.5 第一批 · QQ/OneBot 11）**（2026-11-03；契约见
+/// `docs/INTERFACE.md` §N19）。
+///
+/// ## 设计红线（写死在契约里）
+///
+/// · **鉴权 fail-closed**：accessToken 必填，空 token 拒绝启动；token 走
+///   secure storage（App 侧），**不进配置文件、不进日志**（日志一律脱敏）；
+/// · **白名单 fail-closed**：空白名单 = 拒绝所有人；
+/// · **群聊触发 fail-closed**：不知道 botQQ ⇒ 群聊一律不响应；
+/// · **审批红线**：Bot 触发的一切危险操作走与 App 内完全相同的审批三态；
+///   手机未确认 ⇒ 拒绝并写审计；
+/// · 审计 JSONL **只记元数据**（textLen），正文与 token 永不入审计。
+abstract final class ContractBot {
+  // ---- 传输（v1 只有正向 WS；reverse 进配置但默认关） ----
+  static const String transportForward = 'forward';
+  static const String transportReverse = 'reverse';
+
+  // ---- 连接器状态机（五态；迁移表见 §N19.2） ----
+  static const String statusUnconfigured = 'unconfigured';
+  static const String statusConnecting = 'connecting';
+  static const String statusConnected = 'connected';
+  static const String statusFailed = 'failed';
+  static const String statusDisabled = 'disabled';
+
+  // ---- 错误码 ----
+  /// accessToken 缺失/空白 ⇒ 拒绝启动（fail-closed）。
+  static const String errTokenRequired = 'E_BOT_TOKEN_REQUIRED';
+  /// 发送者不在管理员白名单（空白名单 = 拒绝所有人）。
+  static const String errNotAllowed = 'E_BOT_NOT_ALLOWED';
+  /// 群聊需要 @/回复触发，但 botQQ 未知 ⇒ 不响应（fail-closed）。
+  static const String errGroupTriggerUnknown = 'E_BOT_GROUP_TRIGGER_UNKNOWN';
+  /// 出站限流命中（该条被丢弃，不排队）。
+  static const String errRateLimited = 'E_BOT_RATE_LIMITED';
+  /// 离线排队已满（该条被丢弃）。
+  static const String errQueueFull = 'E_BOT_QUEUE_FULL';
+  /// OneBot 侧发送失败（如 napcat 断开）。
+  static const String errSendFailed = 'E_BOT_SEND_FAILED';
+
+  // ---- 去重窗口（message_id） ----
+  /// 同一 message_id 在窗口内只处理一次（NapCat 重连会重推事件）。
+  static const int dedupeWindowMs = 5 * 60 * 1000;
+  /// 去重表最大条目数（防长驻进程内存膨胀；超限先清最老）。
+  static const int dedupeMaxEntries = 2000;
+
+  // ---- 离线/灭屏排队 ----
+  /// App 不可用时的入站排队上限；满 ⇒ 丢弃 + 审计 [errQueueFull]。
+  static const int queueMax = 50;
+  // ---- 出站限流（滑动窗口 60s） ----
+  /// 每会话回复限流（条/分钟）；超限 ⇒ 丢弃 + 审计 [errRateLimited]。
+  static const int ratePerSessionPerMinute = 10;
+  /// 主动写限流（条/分钟，全局）；超限 ⇒ 丢弃 + 审计 [errRateLimited]。
+  static const int proactivePerMinute = 3;
+
+  // ---- 重连退避（指数：base * 2^n，封顶 max；连接成功即重置） ----
+  static const int reconnectBaseMs = 2000;
+  static const int reconnectMaxMs = 60000;
+
+  // ---- 审计 ----
+  /// 审计行里**不出现正文**；只记长度。超长元数据字段截断到这么多字符。
+  static const int auditMaxChars = 300;
+
+  // ---- 会话绑定（QQ 会话 ↔ Heracles 会话） ----
+  /// 派生 id 前缀：`bot/qq-<chatType>-<peerId>`。**稳定且合法文件名字符**
+  /// （重启可续），不做 hash —— 可读性即可运维性（审计里能认出是哪个会话）。
+  static const String sessionPrefix = 'bot/qq';
+}

@@ -869,3 +869,105 @@ flutter analyze                                   # 期望 No issues found!
 - 改 Kotlin ⇒ `flutter build apk --debug --target-platform android-arm64` 真编过
   （三件套判成功：`√ Built` + 产物 mtime + sha256）
 - **未真机验证**：`AgentChatService.running` 实际值、MIUI 口径 note 的真机表现（无设备）
+
+---
+
+## N19 BotGateway · 第一批：QQ（OneBot 11）（V0.5，2026-11-03 · 只增契约）
+
+> **手机侧现实约束（v1 范围）**：Bot 跑在 App 进程里，手机拨出到**局域网** NapCat（正向 WS）；
+> reverse 监听进配置但**默认关**。不做：个人微信自动化；QQ/微信官方 Webhook（需公网回调 ⇒ 云中继，后置批次）。
+> 参考实现：mario841859784/dsh-onebot（OneBot 11/NapCat、token fail-closed、去重、限流、审计）、
+> xmanrui/dsh-im（渠道插件/凭据绑定/白名单 fail-closed）。
+
+### N19.1 配置形状（token 不进配置文件）
+
+```json
+{
+  "enabled": false,
+  "transport": "forward",            // v1 仅 forward；reverse 进配置但默认关
+  "reverseEnabled": false,
+  "host": "192.168.x.x",             // 局域网 NapCat
+  "port": 3001
+}
+```
+
+**凭据（fail-closed，全部走 secure storage，不进配置/不进日志）**：
+- `heracles.bot.qq.access_token` —— OneBot accessToken，**必填**；空 ⇒ 拒绝启动（`E_BOT_TOKEN_REQUIRED`）；
+- `heracles.bot.qq.self_id` —— botQQ；**群聊触发 fail-closed 的依据**（未知 ⇒ 群聊不响应）；
+- `heracles.bot.qq.admins` —— 管理员白名单（QQ 号列表），**空白名单 = 拒绝所有人**。
+
+WS 握手：`ws://host:port`，token 走 **`Authorization: Bearer` 头**（不进 URL —— URL 会进日志）。
+
+### N19.2 连接器状态机（五态，迁移表钉死）
+
+```
+unconfigured ──(配置齐全+enabled+token 非空)──▶ connecting
+connecting ──(ws open + echo 0 回包)──▶ connected
+connecting ──(token 空)──▶ failed(E_BOT_TOKEN_REQUIRED)   // 不发起连接
+connecting ──(连接失败/超时)──▶ failed(原因) ──(退避到点)──▶ connecting
+connected ──(断线)──▶ failed(原因) ──(退避到点)──▶ connecting   // 2026-11-03 补：真实断线路径
+any ──(enabled=false / 用户停用)──▶ disabled
+disabled / connected ──(stop)──▶ unconfigured
+```
+
+- 迁移只许沿表走；非法迁移抛 `StateError`（状态机单测钉死）。
+- 重连退避：`base(2s) * 2^n`，封顶 `max(60s)`；**连接成功即重置**。
+
+### N19.3 入站（OneBot 11 `message` 事件）
+
+- 解析优先级：**段数组**（`message` 为 List）优先；字符串回退 **CQ 码**解析
+  （`[CQ:at,qq=..]` / `[CQ:reply,id=..]` / 文本）。
+- 归一为 `{messageId, chatType: private|group, peerId, senderId, text, isAtBot, isReplyToBot, ts}`。
+- **触发 fail-closed**：私聊 ⇒ 响应；群聊 ⇒ 仅当（@bot 或 回复 bot 消息）**且 botQQ 已知**；
+  botQQ 未知 ⇒ 丢弃 + 审计 `E_BOT_GROUP_TRIGGER_UNKNOWN`。
+- **去重**：`message_id` 窗口 5 分钟 / 上限 2000 条（超限清最老）；窗口内重复 ⇒ 丢弃（不审计，防刷）。
+- **白名单 fail-closed**：`senderId ∉ admins`（或名单为空）⇒ 丢弃 + 审计 `E_BOT_NOT_ALLOWED`。
+- **排队**：App 离线/灭屏 ⇒ 入站排队（≤50，FIFO）；满 ⇒ 丢弃 + 审计 `E_BOT_QUEUE_FULL`；
+  回前台 `drainQueued()` **按序**处理。
+
+### N19.4 出站（文本回复）
+
+- **Markdown 剥离为纯文本**（QQ 不渲染 MD）：去 `**`/`__`/`~~`/`` ` ``/行首 `#{1,6} `/
+  行首 `- `（保留文字与链接 URL 文本）。
+- **限流**（滑动窗口 60s，超限 ⇒ 丢弃 + 审计 `E_BOT_RATE_LIMITED`，不排队）：
+  每会话回复 ≤10 条/分钟；主动写 ≤3 条/分钟（全局）。
+- 发送失败（连接已断）⇒ 审计 `E_BOT_SEND_FAILED`。
+
+### N19.5 审计 JSONL（脱敏）
+
+行形状（一行一事件，追加写）：
+
+```json
+{"ts":1762000000000,"kind":"inbound|queued|dropped|sent|approval_denied|error",
+ "chatType":"group","peerId":"123","senderId":"456","messageId":"789",
+ "textLen":42,"code":"E_BOT_NOT_ALLOWED"}
+```
+
+- **正文原文与 token 永不入审计**（只记 `textLen`）；字段超长截断到 `ContractBot.auditMaxChars`。
+
+### N19.6 会话绑定（QQ 会话 ↔ Heracles 会话）
+
+- 派生规则：`bot/qq-<chatType>-<peerId>`（如 `bot/qq-private-12345`）。
+- **稳定 + 合法文件名字符** ⇒ 重启可续同一 Heracles 会话；不做 hash（审计可读）。
+
+### N19.7 ★ 审批红线
+
+- Bot 触发的一切危险操作**走与 App 内完全相同的审批三态**（Allow/NeedsApproval/Deny）——
+  同一个 `AskGate`/审批管道，**不因为消息来自 QQ 就降低门槛**。
+- **手机未确认 ⇒ 拒绝并写历史**：审批未通过/未确认 ⇒ 回给 QQ 一条"该操作需要手机上确认，
+  已拒绝"并写审计 `approval_denied`（含 reason code）。
+- **手机离线/灭屏** ⇒ 消息排队（见 N19.3），回前台按序处理；**不许在无人值守时静默提权**。
+
+### N19.8 错误码汇总
+
+`E_BOT_TOKEN_REQUIRED` · `E_BOT_NOT_ALLOWED` · `E_BOT_GROUP_TRIGGER_UNKNOWN` ·
+`E_BOT_RATE_LIMITED` · `E_BOT_QUEUE_FULL` · `E_BOT_SEND_FAILED`
+
+### N19.9 验收
+
+- `cd backend && dart analyze` 干净 + `dart test` 全绿
+- 单测：状态机迁移（含非法迁移抛错）/ token 缺失拒启（且**不发起连接**）/ 去重窗口 /
+  白名单 fail-closed（空名单拒所有人）/ 群聊触发 fail-closed / 段数组与 CQ 双解析 /
+  限流（会话 + 主动写）/ 重连退避（指数封顶、成功重置）/ 排队与 drain / 审计脱敏
+  （正文与 token 不出现）
+- **真实 NapCat 无凭据 ⇒ 标"未验证"**（无局域网 NapCat 与 token）
