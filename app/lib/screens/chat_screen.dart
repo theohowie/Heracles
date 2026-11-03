@@ -1388,6 +1388,18 @@ class _ChatScreenState extends State<ChatScreen> {
     return _workspaces.isNotEmpty ? _workspaces.first : null;
   }
 
+  /// **当前所在工作区**（用于"新建会话"归属）—— 只认"选中会话所在的
+  /// 那个工作区"，**不确定就是 `null`**。
+  ///
+  /// 与 [_activeWorkspace] 的分工（两者故意不同）：
+  ///   · [_activeWorkspace] 是**显示用**的（顶栏标题、底部信息条），末尾会
+  ///     静默回退到 `workspaces.first`，保证界面上永远有个名字可看；
+  ///   · 本 getter 是**动作归属用**的，绝不回退 —— 没有选中会话、或会话
+  ///     所在工作区已被移除/删除时返回 `null`，让侧边栏去问用户
+  ///     （2026-11-03 用户报"点 + 建到了别的工作区"就是回退惹的祸）。
+  String? get _currentWorkspaceId =>
+      currentWorkspaceIdForSession(_workspaces, _activeSessionId);
+
   HSession? get _activeSession {
     for (final w in _workspaces) {
       for (final s in w.sessions) {
@@ -1833,11 +1845,28 @@ class _ChatScreenState extends State<ChatScreen> {
   // ------------------------------------------------------------ 会话操作
 
   Future<void> _newSession(String workspaceId) async {
+    // ★ 2026-11-03：**不许猜**。原先这里是
+    //   `_workspaces.firstWhere((w) => w.id == workspaceId,
+    //                            orElse: () => _workspaces.first)`
+    //   —— 传入的 workspaceId 若已不存在（工作区被移除/文件夹被删），
+    //   它会拿**第一个工作区**的 `treeUri` 去给一个**不存在的 id** 建会话：
+    //   id 与 treeUri 张冠李戴，要么报错要么把会话落到别处。
+    //   现在：认定不了就**明确告诉用户**并停手（不猜、不兜底）。
+    HWorkspace? ws;
+    for (final w in _workspaces) {
+      if (w.id == workspaceId) ws = w;
+    }
+    if (ws == null) {
+      showIosToast(context, '这个工作区已经不在了，请重新选一个');
+      return;
+    }
+    if (!ws.exists) {
+      showIosToast(context, '「${ws.name}」的文件夹已失效，先修好或换一个工作区');
+      return;
+    }
     Navigator.of(context).pop();
     // 新建会话 = 换上下文：让在途运行失效，并停掉实时流
     _switchContext();
-    final ws = _workspaces.firstWhere((w) => w.id == workspaceId,
-        orElse: () => _workspaces.first);
     final id = await _bridge.createSession(workspaceId, '新会话', treeUri: ws.treeUri);
     if (!mounted) return;
     setState(() {
@@ -5384,6 +5413,8 @@ class _ChatScreenState extends State<ChatScreen> {
         loading: _loading,
         onSelectSession: _selectSession,
         onNewSession: _newSession,
+        // ★ 头部 ⊕ 新建会话的归属：只认当前选中会话所在的工作区（不猜）
+        activeWorkspaceId: _currentWorkspaceId,
         onOpenSettings: _openSettings,
         // ★ 技能 / MCP / 自动化入口（2026-11-02 用户裁定：放抽屉，不放设置页）
         onOpenAutomation: _openAutomation,
