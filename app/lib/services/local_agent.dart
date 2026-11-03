@@ -1679,6 +1679,8 @@ class LocalAgentExecutor {
 
     var failed = false;
     var cancelled = false;
+    var runStoppedEventSeen = false;
+    String? failureMessage;
     var finalText = '';
 
     /// 本轮**总轮数**（`HeraclesFinished.turns`）—— 会话用量汇总用。
@@ -1941,6 +1943,7 @@ class LocalAgentExecutor {
             ):
             // ★ V0.4（N14）：任务被策略停下 —— **强类型字段直填**给 UI
             //   （前端 `RunStopInfo` 适配层仍兼容 raw，但强类型落地后可直接读）。
+            runStoppedEventSeen = true;
             tr.runStopped(
               reason.wireName,
               round: round,
@@ -1976,6 +1979,7 @@ class LocalAgentExecutor {
             tr.finished(ft, turnCount, sw.elapsedMilliseconds);
           case HeraclesFailed(:final reason):
             failed = true;
+            failureMessage = reason;
             tr.endStep(status: 'error');
             tr.settleTurn();
             tr.failed(reason);
@@ -1994,8 +1998,9 @@ class LocalAgentExecutor {
       }
     } catch (e) {
       failed = true;
+      failureMessage = _humanize(e);
       tr.endStep(status: 'error');
-      tr.failed(_humanize(e));
+      tr.failed(failureMessage);
       final stepRec = tr.takeStepRecord();
       if (stepRec != null) {
         await sessionStore.appendMessage(sid, stepRec);
@@ -2025,9 +2030,9 @@ class LocalAgentExecutor {
       } catch (_) {
         // 提示事件发不出去也不能让 run 失败（丢失事实已在文案层尽力）。
       }
-      if (_cancelled && !failed) {
+      if (_cancelled) {
         cancelled = true;
-        tr.failed('任务已取消。');
+        if (!failed) tr.failed('任务已取消。');
       }
       // ★ 2026-10-22 真机修复：**这里不能关流** ——
       //   变更报告（`kChanges`）要在流关闭**之前**发，
@@ -2048,9 +2053,6 @@ class LocalAgentExecutor {
         {'path': e.key, 'added': e.value.added, 'removed': e.value.removed},
     ];
 
-    // 关流：**绝不 await**（消费端可能已走，await 会挂住）
-    unawaited(controller.close());
-
     // ---- 计划最终行（B8 P0，2026-10-30）----
     //
     // **位置钉死**（与既有收尾顺序对齐，别挪）：在 try/finally 全部收尾之后、
@@ -2067,6 +2069,14 @@ class LocalAgentExecutor {
           reachedGoal: planClosedReachedGoal,
           closedReason: planClosedReason,
         ),
+      );
+    }
+
+    // 失败记录紧邻收尾阶段追加；append failure 是 best-effort，不得覆盖原 run 结果。
+    if (failed && !cancelled) {
+      await _appendRunFailureRow(
+        sid: sid,
+        message: failureMessage ?? '运行失败',
       );
     }
 
@@ -2162,7 +2172,7 @@ class LocalAgentExecutor {
       noProgressStreak: noProgressStreak,
       noProgressRounds: ContractRunContinue.noProgressRounds,
     );
-    if (decision != null) {
+    if (decision != null && !runStoppedEventSeen) {
       tr.runStopped(
         decision.reason,
         round: round,
@@ -2200,6 +2210,9 @@ class LocalAgentExecutor {
       });
     }
 
+
+    // 所有收尾事件（包括 run_stopped）已经发出，此处再关闭 stream，保证订阅端收到终帧。
+    await controller.close();
 
     return AgentRunResult(
       stopReason: cancelled
@@ -2380,6 +2393,41 @@ class LocalAgentExecutor {
   String _humanize(Object e) {
     final s = e.toString();
     return s.length > 300 ? '${s.substring(0, 300)}…' : s;
+  }
+
+  /// **追加 run 失败记录**（只在非取消失败时调用；best-effort，不阻断收尾）。
+  ///
+  /// `_drive` 是每个 run 的唯一写者，因此同一 run 最多尝试追加一行。
+  /// 异常不写日志，避免把通道/异常内容泄露到 log。
+  String _sanitizeRunFailureMessage(String raw) {
+    var text = sanitizeMcpError(raw, maxChars: 300);
+    // `sanitizeMcpError` redacts URLs and Bearer tokens, but its current
+    // replacement leaves `$1***` for Authorization headers and it does not
+    // know provider-specific or `sk_` keys. Cover both before persistence.
+    text = text.replaceAll(r'$1***', 'Authorization: ***');
+    text = text.replaceAll(
+      RegExp(r'\bsk_[A-Za-z0-9_-]+\b'),
+      '***',
+    );
+    final apiKey = settings.effectiveProvider?.apiKey.trim() ?? '';
+    if (apiKey.isNotEmpty) text = text.replaceAll(apiKey, '***');
+    return text;
+  }
+
+  Future<bool> _appendRunFailureRow({
+    required String sid,
+    required String message,
+  }) async {
+    try {
+      return await sessionStore.appendMessage(sid, <String, dynamic>{
+        'role': 'system',
+        'text': '运行失败：${_sanitizeRunFailureMessage(message)}',
+        'ts': DateTime.now().millisecondsSinceEpoch,
+      });
+    } catch (_) {
+      // 历史记录是增强；持久化故障不能改变 run 的终态或向日志泄露异常。
+      return false;
+    }
   }
 
   /// **追加会话用量汇总行**（T1-5，2026-10-31；只增行类型）。

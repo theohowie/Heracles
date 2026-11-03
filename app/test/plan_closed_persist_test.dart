@@ -35,6 +35,9 @@ class _FakeSessionStore extends SessionStore {
   _FakeSessionStore() : super(workspaceRoot: '/ws/fake');
 
   final List<Map<String, dynamic>> rows = <Map<String, dynamic>>[];
+  bool throwOnSystemRow = false;
+  bool returnFalseOnSystemRow = false;
+  int systemAppendAttempts = 0;
 
   @override
   Future<String> createSession(String title) async => _sid;
@@ -55,9 +58,20 @@ class _FakeSessionStore extends SessionStore {
     String sessionId,
     Map<String, dynamic> message,
   ) async {
+    if (message['role'] == 'system' &&
+        (message['text'] as String? ?? '').startsWith('运行失败：')) {
+      systemAppendAttempts++;
+      if (throwOnSystemRow) throw StateError('secret append failure');
+      if (returnFalseOnSystemRow) return false;
+    }
     rows.add(Map<String, dynamic>.from(message));
     return true;
   }
+
+  List<Map<String, dynamic>> get failureRows => rows
+      .where((r) => r['role'] == 'system' &&
+          (r['text'] as String? ?? '').startsWith('运行失败：'))
+      .toList();
 
   /// 最后一次 plan 行。
   Map<String, dynamic>? get lastPlanRow {
@@ -169,12 +183,18 @@ class _CancelClient implements LLMClient {
 
 /// 失败：列计划 → 抛错。
 class _FailClient implements LLMClient {
+  _FailClient({this.apiKey = ''});
+
+  final String apiKey;
   int calls = 0;
 
   ModelMessage _r(ModelConfig mc) {
     final i = calls++;
     if (i == 0) return _tool(mc, 'write_todos', _todosPending, i);
-    throw StateError('模拟失败');
+    throw StateError(
+      '模拟失败 https://api.example.com/v1/chat?token=query-secret#fragment-secret '
+      'Authorization: Bearer sk-live-secret-token $apiKey',
+    );
   }
 
   @override
@@ -228,11 +248,13 @@ class _NoPlanClient implements LLMClient {
 // 公共装配
 // ============================================================================
 
+const String _testProviderApiKey = 'actual-provider-api-key';
+
 AppSettings _settings() => AppSettings(
       permission: PermissionMode.fullAccess,
       providers: [
         AppSettings.defaultProviders.first
-            .copyWith(apiKey: 'k', enabled: true, isDefault: true),
+            .copyWith(apiKey: _testProviderApiKey, enabled: true, isDefault: true),
       ],
     );
 
@@ -300,8 +322,16 @@ void main() {
     }
     expect(store.lastPlanRow, isNotNull, reason: '取消前应已有计划行');
     await handle.cancel();
-    await handle.result;
+    final result = await handle.result;
     await sub.cancel();
+
+    expect(result.cancelled, isTrue);
+    expect(store.systemAppendAttempts, 0);
+    expect(store.failureRows, isEmpty);
+    expect(events.where((e) => e.type == AgentEvent.kRunStopped), hasLength(1),
+        reason: '取消应在正常关闭 stream 前发送 run_stopped 终帧');
+    expect(await handle.events.isEmpty, isTrue,
+        reason: '取消后 run 返回时事件流已经正常关闭');
 
     final plan = store.lastPlanRow;
     expect(plan!['reachedGoal'], isFalse);
@@ -316,7 +346,8 @@ void main() {
 
   test('★★★ 失败 ⇒ 最终 plan 行 reachedGoal=false + closedReason 含"运行失败"', () async {
     final store = _FakeSessionStore();
-    final handle = await _executor(store: store, client: _FailClient()).run(
+    final client = _FailClient(apiKey: _testProviderApiKey);
+    final handle = await _executor(store: store, client: client).run(
       request: '任务',
       sessionId: _sid,
     );
@@ -328,6 +359,81 @@ void main() {
     expect(plan['closedReason'], isA<String>());
     expect(plan['closedReason'], contains('运行失败'),
         reason: '★ 失败原因带统一人话前缀（不是裸异常/堆栈）');
+    expect(store.failureRows, hasLength(1));
+    expect(store.failureRows.single['text'], contains('https://api.example.com/v1/chat'));
+    expect(store.failureRows.single['text'], contains('Authorization: ***'));
+    expect(store.failureRows.single['text'], isNot(contains('query-secret')));
+    expect(store.failureRows.single['text'], isNot(contains('fragment-secret')));
+    expect(store.failureRows.single['text'], isNot(contains('sk-live-secret-token')));
+    expect(store.failureRows.single['text'], isNot(contains('actual-provider-api-key')));
+    expect(store.failureRows.single['ts'], greaterThan(0));
+    final failureIndex = store.rows.indexOf(store.failureRows.single);
+    final lastStepIndex = store.rows.lastIndexWhere((r) => r['role'] == 'step');
+    expect(failureIndex, greaterThan(store.lastPlanIndex));
+    expect(failureIndex, greaterThan(lastStepIndex),
+        reason: '失败 system 行追加在原有 plan/step 收尾行之后');
+  });
+
+  test('★★★ 失败行 append 返回 false 不重复追加，run 仍为失败终态', () async {
+    final store = _FakeSessionStore()..returnFalseOnSystemRow = true;
+    final events = <AgentEvent>[];
+    final handle = await _executor(store: store, client: _FailClient()).run(
+      request: '任务',
+      sessionId: _sid,
+    );
+    final sub = handle.events.listen(events.add);
+    final result = await handle.result;
+    await sub.cancel();
+
+    expect(result.stopReason, '运行失败');
+    expect(store.systemAppendAttempts, 1,
+        reason: '持久化失败也只尝试一次');
+    expect(store.failureRows, isEmpty);
+    expect(events.where((e) => e.type == AgentEvent.kFailed), hasLength(1));
+    expect(events.map((e) => e.message ?? ''),
+        isNot(contains(contains('secret append failure'))));
+  });
+
+  test('★★★ 失败行 append 抛错不改变 run 终态或泄漏异常', () async {
+    final store = _FakeSessionStore()..throwOnSystemRow = true;
+    final events = <AgentEvent>[];
+    final handle = await _executor(store: store, client: _FailClient()).run(
+      request: '任务',
+      sessionId: _sid,
+    );
+    final sub = handle.events.listen(events.add);
+    final result = await handle.result;
+    await sub.cancel();
+
+    expect(result.stopReason, '运行失败');
+    expect(store.systemAppendAttempts, 1);
+    expect(store.failureRows, isEmpty);
+    expect(events.where((e) => e.type == AgentEvent.kFailed), hasLength(1));
+    expect(events.map((e) => e.message ?? ''),
+        isNot(contains(contains('secret append failure'))));
+  });
+
+  test('★★★ 用户取消成功：单个 run_stopped、正常关流、无 failure system row', () async {
+    final store = _FakeSessionStore();
+    final shell = _FakeShell(delay: const Duration(milliseconds: 300));
+    final events = <AgentEvent>[];
+    final handle = await _executor(
+      store: store,
+      client: _CancelClient(),
+      caps: Capabilities(shell: shell),
+    ).run(request: '任务', sessionId: _sid);
+    final sub = handle.events.listen(events.add);
+    for (var i = 0; i < 200 && store.lastPlanRow == null; i++) {
+      await Future<void>.delayed(const Duration(milliseconds: 5));
+    }
+    await handle.cancel();
+    final result = await handle.result;
+    await sub.cancel();
+
+    expect(result.cancelled, isTrue);
+    expect(store.systemAppendAttempts, 0);
+    expect(store.failureRows, isEmpty);
+    expect(events.where((e) => e.type == AgentEvent.kRunStopped), hasLength(1));
   });
 
   test('★★ 无计划 ⇒ 不写 plan 行、不发 plan_closed 事件', () async {
