@@ -97,6 +97,12 @@ data class EnvRecipe(
 )
 
 object SandboxEnvManager {
+    /** 安装命令超时（10 分钟：apk 拉包 + 解压，慢网也够）。 */
+    private const val INSTALL_TIMEOUT_MS: Long = 10L * 60L * 1000L
+
+    /** 校验命令超时（`node --version` 这类，正常毫秒级）。 */
+    private const val VERIFY_TIMEOUT_MS: Long = 60_000L
+
     /** 支持的配方（只增）。 */
     val RECIPES: List<EnvRecipe> = listOf(
         EnvRecipe(
@@ -187,6 +193,11 @@ object SandboxEnvManager {
      * **真实安装一个环境**（V0.4 T0-3 执行层，2026-11-02）。
      *
      * 在沙箱里按配方跑安装命令，再跑 `--version` 校验：
+     * · **安装前先准备网络（DNS）**：内置 rootfs 不带 `/etc/resolv.conf`，缺它 `apk add`
+     *   必报 `temporary error (try again later)`；准备状态随结果以 `networkPrep`
+     *   （`wrote` = 本次写入 / `exists` = 本来就有）返回；
+     * · 联网失败（`temporary error` / `Could not resolve` / `network is unreachable`）
+     *   ⇒ **立即如实失败**并给人话，**不许吞掉后继续装**；
      * · 安装命令失败 ⇒ **如实失败**（带输出尾部），不假装装好；
      * · 校验命令跑不起来 / 没输出 ⇒ 失败（"装了但校验不过"也是问题）；
      * · 成功 ⇒ 返回 `verifiedVersion`（真实 `--version` 输出）。
@@ -208,22 +219,62 @@ object SandboxEnvManager {
                 "error" to "未知环境（不猜）；支持：${RECIPES.joinToString("/") { it.name }}",
             )
         onProgress("开始安装 ${r.name}（来源：${r.source}）")
+
+        // ---- 步骤 0：准备网络（DNS）—— ★ 2026-11-03 修复的核心 ----
+        //   原先这一步只写在 ToolchainActivation（T2/JDK 路径），installEnv 从不调用；
+        //   而内置 Alpine minirootfs 不带 /etc/resolv.conf ⇒ 沙箱里 `apk add` 必然
+        //   报 "temporary error (try again later)" ⇒ Node/Python 在任何网络下都装不上。
+        //   与 T2 共用 SandboxNetwork.PREPARE_NETWORK（幂等：只在缺失/为空时写）。
+        onProgress("准备网络（DNS）")
+        val prepOut = try {
+            exec(SandboxNetwork.PREPARE_NETWORK, SandboxNetwork.PREPARE_TIMEOUT_MS)
+        } catch (e: Exception) {
+            return mapOf(
+                "ok" to false,
+                "name" to r.name,
+                "networkPrep" to "",
+                "error" to "沙箱内 DNS 准备失败（命令跑不起来）：${e.message ?: e.javaClass.simpleName}",
+                "approxBytes" to r.approxBytes,
+            )
+        }
+        val networkPrep = SandboxNetwork.parsePrepState(prepOut)
+        // 连准备 DNS 就报联网错 ⇒ 立即如实失败，不吞掉后继续装。
+        SandboxNetwork.networkFailureOf(prepOut)?.let { hit ->
+            return networkFailure(r, networkPrep, hit, prepOut)
+        }
+        // 命令必须明确报告 wrote/exists；否则不能假定 DNS 已就绪。
+        if (networkPrep.isEmpty()) {
+            return networkFailure(
+                r,
+                networkPrep,
+                "DNS preparation did not report wrote/exists",
+                prepOut,
+            )
+        }
+
         for (cmd in r.installCommands) {
             onProgress("执行：$cmd")
             val out = try {
-                exec(cmd, 10L * 60L * 1000L)
+                exec(cmd, INSTALL_TIMEOUT_MS)
             } catch (e: Exception) {
                 return mapOf(
                     "ok" to false,
                     "name" to r.name,
+                    "networkPrep" to networkPrep,
                     "error" to "安装命令失败：${e.message ?: e.javaClass.simpleName}",
                     "approxBytes" to r.approxBytes,
                 )
+            }
+            // ★ 联网失败优先判：这不是"包装不上"，而是"沙箱没网"，必须给人话 + 网络前置输出。
+            //   吞掉它继续走，用户只会看到"安装后校验没有输出"这种误导结论。
+            SandboxNetwork.networkFailureOf(out)?.let { hit ->
+                return networkFailure(r, networkPrep, hit, out)
             }
             if (out.contains("ERROR:") || out.contains("failed", ignoreCase = true)) {
                 return mapOf(
                     "ok" to false,
                     "name" to r.name,
+                    "networkPrep" to networkPrep,
                     "error" to "安装命令报错：${out.takeLast(400)}",
                     "approxBytes" to r.approxBytes,
                 )
@@ -231,7 +282,7 @@ object SandboxEnvManager {
         }
         onProgress("校验：${r.verifyCommand}")
         val verifyOut = try {
-            exec(r.verifyCommand, 60_000L)
+            exec(r.verifyCommand, VERIFY_TIMEOUT_MS)
         } catch (e: Exception) {
             return mapOf(
                 "ok" to false,
@@ -251,9 +302,43 @@ object SandboxEnvManager {
         return mapOf(
             "ok" to true,
             "name" to r.name,
+            // 网络前置状态（`wrote` = 本次补了 DNS，`exists` = 本来就有）—— UI 能如实说清
+            "networkPrep" to networkPrep,
             "message" to "已安装 ${r.name}",
             "verifiedVersion" to version,
             "approxBytes" to r.approxBytes,
         )
     }
+
+    /**
+     * 「沙箱无法联网」的统一返回体（**明确失败，绝不假装装好**）。
+     *
+     * 为什么单独抽出来：这条错误必须同时带四样东西，否则用户和维护者都没法定位 ——
+     *   ① 人话结论（DNS 未配置或宿主无网络）；
+     *   ② 命中的特征串（`temporary error` / `Could not resolve` / `network is unreachable`）；
+     *   ③ 网络前置的真实状态（`wrote` / `exists` / 取不到则为空）；
+     *   ④ 命令输出尾（apk 原文）。
+     *
+     * ⚠️ 已知边界（本轮不做可配置 DNS）：只能走内网 DNS 的网络会失败 —— 文案里必须提示，
+     *    不能让人以为"有 DNS 准备就一定连得上网"。
+     */
+    private fun networkFailure(
+        r: EnvRecipe,
+        networkPrep: String,
+        hit: String,
+        output: String,
+    ): Map<String, Any?> = mapOf(
+        "ok" to false,
+        "name" to r.name,
+        "networkPrep" to networkPrep,
+        "networkFailure" to hit,
+        "error" to (
+            "沙箱无法联网（DNS 未配置或宿主无网络）：命中「$hit」。" +
+                "若你在只能走内网 DNS 的网络，这里会失败。" +
+                "安装未完成（不假装装好）。\n" +
+                "  网络前置：${networkPrep.ifEmpty { "未取得状态字" }}\n" +
+                "  输出尾：${output.takeLast(400)}"
+        ),
+        "approxBytes" to r.approxBytes,
+    )
 }

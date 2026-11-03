@@ -6,6 +6,7 @@ import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
+import kotlinx.coroutines.runBlocking
 
 /**
  * **沙箱环境管理测试（V0.4 T0-3）**。
@@ -106,5 +107,56 @@ class SandboxEnvManagerTest {
         assertEquals("node", p["name"])
         assertTrue((p["approxBytes"] as Long) > 0)
         assertTrue((p["installCommands"] as List<*>).isNotEmpty())
+    }
+
+    @Test
+    fun `install prepares network before install and verifies version`() = runBlocking {
+        val commands = mutableListOf<String>()
+        val result = SandboxEnvManager.installEnv("node", exec = { command, _ ->
+            commands += command
+            when {
+                command == SandboxNetwork.PREPARE_NETWORK -> "wrote\n---\nnameserver 223.5.5.5"
+                command == "apk add nodejs npm" -> "installed"
+                command == "node --version" -> "v22.1.0"
+                else -> error("unexpected command: $command")
+            }
+        })
+
+        assertEquals(SandboxNetwork.PREPARE_NETWORK, commands.first())
+        assertEquals(listOf(SandboxNetwork.PREPARE_NETWORK, "apk add nodejs npm", "node --version"), commands)
+        assertEquals(true, result["ok"])
+        assertEquals("wrote", result["networkPrep"])
+        assertEquals("v22.1.0", result["verifiedVersion"])
+    }
+
+    @Test
+    fun `install stops on DNS error and reports actionable network failure`() = runBlocking {
+        val commands = mutableListOf<String>()
+        val result = SandboxEnvManager.installEnv("node", exec = { command, _ ->
+            commands += command
+            if (command == SandboxNetwork.PREPARE_NETWORK) {
+                "temporary error (try again later)"
+            } else {
+                error("install must not continue after DNS failure")
+            }
+        })
+
+        assertEquals(listOf(SandboxNetwork.PREPARE_NETWORK), commands)
+        assertEquals(false, result["ok"])
+        assertTrue((result["error"] as String).contains("沙箱无法联网"))
+        assertTrue((result["error"] as String).contains("只能走内网 DNS"))
+    }
+
+    @Test
+    fun `unknown install environment does not prepare network or guess`() = runBlocking {
+        val commands = mutableListOf<String>()
+        val result = SandboxEnvManager.installEnv("ruby", exec = { command, _ ->
+            commands += command
+            error("unknown environment must not execute")
+        })
+
+        assertTrue(commands.isEmpty())
+        assertEquals(false, result["ok"])
+        assertTrue((result["error"] as String).contains("未知环境（不猜）"))
     }
 }

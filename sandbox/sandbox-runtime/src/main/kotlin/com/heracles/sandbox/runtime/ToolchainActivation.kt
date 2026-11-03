@@ -134,7 +134,7 @@ class ToolchainActivation(
             // ★ 必须先修 DNS（2026-10-29 真机抓到）：Alpine minirootfs **不带**
             //   /etc/resolv.conf，`apk add` 会立刻失败（"temporary error"）。
             //   这是沙箱内所有联网操作的前提，不只 T2。
-            val net = runInSandbox(PREPARE_NETWORK, 30_000)
+            val net = runInSandbox(SandboxNetwork.PREPARE_NETWORK, SandboxNetwork.PREPARE_TIMEOUT_MS)
             onProgress(0, -1, "安装 JDK 17（约 284 MB）")
             val jdk = runInSandbox(APK_INSTALL_JDK, JDK_TIMEOUT_MS)
             // ⚠️ 真机已知：`apk add` 在 PRoot 里常常**退出码非 0 但实际装好了**
@@ -553,21 +553,9 @@ class ToolchainActivation(
 
         private const val JDK_TIMEOUT_MS = 15 * 60 * 1000L
 
-        /**
-         * **准备网络**：Alpine minirootfs 不带 `/etc/resolv.conf`，任何联网操作
-         * （`apk add`、`wget`）都会立刻失败。这里只在**缺失/为空**时写入，
-         * 不覆盖用户已改过的配置。
-         *
-         * DNS 用的是国内公共 DNS（阿里 223.5.5.5 / 114DNS）—— 沙箱里的解析
-         * 不能指望宿主 VPN 的 DNS（PRoot 里走的是真实网络栈）。
-         */
-        private const val PREPARE_NETWORK =
-            "mkdir -p /etc 2>/dev/null; " +
-                "if [ ! -s /etc/resolv.conf ]; then " +
-                "printf 'nameserver 223.5.5.5\\nnameserver 114.114.114.114\\n" +
-                "nameserver 119.29.29.29\\n' > /etc/resolv.conf; " +
-                "echo wrote; else echo exists; fi; " +
-                "echo ---; cat /etc/resolv.conf"
+        // ★ 2026-11-03：DNS 准备已抽到 `SandboxNetwork.PREPARE_NETWORK`（全仓共用一份）。
+        //   原因：原先只有本文件（T2 路径）补 DNS，`SandboxEnvManager.installEnv`
+        //   从未调用 ⇒ 沙箱里装 Node/Python 等必然因 DNS 失败。共用一份可防两处漂移。
 
         /**
          * 把 gradle 挂进 PATH（rootfs 内执行）。
