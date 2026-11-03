@@ -2447,11 +2447,11 @@ class _ChatScreenState extends State<ChatScreen> {
   }
 
   void _openSettings() {
-    // 只有从抽屉里进来才需要先关抽屉；从提示条点进来时**不能** pop
-    // （那会把聊天页自己弹掉 —— 2026-10-19 首启引导的坑）。
-    if (_scaffoldKey.currentState?.isDrawerOpen ?? false) {
-      Navigator.of(context).pop();
-    }
+    // ★ 2026-11-03 用户裁定（返回导航）：从抽屉进的页面，返回要回到
+    //   「抽屉打开」状态 —— 所以 push 时**不再先 pop 抽屉**：二级页全屏
+    //   盖住抽屉，返回时抽屉原样还在。从提示条/横幅进来时抽屉本来就
+    //   关着，同样不需要 pop（2026-10-19 首启引导的坑：pop 会把聊天页
+    //   自己弹掉 —— 现在两处都不 pop，坑不复存在）。
     Navigator.of(context).push(MaterialPageRoute(
       builder: (_) => SettingsScreen(
         controller: widget.settings,
@@ -2472,12 +2472,9 @@ class _ChatScreenState extends State<ChatScreen> {
 
   void _openMcp() => _openFromDrawer(const McpScreen());
 
-  /// 从抽屉进二级页的共用路径：先关抽屉（只有从抽屉进来才需要 ——
-  /// 同 [_openSettings] 里 2026-10-19 的坑），再 push。
+  /// 从抽屉进二级页的共用路径（2026-11-03 用户裁定）：**不先关抽屉** ——
+  /// 二级页全屏盖住抽屉，返回时抽屉原样还在（"返回回到抽屉打开状态"）。
   void _openFromDrawer(Widget page) {
-    if (_scaffoldKey.currentState?.isDrawerOpen ?? false) {
-      Navigator.of(context).pop();
-    }
     Navigator.of(context).push(MaterialPageRoute(builder: (_) => page));
   }
 
