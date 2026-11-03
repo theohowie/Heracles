@@ -104,6 +104,10 @@ class _SandboxEnvSectionState extends State<SandboxEnvSection> {
       setState(() {
         _notes[name] = _resultText(r, name: name, install: install);
       });
+      final registryWarning = r.registryWarning;
+      if (registryWarning != null && registryWarning.isNotEmpty && mounted) {
+        setState(() => _notes[name] = '${_notes[name]}（$registryWarning）');
+      }
       // 成功/失败都重查一次真实状态（不乐观改 UI）
       await _load();
     } catch (e) {

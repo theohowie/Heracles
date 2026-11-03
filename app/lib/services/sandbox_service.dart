@@ -424,10 +424,11 @@ class SandboxService {
   /// · `isolationTier`：当前**只支持** `process`(L1)；`container`/`vm` 会明确返回
   ///   `E_TIER_UNIMPLEMENTED`（**不假实现**，见 ADR-041）；
   /// · `network`：白名单/自由出网/风险标记；强制力是**策略级**（不是硬隔离）；
-  /// · `envs`：已安装环境清单（Kotlin 侧 `SandboxEnvManager` 落地后返回真实值）。
+  /// · `envs`：按 rootfs 隔离的持久登记清单，只表示经本 App 配方验证并登记的环境；
+  ///   不实时扫描用户手工 `apk add/del` 后的包数据库。
   ///
-  /// ⚠️ 当前 sandbox-channel 尚未实现 `envProfile` 方法 ⇒ 调用会抛
-  /// `SandboxChannelException`（**明确失败，不返回假数据**）。
+  /// Android `SandboxBridge` 返回真实隔离/网络策略与按 rootfs 持久化的已安装环境清单；
+  /// 通道不可用时仍抛 `SandboxChannelException`（明确失败，不返回假数据）。
   Future<SandboxEnvProfile> envProfile() async {
     final raw = await _client.call('envProfile');
     return SandboxEnvProfile.fromMap(raw);
@@ -435,13 +436,13 @@ class SandboxService {
 
   /// 安装环境（Node/Python3/Deno/Bun/Go 配方）。
   ///
-  /// 未实现时明确失败（不假装装好）。
+  /// 返回实际校验版本；DNS/联网失败时由宿主返回明确原因，不假装装好。
   Future<SandboxEnvInstallResult> installEnv(String name) async {
     final raw = await _client.call('installEnv', <String, Object?>{'name': name});
     return SandboxEnvInstallResult.fromMap(raw);
   }
 
-  /// 卸载环境。
+  /// 卸载环境；成功执行后同步持久安装清单。
   Future<SandboxEnvInstallResult> uninstallEnv(String name) async {
     final raw = await _client.call('uninstallEnv', <String, Object?>{'name': name});
     return SandboxEnvInstallResult.fromMap(raw);
@@ -781,6 +782,7 @@ class SandboxEnvInstallResult {
     this.message,
     this.approxBytes = 0,
     this.verifiedVersion,
+    this.registryWarning,
   });
 
   final bool ok;
@@ -792,6 +794,9 @@ class SandboxEnvInstallResult {
   /// 安装后 `--version` 校验得到的版本号（校验失败 = null，不编）。
   final String? verifiedVersion;
 
+  /// 安装完成但持久状态写入失败时的警告，不将其伪装成安装失败。
+  final String? registryWarning;
+
   factory SandboxEnvInstallResult.fromMap(Map<String, dynamic> m) =>
       SandboxEnvInstallResult(
         ok: (m['ok'] as bool?) ?? false,
@@ -800,6 +805,7 @@ class SandboxEnvInstallResult {
         message: m['message'] as String?,
         approxBytes: (m['approxBytes'] as num?)?.toInt() ?? 0,
         verifiedVersion: m['verifiedVersion'] as String?,
+        registryWarning: m['registryWarning'] as String?,
       );
 }
 

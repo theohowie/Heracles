@@ -469,7 +469,7 @@ class VoicePartial {
   `riskNote`（**必须含"策略级，非硬隔离"**）、`hosts`（默认白名单 + 可追加企业源）、`proxy`。
 - Dart：`SandboxService.envProfile()/installEnv()/uninstallEnv()/detectProjectEnv()`；返回
   `SandboxEnvProfile` / `SandboxEnvInstallResult`（失败带人话；`verifiedVersion` 拿不到=null）。
-- ⚠️ sandbox-channel 方法未实现 ⇒ 调用明确失败（不返回假数据）。
+- Android `SandboxBridge` 已接通 `envProfile/installEnv/uninstallEnv/detectProjectEnv`：安装前幂等准备 Alpine `/etc/resolv.conf`；完整保留命令 stdout/stderr，识别 DNS/网络失败并如实返回。安装成功仅在 `--version` 验证后写入按 rootfs 隔离的持久环境登记清单（这是由本 App 配方验证并登记的状态，不代表外部手工安装/卸载后的实时包扫描）。网络限制为策略级，当前使用公网 DNS；仅允许内网 DNS 的网络可能失败。真机 Node 安装尚待验证。
 
 #### N15.3 工具面
 

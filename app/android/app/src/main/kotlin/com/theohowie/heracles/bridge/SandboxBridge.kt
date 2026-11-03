@@ -83,6 +83,34 @@ class SandboxBridge(
     /** 四通道汇总器（实现 runtime 的 ChannelQuery SPI）。 */
     private val channelManager = ChannelManager(context)
 
+    /** 按 rootfs 隔离的已安装环境清单，进程重启后仍保留。 */
+    private val envPreferences by lazy {
+        context.getSharedPreferences("sandbox_installed_envs", Context.MODE_PRIVATE)
+    }
+
+    private fun envStateKey(): String {
+        val root = core.rootfs.rootfsHostPath()
+            ?: error("rootfs 尚未就绪，不能读写环境清单")
+        val digest = java.security.MessageDigest.getInstance("SHA-256")
+            .digest(root.toByteArray(Charsets.UTF_8))
+            .joinToString("") { "%02x".format(it.toInt() and 0xff) }
+        return "rootfs:$digest"
+    }
+
+    private fun installedEnvs(): List<String> = runCatching {
+        val raw = envPreferences.getString(envStateKey(), "[]") ?: "[]"
+        val array = org.json.JSONArray(raw)
+        (0 until array.length()).mapNotNull { array.optString(it).takeIf(String::isNotBlank) }
+    }.getOrDefault(emptyList())
+
+    /** 仅在安装版本校验成功或卸载命令成功后更新持久清单。 */
+    private fun updateInstalledEnv(name: String, installed: Boolean): Boolean = runCatching {
+        val envs = installedEnvs().toMutableSet()
+        if (installed) envs += name else envs -= name
+        val payload = org.json.JSONArray(envs.sorted()).toString()
+        envPreferences.edit().putString(envStateKey(), payload).commit()
+    }.getOrDefault(false)
+
     /** 给 Dart 看的一行 rootfs 摘要。 */
     private fun rootfsSummary(): String = runCatching {
         val s = core.rootfs.status()
@@ -568,9 +596,8 @@ class SandboxBridge(
             }
 
             // ---- ★ V0.4 T0-3（2026-11-02）：沙箱环境管理（L1 only）----
-            //   `SandboxEnvManager` 是纯逻辑（配方/网络策略/项目识别），安装执行走沙箱 shell。
-            //   ⚠️ 真实安装（apk/npm/pip 到 /opt/envs/<name>）尚未接线 ⇒ installEnv 明确失败，
-            //   不假装装好（见 docs/接口.md §10.3）。
+            //   环境管理通道已接线：安装经沙箱 shell 执行，成功校验后才写入持久清单。
+            //   DNS 前置由 SandboxEnvManager 在每次安装前完成；stderr 与 stdout 一并保留。
             "envProfile" -> {
                 val n = com.heracles.sandbox.runtime.NetworkPolicy()
                 reply(result, mapOf(
@@ -585,8 +612,8 @@ class SandboxBridge(
                         "hosts" to n.effectiveHosts(),
                         "proxy" to n.proxy,
                     ),
-                    // 已安装环境：安装执行未接线 ⇒ 恒空（不假装有）
-                    "envs" to emptyList<String>(),
+                    // 按当前 rootfs 持久化清单回报，rootfs 切换不会串环境状态。
+                    "envs" to installedEnvs(),
                 ))
             }
 
@@ -598,7 +625,7 @@ class SandboxBridge(
                 scope.launch {
                     val out = withContext(Dispatchers.IO) {
                         runCatching {
-                            SandboxEnvManager.installEnv(
+                            val installResult = SandboxEnvManager.installEnv(
                                 name,
                                 exec = { cmd, timeoutMs ->
                                     val r = core.executeAndWait(
@@ -620,10 +647,20 @@ class SandboxBridge(
                                             override fun isCancelled(): Boolean = false
                                         },
                                     )
-                                    r.stdout
+                                    listOf(r.stdout, r.stderr)
+                                        .filter { it.isNotBlank() }
+                                        .joinToString("\n")
                                 },
                                 onProgress = { msg -> emitProgress(progressId, 0, 0, msg) },
                             )
+                            val installedName = installResult["name"] as? String ?: name
+                            if (installResult["ok"] == true &&
+                                !updateInstalledEnv(installedName, installed = true)
+                            ) {
+                                installResult + ("registryWarning" to "安装已验证，但已安装环境清单未能保存")
+                            } else {
+                                installResult
+                            }
                         }.getOrElse { e ->
                             mapOf(
                                 "ok" to false,
@@ -678,7 +715,16 @@ class SandboxBridge(
                                         },
                                     )
                                     if (r.exitCode == 0) {
-                                        mapOf("ok" to true, "name" to name, "message" to "已卸载 $pkg")
+                                        if (!updateInstalledEnv(name, installed = false)) {
+                                            mapOf(
+                                                "ok" to true,
+                                                "name" to name,
+                                                "message" to "已卸载 $pkg",
+                                                "registryWarning" to "卸载已完成，但已安装环境清单未能更新",
+                                            )
+                                        } else {
+                                            mapOf("ok" to true, "name" to name, "message" to "已卸载 $pkg")
+                                        }
                                     } else {
                                         mapOf(
                                             "ok" to false,
