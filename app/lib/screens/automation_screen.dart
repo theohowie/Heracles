@@ -20,6 +20,8 @@ import 'package:flutter/material.dart';
 import '../services/agent_bridge.dart';
 import '../theme/app_theme.dart';
 import '../theme/cupertino_kit.dart';
+import '../theme/elastic_switch.dart';
+import '../widgets/bw_approval.dart';
 
 class AutomationScreen extends StatefulWidget {
   const AutomationScreen({super.key, this.load, this.save});
@@ -80,80 +82,103 @@ class _AutomationScreenState extends State<AutomationScreen> {
     final title = TextEditingController();
     final prompt = TextEditingController();
     final interval = TextEditingController(text: '60');
-    final created = await showDialog<bool>(
+    // ★ 2026-11-03（§4.4）：新建表单从居中对话框改为**上拉抽屉
+    //   BwSheetShell**（弹层唯一形态：抓手必备、表面填满到屏底）。
+    final created = await showModalBottomSheet<bool>(
       context: context,
-      builder: (ctx) {
-        final h = Hue.of(ctx);
-        return AlertDialog(
-          backgroundColor: h.surface,
-          title: Text('新建自动化任务',
-              style: TextStyle(fontSize: 16, color: h.text)),
-          content: SingleChildScrollView(
-            child: Column(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                TextField(
-                    key: const Key('automation-title'),
-                    controller: title,
-                    decoration: const InputDecoration(labelText: '标题')),
-                TextField(
-                    key: const Key('automation-prompt'),
-                    controller: prompt,
-                    decoration: const InputDecoration(labelText: '提示词')),
-                TextField(
-                    key: const Key('automation-interval'),
-                    controller: interval,
-                    keyboardType: TextInputType.number,
-                    decoration: const InputDecoration(labelText: '间隔（分钟）')),
-                // ★ cron 入口：**置灰 + 写明未实现**（后端本轮只注册 interval 闹钟）。
-                //   允许填 cron ⇒ 用户存下一条永远不会跑的任务；静默忽略更糟。
-                //   所以这里既**不给填**，也**明说为什么**。
-                Container(
-                  key: const Key('automation-cron-disabled'),
-                  margin: const EdgeInsets.only(top: 14),
-                  padding:
-                      const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
-                  decoration: BoxDecoration(
-                    color: h.surfaceAlt,
-                    borderRadius: BorderRadius.circular(HRadius.md),
-                  ),
-                  child: Row(
-                    children: [
-                      Icon(AppIcons.clock, size: 15, color: h.textFaint),
-                      const SizedBox(width: 8),
-                      Expanded(
-                        child: Column(
-                          crossAxisAlignment: CrossAxisAlignment.start,
-                          children: [
-                            Text('按 cron 表达式',
-                                style: TextStyle(
-                                    fontSize: 12.5, color: h.textFaint)),
-                            const SizedBox(height: 2),
-                            Text('当前版本只支持固定间隔；cron 未实现',
-                                key: const Key('automation-cron-note'),
-                                style: TextStyle(
-                                    fontSize: 11,
-                                    height: 1.4,
-                                    color: h.textFaint)),
-                          ],
+      backgroundColor: Colors.transparent,
+      isScrollControlled: true,
+      shape: const RoundedRectangleBorder(),
+      builder: (sheetCtx) {
+        final h = Hue.of(sheetCtx);
+        return BwSheetShell(
+          onDismissRequest: () => Navigator.of(sheetCtx).pop(false),
+          child: Padding(
+            padding: const EdgeInsets.fromLTRB(HSpace.lg, HSpace.sm,
+                HSpace.lg, HSpace.xl),
+            child: SingleChildScrollView(
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text('新建自动化任务',
+                      style: TextStyle(
+                          fontSize: 16,
+                          fontWeight: FontWeight.w600,
+                          color: h.text)),
+                  const SizedBox(height: HSpace.md),
+                  TextField(
+                      key: const Key('automation-title'),
+                      controller: title,
+                      decoration: const InputDecoration(labelText: '标题')),
+                  TextField(
+                      key: const Key('automation-prompt'),
+                      controller: prompt,
+                      decoration: const InputDecoration(labelText: '提示词')),
+                  TextField(
+                      key: const Key('automation-interval'),
+                      controller: interval,
+                      keyboardType: TextInputType.number,
+                      decoration:
+                          const InputDecoration(labelText: '间隔（分钟）')),
+                  // ★ cron 入口：**置灰 + 写明未实现**（后端本轮只注册
+                  //   interval 闹钟）。允许填 cron ⇒ 用户存下一条永远不会
+                  //   跑的任务；静默忽略更糟。
+                  Container(
+                    key: const Key('automation-cron-disabled'),
+                    margin: const EdgeInsets.only(top: 14),
+                    padding: const EdgeInsets.symmetric(
+                        horizontal: 10, vertical: 8),
+                    decoration: BoxDecoration(
+                      color: h.surfaceAlt,
+                      borderRadius: BorderRadius.circular(HRadius.md),
+                    ),
+                    child: Row(
+                      children: [
+                        Icon(AppIcons.clock, size: 15, color: h.textFaint),
+                        const SizedBox(width: 8),
+                        Expanded(
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              Text('按 cron 表达式',
+                                  style: TextStyle(
+                                      fontSize: 12.5, color: h.textFaint)),
+                              const SizedBox(height: 2),
+                              Text('当前版本只支持固定间隔；cron 未实现',
+                                  key: const Key('automation-cron-note'),
+                                  style: TextStyle(
+                                      fontSize: 11,
+                                      height: 1.4,
+                                      color: h.textFaint)),
+                            ],
+                          ),
                         ),
-                      ),
-                      // 一眼看出不可用：禁用的开关（点不动、置灰）
-                      const Switch(value: false, onChanged: null),
+                        // 一眼看出不可用：ElasticSwitch 禁用态（§4.1
+                        //   开关唯一形态 —— 不再用 Material Switch）。
+                        const ElasticSwitch(value: false, onChanged: null),
+                      ],
+                    ),
+                  ),
+                  const SizedBox(height: HSpace.lg),
+                  Row(
+                    mainAxisAlignment: MainAxisAlignment.end,
+                    children: [
+                      TextButton(
+                          onPressed: () => Navigator.of(sheetCtx).pop(false),
+                          child: const Text('取消')),
+                      const SizedBox(width: HSpace.sm),
+                      TextButton(
+                          onPressed: () => Navigator.of(sheetCtx).pop(true),
+                          child: Text('保存',
+                              style: TextStyle(
+                                  fontSize: 13, color: h.accent))),
                     ],
                   ),
-                ),
-              ],
+                ],
+              ),
             ),
           ),
-          actions: [
-            TextButton(
-                onPressed: () => Navigator.of(ctx).pop(false),
-                child: const Text('取消')),
-            TextButton(
-                onPressed: () => Navigator.of(ctx).pop(true),
-                child: const Text('保存')),
-          ],
         );
       },
     );

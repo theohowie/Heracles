@@ -25,6 +25,8 @@ import '../widgets/bw_approval.dart';
 import '../widgets/background_keepalive_card.dart';
 // 技能 / MCP / 自动化三页的入口已移到主页抽屉（2026-11-02 用户裁定），
 // 这里不再 import（单一入口，避免两处维护）。
+import 'robot_access_screen.dart';
+import 'search_settings_screen.dart';
 import 'jev_settings_screen.dart';
 import 'oss_licenses_screen.dart';
 import 'voice_settings_screen.dart';
@@ -103,6 +105,17 @@ class SettingsScreen extends StatelessWidget {
                   //   是按更早的版本改的，把它覆盖掉了 —— 合并后沙箱页没了入口。
                   _SandboxEntry(
                     onOpen: () => _push(context, const SandboxScreen()),
+                  ),
+                  // ★ 2026-11-03：搜索服务 / 机器人接入（本轮新增能力）
+                  _HomeRow(
+                    title: '搜索服务',
+                    subtitle: 'endpoint 配置 · 仅免鉴权',
+                    onTap: () => _push(context, const SearchSettingsScreen()),
+                  ),
+                  _HomeRow(
+                    title: '机器人接入',
+                    subtitle: '飞书 · QQ(OneBot) · 微信官方',
+                    onTap: () => _push(context, const RobotAccessScreen()),
                   ),
                   // ★ 2026-11-02：技能 / MCP / 自动化三行**移出设置页**
                   //   （用户裁定：三个智能体入口放主页抽屉 —— 单一入口，

@@ -13,6 +13,8 @@ import 'package:flutter/material.dart';
 
 import '../theme/app_theme.dart';
 import '../theme/cupertino_kit.dart';
+import '../theme/elastic_switch.dart';
+import '../theme/stretch_segmented.dart';
 
 class McpScreen extends StatefulWidget {
   const McpScreen({super.key});
@@ -104,20 +106,19 @@ class _McpScreenState extends State<McpScreen> {
             decoration: const InputDecoration(labelText: '名称'),
           ),
           const SizedBox(height: 8),
-          Row(
-            children: [
-              Text('传输方式', style: TextStyle(fontSize: 12, color: h.textDim)),
-              const SizedBox(width: 12),
-              for (final t in const ['stdio', 'http'])
-                Padding(
-                  padding: const EdgeInsets.only(right: 8),
-                  child: ChoiceChip(
-                    label: Text(t),
-                    selected: _transport == t,
-                    onSelected: (_) => setState(() => _transport = t),
-                  ),
-                ),
-            ],
+          // ★ 2026-11-03（§4.2）：离散 2–5 档互斥只有 StretchSegmented
+          //   —— ChoiceChip 是第二套分档形态，撤。
+          Text('传输方式', style: TextStyle(fontSize: 12, color: h.textDim)),
+          const SizedBox(height: 6),
+          StretchSegmented(
+            key: const Key('mcp-transport'),
+            labels: const ['stdio', 'http'],
+            selected: _transport == 'stdio' ? 0 : 1,
+            onSelected: (i) => setState(() => _transport = i == 0 ? 'stdio' : 'http'),
+            trackColor: h.surface,
+            blockColor: h.text,
+            selectedLabelColor: h.bg,
+            labelColor: h.textFaint,
           ),
           const SizedBox(height: 8),
           TextField(
@@ -132,12 +133,16 @@ class _McpScreenState extends State<McpScreen> {
             decoration: const InputDecoration(labelText: 'url（http）'),
           ),
           const SizedBox(height: 8),
-          SwitchListTile(
-            key: const Key('mcp-enabled'),
-            value: _enabled,
-            onChanged: (v) => setState(() => _enabled = v),
-            title: const Text('启用'),
-            contentPadding: EdgeInsets.zero,
+          // ★ 2026-11-03（§4.1）：开关只有 ElasticSwitch。
+          Row(
+            children: [
+              const Expanded(child: Text('启用')),
+              ElasticSwitch(
+                key: const Key('mcp-enabled'),
+                value: _enabled,
+                onChanged: (v) => setState(() => _enabled = v),
+              ),
+            ],
           ),
           if (_submitError != null)
             Padding(

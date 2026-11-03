@@ -376,7 +376,7 @@ class _WorkspaceDrawerBody extends StatelessWidget {
               _DrawerNavRow(
                 key: const Key('drawer-nav-skills'),
                 icon: AppIcons.think,
-                label: 'Skill',
+                label: 'Skill技能',
                 onTap: onOpenSkills,
               ),
               _DrawerNavRow(
@@ -2126,9 +2126,12 @@ class _DrawerNavRow extends StatelessWidget {
     if (onTap == null) return const SizedBox.shrink();
     return InkWell(
       onTap: onTap,
+      // ★ 2026-11-03：紧凑菜单行 —— 原先套用设置行规格（vertical lg=20）
+      //   密度太低，与抽屉里的会话列表行不协调；收窄到与会话行看齐
+      //   （图标砖 30×30 保留，无说明行）。测试钉行高 ≤56。
       child: Padding(
-        padding: const EdgeInsets.symmetric(
-            horizontal: HSpace.xl, vertical: HSpace.lg),
+        padding:
+            const EdgeInsets.symmetric(horizontal: HSpace.lg, vertical: 9),
         child: Row(
           children: [
             Container(
@@ -2141,7 +2144,7 @@ class _DrawerNavRow extends StatelessWidget {
               child: Icon(icon, size: 17, color: h.text),
             ),
             const SizedBox(width: HSpace.md),
-            Text(label, style: TextStyle(fontSize: 15, color: h.text)),
+            Text(label, style: TextStyle(fontSize: 14, color: h.text)),
           ],
         ),
       ),

@@ -66,7 +66,7 @@ import 'package:flutter/cupertino.dart';
 
 import 'pressable.dart';
 import 'package:flutter/material.dart'
-    show NoSplash, SnackBar, ScaffoldMessenger, Theme, Widget, BuildContext, Color;
+    show NoSplash, Theme, Widget, BuildContext, Color;
 
 // ============================================================================
 // 图标对照（唯一映射源）
@@ -212,9 +212,8 @@ class _IosTapState extends State<IosTap> {
 void showIosToast(BuildContext context, String message, {IconData? icon}) {
   final overlay = Overlay.maybeOf(context);
   if (overlay == null) {
-    // 没有 Overlay（理论上不会发生）⇒ 退回 SnackBar，**绝不静默丢消息**
-    ScaffoldMessenger.maybeOf(context)
-        ?.showSnackBar(SnackBar(content: Text(message)));
+    // 没有 Overlay（理论上不会发生）⇒ 不显示。§4 铁律：SnackBar 在 lib/
+    // 里为零出现 —— 宁可这一条 toast 静默，也不引入第二种弹层形态。
     return;
   }
   final dark = Theme.of(context).brightness == Brightness.dark;
