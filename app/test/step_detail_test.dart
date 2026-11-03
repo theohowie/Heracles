@@ -10,6 +10,8 @@ import 'package:heracles/theme/app_theme.dart';
 import 'package:heracles/widgets/message_row.dart';
 import 'package:heracles/widgets/tool_call_card.dart';
 
+import 'support/secure_storage_mock.dart';
+
 /// **「工作步骤展示」四档分级的测试**（2026-10-10，t4）。
 ///
 /// ## 它防的是什么
@@ -24,6 +26,27 @@ import 'package:heracles/widgets/tool_call_card.dart';
 /// 这比"属性值对了"强 —— 属性对了但渲染没读它，用户仍然看不到区别。
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
+
+  // ★ 安全存储通道 mock（2026-11-03，QA）
+  //
+  // 本文件有 5 个用例会走 `SettingsController.load()`；其中 **`设置页可操作性`**
+  // （泵 `SettingsScreen`）在没有 mock 时**永不完成** —— 实测：整文件跑到它时
+  // 开始挂，`flutter test` 攒到 02:52 才把它和它后面两条判成
+  // "did not complete"（`flutter_tester` 进程一直挂着，不是报错）。
+  //
+  // 机制：`settings_controller.dart:181` 是
+  // `Future.wait([for (final p in providers) _secureKeys.read(p.id)])`，
+  // 读的是 `flutter_secure_storage` 的 MethodChannel。**测试环境没有平台侧 handler 时
+  // 那个 Future 永不完成**（不是抛 `MissingPluginException`，`try/catch` 救不了）。
+  //
+  // ⚠️ 精确限定（别照抄旧结论）：**只有当 providers 非空时才会挂**。
+  // 本文件多数用例 `setMockInitialValues({})` ⇒ providers 为空 ⇒ `Future.wait([])`
+  // 立即完成 ⇒ 它们不加 mock 也能过（实测 `--plain-name "默认档仍是"` 无 mock 通过）。
+  // 挂的是会加载出 provider 的那条（`SettingsScreen` 路径）。
+  //
+  // 见 `test/support/secure_storage_mock.dart` 与 `实测-03` 坑 36。
+  setUp(installSecureStorageMock);
+  tearDown(removeSecureStorageMock);
 
   /// 一张"最大"的卡片：参数很长、结果很长、带模型原始输出。
   /// 用超长值是为了让"完整 vs 摘要"的差异必然可见。

@@ -647,10 +647,12 @@ void main() {
       switch (call.method) {
         case 'listWorkspaces':
           return [workspaceMap];
-        case 'listSessions':
-          return [
-            {'id': 'sess-A', 'title': '会话 A', 'updatedAt': 2000},
-          ];
+        // ★ 2026-11-03（QA）：原 `case 'listSessions'` 已删 —— 那是**死 mock**。
+        //   `heracles/command` 的 `listSessions` 原生侧早已删除（见
+        //   `agent_bridge.dart:656-657`）；会话清单现在走 `SessionStore.listSessions()`
+        //   ⇒ `heracles/device` 的 `fs.*`（本文件 130-138 行的 `sessions.json` 分支）。
+        //   留着它反而会**掩盖回归**：若有人把调用改回通道，它会静默返回假清单，
+        //   而不是让用例报错。
         case 'removeWorkspace':
           return null; // 移除成功
         default:
