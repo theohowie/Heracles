@@ -905,6 +905,7 @@ unconfigured ──(配置齐全+enabled+token 非空)──▶ connecting
 connecting ──(ws open + echo 0 回包)──▶ connected
 connecting ──(token 空)──▶ failed(E_BOT_TOKEN_REQUIRED)   // 不发起连接
 connecting ──(连接失败/超时)──▶ failed(原因) ──(退避到点)──▶ connecting
+connected ──(断线)──▶ failed(原因) ──(退避到点)──▶ connecting   // 2026-11-03 补：真实断线路径
 any ──(enabled=false / 用户停用)──▶ disabled
 disabled / connected ──(stop)──▶ unconfigured
 ```

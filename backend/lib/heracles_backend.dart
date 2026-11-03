@@ -86,4 +86,5 @@ export 'src/contract/contract.dart';
 export 'src/guard/guardrails.dart';
 // 词法检索索引（R1-R3，用户拍板词法口径）。
 export 'src/rag/workspace_index.dart';
-
+export 'src/bot/bot_gateway.dart';
+export 'src/bot/onebot11_connector.dart';
