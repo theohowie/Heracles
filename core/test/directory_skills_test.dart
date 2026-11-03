@@ -218,6 +218,92 @@ void main() {
     },
   );
 
+  // ==========================================================================
+  // ★ 2026-11-03（QA，T-core-1-VERIFY）：`..` 折叠的回归门禁
+  //
+  // 为什么单独加这两条：修 `76d969a` 里「`_comparisonPath` 必须折叠 `..`」是全
+  // 套件**零覆盖**的安全加固 —— 实测把折叠摘掉，原有 13 条**全绿**
+  // （0 条红），也就是说这条越权通道此前没有任何测试守着。
+  //
+  // 失败模式（不折叠时）：`<root>/../outside.js` 以 `<root>/` 为前缀 ⇒ 通过
+  // 白名单 ⇒ 被放行并执行。同时补一条正向用例，防止将来有人用「一律拒绝」蒙混
+  // 过负向用例。
+  // ==========================================================================
+
+  test(
+    'skill roots reject .. traversal that escapes the root',
+    () async {
+      final root = Directory('${tempDirectory.path}/allowed')..createSync();
+      // 与白名单根**同级**的外部脚本：只有把 `..` 折叠掉才能判出它越界
+      final outsideScript = File('${tempDirectory.path}/outside.js')
+        ..writeAsStringSync('// must not run');
+      final traversalPath = '${root.path}/../outside.js';
+
+      final runtime = _RecordingJavaScriptRuntime();
+      final agent = _createAgent(
+        skillDirectoryPaths: [root.path],
+        javaScriptRuntime: runtime,
+      );
+      final runJavaScript = agent.composeTools().singleWhere(
+        (tool) => tool.name == 'RunJavaScript',
+      );
+
+      final result =
+          await Function.apply(runJavaScript.executable!, [
+                traversalPath,
+                null,
+                null,
+              ])
+              as String;
+
+      expect(
+        result,
+        contains('script path must stay under one of the skillDirectoryPaths.'),
+        reason: '`<root>/../outside.js` 折叠后越出白名单根，必须被拒（否则是越权通道）',
+      );
+      expect(runtime.executedPaths, isEmpty, reason: '被拒绝的脚本绝不能被运行时执行');
+      // 反向确认这条用例的确触到了"越界"而不是别的原因（如文件不存在）
+      expect(outsideScript.existsSync(), isTrue, reason: '外部脚本必须真实存在');
+    },
+  );
+
+  test(
+    'skill roots allow .. that folds back inside the root',
+    () async {
+      final root = Directory('${tempDirectory.path}/allowed')..createSync();
+      // `../` 拐一下仍落在根内 ⇒ 折叠后应判为合法，必须放行并执行
+      Directory('${tempDirectory.path}/allowed2')..createSync();
+      final insideScript = File('${root.path}/inside.js')
+        ..writeAsStringSync('// allowed');
+      final foldedInsidePath = '${tempDirectory.path}/allowed2/../allowed/inside.js';
+
+      final runtime = _RecordingJavaScriptRuntime();
+      final agent = _createAgent(
+        skillDirectoryPaths: [root.path],
+        javaScriptRuntime: runtime,
+      );
+      final runJavaScript = agent.composeTools().singleWhere(
+        (tool) => tool.name == 'RunJavaScript',
+      );
+
+      final result =
+          await Function.apply(runJavaScript.executable!, [
+                foldedInsidePath,
+                null,
+                null,
+              ])
+              as String;
+
+      expect(
+        jsonDecode(result),
+        containsPair('success', true),
+        reason: '折叠后落在根内的脚本必须放行 —— 不许用"一律拒绝"糊过负向用例',
+      );
+      expect(runtime.executedPaths, [File(foldedInsidePath).absolute.path],
+          reason: '放行的就是这一条，且交给运行时的仍是原生路径');
+    },
+  );
+
   test(
     'agent loop executes RunJavaScript through the central tool path',
     () async {
