@@ -469,7 +469,25 @@ class HeraclesAgent {
   /// 当前状态（只读视图，给 CLI / 宿主看 turn 数与用量）。
   AgentState? get state => _state;
 
-  /// 建 LLM client。
+  /// **建循环探测器**（2026-11-04 真机修后统一入口）。
+  ///
+  /// 两处刻意的口径，理由见 [ContractLoop] / [ContractRunContinue.identicalCallThreshold]：
+  ///
+  /// 1. **阈值 6**（框架默认 5）：判据是"`工具名:参数JSON` 字节完全相同 ×N"，
+  ///    长任务里模型偶尔把同一处补丁再打一遍，5 次就中止太紧；
+  /// 2. **关掉 LLM 自我诊断分支**（`client/modelConfig` 传 null）：真机上它把
+  ///    "在同一个大文件上反复增量编辑"判成打转，**在正常推进时把任务杀了**。
+  LoopDetector _buildLoopDetector(LLMClient client, {String? modelName}) =>
+      DefaultLoopDetector(
+        state: _state!,
+        client: ContractLoop.enableSelfDiagnosedLoopCheck ? client : null,
+        modelConfig: ContractLoop.enableSelfDiagnosedLoopCheck
+            ? _modelConfig(model: modelName)
+            : null,
+        toolLoopThreshold: ContractRunContinue.identicalCallThreshold,
+      );
+
+  /// **建 LLM client**。
   LLMClient _buildClient() {
     final injected = _injectedClient;
     if (injected != null) return injected;
@@ -1400,13 +1418,9 @@ class HeraclesAgent {
           : null,
       disableSubAgents: !_options.enableSubAgents,
       // 框架自带循环检测（相同调用重复 + 周期性 LLM 诊断）。
-      // 旧实现只有"相同调用重复"且阈值 2；这里用框架默认（5），
+      // 旧实现只有"相同调用重复"且阈值 2；这里用 [ContractRunContinue.identicalCallThreshold]，
       // 因为云端模型有自愈能力，2 太激进。
-      loopDetector: DefaultLoopDetector(
-        state: _state!,
-        client: client,
-        modelConfig: _modelConfig(),
-      ),
+      loopDetector: _buildLoopDetector(client),
       autoSaveStateFunc: _stateStorage == null
           ? null
           : (state) async => _stateStorage.save(state),
@@ -1585,9 +1599,12 @@ class HeraclesAgent {
           ],
           loopDetector: DefaultLoopDetector(
             state: _state!,
-            client: client,
-            modelConfig: _modelConfig(
-                model: _options.fallbackModelNames[usedFallbackIdx]),
+            client: ContractLoop.enableSelfDiagnosedLoopCheck ? client : null,
+            modelConfig: ContractLoop.enableSelfDiagnosedLoopCheck
+                ? _modelConfig(
+                    model: _options.fallbackModelNames[usedFallbackIdx])
+                : null,
+            toolLoopThreshold: ContractRunContinue.identicalCallThreshold,
           ),
           autoSaveStateFunc: _stateStorage == null
               ? null
@@ -1648,12 +1665,7 @@ class HeraclesAgent {
             // ★ P0（2026-10-31）：计划自动推进（同一实例）
             if (planProgressHook != null) planProgressHook,
           ],
-          loopDetector: DefaultLoopDetector(
-            state: _state!,
-            client: client,
-            modelConfig: _modelConfig(
-                model: _options.fallbackModelNames[usedFallbackIdx]),
-          ),
+          loopDetector: _buildLoopDetector(client, modelName: _options.fallbackModelNames[usedFallbackIdx]),
           autoSaveStateFunc: _stateStorage == null
               ? null
               : (state) async => _stateStorage.save(state),
@@ -1883,8 +1895,10 @@ class HeraclesAgent {
     if (e is AgentException) {
       return switch (e.code) {
         AgentExceptionCode.loopDetection =>
-          '检测到循环：模型反复请求相同的操作。任务已停止，避免反复修改同一文件。'
-              '如果确实需要继续，请把需求拆成更小的步骤重试。',
+          '检测到循环：模型把**完全相同的调用**连续重复了多次'
+              '（${_clipForFailure(e.message, 120)}）。'
+              '任务已停止以避免空转；如果任务还没做完，请把需求拆成更小的步骤再试。'
+              '注意：在同一个文件上连续做**不同**的编辑属于正常推进，不会触发这条。',
         AgentExceptionCode.cancelled => '任务已取消。',
         AgentExceptionCode.stopByController => '任务被停止规则拦截。',
         AgentExceptionCode.resumeFailed => '无法恢复上次中断的任务：${e.message}',
@@ -1932,8 +1946,14 @@ class HeraclesAgent {
             compressor: parent.compressor,
             loopDetector: DefaultLoopDetector(
               state: workerState,
-              client: parent.client,
-              modelConfig: parent.modelConfig,
+              // ★ worker 同样关掉"自我诊断"分支（理由见 ContractLoop）
+              client: ContractLoop.enableSelfDiagnosedLoopCheck
+                  ? parent.client
+                  : null,
+              modelConfig: ContractLoop.enableSelfDiagnosedLoopCheck
+                  ? parent.modelConfig
+                  : null,
+              toolLoopThreshold: ContractRunContinue.identicalCallThreshold,
             ),
             hooks: parent.hooks,
             // 独立事件总线：worker 的过程事件无人订阅 ⇒ 隔离（见上方注释 1）
