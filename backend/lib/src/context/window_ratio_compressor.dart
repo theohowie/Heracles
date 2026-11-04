@@ -208,6 +208,197 @@ class WindowRatioCompressor implements ContextCompressor {
             _estimateUsage(state));
       }
     }
+
+    // ---- 第四级（兜底，2026-11-04 真机修）：按 **token** 真降压 ----
+    //
+    // ## 为什么必须有这一级
+    //
+    // 上面三级都拿"最近 keepRecentTurns(6) 轮 ≈ 24 条"当保护窗，于是
+    // **「消息很少、单条内容巨大」**（一次 read_file 把整份大文件读进历史）
+    // 会同时落进三级的空档：
+    // · micro：大工具结果在保护窗**内** ⇒ 无可清 ⇒ 返回 0；
+    // · auto：框架摘要可能静默早退（无可摘 / 无 usage）；
+    // · full：`if (msgs.length <= keepMessages) return 0;` ⇒ 条数少就整段放弃。
+    //
+    // 真机现场（用户 2026-11-04 10:19）：上下文 102% 却**一处都没动**，
+    // 用户判断"压缩机制是坏的"—— 是对的（回归闸见
+    // `test/compression_short_history_test.dart`）。
+    if (_estimateUsage(state) >= fullLine) {
+      final b3m = state.history.messages.length;
+      final b3t = _estimateUsage(state);
+      if (_trimToFit(state, fullLine)) {
+        onCompressed?.call(b3m, state.history.messages.length, b3t,
+            _estimateUsage(state));
+      }
+    }
+  }
+
+  /// **第四级兜底：把占用真的降到 [budget] 以下**（确定性，不依赖 LLM）。
+  ///
+  /// 三招按代价从低到高依次做，够用就停：
+  ///
+  /// 1. **老的/大的工具结果换占位符**（此时保护窗让路 —— 已经超线了，
+  ///    留住"窗口被撑爆"比留住一份能重读的工具输出更糟）；
+  /// 2. **按 token 丢更早的消息**（`_adjustCut` 保证不拆"调用↔结果"配对），
+  ///    且**永远保留最后一条**（模型要知道当前这轮发生了什么）；
+  /// 3. 单条就超（极少见）⇒ 对**最大的一条**文本做截断，保留头部并写明已截断。
+  ///
+  /// 返回是否真的动过历史（动过才播 `context_compressed`）。
+  bool _trimToFit(AgentState state, int budget) {
+    // 说明消息本身要占位，先扣掉
+    final target = budget - _trimNoteAllowance;
+    var acted = false;
+    final details = <String>[];
+
+    // ---- 第 1 招：大工具结果 → 占位符（旧→新，够用就停）----
+    final msgs = state.history.messages;
+    for (var i = 0; i < msgs.length; i++) {
+      if (_estimateUsage(state) < target) break;
+      final m = msgs[i];
+      if (m is! FunctionExecutionResultMessage) continue;
+      final replaced = _replaceBigResults(m, minChars: microMinChars);
+      if (replaced == null) continue;
+      msgs[i] = replaced;
+      acted = true;
+      details.add('清理了少量老工具输出');
+    }
+
+    // ---- 第 2 招：按 token 丢更早的消息（保留最后一条）----
+    if (_estimateUsage(state) >= target && state.history.messages.length > 1) {
+      final list = state.history.messages;
+      var chosen = -1;
+      for (var k = 1; k < list.length; k++) {
+        if (_estimateRange(list, k) + _trimNoteAllowance <= target) {
+          chosen = k;
+          break;
+        }
+      }
+      // 没有任何后缀装得下 ⇒ 只保最后一条（它仍可能超，交给第 3 招）
+      var cut = chosen >= 0 ? chosen : list.length - 1;
+      cut = _adjustCut(list, cut);
+      if (cut <= 0) cut = 1;
+      if (cut < list.length) {
+        final removed = cut;
+        state.history.messages = list.sublist(cut);
+        acted = true;
+        details.add('移除了更早的 $removed 条消息');
+      }
+    }
+
+    // ---- 第 3 招：单条仍超 ⇒ 截断最大那条的文本 ----
+    if (_estimateUsage(state) >= target) {
+      final truncated = _truncateLargestMessage(state, target);
+      if (truncated != null) {
+        acted = true;
+        details.add('截断了 1 条超长内容（原 $truncated 字符，需要请重新读取）');
+      }
+    }
+
+    if (!acted) return false;
+
+    // ---- 如实说明（头部插入，不改变"最后一条"）----
+    state.history.messages = <LLMMessage>[
+      UserMessage.text(
+        '[系统维护] 上下文窗口吃紧，已自动腾出空间：${details.join('；')}。'
+        '这些内容**没有**进摘要（摘要本轮未成功），如需依据请重新读取相应文件；'
+        '继续任务时请如实告知用户上下文被清理过。',
+      ),
+      ...state.history.messages,
+    ];
+    return true;
+  }
+
+  /// 说明消息的 token 预留（约 120 个汉字量级）。
+  static const int _trimNoteAllowance = 200;
+
+  /// 把一条工具结果里**较大的**输出换成占位符；没有可换的返回 null。
+  FunctionExecutionResultMessage? _replaceBigResults(
+    FunctionExecutionResultMessage m, {
+    required int minChars,
+  }) {
+    var changed = false;
+    final out = <FunctionExecutionResult>[];
+    for (final r in m.results) {
+      final text = _contentText(r.content);
+      if (text.length < minChars) {
+        out.add(r);
+        continue;
+      }
+      final placeholder = '[工具结果已清理（窗口吃紧）：原 ${text.length} 字符。'
+          '如仍需要该信息，请重新执行相应工具获取。]';
+      out.add(FunctionExecutionResult(
+        id: r.id,
+        name: r.name,
+        isError: r.isError,
+        arguments: r.arguments,
+        content: [TextPart(placeholder)],
+        timestamp: r.timestamp,
+      ));
+      changed = true;
+    }
+    if (!changed) return null;
+    return FunctionExecutionResultMessage(results: out);
+  }
+
+  /// 截断**最大一条**消息里的文本；返回被截掉的原字符数（null = 没做）。
+  ///
+  /// 只截 `FunctionExecutionResultMessage` 与 `UserMessage` 的文本：
+  /// `ModelMessage` 里可能带 functionCalls，重建成本与风险都更高（且它通常不大）。
+  int? _truncateLargestMessage(AgentState state, int target) {
+    final msgs = state.history.messages;
+    var bestIndex = -1;
+    var bestTokens = 0;
+    for (var i = 0; i < msgs.length; i++) {
+      final t = estimateMessageTokens(msgs[i]);
+      if (t > bestTokens) {
+        bestTokens = t;
+        bestIndex = i;
+      }
+    }
+    if (bestIndex < 0) return null;
+    final m = msgs[bestIndex];
+
+    if (m is FunctionExecutionResultMessage) {
+      var droppedChars = 0;
+      final out = <FunctionExecutionResult>[];
+      for (final r in m.results) {
+        final text = _contentText(r.content);
+        final keep = text.length ~/ 4; // 只留头部四分之一
+        final cutChars = text.length - keep;
+        if (cutChars <= 0) {
+          out.add(r);
+          continue;
+        }
+        droppedChars += cutChars;
+        out.add(FunctionExecutionResult(
+          id: r.id,
+          name: r.name,
+          isError: r.isError,
+          arguments: r.arguments,
+          content: [
+            TextPart('${text.substring(0, keep)}\n'
+                '…[已截断：原 ${text.length} 字符，只保留前 $keep 字符。'
+                '需要完整内容请重新执行相应工具]'),
+          ],
+          timestamp: r.timestamp,
+        ));
+      }
+      if (droppedChars == 0) return null;
+      msgs[bestIndex] = FunctionExecutionResultMessage(results: out);
+      return droppedChars;
+    }
+
+    if (m is UserMessage) {
+      final text = _contentText(m.contents);
+      final keep = text.length ~/ 4;
+      final cutChars = text.length - keep;
+      if (cutChars <= 0) return null;
+      msgs[bestIndex] = UserMessage.text(
+        '${text.substring(0, keep)}\n…[已截断：原 ${text.length} 字符，只保留前 $keep 字符]',
+      );
+      return cutChars;
+    }
+    return null;
   }
 
   /// 按需要的保留量建 delegate（第二级用；框架实现，KDoc 见字段声明）。
