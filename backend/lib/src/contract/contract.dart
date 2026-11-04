@@ -111,6 +111,20 @@ abstract final class ContractModel {
   /// 旧实现用 4096，长补丁会被截断（用户报过"输出无法解析"）。
   static const int maxOutputTokens = 16384;
 
+  /// **单次模型请求的墙钟上限（秒）** —— 2026-11-04 从框架默认 **300 s 提到 600 s**。
+  ///
+  /// ## 为什么必须比框架默认值大
+  ///
+  /// 框架 `OpenAIClient.timeout` 默认 300 s，且**同时**用作 `sendTimeout` 与
+  /// `receiveTimeout`。对"边想边吐"的推理模型，`receiveTimeout` 量的是
+  /// **相邻两次收到数据之间的间隔** —— 大上下文（读了整份 HTML/日志）时，
+  /// 首个 chunk 之前的思考很容易顶到 5 分钟。
+  ///
+  /// 真机上就撞过：真机 2026-11-04 09:29 那条"网络连接失败"其实是
+  /// Dio 的 `receiveTimeout`（消息里是 `connection took longer than 0:05:00`），
+  /// 被 UI 的关键词表当成网络故障 —— 用户网络明明是好的。
+  static const int requestTimeoutSeconds = 600;
+
   /// OpenAI 兼容协议的默认 base URL。
   static const String defaultBaseUrl = 'https://api.openai.com';
 }

@@ -478,10 +478,15 @@ class HeraclesAgent {
 
   /// 按 [BackendConfig] 建 client（静态：/compact 的摘要调用也用它）。
   static LLMClient buildClientFor(BackendConfig config) {
+    // ★ 2026-11-04：请求墙钟上限显式给足（框架默认 300 s 对推理模型太紧，
+    //   真机上把"首个 chunk 之前的长时间思考"误判成网络故障）。
+    final requestTimeout =
+        Duration(seconds: ContractModel.requestTimeoutSeconds);
     return switch (config.provider) {
       BackendProvider.openAiCompatible => OpenAIClient(
           apiKey: config.apiKey,
           baseUrl: config.baseUrl,
+          timeout: requestTimeout,
         ),
       BackendProvider.anthropic => ClaudeClient(
           apiKey: config.apiKey,
@@ -1883,10 +1888,11 @@ class HeraclesAgent {
         AgentExceptionCode.cancelled => '任务已取消。',
         AgentExceptionCode.stopByController => '任务被停止规则拦截。',
         AgentExceptionCode.resumeFailed => '无法恢复上次中断的任务：${e.message}',
-        AgentExceptionCode.unknown => '任务异常：${e.message}',
+        AgentExceptionCode.unknown =>
+          '任务异常：${describeFailureMessage(e.message)}',
       };
     }
-    return '任务异常：$e';
+    return '任务异常：${describeFailureMessage(e.toString())}';
   }
   /// **worker 子代理工厂**（H6，2026-10-24）—— 干净上下文的执行者。
   ///
@@ -2706,6 +2712,93 @@ class FailureStopClassification {
   /// null = 普通失败（不归为"可继续的停止"，仍走 `failed` 事件）。
   final RunStopReason? reason;
   final bool canContinue;
+}
+
+/// **把底层异常文本翻成人话，而且不许把超时说成"网络不好"**（2026-11-04）。
+///
+/// ## 为什么必须做这一层（真机事故）
+///
+/// 真机 2026-11-04 09:29：用户在网络完全正常的情况下看到
+/// **「网络连接失败：请检查网络后重试。」**。真相是 Dio 的 `receiveTimeout`
+/// 到点（原始文本 `The request connection took longer than 0:05:00…`）——
+/// 里面带 `connection` 这个词，而 UI 的关键词表把 `connection` 一律当网络故障。
+/// 于是用户被指向一个**根本不存在的问题**。
+///
+/// 所以这里在**后端**就把错误种类认清楚并写成中文：
+///
+/// | 原始特征 | 翻成 | 为什么 |
+/// |---|---|---|
+/// | `took longer than 0:05:00` / `timeout` | **超时**（带时限） | 它是本地等了太久，不是断网 |
+/// | `closed before full header` / `reset` / `broken pipe` | 对端**提前中断** | 对端拒绝/代理截断，改网络没用 |
+/// | `failed host lookup` | **DNS 解析失败** | 这个才是网络问题 |
+/// | `certificate` / `handshake` | **TLS/证书** | 自签或中间人代理 |
+/// | `HTTP 4xx/5xx` | **服务端状态码** | 有码就先把码给出来 |
+///
+/// ⚠️ 纪律：**不吞原始信息**（兜底分支原样给出，截断到 200 字），
+/// 但也不把英文原串塞进"已归类"的分支里 —— 那会让 UI 的关键词表再次误判。
+String describeFailureMessage(String raw) {
+  final s = raw.trim();
+  if (s.isEmpty) return '后端没有给出失败原因（空消息）';
+  final lower = s.toLowerCase();
+
+  // ---- 1) 超时（最常见：推理模型在大上下文上想太久）----
+  if (lower.contains('longer than') ||
+      lower.contains('timeout') ||
+      lower.contains('timed out') ||
+      lower.contains('timedout') ||
+      s.contains('超时')) {
+    final m = RegExp(r'longer than (\d+:\d+:\d+(?:\.\d+)?)').firstMatch(lower);
+    final limit = m == null ? '请求时限' : '${m.group(1)} 上限';
+    return '模型响应超时：$limit 内没有收到任何数据（本地已按配置自动重试）。'
+        '常见原因是上下文太大、模型思考太久，或中转站排队；'
+        '可精简上下文或把任务拆小后重试。';
+  }
+
+  // ---- 2) 对端提前中断（不是"你没网"，而是这次请求被对面掐了）----
+  if (lower.contains('closed before full header') ||
+      lower.contains('connection closed') ||
+      lower.contains('connection reset') ||
+      lower.contains('broken pipe') ||
+      lower.contains('stream was reset') ||
+      lower.contains('unexpected end of stream') ||
+      lower.contains('premature')) {
+    return '连接被对端提前中断：服务端或代理在这次请求返回完整响应前就关闭了连接'
+        '（常见于请求体过大、被网关拦截或长连接被中间设备剪断）。'
+        '可减少一次塞入的上下文后重试。';
+  }
+
+  // ---- 3) DNS：这才是真正的网络问题 ----
+  if (lower.contains('failed host lookup') ||
+      lower.contains('no address associated') ||
+      lower.contains('nodename nor servname') ||
+      lower.contains('name or service not known') ||
+      lower.contains('dns')) {
+    return '网络域名解析失败（DNS）：请检查网络、代理或 Base URL 是否拼写正确。';
+  }
+
+  // ---- 4) TLS / 证书 ----
+  if (lower.contains('certificate') ||
+      lower.contains('handshake') ||
+      lower.contains('tls') ||
+      lower.contains('ssl')) {
+    return 'TLS 握手/证书校验失败：常见于自签证书、企业代理或系统时间不正确。';
+  }
+
+  // ---- 5) HTTP 状态码（有码就先给码）----
+  final codeMatch = RegExp(r'\b(4\d{2}|5\d{2})\b').firstMatch(s);
+  if (codeMatch != null && lower.contains('openai')) {
+    return '模型服务返回 HTTP ${codeMatch.group(1)}：'
+        '${_clipForFailure(s, 160)}';
+  }
+
+  // ---- 6) 兜底：原样给（截断），绝不编造 ----
+  return _clipForFailure(s, 200);
+}
+
+/// 失败文案里的原文截断（不引入省略号歧义：有截断才加 `…`）。
+String _clipForFailure(String s, int max) {
+  final one = s.replaceAll(RegExp(r'\s+'), ' ').trim();
+  return one.length <= max ? one : '${one.substring(0, max)}…';
 }
 
 /// **把一次失败收尾归类成 `RunStopReason`**（V0.4 纯函数）。
