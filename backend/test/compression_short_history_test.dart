@@ -176,4 +176,57 @@ void main() {
 
     expect(state.history.messages.length, before);
   });
+
+  // ---- ⑤ 真机 11:35 的形状：字符估算低估 5 倍，但服务端真值已经 81% ----
+  //
+  // 用户截图：分项合计 ~20K，总量却是 **~104.0K / 128.0K（81%）**。
+  // 压缩器若只看字符估算（20K），离 80% 线（102.4K）十万八千里 ⇒ 永不压缩。
+  test('⑤ 服务端真值已过 80% 线时，即使字符估算很低也必须压', () async {
+    final calls = <List<int>>[];
+    final c = WindowRatioCompressor(
+      client: _SilentClient(),
+      modelConfig: ModelConfig(model: 'stub-model'),
+      modelWindowTokens: 128000,
+      delegateImpl: _NoOpDelegate(),
+      onCompressed: (bm, am, bt, at) => calls.add([bm, am, bt, at]),
+    );
+
+    final state = AgentState(
+      sessionId: 's-real-usage',
+      history: AgentMessageHistory(messages: [
+        UserMessage.text('把光调暗一点'),
+        ModelMessage(
+          model: 'm',
+          stopReason: 'tool_calls',
+          functionCalls: [
+            FunctionCall(id: 'r1', name: 'read_file', arguments: '{"path":"a.html"}'),
+          ],
+        ),
+        FunctionExecutionResultMessage(
+          results: [
+            FunctionExecutionResult(
+              id: 'r1',
+              name: 'read_file',
+              isError: false,
+              arguments: '{"path":"a.html"}',
+              content: [TextPart(_ascii(60000))], // 估算 ≈ 15K，真值远不止
+            ),
+          ],
+        ),
+        ModelMessage(model: 'm', stopReason: 'stop', textOutput: '看过页面了。'),
+      ]),
+    );
+    // 服务端真实上报：这一轮输入 104K tokens（81% of 128K）
+    state.usages.add(ModelUsage(promptTokens: 104000, completionTokens: 800));
+
+    final est = c.estimateUsage(state);
+    expect(est, lessThan((128000 * 0.8).floor()),
+        reason: '前提：字符估算**低于**强制线（这正是真机低估的形态）');
+
+    await c.compress(state);
+
+    expect(calls, isNotEmpty,
+        reason: '★ 真机缺陷：只看字符估算 ⇒ 真值 104K/128K(81%) 也不会压，'
+            '上下文一路涨到 100%+ 才崩');
+  });
 }

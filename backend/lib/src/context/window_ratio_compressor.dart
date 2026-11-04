@@ -159,7 +159,7 @@ class WindowRatioCompressor implements ContextCompressor {
   @override
   Future compress(AgentState state) async {
     final window = modelWindowTokens;
-    final usage = _estimateUsage(state);
+    final usage = _decisionUsage(state);
     final fullLine = (window * compressAtRatio).floor();
     final autoLine = (window * ContractCompression.autoRatio).floor();
     final microLine = (window * ContractCompression.microRatio).floor();
@@ -197,13 +197,18 @@ class WindowRatioCompressor implements ContextCompressor {
     }
 
     // ---- 第三级：full（强制重置，确定性）----
-    // 触发条件：**现在**的估算仍在强制线上 —— 不管第二级是失败、静默早退、
+    // 触发条件：**真实占用**仍在强制线上 —— 不管第二级是失败、静默早退、
     // 还是压了但不够。下一轮还有输出与工具结果要进来，80% 这条线不能赌。
-    if (afterTokens >= fullLine) {
+    //
+    // ⚠️ 这里用 `usage`（决策口径：真值与估算取大）而不是 `afterTokens`（低估的字符估算）：
+    // 真机 11:35 那次就是"真值 104K / 估算 20K"，按估算判断永远到不了线。
+    var acted = summarized;
+    if (usage >= fullLine) {
       final b2m = state.history.messages.length;
       final b2t = afterTokens;
       final dropped = _forceReset(state);
       if (dropped > 0) {
+        acted = true;
         onCompressed?.call(b2m, state.history.messages.length, b2t,
             _estimateUsage(state));
       }
@@ -223,10 +228,30 @@ class WindowRatioCompressor implements ContextCompressor {
     // 真机现场（用户 2026-11-04 10:19）：上下文 102% 却**一处都没动**，
     // 用户判断"压缩机制是坏的"—— 是对的（回归闸见
     // `test/compression_short_history_test.dart`）。
-    if (_estimateUsage(state) >= fullLine) {
+    //
+    // ## 目标怎么定（关键）
+    //
+    // 决策用的是"真值 104K"，而裁剪时只能用**字符估算**（20K）来量。
+    // 两个口径差 5 倍，直接把 fullLine 当裁剪目标会"清不动就停"。
+    // 所以按 **scale = 真值 / 估算** 把"要腾出来的真实 token 数"折算成估算单位：
+    //   要压到 autoLine(60%) ⇒ 需要腾出 (usage - autoLine) 真实 token
+    //                        ⇒ 估算上要腾出 (usage - autoLine) / scale
+    // 只在"前面几级都没真正动过历史"时才兜底 —— 否则会把刚重置好的历史再砍一刀
+    // （第三级的设计承诺是"压到强制线以下"，不是"压到 60%"）。
+    if (usage >= fullLine && (!acted || _estimateUsage(state) >= fullLine)) {
+      final estNow = _estimateUsage(state);
+      final scale = (usage > 0 && estNow > 0) ? usage / estNow : 1.0;
+      final wantReal = (window * ContractCompression.autoRatio).floor();
+      var needReal = usage - wantReal;
+      if (needReal <= 0) needReal = usage - ((fullLine * 0.9).floor());
+      if (needReal < 0) needReal = 0;
+      final needEst = (needReal / (scale <= 0 ? 1.0 : scale)).ceil();
+      final targetEstimate = estNow - needEst < 1 ? 1 : estNow - needEst;
+
       final b3m = state.history.messages.length;
-      final b3t = _estimateUsage(state);
-      if (_trimToFit(state, fullLine)) {
+      final b3t = estNow;
+      final trimmed = _trimToFit(state, targetEstimateTokens: targetEstimate);
+      if (trimmed) {
         onCompressed?.call(b3m, state.history.messages.length, b3t,
             _estimateUsage(state));
       }
@@ -244,9 +269,14 @@ class WindowRatioCompressor implements ContextCompressor {
   /// 3. 单条就超（极少见）⇒ 对**最大的一条**文本做截断，保留头部并写明已截断。
   ///
   /// 返回是否真的动过历史（动过才播 `context_compressed`）。
-  bool _trimToFit(AgentState state, int budget) {
+  ///
+  /// [targetEstimateTokens] 是**估算口径**的目标（不是真实 token）——
+  /// 调用方已按 `scale = 真值/估算` 折算过（见 `compress` 第四级）。
+  bool _trimToFit(AgentState state, {required int targetEstimateTokens}) {
     // 说明消息本身要占位，先扣掉
-    final target = budget - _trimNoteAllowance;
+    final target = (targetEstimateTokens - _trimNoteAllowance) < 1
+        ? 1
+        : targetEstimateTokens - _trimNoteAllowance;
     var acted = false;
     final details = <String>[];
 
@@ -588,12 +618,43 @@ class WindowRatioCompressor implements ContextCompressor {
     return buf.toString();
   }
 
-  /// 粗估当前历史占多少 token。
+  /// **粗估**当前历史占多少 token。
   ///
   /// 为什么要自己估：框架的 `ModelUsage` 只反映**上一次请求**的用量，
   /// 而压缩决策要看**当前累积**的历史（包括还没发出去的工具结果）。
   int _estimateUsage(AgentState state) =>
       estimateMessagesUsage(state) + estimateToolDefinitions(state);
+
+  /// **决策用的占用**：取"估算"与"服务端真实上报"两者的**较大值**。
+  ///
+  /// ## 为什么必须掺进真值（2026-11-04 真机修）
+  ///
+  /// 真机现场（用户 11:35 截图）：用量抽屉里分项合计只有 ~20K
+  /// （系统 2.7K + 工具定义 10.6K + 工具结果 4.7K + 助手 1.8K），
+  /// 但同一屏的总量写着 **~104.0K / 128.0K（81%）** —— 那是 provider 真实上报的
+  /// `promptTokens`。**我们的字符估算低估了约 5 倍**（工具 JSON、代码、结构化文本
+  /// 的 `字符/4` 系数明显不够），于是：
+  ///
+  /// · 抽屉显示 104K（真值）；
+  /// · 压缩器按 **20K** 判断 ⇒ 离 80% 线（102.4K）差得远 ⇒ **永不压缩**；
+  /// · 真实上下文一路涨到 100%+ ⇒ 用户看到"溢出却不压"。
+  ///
+  /// 取 `max(真值, 估算)` 的理由：
+  /// · 真值是**服务端数的**，做窗口判断必须以它为准（估算再准也只是估算）；
+  /// · 估算覆盖"上一次请求之后新追加的消息"（真值还没反映它们）；
+  /// · 取大值 = **宁可早压**（压早了只是多一次摘要；压晚了直接撞窗失败）。
+  int _decisionUsage(AgentState state) {
+    final est = _estimateUsage(state);
+    final real = _lastPromptTokens(state);
+    return real > est ? real : est;
+  }
+
+  /// 上一次请求服务端上报的**输入** token（没有则 0）。
+  int _lastPromptTokens(AgentState state) {
+    if (state.usages.isEmpty) return 0;
+    final u = state.usages.last;
+    return u.promptTokens > 0 ? u.promptTokens : 0;
+  }
 
   /// 估算**历史消息**部分的 token（2026-10-24，C5 构成统计；静态，无需实例）。
   static int estimateMessagesUsage(AgentState state) {
