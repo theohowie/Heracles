@@ -1366,6 +1366,8 @@ class HeraclesAgent {
           _SteerHook(_options.takeSteerMessage!),
         budgetHook,
         approvalHook,
+        // ★ 2026-11-04：只思考不动手 ⇒ 不许沉默收尾（真机"反复说继续"事故）
+        _ThoughtOnlyGateHook(),
 
         // ★ P0（2026-10-31）：计划自动推进 —— 执行类工具成功后推进一格并播帧。
         if (planProgressHook != null) planProgressHook,
@@ -1571,6 +1573,8 @@ class HeraclesAgent {
               _SteerHook(_options.takeSteerMessage!),
             budgetHook,
             approvalHook,
+            // ★ 2026-11-04：只思考不动手 ⇒ 不许沉默收尾（降级重跑同样要拦）
+            _ThoughtOnlyGateHook(),
             // ★ P0（2026-10-31）：计划自动推进（同一实例 ⇒ 记账不因换模型重置）
             if (planProgressHook != null) planProgressHook,
           ],
@@ -1634,6 +1638,8 @@ class HeraclesAgent {
               _SteerHook(_options.takeSteerMessage!),
             budgetHook,
             approvalHook,
+            // ★ 2026-11-04：只思考不动手 ⇒ 不许沉默收尾（降级重跑同样要拦）
+            _ThoughtOnlyGateHook(),
             // ★ P0（2026-10-31）：计划自动推进（同一实例）
             if (planProgressHook != null) planProgressHook,
           ],
@@ -2211,6 +2217,87 @@ class _SteerHook extends AgentHook {
     final text = raw?.trim() ?? '';
     if (text.isEmpty) return const TurnCompletionHookResult.accept();
     return TurnCompletionHookResult.continueWith([UserMessage.text(text)]);
+  }
+}
+
+/// **只思考不动手门禁**（2026-11-04）—— 拦"假装在干活"的沉默收尾。
+///
+/// ## 真机现场（用户 2026-11-03 22:29 截图）
+///
+/// 下发完整任务后，每一轮只有 `分析完成` / `思考完成`，**没有正文、没有写文件**，
+/// 然后这一轮就结束了 —— 用户必须反复手打「继续」，任务永远推进不了。
+///
+/// ## 为什么框架不会拦（必须在装配层堵）
+///
+/// `stateful_agent.dart` 的 `_ModelMessageAccumulator.isEmptyResponse` 把
+/// 「只有 thought」判成**真实一轮**（有意为之：思考也是模型产出），于是
+/// 「空响应重试」不触发；主循环再看到 `functionCalls.isEmpty` ⇒ `break`
+/// ⇒ 整轮 run **正常结束**。用户那边既没有正文也没有错误 —— 最坏的失败形态。
+///
+/// ## 本 hook 的两级处置
+///
+/// 1. **还有续跑预算**（框架 `maxTurnContinuations`）：注入一条明确的行动指令，
+///    把"继续分析"顶成"立刻动手"，并把 `stop_reason`/输出 token 数说清楚；
+/// 2. **预算用尽仍只思考**：抛一个**可见的**失败（不是沉默结束），
+///    理由含诊断数字（stop_reason、输出 tokens），用户能据此判断是该换模型、
+///    调小思考强度，还是把任务拆小。
+///
+/// ## 边界（刻意不做的事）
+///
+/// · 有正文 ⇒ 放行（正常收尾）；
+/// · 有工具调用 ⇒ 放行（在干活）；
+/// · thought 也是空（真正零产出）⇒ 交给框架既有的「空响应重试」路径，不抢。
+class _ThoughtOnlyGateHook extends AgentHook {
+  @override
+  Future<TurnCompletionHookResult> onTurnCompletion(
+    TurnCompletionHookContext context,
+  ) async {
+    final m = context.finalMessage;
+    // 有正文 / 有工具调用 ⇒ 不是本 hook 的事
+    if ((m.textOutput ?? '').trim().isNotEmpty) {
+      return const TurnCompletionHookResult.accept();
+    }
+    if (m.functionCalls.isNotEmpty) {
+      return const TurnCompletionHookResult.accept();
+    }
+    final thought = (m.thought ?? '').trim();
+    // 连思考都没有 ⇒ 框架的空响应重试 + 循环检测负责，这里不插手
+    if (thought.isEmpty) return const TurnCompletionHookResult.accept();
+
+    final stop = m.stopReason ?? 'unknown';
+    final completionTokens = m.usage?.completionTokens;
+    final truncated = stop == 'length' ||
+        stop == 'max_tokens' ||
+        stop == 'max_completion_tokens';
+    final tokenNote =
+        completionTokens == null ? '' : '，本轮输出 $completionTokens tokens';
+
+    // ---- 还有预算：推它一把（说清"只分析不行，必须动手"）----
+    final remaining =
+        context.maxContinuations - context.continuationCount - 1;
+    if (remaining > 0) {
+      return TurnCompletionHookResult.continueWith([
+        UserMessage.text(
+          '[系统提醒] 你上一轮**只输出了思考**：没有任何正文，也没有调用任何工具'
+          '（stop_reason=$stop$tokenNote）。'
+          '用户看到的只有「思考完成」，任务一点没推进。\n'
+          '现在请立刻动手，二选一：\n'
+          '1) 调用工具推进任务（例如 write_file / run_shell_command / read_file）；\n'
+          '2) 如果确实做完了或做不了，用**正文**明确告诉用户结论与原因。\n'
+          '${truncated ? '⚠️ 上一轮被输出上限截断：这次只做**最小的一步**，'
+              '不要在思考里长篇铺陈。' : ''}',
+        ),
+      ]);
+    }
+
+    // ---- 预算用尽：可见失败（绝不沉默收尾）----
+    throw AgentException(
+      AgentExceptionCode.unknown,
+      '模型连续 ${context.continuationCount + 1} 轮**只输出思考**，'
+          '既没有正文也没有工具调用，任务没有推进'
+          '（stop_reason=$stop$tokenNote）。'
+          '${truncated ? '疑似输出上限被思考吃光：建议把任务拆小、调低思考强度，或换模型重试。' : '建议换个更明确的下发方式，或换模型重试。'}',
+    );
   }
 }
 
