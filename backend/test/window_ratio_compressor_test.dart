@@ -159,40 +159,41 @@ void main() {
   });
 
   group('触发阈值 —— 按模型窗口比例，不是写死的数', () {
-    test('★★★ 128K 窗口 ⇒ 阈值 102400（= 128000 × 0.80）', () {
+    test('★★★ 128K 窗口 ⇒ 阈值 108800（= 128000 × 0.85）', () {
       final c = compressor(modelWindowTokens: 128000);
-      expect(c.triggerThreshold, 102400);
+      expect(c.triggerThreshold, 108800);
     });
 
-    test('★★★ 80% 是用户明确要求的比例（不是拍的）', () {
-      // 用户原话：「如果上下文达到了 80% 必须先自动压缩，然后继续任务」。
-      expect(ContractCompression.compressAtRatio, 0.80);
+    test('★★★ 85% 是现任强制线的比例（2026-11-04 用户确认从 0.80 上调）', () {
+      // 用户在真机 120% 事故后确认：摘要 60% / 强制重置 85% / 发送硬顶 90%。
+      expect(ContractCompression.compressAtRatio, 0.85);
+      expect(ContractCompression.sendCeilingRatio, 0.90);
     });
 
     test('★★★ 换窗口阈值跟着变（自适应才是这个类存在的理由）', () {
-      expect(compressor(modelWindowTokens: 200000).triggerThreshold, 160000);
-      expect(compressor(modelWindowTokens: 8192).triggerThreshold, 6553,
-          reason: '8192 × 0.8 = 6553.6 ⇒ floor 6553');
+      expect(compressor(modelWindowTokens: 200000).triggerThreshold, 170000);
+      expect(compressor(modelWindowTokens: 8192).triggerThreshold, 6963,
+          reason: '8192 × 0.85 = 6963.2 ⇒ floor 6963');
     });
 
-    test('★★ 阈值向下取整（不能浮点漏成 0.8 个 token）', () {
-      // 10000 × 0.8 = 8000（整数，无余数）
-      expect(compressor(modelWindowTokens: 10000).triggerThreshold, 8000);
-      // 10001 × 0.8 = 8000.8 ⇒ floor ⇒ 8000
-      expect(compressor(modelWindowTokens: 10001).triggerThreshold, 8000);
-      // 10005 × 0.8 = 8004.0（整数）
-      expect(compressor(modelWindowTokens: 10005).triggerThreshold, 8004);
+    test('★★ 阈值向下取整（不能浮点漏成 0.85 个 token）', () {
+      // 10000 × 0.85 = 8500（整数）
+      expect(compressor(modelWindowTokens: 10000).triggerThreshold, 8500);
+      // 10001 × 0.85 = 8500.85 ⇒ floor ⇒ 8500
+      expect(compressor(modelWindowTokens: 10001).triggerThreshold, 8500);
+      // 10005 × 0.85 = 8504.25 ⇒ floor ⇒ 8504
+      expect(compressor(modelWindowTokens: 10005).triggerThreshold, 8504);
     });
 
     test('★★ 默认参数来自契约常量（不是内联字面量）', () {
       final c = compressor();
       expect(c.compressAtRatio, ContractCompression.compressAtRatio);
-      expect(c.compressAtRatio, 0.80);
+      expect(c.compressAtRatio, 0.85);
       expect(c.keepRecentTurns, 6);
     });
   });
 
-  group('窗口 10000 的边界：7999 不压 / 8000 压', () {
+  group('窗口 10000 的边界：micro 线 4000 / 强制线 8500', () {
     /// 造一个估算值恰好约等于 [tokens] token 的 state。
     ///
     /// ## 估算规则（`_estimateTokens`，别猜）
@@ -220,7 +221,7 @@ void main() {
       );
     }
 
-    test('★★★ 7999 token < 阈值 8000 ⇒ 不压（delegate 一次都不调）', () async {
+    test('★★★ 3999 token < micro 线 4000 ⇒ 既不清理也不摘要（一次都不调）', () async {
       final client = _RecordingClient();
       var compressed = 0;
       final c = WindowRatioCompressor(
@@ -230,11 +231,11 @@ void main() {
         onCompressed: (_, __, ___, ____) => compressed++,
       );
 
-      final state = stateWithTokens(7999);
+      final state = stateWithTokens(3999);
       final usage = c.estimateUsage(state);
-      // 正好 7999（汉字 1:1，没有 ceil 误差）
-      expect(usage, 7999, reason: '构造必须精确：实际 $usage');
-      expect(usage, lessThan(8000));
+      // 正好 3999（汉字 1:1，没有 ceil 误差）
+      expect(usage, 3999, reason: '构造必须精确：实际 $usage');
+      expect(usage, lessThan((10000 * ContractCompression.microRatio).floor()));
 
       final before = client.calls;
       await c.compress(state);
@@ -242,7 +243,7 @@ void main() {
       expect(compressed, 0, reason: '没到阈值不许触发压缩事件');
       expect(client.calls, before, reason: '没到阈值连摘要请求都不该发');    });
 
-    test('★★★ 8000 token = 阈值 ⇒ 放行到 delegate', () async {
+    test('★★★ 8500 token = 阈值 ⇒ 放行到摘要', () async {
       final client = _RecordingClient();
       final c = WindowRatioCompressor(
         client: client,
@@ -250,10 +251,10 @@ void main() {
         modelWindowTokens: 10000,
       );
 
-      final state = stateWithTokens(8000);
+      final state = stateWithTokens(8500);
       final usage = c.estimateUsage(state);
-      expect(usage, 8000, reason: '构造必须精确：实际 $usage');
-      expect(c.triggerThreshold, 8000);
+      expect(usage, 8500, reason: '构造必须精确：实际 $usage');
+      expect(c.triggerThreshold, 8500);
       expect(usage, greaterThanOrEqualTo(c.triggerThreshold));
 
       // 放行 ≠ 真的压缩：delegate 内部还有早退条件
@@ -412,8 +413,12 @@ void main() {
   });
 
   group('三级 —— 第三级 full（摘要失败/不够时，确定性强制重置）', () {
-    test('★★★ 摘要静默失败 + 估算 ≥80% ⇒ 整批丢弃老轮次 + 插如实说明', () async {
-      final client = _RecordingClient();
+    test('★★★ 摘要静默失败 + 估算 ≥85% ⇒ 整批丢弃老轮次 + 插如实说明', () async {
+      // ★ 2026-11-04：要证明的是"**摘要失败**时第三级仍兜底"，
+      //   所以必须用一个**返回空**的 client（结构化摘要会判空 = 失败）。
+      //   之前用的 `_RecordingClient` 会返回一段非空文本 ⇒ 结构化摘要成功 ⇒
+      //   根本走不到第三级（那是另一条路径的正确行为，不是本用例要锁的东西）。
+      final client = _EmptySummaryClient();
       var notified = 0;
       final c = WindowRatioCompressor(
         client: client,
@@ -421,13 +426,13 @@ void main() {
         modelWindowTokens: 10000,
         onCompressed: (_, __, ___, ____) => notified++,
       );
-      // 90 批 × 90 token = 8100 ≥ 8000（强制线）。
-      // 真框架 delegate 因 usages 为空会静默早退 ⇒ 只能靠第三级。
+      // 96 批 × 90 token ≈ 8640 ≥ 8500（强制线 0.85）。
+      // 摘要失败 ⇒ 只能靠第三级。
       final state = AgentState(
         sessionId: 's-full',
         history: AgentMessageHistory(
           messages: [
-            for (var i = 0; i < 90; i++) UserMessage.text('字' * 90),
+            for (var i = 0; i < 96; i++) UserMessage.text('字' * 90),
           ],
         ),
       );
@@ -438,11 +443,11 @@ void main() {
           reason: '说明 1 条 + 最近 6 批');
       final note = state.history.messages.first as UserMessage;
       expect(_text(note), contains('[系统维护]'));
-      expect(_text(note), contains('84'),
+      expect(_text(note), contains('90'),
           reason: '如实报丢弃条数，绝不假装"已摘要"');
-      expect(c.estimateUsage(state), lessThan(8000),
-          reason: '★ 重置后必须低于强制线 —— 这就是"80% 必压缩"的兜底');
-      expect(notified, 1, reason: '第二级没生效不播；第三级生效播一次');
+      expect(c.estimateUsage(state), lessThan(8500),
+          reason: '★ 重置后必须低于强制线 —— 这就是"必压缩"的兜底');
+      expect(notified, greaterThanOrEqualTo(1), reason: '第三级生效必须播报');
     });
 
     test('★★ 无 user 边界的历史也能重置（切点不拆工具批）', () async {
@@ -538,6 +543,24 @@ void main() {
 /// 取 UserMessage 的文本（断言用）。
 String _text(UserMessage m) =>
     m.contents.whereType<TextPart>().map((p) => p.text).join();
+
+/// **摘要一律失败**的 client（返回空文本 ⇒ 结构化摘要判为"没做成"）。
+///
+/// 用途：证明第三级"强制重置"在**摘要失败**时仍然兜底。
+class _EmptySummaryClient extends _RecordingClient {
+  @override
+  Future<ModelMessage> generate(
+    List<LLMMessage> messages, {
+    List<Tool>? tools,
+    ToolChoice? toolChoice,
+    required ModelConfig modelConfig,
+    bool? jsonOutput,
+    dynamic cancelToken,
+  }) async {
+    calls++;
+    return ModelMessage(textOutput: '', model: modelConfig.model);
+  }
+}
 
 /// 记录调用次数的 client 替身 —— **绝不联网**。
 ///

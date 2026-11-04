@@ -1,0 +1,214 @@
+// Copyright (C) 2026 The Heracles Authors
+// SPDX-License-Identifier: GPL-3.0
+//
+// **压缩的"保留什么"与"不许硬发"** 回归闸（2026-11-04，用户确认的第 3/4 条改法）。
+//
+// ## 背景（用户质问）
+//
+// 「120% 的上下文占用？难道不是到 90% 就要自己压缩吗？压缩就是保留上下文里
+//  最关键的信息」—— 用户随后批准了两条改法：
+//
+// 1. **摘要按结构化保留清单做**（对齐 Anthropic compaction 实践：
+//    保留架构决策 / 未解决 bug / 实现细节，丢弃冗余工具输出）；
+// 2. **发送硬顶 90%**：压不下来就不许发，宁可这一轮明确失败 ——
+//    因为有的网关会**静默截断历史**，模型"莫名失忆"比报错更坏。
+//
+// ## 本文件锁住的契约
+//
+// | # | 契约 | 抓的缺陷 |
+// |---|---|---|
+// | ① | 摘要请求里必须包含"保留清单"提示词 | 退化成自由要点，漏掉用户硬约束 |
+// | ② | 摘要结果落地成**结构化笔记**并插在历史最前 | 压缩后模型不知道自己被压缩过 |
+// | ③ | 摘要失败 ⇒ 回退到确定性重置（不许什么都不做） | "摘要静默失败 = 未压缩" |
+// | ④ | 压完仍 ≥ 90% ⇒ **抛可见异常**（不许把注定超限的请求发出去） | 120% 硬发、被网关静默截断 |
+library;
+
+import 'dart:async';
+
+import 'package:dart_agent_core/dart_agent_core.dart';
+import 'package:dio/dio.dart' show CancelToken;
+import 'package:heracles_backend/heracles_backend.dart';
+import 'package:test/test.dart';
+
+/// 记录收到的 messages、回一段**带六个标签**的结构化摘要。
+class _StructuredClient implements LLMClient {
+  final List<List<LLMMessage>> seen = [];
+
+  @override
+  Future<ModelMessage> generate(
+    List<LLMMessage> messages, {
+    List<Tool>? tools,
+    ToolChoice? toolChoice,
+    required ModelConfig modelConfig,
+    bool? jsonOutput,
+    CancelToken? cancelToken,
+  }) async {
+    seen.add(List.of(messages));
+    return ModelMessage(
+      model: modelConfig.model,
+      stopReason: 'stop',
+      textOutput: '<goal>做雨夜便利店街角</goal>'
+          '<constraints>不要动 chatgpt6-luna-index.html</constraints>'
+          '<decisions>用单文件 HTML + CSS 3D</decisions>'
+          '<files>deepseek-v41-flash-index.html（已写入初稿）</files>'
+          '<open_issues>灯泡过曝，未解决</open_issues>'
+          '<plan>下一步调暗环境光</plan>',
+    );
+  }
+
+  @override
+  Future<Stream<StreamingMessage>> stream(
+    List<LLMMessage> messages, {
+    List<Tool>? tools,
+    ToolChoice? toolChoice,
+    required ModelConfig modelConfig,
+    bool? jsonOutput,
+    CancelToken? cancelToken,
+  }) async =>
+      const Stream<StreamingMessage>.empty();
+}
+
+/// 摘要一定失败（返回空）。
+class _FailingSummaryClient implements LLMClient {
+  int calls = 0;
+  @override
+  Future<ModelMessage> generate(
+    List<LLMMessage> messages, {
+    List<Tool>? tools,
+    ToolChoice? toolChoice,
+    required ModelConfig modelConfig,
+    bool? jsonOutput,
+    CancelToken? cancelToken,
+  }) async {
+    calls++;
+    return ModelMessage(model: modelConfig.model, stopReason: 'stop', textOutput: '');
+  }
+
+  @override
+  Future<Stream<StreamingMessage>> stream(
+    List<LLMMessage> messages, {
+    List<Tool>? tools,
+    ToolChoice? toolChoice,
+    required ModelConfig modelConfig,
+    bool? jsonOutput,
+    CancelToken? cancelToken,
+  }) async =>
+      const Stream<StreamingMessage>.empty();
+}
+
+/// 造一段长对话（每条 90 个汉字 ≈ 90 token）。
+List<LLMMessage> _manyTurns(int n) =>
+    [for (var i = 0; i < n; i++) UserMessage.text('字' * 90)];
+
+WindowRatioCompressor _c(LLMClient client, {int window = 10000, void Function(int,int,int,int)? onCompressed}) =>
+    WindowRatioCompressor(
+      client: client,
+      modelConfig: ModelConfig(model: 'stub'),
+      modelWindowTokens: window,
+      onCompressed: onCompressed,
+    );
+
+void main() {
+  test('① 摘要请求带着"保留清单"提示词（不是自由发挥）', () async {
+    final client = _StructuredClient();
+    final state = AgentState(
+      sessionId: 's1',
+      history: AgentMessageHistory(messages: _manyTurns(96)), // ≈8640 ≥ 8500
+    );
+
+    await _c(client).compress(state);
+
+    expect(client.seen, isNotEmpty, reason: '该压的时候必须真的发出摘要请求');
+    final systemPrompt = (client.seen.first.first as SystemMessage).content;
+    for (final must in ['goal', 'constraints', 'decisions', 'files', 'open_issues', 'plan']) {
+      expect(systemPrompt, contains(must),
+          reason: '★ 保留清单缺了 $must —— 模型会漏掉这类关键信息');
+    }
+  });
+
+  test('② 摘要结果落成结构化笔记，且插在历史最前 + 保留最近几轮原文', () async {
+    final client = _StructuredClient();
+    final state = AgentState(
+      sessionId: 's2',
+      history: AgentMessageHistory(messages: _manyTurns(96)),
+    );
+
+    await _c(client).compress(state);
+
+    final first = state.history.messages.first as UserMessage;
+    final note = (first.contents.first as TextPart).text;
+    expect(note, contains('[上下文压缩快照]'));
+    expect(note, contains('不要动 chatgpt6-luna-index.html'),
+        reason: '★ 用户硬约束必须在摘要里活下来');
+    expect(note, contains('deepseek-v41-flash-index.html'));
+    expect(state.history.messages.length, lessThan(96),
+        reason: '压缩后必须真的变短');
+    expect(state.history.messages.last, isA<UserMessage>(),
+        reason: '最近轮次保留原文');
+  });
+
+  test('③ 摘要失败 ⇒ 回退确定性重置（不许什么都不做）', () async {
+    final client = _FailingSummaryClient();
+    var notified = 0;
+    final state = AgentState(
+      sessionId: 's3',
+      history: AgentMessageHistory(messages: _manyTurns(96)),
+    );
+
+    await _c(client, onCompressed: (_, __, ___, ____) => notified++).compress(state);
+
+    expect(client.calls, greaterThan(0), reason: '摘要请求发过（只是返回空）');
+    expect(state.history.messages.length, lessThan(96),
+        reason: '★ 摘要失败也必须靠第三级重置把历史压下来');
+    final note = (state.history.messages.first as UserMessage).contents.first as TextPart;
+    expect(note.text, contains('[系统维护]'),
+        reason: '走的是"强制移除"这条路，要如实说，不许假装摘要成功');
+    expect(notified, greaterThanOrEqualTo(1));
+  });
+
+  test('④ 压完仍 ≥90% ⇒ 抛可见异常（不许硬发）', () async {
+    // 窗口极小 + 单条巨大：摘要不可用（只有 1 条），截断只留 1/4 仍超硬顶。
+    final client = _FailingSummaryClient();
+    final state = AgentState(
+      sessionId: 's4',
+      history: AgentMessageHistory(messages: [
+        // 40000 字符 ⇒ 截断后仍约 10K > 90% × 10K = 9K ⇒ 必须报错而不是硬发
+        UserMessage.text('字' * 40000),
+      ]),
+    );
+
+    await expectLater(
+      _c(client, window: 10000).compress(state),
+      throwsA(isA<AgentException>()),
+      reason: '★ 用户确认：压不下来就明确失败，绝不把注定超限的请求发出去',
+    );
+  });
+
+  // ---- ⑤ 分项与总量必须对得上（用户："这个环形图不是真实占比"）----
+  group('⑤ 分项按真实总量等比放大', () {
+    test('放大后各分项之和精确等于真实总量', () {
+      final parts = <String, int>{
+        'system': 2700,
+        'toolDefs': 10600,
+        'toolResults': 4700,
+        'reasoning': 0,
+        'assistant': 1800,
+        'user': 25,
+        'summary': 0,
+      }; // 合计 19825（真机 11:35 那屏）
+      final scaled = WindowRatioCompressor.scaleToRealTotal(parts, 104000);
+
+      expect(scaled.values.fold<int>(0, (a, b) => a + b), 104000,
+          reason: '★ 屏幕上"分项加起来"必须等于总量，否则用户只会认为数字是假的');
+      expect(scaled.keys.toSet(), parts.keys.toSet(), reason: '键不许变（UI 只认固定键）');
+      expect(scaled['toolDefs']!, greaterThan(parts['toolDefs']!),
+          reason: '放大是等比放大 —— 原先占比大的仍然大');
+    });
+
+    test('没有真实值 / 空 map 时原样返回（不猜、不缩放）', () {
+      final parts = <String, int>{'system': 100};
+      expect(WindowRatioCompressor.scaleToRealTotal(parts, 0), parts);
+      expect(WindowRatioCompressor.scaleToRealTotal(const {}, 1000), isEmpty);
+    });
+  });
+}

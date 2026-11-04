@@ -46,9 +46,9 @@ void main() {
   });
 
   group('ContractCompression — 上下文压缩', () {
-    test('★★★ compressAtRatio = 0.80（用户要求 80%）', () {
+    test('★★★ compressAtRatio = 0.85（2026-11-04 用户确认的强制线）', () {
       // 注意是 double 而不是 int：0.5 太频繁、0.95 会先撞窗口
-      expect(ContractCompression.compressAtRatio, 0.80);
+      expect(ContractCompression.compressAtRatio, 0.85);
       expect(ContractCompression.compressAtRatio, isA<double>());
     });
 

@@ -159,10 +159,15 @@ class WindowRatioCompressor implements ContextCompressor {
   @override
   Future compress(AgentState state) async {
     final window = modelWindowTokens;
-    final usage = _decisionUsage(state);
+    final usage = _decisionUsage(state, window: window);
     final fullLine = (window * compressAtRatio).floor();
     final autoLine = (window * ContractCompression.autoRatio).floor();
     final microLine = (window * ContractCompression.microRatio).floor();
+
+    /// **估算偏差**：真实上报 / 字符估算。用于把"要腾多少真实 token"
+    /// 折算成"估算上要腾多少"，以及压完后把估算折回真实值。
+    final estAtStart = _estimateUsage(state);
+    final bias = (usage > 0 && estAtStart > 0) ? usage / estAtStart : 1.0;
 
     // ---- 没到第一级 ⇒ 什么都不做（装得下就全装）----
     if (usage < microLine) return;
@@ -184,10 +189,18 @@ class WindowRatioCompressor implements ContextCompressor {
     }
 
     // ---- 第二级：auto（≥60%，LLM 摘要）----
+    //
+    // 2026-11-04：优先用**结构化摘要**（保留清单见 `_structuredSummaryPrompt`），
+    // 它失败/返回空才退回框架 delegate —— delegate 有一堆静默早退分支，
+    // 单靠它会"什么都没做却不报错"。
     final beforeMessages = state.history.messages.length;
     final beforeTokens = usage;
-    await _delegateFor(keepRecentTurns * ContractCompression.messagesPerTurn)
-        .compress(state);
+    final structuredOk =
+        await _structuredSummarize(state, keepRecentTurns * ContractCompression.messagesPerTurn);
+    if (!structuredOk) {
+      await _delegateFor(keepRecentTurns * ContractCompression.messagesPerTurn)
+          .compress(state);
+    }
     var afterTokens = _estimateUsage(state);
     final afterMessages = state.history.messages.length;
     final summarized = afterMessages < beforeMessages || afterTokens < beforeTokens;
@@ -203,7 +216,9 @@ class WindowRatioCompressor implements ContextCompressor {
     // ⚠️ 这里用 `usage`（决策口径：真值与估算取大）而不是 `afterTokens`（低估的字符估算）：
     // 真机 11:35 那次就是"真值 104K / 估算 20K"，按估算判断永远到不了线。
     var acted = summarized;
-    if (usage >= fullLine) {
+    // 2026-11-04：**先看摘要有没有把占用压到强制线以下** —— 压下来了就别再重置，
+    // 否则会把刚生成的结构化摘要连同老消息一起丢掉（真机用例 ② 逮到过）。
+    if (usage >= fullLine && _estimateUsage(state) >= fullLine) {
       final b2m = state.history.messages.length;
       final b2t = afterTokens;
       final dropped = _forceReset(state);
@@ -215,7 +230,6 @@ class WindowRatioCompressor implements ContextCompressor {
     }
 
     // ---- 第四级（兜底，2026-11-04 真机修）：按 **token** 真降压 ----
-    //
     // ## 为什么必须有这一级
     //
     // 上面三级都拿"最近 keepRecentTurns(6) 轮 ≈ 24 条"当保护窗，于是
@@ -240,7 +254,7 @@ class WindowRatioCompressor implements ContextCompressor {
     // （第三级的设计承诺是"压到强制线以下"，不是"压到 60%"）。
     if (usage >= fullLine && (!acted || _estimateUsage(state) >= fullLine)) {
       final estNow = _estimateUsage(state);
-      final scale = (usage > 0 && estNow > 0) ? usage / estNow : 1.0;
+      final scale = bias;
       final wantReal = (window * ContractCompression.autoRatio).floor();
       var needReal = usage - wantReal;
       if (needReal <= 0) needReal = usage - ((fullLine * 0.9).floor());
@@ -255,6 +269,35 @@ class WindowRatioCompressor implements ContextCompressor {
         onCompressed?.call(b3m, state.history.messages.length, b3t,
             _estimateUsage(state));
       }
+    }
+
+    // ---- 第五级：发送硬顶（2026-11-04 用户确认）----
+    // 压完再量一次：用**压缩前**测得的估算偏差 `bias` 把估算折回真实 token。
+    // 仍 ≥ 硬顶 ⇒ **不许发**。
+    //
+    // ⚠️ 必须用压缩前的 bias（`usage / estAtStart`）：压缩后用
+    // `usage / estAfter` 会把比例重新放大（est 变小 ⇒ 商变大 ⇒ 永远超顶）。
+    // 这是本节第一个版本的真实 bug，已被 ① 的用例当场逮住。
+    final estAfter = _estimateUsage(state);
+    // ★ 只有**可信的**上报值才配当偏差系数：上报值超过窗口 ⇒ 已被 `_decisionUsage`
+    //   封顶，那个 bias 是"为了不让决策失智"造出来的，不能反过来当真实比例用
+    //   （否则会把每一轮都判成"压不下来"，把好任务整死）。
+    final reported = _lastPromptTokens(state);
+    final reportedTrustworthy = reported > 0 && reported <= window;
+    final biasForCeiling = reportedTrustworthy ? bias : 1.0;
+    final approxRealAfter = (estAfter * (biasForCeiling < 1 ? 1.0 : biasForCeiling)).round();
+    final ceiling = (window * ContractCompression.sendCeilingRatio).floor();
+    if (approxRealAfter >= ceiling) {
+      throw AgentException(
+        AgentExceptionCode.unknown,
+        '上下文压不下来：清理后仍约 ${(approxRealAfter / 1000).toStringAsFixed(1)}K tokens，'
+            '超过本次允许发送的上限 ${(ceiling / 1000).toStringAsFixed(1)}K'
+            '（窗口 ${(window / 1000).toStringAsFixed(1)}K × '
+            '${(ContractCompression.sendCeilingRatio * 100).round()}%）。'
+            '这一轮**没有发出**，避免被网关静默截断历史后"莫名失忆"。'
+            '建议：新开会话继续、或把单步任务拆小；'
+            '若模型真实窗口比当前设置更大，请到「设置 → 模型」把上下文长度改对。',
+      );
     }
   }
 
@@ -428,6 +471,26 @@ class WindowRatioCompressor implements ContextCompressor {
       );
       return cutChars;
     }
+
+    // ★ 2026-11-04：**助手正文**同样可能是最大的一条（模型在回复里贴了整段代码/HTML）。
+    //   以前只截工具结果与用户消息 ⇒ 这种情况"无计可施"直接撞发送硬顶（e2e 抓到）。
+    //   截断时**保留 functionCalls**：那是调用配对，丢了会造成"有结果没请求"。
+    if (m is ModelMessage) {
+      final text = m.textOutput ?? '';
+      final keep = text.length ~/ 4;
+      final cutChars = text.length - keep;
+      if (cutChars <= 0) return null;
+      msgs[bestIndex] = ModelMessage(
+        model: m.model,
+        textOutput: '${text.substring(0, keep)}\n'
+            '…[已截断：原 ${text.length} 字符，只保留前 $keep 字符]',
+        thought: m.thought,
+        stopReason: m.stopReason,
+        functionCalls: m.functionCalls,
+        usage: m.usage,
+      );
+      return cutChars;
+    }
     return null;
   }
 
@@ -443,6 +506,107 @@ class WindowRatioCompressor implements ContextCompressor {
         totalTokenThreshold: 1,
         keepRecentMessageSize: keepMessageSize,
       );
+
+  /// **结构化摘要（2026-11-04，对齐 Anthropic compaction 的保留清单）**。
+  ///
+  /// ## 为什么不用框架的自由摘要
+  ///
+  /// 框架 `LLMBasedContextCompressor` 让模型自由写"要点"，实测有两个问题：
+  /// ① 它会**静默早退**（usages 为空 / 摘要为空 / XML 解析失败都 catch 掉）；
+  /// ② 保留什么都由模型临场决定 —— 容易漏掉"用户明确禁止动某个文件"这类硬约束。
+  ///
+  /// Anthropic 在 [Effective context engineering]（compaction 一节）明确说：
+  /// 保留**架构决策、未解决的 bug、实现细节**，丢弃**冗余工具输出**，
+  /// 并要求"先最大化 recall，再收紧 precision"。LLMLingua / RECOMP 那类
+  /// "压缩到 6%~5%" 是给**检索文档**用的，不适用于对话状态 —— 所以这里按
+  /// "结构化字段一个都不能少"来做，而不是追求极限压缩率。
+  ///
+  /// 返回 true = 真的替换了历史；false = 没做（调用方走 delegate 或强制重置）。
+  Future<bool> _structuredSummarize(AgentState state, int keepMessages) async {
+    final msgs = state.history.messages;
+    if (msgs.length <= keepMessages) return false;
+
+    var cut = msgs.length - keepMessages;
+    cut = _adjustCut(msgs, cut);
+    if (cut <= 0 || cut >= msgs.length) return false;
+
+    final head = msgs.sublist(0, cut);
+    final tail = msgs.sublist(cut);
+    final transcript = StringBuffer();
+    for (final m in head) {
+      final text = switch (m) {
+        UserMessage() => '[用户] ${_contentText(m.contents)}',
+        ModelMessage() =>
+          '[助手] ${(m.textOutput ?? '').trim()}'
+              '${m.functionCalls.isEmpty ? '' : '（调用：${m.functionCalls.map((c) => c.name).join(',')}）'}',
+        FunctionExecutionResultMessage() =>
+          '[工具结果] ${m.results.map((r) => _clipText(_contentText(r.content), 400)).join(' | ')}',
+        SystemMessage() => '[系统] ${_clipText(m.content, 400)}',
+        _ => '',
+      };
+      if (text.trim().isEmpty) continue;
+      transcript.writeln(_clipText(text, 1200));
+    }
+
+    String out;
+    try {
+      final resp = await client.generate(
+        [
+          SystemMessage(_structuredSummaryPrompt),
+          UserMessage.text(transcript.toString()),
+        ],
+        modelConfig: modelConfig,
+      );
+      out = (resp.textOutput ?? '').trim();
+    } catch (_) {
+      return false; // 网络/超时 ⇒ 交给上层 fallback
+    }
+    if (out.isEmpty) return false;
+
+    final note = UserMessage.text(
+      '[上下文压缩快照] 以下是更早对话的结构化摘要（原文已移除，可按需重新取证）：\n'
+      '$out\n'
+      '[说明] 上面的工具原始输出已被清理；需要细节请重新执行相应工具读取。'
+      '如果摘要与你的记忆有冲突，**以工作区文件的实际内容为准**。',
+    );
+    state.history.messages = <LLMMessage>[note, ...tail];
+    return true;
+  }
+
+  /// 结构化摘要的**保留清单**（一个字段都不许省）。
+  ///
+  /// 依据（见方法 KDoc）：Anthropic compaction 实践 + 真机踩过的坑 ——
+  /// 用户明确说过"文件写入 A，不要动 B"，这种硬约束一旦被摘要漏掉，
+  /// 模型就会去改 B，而用户完全不知道是压缩丢的。
+  static const String _structuredSummaryPrompt = '''
+你是上下文压缩器。把给出的对话历史压缩成结构化笔记，供同一个 agent 继续任务。
+
+【必须保留（一个都不能少）】
+1. goal：用户的任务目标（用用户自己的措辞概括）
+2. constraints：用户明确提出的硬约束与偏好（例如"文件写入 A，不要动 B"、"不要改权限"）
+3. decisions：已经做出的技术决策，以及**为什么**这么选
+4. files：已创建/修改的文件路径，以及每个文件改了什么要点
+5. open_issues：尚未解决的报错（保留关键报错原文一行）、失败的尝试及原因
+6. plan：当前进度 —— 哪些步骤已完成、下一步该做什么
+
+【可以丢弃】
+- 完整的工具原始输出（整份文件内容、长日志）—— 需要时可重新读取
+- 重复内容、寒暄、与目标无关的旁枝
+
+【输出格式】只输出下面六个标签块，不要任何额外解释：
+<goal>…</goal>
+<constraints>…</constraints>
+<decisions>…</decisions>
+<files>…</files>
+<open_issues>…</open_issues>
+<plan>…</plan>
+''';
+
+  /// 截断一段文本（摘要输入用，防止源文本本身把摘要请求撑爆）。
+  static String _clipText(String text, int max) {
+    final one = text.replaceAll(RegExp(r'\s+'), ' ').trim();
+    return one.length <= max ? one : '${one.substring(0, max)}…';
+  }
 
   /// **第一级：micro** —— 把保护窗之外的老工具结果换成占位符。
   ///
@@ -618,6 +782,38 @@ class WindowRatioCompressor implements ContextCompressor {
     return buf.toString();
   }
 
+  /// **把分项估算按"真实总量"等比放大**（2026-11-04，用户要求环图别自相矛盾）。
+  ///
+  /// ## 为什么需要
+  ///
+  /// 真机截图里同一屏出现两个口径：分项合计 ~20K，总量却是 `~104.0K / 128.0K`。
+  /// 总量是服务端真值（对），分项是字符估算（低估约 5 倍）。两个数并排，
+  /// 用户只会得出一个结论：**"这软件在骗我"**。
+  ///
+  /// 这里把分项按 `真实总量 / 估算合计` 等比放大，并**把舍入误差补到最大的一项**，
+  /// 保证 `sum(结果) == 真实总量` —— 屏幕上加起来必须对得上。
+  ///
+  /// 入参为空/真实值不可用时**原样返回**（不猜、不缩放）。
+  static Map<String, int> scaleToRealTotal(
+    Map<String, int> parts,
+    int realTotal,
+  ) {
+    if (parts.isEmpty || realTotal <= 0) return parts;
+    final estTotal = parts.values.fold<int>(0, (a, b) => a + b);
+    if (estTotal <= 0) return parts;
+    final factor = realTotal / estTotal;
+    final out = <String, int>{
+      for (final e in parts.entries) e.key: (e.value * factor).round(),
+    };
+    // 舍入误差补到"最大的一项"，保证总和精确等于 realTotal
+    final diff = realTotal - out.values.fold<int>(0, (a, b) => a + b);
+    if (diff != 0) {
+      final biggest = out.entries.reduce((a, b) => a.value >= b.value ? a : b);
+      out[biggest.key] = (biggest.value + diff) < 0 ? 0 : biggest.value + diff;
+    }
+    return out;
+  }
+
   /// **粗估**当前历史占多少 token。
   ///
   /// 为什么要自己估：框架的 `ModelUsage` 只反映**上一次请求**的用量，
@@ -643,9 +839,13 @@ class WindowRatioCompressor implements ContextCompressor {
   /// · 真值是**服务端数的**，做窗口判断必须以它为准（估算再准也只是估算）；
   /// · 估算覆盖"上一次请求之后新追加的消息"（真值还没反映它们）；
   /// · 取大值 = **宁可早压**（压早了只是多一次摘要；压晚了直接撞窗失败）。
-  int _decisionUsage(AgentState state) {
+  int _decisionUsage(AgentState state, {int? window}) {
     final est = _estimateUsage(state);
-    final real = _lastPromptTokens(state);
+    var real = _lastPromptTokens(state);
+    // ★ 2026-11-04：上报值**超过窗口** ⇒ 不可信（真实请求不可能发出去），
+    //   按窗口封顶。否则一个撒谎/错位的 usage 就能把决策推到"永远超线"，
+    //   进而触发发送硬顶、把好好的任务判死（e2e 用例当场逮到：999999 vs 20K 窗口）。
+    if (window != null && window > 0 && real > window) real = window;
     return real > est ? real : est;
   }
 

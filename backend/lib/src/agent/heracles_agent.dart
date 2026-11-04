@@ -702,7 +702,10 @@ class HeraclesAgent {
           break;
       }
     }
-    return <String, int>{
+    // ★ 2026-11-04：分项按**服务端真值**等比放大后再给 UI。
+    //   真机上"分项 20K / 总量 104K"并排出现，用户直接失去信任；
+    //   放大后 sum(分项) 精确等于真实总量（见 scaleToRealTotal 的 KDoc）。
+    final parts = <String, int>{
       'system': system,
       'toolDefs': WindowRatioCompressor.estimateToolDefinitions(st),
       'toolResults': toolResults,
@@ -711,6 +714,8 @@ class HeraclesAgent {
       'user': user,
       'summary': 0,
     };
+    final realPrompt = st.usages.isEmpty ? 0 : st.usages.last.promptTokens;
+    return WindowRatioCompressor.scaleToRealTotal(parts, realPrompt);
   }
 
   /// 构建全部工具（**33 个**）。

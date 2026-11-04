@@ -68,7 +68,7 @@ void main() {
     test('★★★ 多轮 + 大 usage ⇒ 触发压缩，并播 HeraclesContextCompressed', () async {
       // 40 轮回复（够多，保证消息数超过 keepRecentMessageSize=24）
       final client = scripted(finalReply: '这是一段足够长的正文内容。');
-      final agent = agentWith(client, windowTokens: 2000, maxTurns: 40);
+      final agent = agentWith(client, windowTokens: 20000, maxTurns: 40);
 
       final events = <HeraclesEvent>[];
       await for (final e in agent.run('开始一个长任务')) {
@@ -104,7 +104,7 @@ void main() {
   group('★★★ 压缩后任务继续（用户核心诉求）', () {
     test('★★★ 压缩发生后 run 仍正常结束（收到 HeraclesFinished）', () async {
       final client = scripted(finalReply: '继续工作。');
-      final agent = agentWith(client, windowTokens: 2000, maxTurns: 40);
+      final agent = agentWith(client, windowTokens: 20000, maxTurns: 40);
 
       final events = <HeraclesEvent>[];
       await for (final e in agent.run('跑一个会被压缩的长任务')) {
@@ -117,7 +117,8 @@ void main() {
 
       // ② run 正常结束（不是 HeraclesFailed）
       expect(events.whereType<HeraclesFailed>(), isEmpty,
-          reason: '压缩不该让 run 失败');
+          reason: '压缩不该让 run 失败，实际原因：'
+              '${events.whereType<HeraclesFailed>().map((e) => e.reason).join('；')}');
       expect(events.whereType<HeraclesFinished>(), hasLength(1),
           reason: '★ 压缩后任务必须能继续跑完 —— 这正是用户要的"哪怕跑到一半"');
     });
@@ -126,7 +127,7 @@ void main() {
       // 模型每轮都说这句明确的正文
       const realReply = '我已经把文件改好了，请查看。';
       final client = scripted(finalReply: realReply);
-      final agent = agentWith(client, windowTokens: 2000, maxTurns: 40);
+      final agent = agentWith(client, windowTokens: 20000, maxTurns: 40);
 
       final events = <HeraclesEvent>[];
       await for (final e in agent.run('改一下文件')) {
@@ -155,7 +156,7 @@ void main() {
     test('★★★ 压缩使 messages 短于 turnStartIndex 时，finalText 依然正确', () async {
       const realReply = '这是本轮的正确答案。';
       final client = scripted(finalReply: realReply);
-      final agent = agentWith(client, windowTokens: 2000, maxTurns: 40);
+      final agent = agentWith(client, windowTokens: 20000, maxTurns: 40);
 
       final events = <HeraclesEvent>[];
       await for (final e in agent.run('长任务')) {
@@ -182,7 +183,7 @@ void main() {
     test('★★ 压缩发生了不止一次也照样正确（反复截短）', () async {
       const realReply = '多次压缩后仍然正确。';
       final client = scripted(finalReply: realReply, toolRounds: 50);
-      final agent = agentWith(client, windowTokens: 1500, maxTurns: 60);
+      final agent = agentWith(client, windowTokens: 20000, maxTurns: 60);
 
       final events = <HeraclesEvent>[];
       await for (final e in agent.run('很长很长的任务')) {
