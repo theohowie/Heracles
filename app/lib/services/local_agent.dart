@@ -246,7 +246,8 @@ RunStopDecision? decideRunStop({
   // 已完成：不需要续跑。
   if (taskDone) return null;
   // token 预算：**硬预算优先**（"谁先到停谁"里 token 是不可协商的那条线）。
-  if (tokensSpent >= tokenLimit) {
+  // ★ 2026-11-05：`tokenLimit == 0` = 不限（用户要跑几十亿 token 的会话）
+  if (tokenLimit > 0 && tokensSpent >= tokenLimit) {
     return RunStopDecision(
       reason: 'token_budget',
       canContinue: policy != ContinuePolicy.off,
