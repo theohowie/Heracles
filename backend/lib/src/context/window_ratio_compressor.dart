@@ -271,33 +271,45 @@ class WindowRatioCompressor implements ContextCompressor {
       }
     }
 
-    // ---- 第五级：发送硬顶（2026-11-04 用户确认）----
-    // 压完再量一次：用**压缩前**测得的估算偏差 `bias` 把估算折回真实 token。
-    // 仍 ≥ 硬顶 ⇒ **不许发**。
+    // ---- 第五级：发送硬顶 → **继续压，不许停、不许报错**（2026-11-05 用户裁定）----
     //
-    // ⚠️ 必须用压缩前的 bias（`usage / estAtStart`）：压缩后用
-    // `usage / estAfter` 会把比例重新放大（est 变小 ⇒ 商变大 ⇒ 永远超顶）。
-    // 这是本节第一个版本的真实 bug，已被 ① 的用例当场逮住。
-    final estAfter = _estimateUsage(state);
-    // ★ 只有**可信的**上报值才配当偏差系数：上报值超过窗口 ⇒ 已被 `_decisionUsage`
-    //   封顶，那个 bias 是"为了不让决策失智"造出来的，不能反过来当真实比例用
-    //   （否则会把每一轮都判成"压不下来"，把好任务整死）。
+    // 用户原话：「90% 到达这个阈值，就是先压缩，不能报错，不能停下，就是调用
+    // 压缩工具，压缩完了再继续任务」。
+    //
+    // 所以这一级**不再是"抛错闸"**，而是"再压一轮"的**升级循环**：
+    // 每轮把目标收紧（50% → 30% → 15% 窗口），用 `_trimToFit` 继续清；
+    // 哪一轮已经动不了历史（没有可清/可丢/可截的）就说明这是**压缩的物理下限**，
+    // 此时**照常继续任务**（不再抛错），只把"压到多少了"如实播报。
+    //
+    // 为什么不抛错：抛错 = 这一轮白跑，而用户要的是"压完接着干"。
+    // 为什么不怕超限：缓存前缀/上下文都是我们自己的，压到下限后若仍超窗口，
+    // 那是**窗口设置本身错了**（或上游给的上限比设置小）——那种情况在设置页
+    // 把"上下文窗口"填对即可；代码不该替用户做"停任务"这个决定。
     final reported = _lastPromptTokens(state);
     final reportedTrustworthy = reported > 0 && reported <= window;
     final biasForCeiling = reportedTrustworthy ? bias : 1.0;
-    final approxRealAfter = (estAfter * (biasForCeiling < 1 ? 1.0 : biasForCeiling)).round();
     final ceiling = (window * ContractCompression.sendCeilingRatio).floor();
-    if (approxRealAfter >= ceiling) {
-      throw AgentException(
-        AgentExceptionCode.unknown,
-        '上下文压不下来：清理后仍约 ${(approxRealAfter / 1000).toStringAsFixed(1)}K tokens，'
-            '超过本次允许发送的上限 ${(ceiling / 1000).toStringAsFixed(1)}K'
-            '（窗口 ${(window / 1000).toStringAsFixed(1)}K × '
-            '${(ContractCompression.sendCeilingRatio * 100).round()}%）。'
-            '这一轮**没有发出**，避免被网关静默截断历史后"莫名失忆"。'
-            '建议：新开会话继续、或把单步任务拆小；'
-            '若模型真实窗口比当前设置更大，请到「设置 → 模型」把上下文长度改对。',
+
+    int approxReal() {
+      final est = _estimateUsage(state);
+      return (est * (biasForCeiling < 1 ? 1.0 : biasForCeiling)).round();
+    }
+
+    // 升级目标：50% → 30% → 15%（估算口径 = 真实目标 / bias）
+    for (final ratio in const <double>[0.50, 0.30, 0.15]) {
+      if (approxReal() < ceiling) break;
+      final targetReal = (window * ratio).floor();
+      final targetEstimate =
+          (targetReal / (biasForCeiling < 1 ? 1.0 : biasForCeiling)).floor();
+      final bm = state.history.messages.length;
+      final bt = _estimateUsage(state);
+      final acted2 = _trimToFit(
+        state,
+        targetEstimateTokens: targetEstimate < 1 ? 1 : targetEstimate,
       );
+      if (!acted2) break; // 已经压到物理下限
+      onCompressed?.call(bm, state.history.messages.length, bt,
+          _estimateUsage(state));
     }
   }
 

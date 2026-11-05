@@ -126,22 +126,31 @@ class _ContextPage extends StatelessWidget {
 
   final ContextUsage contextUsage;
 
+  /// 分项的**展示顺序与名称**（2026-11-05 用户指定：按这张图来）。
+  ///
+  /// 顺序依据"越稳定越靠前"：系统提示词/工具定义是每轮字节不变的常驻开销，
+  /// 中间是注入类（注入内容/技能注入），最后才是随对话增长的（消息/工具结果）。
+  /// 这样一眼能看出"是常驻开销吃掉窗口，还是对话本身太长"。
   static const _keyOrder = [
-    'system',
+    'systemPrompt',
     'toolDefs',
-    'toolResults',
-    'reasoning',
-    'assistant',
     'user',
-    'summary',
+    'injected',
+    'skills',
+    'toolResults',
+    'assistant',
   ];
   static const _keyLabels = {
-    'system': '系统提示',
+    'systemPrompt': '系统提示词',
     'toolDefs': '工具定义',
-    'toolResults': '工具结果',
-    'reasoning': '思考',
-    'assistant': '助手回复',
     'user': '用户消息',
+    'injected': '注入内容',
+    'skills': '技能注入',
+    'toolResults': '工具结果',
+    'assistant': '助手消息',
+    // 旧键（老后端仍可能只发这些）—— 留着，避免显示错位
+    'system': '系统提示',
+    'reasoning': '思考',
     'summary': '历史摘要',
   };
 
@@ -248,8 +257,16 @@ class _ContextPage extends StatelessWidget {
           const SizedBox(height: 20),
           if (hasBreakdown) ...[
             for (final s in segments)
-              _kv(h, s.label, '~${formatTokensCompact(s.value.round())}',
-                  swatch: s.color),
+              // 2026-11-05 用户要求"占比"一眼可见 ⇒ 行尾补百分比（分母 = 窗口上限）
+              _kv(
+                h,
+                s.label,
+                limit > 0
+                    ? '~${formatTokensCompact(s.value.round())}  '
+                        '${(s.value / limit * 100).toStringAsFixed(0)}%'
+                    : '~${formatTokensCompact(s.value.round())}',
+                swatch: s.color,
+              ),
           ] else ...[
             _kv(h, '冻结内容', '~${formatTokensCompact(contextUsage.frozenTokens)}',
                 swatch: h.text),

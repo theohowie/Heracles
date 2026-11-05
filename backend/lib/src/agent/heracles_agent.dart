@@ -683,9 +683,35 @@ class HeraclesAgent {
   Map<String, int> contextBreakdown() {
     final st = _state;
     if (st == null) return const <String, int>{};
-    var system = 0;
-    for (final p in _buildSystemPrompts()) {
-      system += WindowRatioCompressor.estimateText(p);
+
+    // ★ 2026-11-05（用户要求按"系统提示词 / 工具定义 / 用户消息 / 注入内容 /
+    //   技能注入 / 工具结果 / 助手消息"拆）：把原先笼统的 `system` 拆成三段 ——
+    //   · 系统提示词 = `defaultSystemPrompt`（人设与环境，字节稳定）
+    //   · 注入内容   = 宿主追加提示 + 长期记忆（每轮可能变）
+    //   · 技能注入   = 技能系统提示（框架拼进 system 的那一段，单独计量）
+    //   三段口径互斥，加起来仍等于原来的 system 总量（不重复计数）。
+    final prompts = _buildSystemPrompts();
+    final systemPrompt = prompts.isEmpty
+        ? 0
+        : WindowRatioCompressor.estimateText(prompts.first);
+    var injected = 0;
+    for (var i = 1; i < prompts.length; i++) {
+      injected += WindowRatioCompressor.estimateText(prompts[i]);
+    }
+    var skills = 0;
+    try {
+      final part = buildSkillSystemPrompt(
+        st,
+        _options.enableSkills
+            ? <Skill>[
+                ...builtinSkills(),
+                for (final s in _options.userSkills) s.toFrameworkSkill(),
+              ]
+            : null,
+      );
+      if (part != null) skills = WindowRatioCompressor.estimateText(part.content);
+    } catch (_) {
+      skills = 0; // 计量失败不影响主功能（分项少一块，不编数）
     }
     var user = 0;
     var assistant = 0;
@@ -706,12 +732,17 @@ class HeraclesAgent {
     //   真机上"分项 20K / 总量 104K"并排出现，用户直接失去信任；
     //   放大后 sum(分项) 精确等于真实总量（见 scaleToRealTotal 的 KDoc）。
     final parts = <String, int>{
-      'system': system,
+      // 新七类（2026-11-05，用户指定的口径与顺序）
+      'systemPrompt': systemPrompt,
       'toolDefs': WindowRatioCompressor.estimateToolDefinitions(st),
-      'toolResults': toolResults,
-      'reasoning': 0,
-      'assistant': assistant,
       'user': user,
+      'injected': injected,
+      'skills': skills,
+      'toolResults': toolResults,
+      'assistant': assistant,
+      // 兼容旧键（老前端可能还在读；值恒 0 或与旧口径一致，绝不重复计数）
+      'system': systemPrompt + injected + skills,
+      'reasoning': 0,
       'summary': 0,
     };
     final realPrompt = st.usages.isEmpty ? 0 : st.usages.last.promptTokens;

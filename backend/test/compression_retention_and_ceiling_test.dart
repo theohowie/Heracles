@@ -166,24 +166,36 @@ void main() {
     expect(notified, greaterThanOrEqualTo(1));
   });
 
-  test('④ 压完仍 ≥90% ⇒ 抛可见异常（不许硬发）', () async {
-    // 窗口极小 + 单条巨大：摘要不可用（只有 1 条），截断只留 1/4 仍超硬顶。
+  // ---- ④ 到 90% 不许报错、不许停：继续压，压到下限就照常继续（2026-11-05 用户裁定）----
+  test('④ 压不下来时**不抛错**，而是继续把历史压到物理下限', () async {
     final client = _FailingSummaryClient();
     final state = AgentState(
       sessionId: 's4',
       history: AgentMessageHistory(messages: [
-        // 40000 字符 ⇒ 截断后仍约 10K > 90% × 10K = 9K ⇒ 必须报错而不是硬发
-        UserMessage.text('字' * 40000),
+        UserMessage.text('前面的对话' * 500),
+        UserMessage.text('字' * 40000), // 单条巨大：截断后仍超 90%
       ]),
     );
+    final before = state.history.messages.length;
+    var notified = 0;
 
-    await expectLater(
-      _c(client, window: 10000).compress(state),
-      throwsA(isA<AgentException>()),
-      reason: '★ 用户确认：压不下来就明确失败，绝不把注定超限的请求发出去',
-    );
+    // ★ 关键：不能抛（抛 = 这一轮白跑，用户明确要求"压完接着干"）
+    await _c(client, window: 10000,
+            onCompressed: (_, __, ___, ____) => notified++)
+        .compress(state);
+
+    expect(notified, greaterThanOrEqualTo(1),
+        reason: '必须真的动手压缩，而不是什么都不做');
+    expect(state.history.messages.length, lessThanOrEqualTo(before),
+        reason: '压缩只会让历史更短/更小，不许反而变长');
+    // 巨量用户消息应被截断（保留头部 + 明确说明）
+    final joined = state.history.messages
+        .whereType<UserMessage>()
+        .map((m) => (m.contents.first as TextPart).text)
+        .join('\n');
+    expect(joined, contains('已截断'),
+        reason: '单条超长必须截断并写明原长度，而不是整轮失败');
   });
-
   // ---- ⑤ 分项与总量必须对得上（用户："这个环形图不是真实占比"）----
   group('⑤ 分项按真实总量等比放大', () {
     test('放大后各分项之和精确等于真实总量', () {

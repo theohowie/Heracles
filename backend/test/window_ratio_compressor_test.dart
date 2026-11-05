@@ -520,22 +520,38 @@ void main() {
       );
       await agent.run('问一句').drain<void>();
       final b = agent.contextBreakdown();
-      // N2 契约：固定 7 键，只许新增不许改名
+      // ★ 2026-11-05 新口径（用户指定按"系统提示词/工具定义/用户消息/注入内容/
+      //   技能注入/工具结果/助手消息"拆）：七类必须是主角，旧键只作兼容别名。
       expect(b.keys, containsAll([
-        'system', 'toolDefs', 'toolResults', 'reasoning', 'assistant', 'user', 'summary',
+        'systemPrompt', 'toolDefs', 'user', 'injected', 'skills',
+        'toolResults', 'assistant',
       ]));
-      expect(b['system']!, greaterThan(0), reason: 'system 提示必有');
-      expect(b['user']!, greaterThan(0), reason: '本轮请求在历史里');
-      expect(b['user']!, greaterThan(0), reason: '本轮请求在历史里');
+      // 兼容别名仍在（老前端不炸）
+      expect(b.keys, containsAll(['system', 'reasoning', 'summary']));
+
+      expect(b['systemPrompt']!, greaterThan(0), reason: '人设与环境必有');
       expect(b['toolDefs']!, greaterThan(0),
-          reason: '发过请求就有工具面快照（21 个工具定义是常驻开销）');
-      // Σ ≈ 旧三块口径（system + toolDefs + 消息）—— 口径没变，只是拆细了
-      final total = b.values.reduce((a, c) => a + c);
-      expect(total,
+          reason: '发过请求就有工具面快照（常驻开销）');
+      expect(b['user']!, greaterThan(0), reason: '本轮请求在历史里');
+      // 技能注入：本用例没开技能 ⇒ 0（不许凭空编一个数）
+      expect(b['skills'], 0);
+
+      // ① 别名不重复计数：system == 三段之和
+      expect(b['system'], b['systemPrompt']! + b['injected']! + b['skills']!);
+
+      // ② 七类之和 == 旧口径总账（同一套估算器，±0）
+      final seven = b['systemPrompt']! +
+          b['toolDefs']! +
+          b['user']! +
+          b['injected']! +
+          b['skills']! +
+          b['toolResults']! +
+          b['assistant']!;
+      expect(seven,
           WindowRatioCompressor.estimateMessagesUsage(agent.state!) +
               WindowRatioCompressor.estimateToolDefinitions(agent.state!) +
               b['system']!,
-          reason: '七键之和必须对得上总账（±0，同一套估算器）');
+          reason: '七类之和必须对得上总账（拆细≠重复计数）');
     });
   });
 }
