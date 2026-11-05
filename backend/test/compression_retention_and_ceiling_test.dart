@@ -196,6 +196,39 @@ void main() {
     expect(joined, contains('已截断'),
         reason: '单条超长必须截断并写明原长度，而不是整轮失败');
   });
+  // ---- ⑥ 不许无限 micro：连续 3 次 micro 后必须升级到结构化摘要 ----
+  //
+  // 用户 2026-11-05 质疑：「你这样做的话，那上下文永远不会到 80% 的阈值对吗？」
+  // 真机日志证实过这个形态：usage 长期贴在 40% 线（52–54K / 128K），
+  // 每轮 micro 清一点、永远不升级 ⇒ 模型反复丢工具结果，用户以为没压缩过。
+  test('⑥ 连续 3 次 micro 仍压不到 60% ⇒ 强制升级到结构化摘要', () async {
+    final client = _StructuredClient();
+    final c = _c(client, window: 10000); // micro 4000 / auto 6000 / 强制 8500
+
+    // 18000 字符的用户正文 ≈ 4500 估算 token —— 正落在 micro 档（4000~6000），
+    // 且**清不动**（micro 只清工具输出），正是真机"贴在 40% 上"的形态。
+    final state = AgentState(
+      sessionId: 's6',
+      // 31 条消息（> keepRecentTurns×4=24，否则摘要会因"条数不够"直接拒做）
+      history: AgentMessageHistory(messages: [
+        UserMessage.text('a' * 18000),
+        for (var i = 0; i < 30; i++) UserMessage.text('hi $i'),
+      ]),
+    );
+
+    for (var round = 0; round < 4; round++) {
+      await c.compress(state);
+    }
+
+    expect(client.seen, isNotEmpty,
+        reason: '★ 只会无限 micro ⇒ 上下文永远贴在 40%，永远到不了 60%/80%');
+    final joined = state.history.messages
+        .whereType<UserMessage>()
+        .map((m) => (m.contents.first as TextPart).text)
+        .join('\n');
+    expect(joined, contains('[上下文压缩快照]'),
+        reason: '升级后应留下结构化摘要，而不是只有占位符');
+  });
   // ---- ⑤ 分项与总量必须对得上（用户："这个环形图不是真实占比"）----
   group('⑤ 分项按真实总量等比放大', () {
     test('放大后各分项之和精确等于真实总量', () {

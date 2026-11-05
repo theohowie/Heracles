@@ -182,11 +182,23 @@ class WindowRatioCompressor implements ContextCompressor {
         'msgs=${state.history.messages.length}');
 
     // ---- 第一级：micro（≥40% 且 <60%）----
-    if (usage < autoLine) {
+    //
+    // ★ 2026-11-05（用户质疑"这样永远到不了 80%"）：**不许无限 micro**。
+    //
+    // micro 只能把**工具输出**换成占位符，清不动正文；如果上下文长期稳在 40%
+    // 那条线上，就会变成"每轮都清一次老工具输出、永远不升级"——
+    // 代价是模型反复失去工具结果（要么重读文件、要么凭记忆瞎改），
+    // 而用户看到的是"压缩好像从没发生"。
+    // 所以累计 micro 达到 [ContractCompression.microEscalateAfter] 次 ⇒
+    // **主动升级到结构化摘要**（哪怕还没到 60%），把老历史真正收进摘要。
+    if (usage < autoLine && _microStreak < ContractCompression.microEscalateAfter) {
       final beforeMessages = state.history.messages.length;
       final beforeTokens = usage;
+      // ★ 计数口径：**只要这一轮处在 micro 档就算一次**，不要求真清出东西 ——
+      //   真机卡点恰恰是"每轮都清不出东西 ⇒ 永远不升级"。
+      _microStreak++;
       final freed = _microCompact(state);
-      // 没有可清的（老消息里没有大工具结果）⇒ 不播事件，也不算压缩过。
+      // 没有可清的（老消息里没有大工具结果）⇒ 不播事件，但计数照走。
       if (freed <= 0) return;
       onCompressed?.call(
         beforeMessages,
@@ -528,6 +540,12 @@ class WindowRatioCompressor implements ContextCompressor {
         keepRecentMessageSize: keepMessageSize,
       );
 
+  /// **连续 micro 计数**（2026-11-05）：到 `microEscalateAfter` 次就升级到摘要。
+  ///
+  /// 为什么需要它：micro 只清工具输出、清不动正文 ⇒ 上下文会长期贴在 40% 线上，
+  /// 每轮清一点、永远不升级。用户实测就是这个形态（usage 一直 52–54K / 128K），
+  /// 他会以为"压缩从没发生"，而模型却在反复丢失工具结果。
+  int _microStreak = 0;
   /// **结构化摘要（2026-11-04，对齐 Anthropic compaction 的保留清单）**。
   ///
   /// ## 为什么不用框架的自由摘要
