@@ -261,11 +261,11 @@ void main() {
 
       final agentA = agentWithMemory(withMemory, memory: memory);
       await runToEnd(agentA, '问');
-      final sysWith = agentA.contextBreakdown()['system']!;
+      final sysWith = _systemTotal(agentA.contextBreakdown());
 
       final agentB = agentWith(without, memoryNote: null);
       await runToEnd(agentB, '问');
-      final sysWithout = agentB.contextBreakdown()['system']!;
+      final sysWithout = _systemTotal(agentB.contextBreakdown());
 
       expect(sysWith, greaterThan(sysWithout),
           reason: '★ 记忆段是从 _buildSystemPrompts 产出的同一批片段 —— '
@@ -373,3 +373,8 @@ class _ScriptedClient implements LLMClient {
     ]);
   }
 }
+
+/// 系统侧总量 = 系统提示词 + 注入内容 + 技能注入（2026-11-05 拆成三类后不再有
+/// 单一 `system` 键；这个 helper 让旧断言继续表达"系统侧总共多少"）。
+int _systemTotal(Map<String, int> b) =>
+    (b['systemPrompt'] ?? 0) + (b['injected'] ?? 0) + (b['skills'] ?? 0);

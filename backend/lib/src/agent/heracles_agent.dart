@@ -740,8 +740,9 @@ class HeraclesAgent {
       'skills': skills,
       'toolResults': toolResults,
       'assistant': assistant,
-      // 兼容旧键（老前端可能还在读；值恒 0 或与旧口径一致，绝不重复计数）
-      'system': systemPrompt + injected + skills,
+      // ⚠️ 2026-11-05：**不再发旧别名 system**。前端会把"不在七类里的键"
+      //    合并成「其他」⇒ 屏上出现「系统提示词 2.6K + 其他 2.9K」的**重复计数**
+      //    （真机 12:43 抓到）。新前端只认上面七类。
       'reasoning': 0,
       'summary': 0,
     };
@@ -2796,6 +2797,24 @@ String describeFailureMessage(String raw) {
   final s = raw.trim();
   if (s.isEmpty) return '后端没有给出失败原因（空消息）';
   final lower = s.toLowerCase();
+
+  // ---- 0) 余额不足（402）—— 必须说人话并给出充值入口、且**绝不重试** ----
+  //
+  // 真机 2026-11-05：上游回 402 `INSUFFICIENT_BALANCE`（"账户余额不足"），
+  // 我们把原始 JSON 糊在界面上，用户完全不知道"这是没充钱"；更糟的是客户端
+  // 还把它当普通网络错误重试 3 次 ⇒ 发出去了却什么都不发生。
+  // 这类错误在 client 层已被拦住不再重试，文案在这里指向充值地址。
+  if (lower.contains('insufficient_balance') ||
+      lower.contains('insufficient balance') ||
+      lower.contains('payment required') ||
+      s.contains('余额不足')) {
+    final url = RegExp(r'https?://[^"\s)]+').firstMatch(s)?.group(0);
+    return '账户余额不足：模型服务拒绝了这次请求（HTTP 402）。'
+        '${url == null ? '' : '充值地址：$url ；'}'
+        // ⚠️ 文案里刻意**不出现「网络」二字**：前端 humanize 会据此把原因改写成
+        //    「网络连接失败」（真踩过：402 被说成没网）。
+        '充值后重发即可 —— 与断网无关，充值到账后重发这条消息就行。';
+  }
 
   // ---- 1) 超时（最常见：推理模型在大上下文上想太久）----
   if (lower.contains('longer than') ||

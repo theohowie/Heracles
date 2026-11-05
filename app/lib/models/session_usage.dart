@@ -323,7 +323,25 @@ class ContextUsage {
   /// 上限算错会让压缩过早触发（丢上下文），所以来源必须可见。
   final String limitSource;
 
-  int get used => frozenTokens + conversationTokens;
+  /// **已用 token**（单一真源，2026-11-05 修）。
+  ///
+  /// ## 为什么改成"分项之和优先"
+  ///
+  /// 真机 12:43 的抽屉：分项合计 ≈16.5K，中心却写「0%」、底部写「~242 / 131.1K」。
+  /// 原因：`used = frozenTokens + conversationTokens`，而 `frozenTokens` 是
+  /// "首轮 promptTokens"（本次请求失败时根本没拿到）⇒ 242 这种残值。
+  /// **同一屏两个口径打架，用户只会认为数字是假的。**
+  ///
+  /// 现在：有分项（后端 `context_updated` 给的七类）就以**分项之和**为准；
+  /// 没有分项才退回旧的 frozen+conversation。两者互斥，绝不叠加。
+  int get used {
+    final b = breakdown;
+    if (b != null && b.isNotEmpty) {
+      final sum = b.values.fold<int>(0, (a, v) => a + v);
+      if (sum > 0) return sum;
+    }
+    return frozenTokens + conversationTokens;
+  }
 
   /// 已用比例；`null` = 上限未知（不画进度条，而不是画个假的满格）
   double? get ratio {

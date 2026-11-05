@@ -117,6 +117,10 @@ class OpenAIClient extends LLMClient {
       } on DioException catch (e) {
         // Cancel is terminal; retrying it just waits out the backoff.
         if (isLlmRequestCancelled(e)) rethrow;
+        // ★ 2026-11-05：不可重试的 4xx（402/404/…）直接抛 —— 重试只会白等
+        final st = e.response?.statusCode;
+        final retryable = st == null || st == 408 || st == 429 || st >= 500;
+        if (!retryable) rethrow;
         if (retryCount < maxRetries) {
           await waitForRetry('DioException: ${e.message}');
           continue;
@@ -244,7 +248,13 @@ class OpenAIClient extends LLMClient {
             controller.close();
             break;
           }
-          if (retryCount < maxRetries) {
+          // ★ 2026-11-05：**不可重试的 4xx 不重试**（402 余额不足 / 404 模型不存在…）。
+          //   真机实测：402 被重试 3 次、每次立即失败 ⇒ 用户看到"发出去了却什么都
+          //   不发生"，而 App 在满负荷空转（CPU 73%×88s 就是这么烧的）。
+          final status = e.response?.statusCode;
+          final retryableStatus =
+              status == null || status == 408 || status == 429 || status >= 500;
+          if (retryableStatus && retryCount < maxRetries) {
             await waitForRetry('DioException: ${e.message}');
             controller.add(
               StreamingMessage(

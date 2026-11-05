@@ -83,6 +83,18 @@ void main() {
     expect(clipped, endsWith('…'));
   });
 
+  test('⑦b 余额不足（402）⇒ 说人话 + 给充值地址 + 不许说成网络问题', () {
+    final text = describeFailureMessage(
+      'Exception: Failed to stream from OpenAI: 402 Payment Required '
+      '{"code":"INSUFFICIENT_BALANCE","message":"账户余额不足，请充值后重试。'
+      '充值地址：https://tokenrhythm.studio/account/recharge"}',
+    );
+    expect(text, contains('余额不足'));
+    expect(text, contains('402'));
+    expect(text, contains('tokenrhythm.studio'));
+    expect(text, isNot(contains('网络')));
+    expect(text, isNot(contains('超时')));
+  });
   test('⑦ 空消息 ⇒ 明说没给原因（不冒充"网络失败"）', () {
     final text = describeFailureMessage('   ');
     expect(text, contains('没有给出失败原因'));

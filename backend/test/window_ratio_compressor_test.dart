@@ -526,8 +526,10 @@ void main() {
         'systemPrompt', 'toolDefs', 'user', 'injected', 'skills',
         'toolResults', 'assistant',
       ]));
-      // 兼容别名仍在（老前端不炸）
-      expect(b.keys, containsAll(['system', 'reasoning', 'summary']));
+      // ★ 2026-11-05：**旧别名 system 已删除**（它会被前端合并成「其他」⇒ 重复计数）
+      expect(b.containsKey('system'), isFalse,
+          reason: 'system 别名会让屏上出现「系统提示词 + 其他」两份，必须不发');
+      expect(b.keys, containsAll(['reasoning', 'summary']));
 
       expect(b['systemPrompt']!, greaterThan(0), reason: '人设与环境必有');
       expect(b['toolDefs']!, greaterThan(0),
@@ -536,8 +538,10 @@ void main() {
       // 技能注入：本用例没开技能 ⇒ 0（不许凭空编一个数）
       expect(b['skills'], 0);
 
-      // ① 别名不重复计数：system == 三段之和
-      expect(b['system'], b['systemPrompt']! + b['injected']! + b['skills']!);
+      // ① 七类互斥：systemPrompt 只含基础人设，不含注入/技能
+      expect(b['systemPrompt']!, lessThan(
+          WindowRatioCompressor.estimateText(defaultSystemPrompt(const Capabilities())) + 500),
+          reason: 'systemPrompt 若把注入/技能也算进来就是重复计数');
 
       // ② 七类之和 == 旧口径总账（同一套估算器，±0）
       final seven = b['systemPrompt']! +
@@ -550,7 +554,9 @@ void main() {
       expect(seven,
           WindowRatioCompressor.estimateMessagesUsage(agent.state!) +
               WindowRatioCompressor.estimateToolDefinitions(agent.state!) +
-              b['system']!,
+              b['systemPrompt']! +
+              b['injected']! +
+              b['skills']!,
           reason: '七类之和必须对得上总账（拆细≠重复计数）');
     });
   });
