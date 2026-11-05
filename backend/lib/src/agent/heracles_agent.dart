@@ -1931,11 +1931,11 @@ class HeraclesAgent {
   String _describeException(Exception e) {
     if (e is AgentException) {
       return switch (e.code) {
-        AgentExceptionCode.loopDetection =>
-          '检测到循环：模型把**完全相同的调用**连续重复了多次'
-              '（${_clipForFailure(e.message, 120)}）。'
-              '任务已停止以避免空转；如果任务还没做完，请把需求拆成更小的步骤再试。'
-              '注意：在同一个文件上连续做**不同**的编辑属于正常推进，不会触发这条。',
+        // ★ 2026-11-05 修：**轮次用尽 ≠ 死循环**。两者都复用 `loopDetection` 这个
+        //   异常码（框架只有 5 个码），但话术必须分开 —— 真机上用户看到
+        //   「检测到循环：完全相同的调用连续重复」而实际是 `Maximum turns reached (40)`，
+        //   完全误导（他没在循环，只是任务太大/每轮固定开销太高）。
+        AgentExceptionCode.loopDetection => describeLoopFailure(e.message),
         AgentExceptionCode.cancelled => '任务已取消。',
         AgentExceptionCode.stopByController => '任务被停止规则拦截。',
         AgentExceptionCode.resumeFailed => '无法恢复上次中断的任务：${e.message}',
@@ -2793,6 +2793,33 @@ class FailureStopClassification {
 ///
 /// ⚠️ 纪律：**不吞原始信息**（兜底分支原样给出，截断到 200 字），
 /// 但也不把英文原串塞进"已归类"的分支里 —— 那会让 UI 的关键词表再次误判。
+/// 这条 `loopDetection` 异常是不是「轮次用尽」（而不是真的死循环）？
+///
+/// 框架把两种完全不同的终止都塞进 `AgentExceptionCode.loopDetection`：
+/// · `Maximum turns reached (40)` —— 轮次用尽（任务太大 / 每轮固定开销太高）；
+/// · `Tool call loop detected…` —— 真的在重复同一个调用。
+/// 话术必须分开：真机 2026-11-05 用户看到「检测到循环：完全相同的调用连续重复」，
+/// 而实际是轮次用尽 —— 完全误导（他没在循环，只是任务太大）。
+/// **`loopDetection` 两种终止的人话**（纯函数，可测）。
+///
+/// 拆出来是为了能单测：话术必须区分"轮次用尽"和"真的死循环"。
+String describeLoopFailure(String message) {
+  if (_isTurnsExhausted(message)) {
+    return '轮次用尽：这一轮跑满了设定的最大轮次（原始信息：'
+        '${_clipForFailure(message, 80)}）。'
+        '常见原因是任务太大、或每轮固定开销（系统提示 + 工具定义）吃掉了额度 —— '
+        '可以：把任务拆成更小的步骤、在设置里提高「最大轮次」，或换更省 token 的做法。';
+  }
+  return '检测到循环：模型把**完全相同的调用**连续重复了多次'
+      '（${_clipForFailure(message, 120)}）。'
+      '任务已停止以避免空转；如果任务还没做完，请把需求拆成更小的步骤再试。'
+      '注意：在同一个文件上连续做**不同**的编辑属于正常推进，不会触发这条。';
+}
+bool _isTurnsExhausted(String message) {
+  final m = message.toLowerCase();
+  return m.contains('maximum turns') || message.contains('轮次');
+}
+
 String describeFailureMessage(String raw) {
   final s = raw.trim();
   if (s.isEmpty) return '后端没有给出失败原因（空消息）';

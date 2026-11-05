@@ -83,6 +83,17 @@ void main() {
     expect(clipped, endsWith('…'));
   });
 
+  test('⑦c 轮次用尽 ≠ 死循环：话术必须分开', () {
+    // 框架把两种终止都塞进 loopDetection 异常码；真机上用户看到"完全相同的调用
+    // 连续重复"，而实际是 Maximum turns reached(40) —— 完全误导。
+    final turns = describeLoopFailure('Maximum turns reached (40). Possible infinite loop.');
+    expect(turns, contains('轮次用尽'));
+    expect(turns, isNot(contains('完全相同的调用')));
+
+    final real = describeLoopFailure('Tool call loop detected: Same tool called 6 times.');
+    expect(real, contains('完全相同的调用'));
+    expect(real, isNot(contains('轮次用尽')));
+  });
   test('⑦b 余额不足（402）⇒ 说人话 + 给充值地址 + 不许说成网络问题', () {
     final text = describeFailureMessage(
       'Exception: Failed to stream from OpenAI: 402 Payment Required '
