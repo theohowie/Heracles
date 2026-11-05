@@ -87,14 +87,15 @@ void main() {
   });
 
   group('ContinuePolicy 默认值', () {
-    test('④ 默认 off；auto 默认 3 轮；token 上限 200 万', () {
+    test('④ 默认 off；auto 默认 3 轮；token 预算已取消（0 = 不限）', () {
       const o = RunOptions();
       expect(o.continuePolicy, ContinuePolicy.off,
           reason: '★ 库默认必须与旧行为一致（跑一轮就停），不能悄悄开续跑');
       expect(o.maxRounds, ContractRunContinue.autoMaxRounds);
       expect(o.tokenLimit, ContractRunContinue.runTokenLimit);
       expect(ContractRunContinue.autoMaxRounds, 3);
-      expect(ContractRunContinue.runTokenLimit, 2000000);
+      expect(ContractRunContinue.runTokenLimit, 0,
+          reason: '2026-11-05 用户裁定：token 预算取消（0 = 不限）');
       expect(ContractRunContinue.noProgressRounds, 2);
       expect(ContractRunContinue.checkpointRole, 'run_checkpoint');
       // 恢复默认空 Map ⇒ 不恢复（旧行为）

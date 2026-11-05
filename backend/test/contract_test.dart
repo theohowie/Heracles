@@ -22,12 +22,12 @@ import 'package:test/test.dart';
 /// **改这些数字 = 改产品契约**，必须先有新的实测数据。
 void main() {
   group('ContractAgent — 编排预算（ADR-033）', () {
-    test('★★★ maxTurns = 40（20 轮不够、60 轮以上必然打转）', () {
-      expect(ContractAgent.maxTurns, 40);
+    test('★★★ maxTurns 已取消上限（2026-11-05 用户裁定：无限制）', () {
+      expect(ContractAgent.maxTurns, greaterThanOrEqualTo(1000000000));
     });
 
-    test('★★★ maxToolCalls = 200（真实逆向任务 120 上下 + 60% 余量）', () {
-      expect(ContractAgent.maxToolCalls, 200);
+    test('★★★ maxToolCalls 已取消上限（用户裁定：无限制）', () {
+      expect(ContractAgent.maxToolCalls, greaterThanOrEqualTo(1000000));
     });
   });
 
