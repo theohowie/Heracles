@@ -49,7 +49,18 @@ class WindowRatioCompressor implements ContextCompressor {
     this.keepRecentTurns = ContractCompression.keepRecentTurns,
     ContextCompressor? delegateImpl,
     this.onCompressed,
+    this.enableMicro = true,
   }) : _delegateImpl = delegateImpl; // ignore: prefer_initializing_formals
+
+  /// 是否启用「微压缩」(micro)。**生产默认关闭**（2026-11-05 用户裁定）。
+  ///
+  /// micro 把历史中段的老工具输出换成占位符 ⇒ 那之后的 token 前缀全部失效，
+  /// 下一轮必须重新 prefill。而它在 40% 线上会**每轮触发**（真机 usage 长期贴 40%），
+  /// 结果把缓存命中率压在 40%~48%，远低于前缀稳定时的 80%+。
+  /// 用户把高缓存命中率当招牌 ⇒ 取舍反过来：宁可上下文大一点，也不许每轮改写历史；
+  /// 真要压时用一次性结构化摘要（60% 线），压完前缀重新稳定。
+  /// 保留开关是为了单测仍能验证 micro 行为。
+  final bool enableMicro;
 
   /// 用来做摘要的 client。
   ///
@@ -191,7 +202,9 @@ class WindowRatioCompressor implements ContextCompressor {
     // 而用户看到的是"压缩好像从没发生"。
     // 所以累计 micro 达到 [ContractCompression.microEscalateAfter] 次 ⇒
     // **主动升级到结构化摘要**（哪怕还没到 60%），把老历史真正收进摘要。
-    if (usage < autoLine && _microStreak < ContractCompression.microEscalateAfter) {
+    if (enableMicro &&
+        usage < autoLine &&
+        _microStreak < ContractCompression.microEscalateAfter) {
       final beforeMessages = state.history.messages.length;
       final beforeTokens = usage;
       // ★ 计数口径：**只要这一轮处在 micro 档就算一次**，不要求真清出东西 ——

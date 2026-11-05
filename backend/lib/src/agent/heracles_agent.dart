@@ -1270,6 +1270,10 @@ class HeraclesAgent {
     // 所以这里不用再判断一次 —— 别在两处判同一件事，将来会分叉。
     final summarizerClient = _config.summarizerModel == null ? null : _buildClient();
     final compressor = WindowRatioCompressor(
+      // ★ 2026-11-05：生产**关掉 micro** —— 它每轮改写历史中段，直接把缓存命中率打穿
+      //   （用户招牌指标：命中率要 80%+，而 micro 让它掉到 40% 左右）。
+      //   压缩改由「60% 结构化摘要」一次性完成，压完前缀重新稳定。
+      enableMicro: false,
       client: summarizerClient ?? client,
       modelConfig: _modelConfig(model: _config.summarizerModel),
       modelWindowTokens: _config.modelWindowTokens,
