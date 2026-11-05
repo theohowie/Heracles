@@ -354,6 +354,7 @@ class ModelProviderConfig {
     this.modelCatalog = const [],
     this.protocol = ProviderProtocol.openaiChat,
     this.contextLength = 0,
+    this.maxOutputTokens = 0,
     this.modelCapabilities = const {},
   });
 
@@ -417,6 +418,12 @@ class ModelProviderConfig {
   ///（本地 4096 / 云端 128K）。
   final int contextLength;
 
+  /// **单轮最大输出 token 数**（2026-11-05 用户要求可配）。`0` = 用契约默认（16384）。
+  ///
+  /// 为什么必须可配：不同上游对同一模型的输出上限不同（有的 32K、有的只给 8K），
+  /// 而我们的 max_completion_tokens 一旦超过上游限制，整轮会被拒或静默截断。
+  final int maxOutputTokens;
+
   /// **模型能力缓存**（2026-10-14，第三版修复）。
   ///
   /// `模型 id → 能力`（上下文长度、输出上限、是否支持工具/思考…）。
@@ -463,6 +470,7 @@ class ModelProviderConfig {
     bool? isDefault,
     List<String>? modelCatalog,
     ProviderProtocol? protocol,
+    int? maxOutputTokens,
     int? contextLength,
     Map<String, ModelCapability>? modelCapabilities,
   }) =>
@@ -478,6 +486,7 @@ class ModelProviderConfig {
         modelCatalog: modelCatalog ?? this.modelCatalog,
         protocol: protocol ?? this.protocol,
         contextLength: contextLength ?? this.contextLength,
+        maxOutputTokens: maxOutputTokens ?? this.maxOutputTokens,
         modelCapabilities: modelCapabilities ?? this.modelCapabilities,
       );
 
@@ -504,6 +513,7 @@ class ModelProviderConfig {
         'modelCatalog': modelCatalog,
         'protocol': protocol.name,
         'contextLength': contextLength,
+        'maxOutputTokens': maxOutputTokens,
         'modelCapabilities': {
           for (final e in modelCapabilities.entries) e.key: e.value.toJson(),
         },
@@ -520,6 +530,7 @@ class ModelProviderConfig {
         isOfficialAccount: j['isOfficialAccount'] as bool? ?? false,
         protocol: ProviderProtocol.parse(j['protocol'] as String?),
         contextLength: (j['contextLength'] as num?)?.toInt() ?? 0,
+        maxOutputTokens: (j['maxOutputTokens'] as num?)?.toInt() ?? 0,
         modelCapabilities: (j['modelCapabilities'] as Map?)?.map(
               (k, v) => MapEntry(
                 k as String,

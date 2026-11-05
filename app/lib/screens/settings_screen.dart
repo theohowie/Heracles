@@ -21,6 +21,7 @@ import '../theme/elastic_switch.dart';
 import '../theme/stretch_segmented.dart';
 import '../theme/theme_reveal.dart';
 import '../data/open_source_licenses.dart';
+import '../widgets/model_catalog_row.dart';
 import '../widgets/bw_approval.dart';
 import '../widgets/background_keepalive_card.dart';
 // 技能 / MCP / 自动化三页的入口已移到主页抽屉（2026-11-02 用户裁定），
@@ -3072,6 +3073,15 @@ class _ProviderEditPageState extends State<ProviderEditPage> {
   /// ★ 初值必须来自 [widget.provider.modelCatalog]（2026-10-14
   ///   真机 bug：原来写死 `const []` —— 每次进编辑页目录都空，
   ///   保存后把已存的目录**覆盖回空**，用户"保存了但目录里不显示"）。
+  /// **单轮最大输出 token**（2026-11-05 用户要求可配，留空 = 契约默认 16384）。
+  late final TextEditingController _maxOut = TextEditingController(
+    text: widget.provider.maxOutputTokens > 0
+        ? widget.provider.maxOutputTokens.toString()
+        : '',
+  );
+
+  /// 哪一行模型展开了「窗口 / 输出上限」面板（null = 都收起）。
+  String? _expandedModel;
   late List<String> _modelCatalog = [...widget.provider.modelCatalog];
 
   /// 拉取中（右上角轻量转圈）
@@ -3193,6 +3203,8 @@ class _ProviderEditPageState extends State<ProviderEditPage> {
       protocol: _protocol,
       // ★ 上下文长度（2026-10-14）：留空 → 0（用后端默认）
       contextLength: int.tryParse(_contextLength.text.trim()) ?? 0,
+      // ★ 2026-11-05：单轮输出上限也随 provider 保存（留空 = 0 = 契约默认）
+      maxOutputTokens: int.tryParse(_maxOut.text.trim()) ?? 0,
       // ★ 模型能力（2026-10-14 第三版）：从服务端拉到的一并持久化，
       //   否则 App 重启后又退回兜底值（用户实测抓到的 bug）
       modelCapabilities: _modelCapabilities,
@@ -3397,6 +3409,23 @@ class _ProviderEditPageState extends State<ProviderEditPage> {
             children: [
               Text('模型目录', style: TextStyle(fontSize: 13, color: h.textDim)),
               const Spacer(),
+              // ★ 2026-11-05 用户要求：与「获取可用模型」同样的文字按钮样式，
+              //   点一下把目录清空（没有"默认模型"清单，就不假装有 —— 直接清空，
+              //   目录外的 ID 仍可手填直发）。
+              IosTap(
+                onTap: _loadingModels
+                    ? null
+                    : () => setState(() {
+                          _modelCatalog = <String>[];
+                          _expandedModel = null;
+                          _modelsError = null;
+                        }),
+                child: Padding(
+                  padding: const EdgeInsets.symmetric(horizontal: HSpace.xs),
+                  child: Text('恢复默认模型',
+                      style: TextStyle(fontSize: 12, color: h.textDim)),
+                ),
+              ),
               IosTap(
                 onTap: _loadingModels ? null : _fetchModels,
                 child: Padding(
@@ -3446,32 +3475,17 @@ class _ProviderEditPageState extends State<ProviderEditPage> {
                   //   选中的会作为实际发送用的 model（对照参考图：
                   //   「选择基元律动来当模型用是可以点进去选择模型的」）
                   for (final id in _modelCatalog)
-                    CupertinoListTile(
-                      padding: const EdgeInsets.symmetric(
-                          horizontal: 14, vertical: 6),
-                      title: Text(id,
-                          style: TextStyle(
-                              fontSize: 13,
-                              fontFamily: kMonoFontFamily,
-                              fontFamilyFallback: kMonoFallback,
-                              // 选中的高亮
-                              color: id == _model.text ? h.accent : h.text,
-                              fontWeight: id == _model.text
-                                  ? FontWeight.w600
-                                  : FontWeight.w400)),
-                      // 选中态对勾
-                      trailing: id == _model.text
-                          ? Icon(AppIcons.check, size: 17, color: h.accent)
-                          : CupertinoButton(
-                              padding: const EdgeInsets.all(6),
-                              minimumSize: const Size(0, 28),
-                              onPressed: () => setState(() =>
-                                  _modelCatalog =
-                                      [..._modelCatalog]..remove(id)),
-                              child: Icon(AppIcons.trash,
-                                  size: 18, color: h.textFaint),
-                            ),
-                      onTap: () => setState(() => _model.text = id),
+                    ModelCatalogRow(
+                      id: id,
+                      selected: id == _model.text,
+                      expanded: _expandedModel == id,
+                      contextLength: _contextLength,
+                      maxOutput: _maxOut,
+                      onSelect: () => setState(() => _model.text = id),
+                      onToggleExpand: () => setState(() =>
+                          _expandedModel = _expandedModel == id ? null : id),
+                      onRemove: () => setState(() =>
+                          _modelCatalog = [..._modelCatalog]..remove(id)),
                     ),
                 ],
               ),

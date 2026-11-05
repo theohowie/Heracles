@@ -1006,6 +1006,10 @@ class LocalAgentExecutor {
       //   provider 无关概念 → 框架 extra → OpenAI 轨的 reasoning_effort。
       //   auto 不下发（旧行为）；Anthropic/Responses 轨暂不生效（框架不读）。
       reasoningEffort: settings.reasoningLevel.reasoningEffort,
+      // ★ 2026-11-05：单轮输出上限可配（上游对同一模型的限额不同；填 0 = 用契约默认）
+      maxOutputTokens: provider.maxOutputTokens > 0
+          ? provider.maxOutputTokens
+          : ContractModel.maxOutputTokens,
       provider: switch (provider.protocol) {
         ProviderProtocol.anthropic => BackendProvider.anthropic,
         ProviderProtocol.openaiResponses => BackendProvider.openAiResponses,
