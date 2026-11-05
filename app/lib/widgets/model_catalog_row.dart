@@ -26,6 +26,8 @@ class ModelCatalogRow extends StatelessWidget {
     required this.onSelect,
     required this.onToggleExpand,
     required this.onRemove,
+    this.contextPlaceholder = '128K',
+    this.maxOutputPlaceholder = '16K',
   });
 
   final String id;
@@ -36,6 +38,10 @@ class ModelCatalogRow extends StatelessWidget {
   final VoidCallback onSelect;
   final VoidCallback onToggleExpand;
   final VoidCallback onRemove;
+
+  /// 占位提示 = **默认/已获取的值**（用户要求：输入框自己展示填好的默认值）。
+  final String contextPlaceholder;
+  final String maxOutputPlaceholder;
 
   @override
   Widget build(BuildContext context) {
@@ -100,12 +106,14 @@ class ModelCatalogRow extends StatelessWidget {
                       child: _num(
                         h,
                         contextLength,
-                        '上下文窗口（如 1000000）',
+                        '上下文窗口，如 1M / 128K / 131072'
+                            '（默认 $contextPlaceholder）',
                       ),
                     ),
                     const SizedBox(width: HSpace.sm),
                     Expanded(
-                      child: _num(h, maxOutput, '最大输出 token（如 32000）'),
+                      child: _num(h, maxOutput,
+                          '最大输出，如 32K / 32768（默认 $maxOutputPlaceholder）'),
                     ),
                   ],
                 ),

@@ -21,6 +21,7 @@ import '../theme/elastic_switch.dart';
 import '../theme/stretch_segmented.dart';
 import '../theme/theme_reveal.dart';
 import '../data/open_source_licenses.dart';
+import '../models/token_count.dart';
 import '../widgets/model_catalog_row.dart';
 import '../widgets/bw_approval.dart';
 import '../widgets/background_keepalive_card.dart';
@@ -3202,9 +3203,10 @@ class _ProviderEditPageState extends State<ProviderEditPage> {
       // ★ API 协议（2026-10-14）：决定 AgentBridge 分派到哪个 provider
       protocol: _protocol,
       // ★ 上下文长度（2026-10-14）：留空 → 0（用后端默认）
-      contextLength: int.tryParse(_contextLength.text.trim()) ?? 0,
+      // ★ 2026-11-05：允许单位（1M / 128K / 32K / 纯数字）；非法或留空 ⇒ 0（未设置）
+      contextLength: parseTokenCount(_contextLength.text) ?? 0,
       // ★ 2026-11-05：单轮输出上限也随 provider 保存（留空 = 0 = 契约默认）
-      maxOutputTokens: int.tryParse(_maxOut.text.trim()) ?? 0,
+      maxOutputTokens: parseTokenCount(_maxOut.text) ?? 0,
       // ★ 模型能力（2026-10-14 第三版）：从服务端拉到的一并持久化，
       //   否则 App 重启后又退回兜底值（用户实测抓到的 bug）
       modelCapabilities: _modelCapabilities,
@@ -3486,6 +3488,16 @@ class _ProviderEditPageState extends State<ProviderEditPage> {
                           _expandedModel = _expandedModel == id ? null : id),
                       onRemove: () => setState(() =>
                           _modelCatalog = [..._modelCatalog]..remove(id)),
+                      // 占位 = 已获取/已设置的值（用户要求：输入框自己展示默认值）
+                      contextPlaceholder:
+                          widget.provider.effectiveContextWindow > 0
+                              ? formatTokenCount(
+                                  widget.provider.effectiveContextWindow)
+                              : '128K',
+                      maxOutputPlaceholder:
+                          widget.provider.maxOutputTokens > 0
+                              ? formatTokenCount(widget.provider.maxOutputTokens)
+                              : '16K',
                     ),
                 ],
               ),
