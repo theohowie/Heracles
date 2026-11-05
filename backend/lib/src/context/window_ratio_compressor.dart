@@ -172,6 +172,15 @@ class WindowRatioCompressor implements ContextCompressor {
     // ---- 没到第一级 ⇒ 什么都不做（装得下就全装）----
     if (usage < microLine) return;
 
+    // ★ 2026-11-05 排障：压缩到底有没有被触发、用的是哪套口径。
+    //   只在"到了 micro 线以上"时打一行，避免每轮刷屏；debug 包看 logcat。
+    //   （真机上用户报「60% 却没看到压缩」，这一行能直接给出答案：
+    //    是 usage 没到线、还是到了线但各级都没动历史。）
+    // ignore: avoid_print
+    print('[compress] usage=$usage est=$estAtStart bias=${bias.toStringAsFixed(2)} '
+        'window=$window micro=$microLine auto=$autoLine full=$fullLine '
+        'msgs=${state.history.messages.length}');
+
     // ---- 第一级：micro（≥40% 且 <60%）----
     if (usage < autoLine) {
       final beforeMessages = state.history.messages.length;

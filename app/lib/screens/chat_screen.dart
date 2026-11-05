@@ -53,10 +53,7 @@ import '../widgets/tool_call_card.dart'
         friendlyToolName,
         kStepRowArrowGap,
         kStepRowArrowSize,
-        kStepRowHPad,
-        kStepRowStatusGap,
-        kStepRowStatusSize,
-        kStepRowVPad;
+        kStepRowHPad;
 import '../widgets/workspace_drawer.dart';
 
 /// 会话主屏 —— 默认首屏（`06-UI界面设计.md` §6.1）。
@@ -3392,6 +3389,8 @@ class _ChatScreenState extends State<ChatScreen> {
         setState(() {
           _compressedNotes.add(_ContextCompressedNote(
             anchor: _messages.length,
+            beforeMessages: e.beforeMessages,
+            afterMessages: e.afterMessages,
             beforeTokens: e.beforeTokens,
             afterTokens: e.afterTokens,
           ));
@@ -5975,61 +5974,74 @@ class _ChatScreenState extends State<ChatScreen> {
   /// + 状态槽（`kStepRowStatusSize` + `kStepRowStatusGap`）+ 文字。
   /// 本行不需要展开（没有箭头），所以先用**空白**占掉箭头槽，小图标放进状态槽
   /// ⇒ 文字起点与分析行完全一致。
+  /// **「上下文已压缩」—— 按*工具卡*的样式展示**（2026-11-05 用户要求）。
+  ///
+  /// 用户原话：「压缩需要像工具一样展示，它可以像一个工具」。
+  /// 之前是一行淡色小字，用户在自己跑任务时**根本看不出压缩有没有发生**。
+  ///
+  /// 现在的信息层级（与工具卡一致）：
+  /// · 头行：图标 + 「压缩上下文」 + 右侧 `条数 前→后`
+  /// · 正文行：`tokens 前 → 后`（估算值，带 `~`），并说明"任务继续"
+  ///
+  /// ⚠️ 不做"一定变少"的假设：摘要本身也占 token，`after` 可能更大。
   Widget _contextCompressedRow(Hue h, _ContextCompressedNote note) {
+    final bm = note.beforeMessages;
+    final am = note.afterMessages;
+    final bt = note.beforeTokens;
+    final at = note.afterTokens;
+    final countText = (bm != null && am != null) ? '$bm → $am 条' : '';
+    final tokenText = (bt != null && at != null && bt > 0 && at > 0)
+        ? '~${formatTokensCompact(bt)} → ~${formatTokensCompact(at)}'
+        : '';
+
     return Padding(
       padding: const EdgeInsets.symmetric(
-          horizontal: kStepRowHPad, vertical: kStepRowVPad),
-      child: Row(
-        children: [
-          // 占掉箭头槽 —— 本行不可展开，但文字必须与分析行对齐
-          const SizedBox(width: kStepRowArrowSize + kStepRowArrowGap),
-          SizedBox(
-            width: kStepRowStatusSize,
-            height: kStepRowStatusSize,
-            child: Icon(
-              // 图标语义 = "老历史被收起来了"。AppIcons 里没有压缩/归档类图标，
-              // 按项目规则直接用 `CupertinoIcons`（名字已核对 SDK：`archivebox`）。
-              CupertinoIcons.archivebox,
-              size: kStepRowStatusSize,
-              color: h.textFaint,
-            ),
-          ),
-          const SizedBox(width: kStepRowStatusGap),
-          Expanded(
-            child: FittedBox(
-              fit: BoxFit.scaleDown,
-              alignment: Alignment.centerLeft,
-              child: Text(
-                _compressedText(note),
-                maxLines: 1,
-                style: TextStyle(
-                  fontSize: 12,
-                  height: 1.3,
-                  color: h.textDim,
-                ),
+          horizontal: kStepRowHPad, vertical: 4),
+      child: Container(
+        padding: const EdgeInsets.fromLTRB(12, 10, 12, 10),
+        decoration: BoxDecoration(
+          border: Border.all(color: h.border),
+          borderRadius: BorderRadius.circular(HRadius.sm),
+        ),
+        child: Row(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Icon(CupertinoIcons.archivebox,
+                size: 17, color: h.textDim),
+            const SizedBox(width: 8),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Row(
+                    children: [
+                      Text('压缩上下文',
+                          style: TextStyle(
+                              fontSize: 13.5,
+                              fontWeight: FontWeight.w600,
+                              color: h.text)),
+                      const Spacer(),
+                      if (countText.isNotEmpty)
+                        Text(countText,
+                            style: TextStyle(
+                                fontSize: 12, color: h.textFaint)),
+                    ],
+                  ),
+                  const SizedBox(height: 3),
+                  Text(
+                    [
+                      if (tokenText.isNotEmpty) tokenText,
+                      '老内容已收进摘要，任务继续',
+                    ].join(' · '),
+                    style: TextStyle(fontSize: 12, color: h.textDim),
+                  ),
+                ],
               ),
             ),
-          ),
-        ],
+          ],
+        ),
       ),
     );
-  }
-
-  /// 压缩提示文案：**有 token 数字就带上，缺失/为 0 就降级成不带数字**。
-  ///
-  /// 数字用现成的 [formatTokensCompact]（`models/session_usage.dart`）——
-  /// 不另写一套格式化：两套迟早漂移（本仓库的老教训）。
-  ///
-  /// ⚠️ `afterTokens` **可能 ≥ `beforeTokens`**（摘要文本本身也占 token），
-  /// 这是就事论事的展示，不做"一定变少"的假设（见事件字段 KDoc）。
-  String _compressedText(_ContextCompressedNote note) {
-    final before = note.beforeTokens;
-    final after = note.afterTokens;
-    if (before != null && after != null && before > 0 && after > 0) {
-      return '上下文已达 80%，已压缩历史'
-          '（${formatTokensCompact(before)} → ${formatTokensCompact(after)} tokens），任务继续';
-    }
-    return '上下文已达 80%，已压缩历史，任务继续';
   }
 
   /// **ask_user 弹窗**（2026-10-16 引入；**2026-10-21 改为选项式多题**）。
@@ -7616,6 +7628,8 @@ class _ContextCompressedNote {
     required this.anchor,
     required this.beforeTokens,
     required this.afterTokens,
+    this.beforeMessages,
+    this.afterMessages,
   });
 
   /// 插在 `_messages` 第 [anchor] 条**之前**（= 事件到达时消息列表的长度）。
@@ -7626,6 +7640,11 @@ class _ContextCompressedNote {
   /// ⚠️ 可能 `after >= before`（摘要本身占 token），展示时不做"一定变少"的假设。
   final int? beforeTokens;
   final int? afterTokens;
+
+  /// 压缩前后的**消息条数**（2026-11-05：用户要求压缩像工具一样展示，
+  /// 卡片里要能一眼看到"多少条被收起来了"）。null = 老后端没带。
+  final int? beforeMessages;
+  final int? afterMessages;
 }
 
 /// 「上下文已压缩」提示行（显示行的第三种）。渲染见
