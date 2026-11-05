@@ -50,7 +50,15 @@ class WindowRatioCompressor implements ContextCompressor {
     ContextCompressor? delegateImpl,
     this.onCompressed,
     this.enableMicro = true,
+    this.summarizeAtRatio = ContractCompression.autoRatio,
   }) : _delegateImpl = delegateImpl; // ignore: prefer_initializing_formals
+
+  /// **唯一**的摘要触发线（2026-11-05 用户裁定：单阈值、一次性）。
+  ///
+  /// 生产侧传 0.85 —— 到线才压一次，压完前缀重新稳定，避免"小压缩不断改写历史"
+  /// 把缓存命中率打穿（真机实测：micro + 60% 摘要让命中率只有 40% 多）。
+  /// 库默认仍是契约的 0.60，单测行为不变。
+  final double summarizeAtRatio;
 
   /// 是否启用「微压缩」(micro)。**生产默认关闭**（2026-11-05 用户裁定）。
   ///
@@ -172,7 +180,7 @@ class WindowRatioCompressor implements ContextCompressor {
     final window = modelWindowTokens;
     final usage = _decisionUsage(state, window: window);
     final fullLine = (window * compressAtRatio).floor();
-    final autoLine = (window * ContractCompression.autoRatio).floor();
+    final autoLine = (window * summarizeAtRatio).floor();
     final microLine = (window * ContractCompression.microRatio).floor();
 
     /// **估算偏差**：真实上报 / 字符估算。用于把"要腾多少真实 token"

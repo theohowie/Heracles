@@ -1274,6 +1274,9 @@ class HeraclesAgent {
       //   （用户招牌指标：命中率要 80%+，而 micro 让它掉到 40% 左右）。
       //   压缩改由「60% 结构化摘要」一次性完成，压完前缀重新稳定。
       enableMicro: false,
+      // ★ 2026-11-05：**单阈值** —— 到 85% 才做一次结构化摘要（不再 60% 提前压）。
+      //   用户要的是"到线压一次"，不是"一路小压缩"，后者既砸缓存又白耗性能。
+      summarizeAtRatio: ContractCompression.compressAtRatio,
       client: summarizerClient ?? client,
       modelConfig: _modelConfig(model: _config.summarizerModel),
       modelWindowTokens: _config.modelWindowTokens,
