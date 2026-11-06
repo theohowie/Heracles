@@ -210,6 +210,16 @@ class AgentBridge {
     if (e.type == AgentEvent.kContextUpdated && lim != null && lim > 0) {
       _rememberContextLimit(lim, e.limitSource);
     }
+    // ★ 2026-11-06：记住"上一次真实输入 token"（= 分项之和，后端按真值等比放大过）。
+    //   为什么必须记：新一轮开始时 backend 的 `state.usages` 是空的，压缩决策只能
+    //   退回字符估算（低估 2.5~3.5 倍）⇒ 真机出现"上下文 122%、压缩从不触发"。
+    if (e.type == AgentEvent.kContextUpdated) {
+      final bd = e.breakdown;
+      if (bd != null && bd.isNotEmpty) {
+        final sum = bd.values.fold<int>(0, (a, v) => a + v);
+        if (sum > 0) _rememberPromptTokens(sum);
+      }
+    }
     if (!_localEvents.isClosed) _localEvents.add(e);
   }
 
@@ -253,6 +263,30 @@ class AgentBridge {
   /// 存 `SharedPreferences`：阈值是**用户偏好**，跨重启要还在。
   /// 读不到 = 用 backend 契约默认（`ContractCompaction.autoCompactThreshold`）。
   static const String _autoCompactKey = 'heracles.autocompact_threshold';
+
+  /// 上一次真实输入 token 的**同步缓存**（`local_agent` 在非 async 处读它）。
+  static int knownPromptTokens = 0;
+  static const String _knownPromptKey = 'heracles.last_prompt_tokens';
+
+  static void _rememberPromptTokens(int v) {
+    if (v <= 0) return;
+    knownPromptTokens = v;
+    unawaited(() async {
+      try {
+        final p = await SharedPreferences.getInstance();
+        await p.setInt(_knownPromptKey, v);
+      } catch (_) {}
+    }());
+  }
+
+  /// 从 prefs 刷新缓存（run 开始时调一次）。
+  static Future<void> refreshKnownPromptTokens() async {
+    try {
+      final p = await SharedPreferences.getInstance();
+      final v = p.getInt(_knownPromptKey) ?? 0;
+      if (v > 0) knownPromptTokens = v;
+    } catch (_) {}
+  }
 
   /// /autocompact 的**同步缓存**（local_agent 在非 async 处读它）。
   static double? autoCompactOverride;
@@ -897,6 +931,11 @@ class AgentBridge {
     String treeUri = '',
     List<HAttachment> attachments = const [],
   }) async {
+    // 2026-11-06: refresh cached knobs before building the executor.
+    // They are read synchronously elsewhere, and a stale 0 makes the
+    // compaction decision blind to the real prompt size.
+    await refreshAutoCompactOverride();
+    await refreshKnownPromptTokens();
     final provider = settings.effectiveProvider;
 
     // ★★ 未配置 provider ⇒ **就地明确失败**（2026-10-18，ADR-035 S4）★★

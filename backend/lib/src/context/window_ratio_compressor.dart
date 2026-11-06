@@ -761,6 +761,9 @@ class WindowRatioCompressor implements ContextCompressor, CompactionFallback {
   int _decisionUsage(AgentState state, {int? window}) {
     final est = _estimateUsage(state);
     var real = _lastPromptTokens(state);
+    // ★ 2026-11-06：新一轮开始时 `usages` 为空 ⇒ 用宿主带来的上次真值兜底。
+    //   没有这一条，真机出现"上下文 122%、压缩从不触发"（真值不在 state 里）。
+    if (real <= 0) real = effectiveConfig.knownPromptTokens;
     // 上报值**超过窗口** ⇒ 不可信（真实请求不可能发出去），按窗口封顶。
     if (window != null && window > 0 && real > window) real = window;
     return real > est ? real : est;

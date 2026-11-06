@@ -29,6 +29,7 @@ class CompactionConfig {
     this.sessionMemoryEnabled = ContractCompaction.sessionMemoryEnabled,
     this.progressiveLayersEnabled = ContractCompaction.progressiveLayersEnabled,
     this.metricsEnabled = ContractCompaction.metricsEnabled,
+    this.knownPromptTokens = 0,
   });
 
   /// 上下文窗口（token）。压缩线 = `contextWindow × autoCompactThreshold`。
@@ -61,6 +62,14 @@ class CompactionConfig {
   /// 是否留存压缩事件（不影响压缩行为本身）。
   final bool metricsEnabled;
 
+  /// **宿主带来的"上一次真实输入 token"**（0 = 不知道）。
+  ///
+  /// 为什么必须有：新一轮开始时框架的 `state.usages` 是**空的**，
+  /// 压缩决策只能退回字符估算（实测低估 2.5~3.5 倍）⇒ 真机出现
+  /// "上下文已经 122%、压缩却从不触发"。宿主把上次真值（持久化过）带进来，
+  /// 决策才看得见现实。
+  final int knownPromptTokens;
+
   /// 触发线（token）：`floor(contextWindow × autoCompactThreshold)`。
   int get autoCompactLine =>
       (contextWindow * autoCompactThreshold).floor();
@@ -80,6 +89,7 @@ class CompactionConfig {
     bool? sessionMemoryEnabled,
     bool? progressiveLayersEnabled,
     bool? metricsEnabled,
+    int? knownPromptTokens,
   }) {
     return CompactionConfig(
       contextWindow: contextWindow ?? this.contextWindow,
@@ -96,6 +106,7 @@ class CompactionConfig {
       progressiveLayersEnabled:
           progressiveLayersEnabled ?? this.progressiveLayersEnabled,
       metricsEnabled: metricsEnabled ?? this.metricsEnabled,
+      knownPromptTokens: knownPromptTokens ?? this.knownPromptTokens,
     );
   }
 
