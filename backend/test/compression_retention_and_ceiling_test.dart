@@ -100,11 +100,22 @@ class _FailingSummaryClient implements LLMClient {
 List<LLMMessage> _manyTurns(int n) =>
     [for (var i = 0; i < n; i++) UserMessage.text('字' * 90)];
 
-WindowRatioCompressor _c(LLMClient client, {int window = 10000, void Function(int,int,int,int)? onCompressed}) =>
+/// 造一个压缩器。
+///
+/// ⚠️ **默认关掉 Session Memory**（2026-11-06）：本文件的用例锁的都是
+/// **API 结构化摘要**那条路径（保留清单 / 快照落地 / 失败回退）。
+/// 阶段 2（本地记忆）默认开启时会把这类纯文本历史直接收进摘要视图、
+/// **零 API** 搞定 —— 那是设计意图（省钱），但会让这里的"摘要请求"断言空转。
+/// 所以显式关掉，让用例继续测它本来要测的那条路。
+WindowRatioCompressor _c(LLMClient client,
+        {int window = 10000,
+        void Function(int, int, int, int)? onCompressed,
+        bool sessionMemory = false}) =>
     WindowRatioCompressor(
       client: client,
       modelConfig: ModelConfig(model: 'stub'),
       modelWindowTokens: window,
+      compactionConfig: CompactionConfig(sessionMemoryEnabled: sessionMemory),
       onCompressed: onCompressed,
     );
 
@@ -196,38 +207,47 @@ void main() {
     expect(joined, contains('已截断'),
         reason: '单条超长必须截断并写明原长度，而不是整轮失败');
   });
-  // ---- ⑥ 不许无限 micro：连续 3 次 micro 后必须升级到结构化摘要 ----
+  // ---- ⑥ 单阈值 + 一次性：**同一份历史重复压缩不许反复改写** ----
   //
-  // 用户 2026-11-05 质疑：「你这样做的话，那上下文永远不会到 80% 的阈值对吗？」
-  // 真机日志证实过这个形态：usage 长期贴在 40% 线（52–54K / 128K），
-  // 每轮 micro 清一点、永远不升级 ⇒ 模型反复丢工具结果，用户以为没压缩过。
-  test('⑥ 连续 3 次 micro 仍压不到 60% ⇒ 强制升级到结构化摘要', () async {
+  // 这条替换了旧的"连续 3 次 micro 后强制升级"用例 —— 那个行为（micro 每轮跑、
+  // 卡在 40% 线上）已被用户删除：真机实测它把缓存命中率压到 40%~48%。
+  // 新契约：**压过一次之后，占用必须真的降下来；再调用 compress 什么都不做**
+  //（否则每轮改写历史前缀 = 缓存灾难）。
+  test('⑥ 压过一次后占用真降；同一份历史再调 compress 不许再改（缓存保护）', () async {
     final client = _StructuredClient();
-    final c = _c(client, window: 10000); // micro 4000 / auto 6000 / 强制 8500
+    final c = _c(client, window: 10000); // 触发线 8500
 
-    // 18000 字符的用户正文 ≈ 4500 估算 token —— 正落在 micro 档（4000~6000），
-    // 且**清不动**（micro 只清工具输出），正是真机"贴在 40% 上"的形态。
+    // 96 条 × 90 token ≈ 8640 ≥ 8500 ⇒ 必触发
     final state = AgentState(
       sessionId: 's6',
-      // 31 条消息（> keepRecentTurns×4=24，否则摘要会因"条数不够"直接拒做）
-      history: AgentMessageHistory(messages: [
-        UserMessage.text('a' * 18000),
-        for (var i = 0; i < 30; i++) UserMessage.text('hi $i'),
-      ]),
+      history: AgentMessageHistory(messages: _manyTurns(96)),
     );
 
-    for (var round = 0; round < 4; round++) {
+    await c.compress(state);
+
+    final afterFirst = c.estimateUsage(state);
+    expect(afterFirst, lessThan(8500),
+        reason: '★ 压过之后必须真的低于触发线（否则下一轮立刻又压，缓存白丢）');
+    expect(client.seen, isNotEmpty, reason: '该走 API 摘要的时候要走');
+    final messagesAfterFirst = List<LLMMessage>.of(state.history.messages);
+
+    // 再调 3 次：历史必须**一个字节都不变**，且不许再发一次摘要请求
+    final callsAfterFirst = client.seen.length;
+    for (var round = 0; round < 3; round++) {
       await c.compress(state);
     }
 
-    expect(client.seen, isNotEmpty,
-        reason: '★ 只会无限 micro ⇒ 上下文永远贴在 40%，永远到不了 60%/80%');
-    final joined = state.history.messages
-        .whereType<UserMessage>()
-        .map((m) => (m.contents.first as TextPart).text)
-        .join('\n');
-    expect(joined, contains('[上下文压缩快照]'),
-        reason: '升级后应留下结构化摘要，而不是只有占位符');
+    expect(state.history.messages.length, messagesAfterFirst.length,
+        reason: '★★ 已经低于触发线 ⇒ 后续 compress 必须零副作用');
+    for (var i = 0; i < messagesAfterFirst.length; i++) {
+      expect(
+        WindowRatioCompressor.estimateMessageTokens(state.history.messages[i]),
+        WindowRatioCompressor.estimateMessageTokens(messagesAfterFirst[i]),
+        reason: '★★ 第 $i 条被改写了 —— 前缀缓存会全废',
+      );
+    }
+    expect(client.seen.length, callsAfterFirst,
+        reason: '★★ 低于触发线时一次摘要调用都不许再发（花钱 + 改写历史）');
   });
   // ---- ⑤ 分项与总量必须对得上（用户："这个环形图不是真实占比"）----
   group('⑤ 分项按真实总量等比放大', () {

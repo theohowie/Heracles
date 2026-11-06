@@ -43,6 +43,10 @@ import 'package:dio/dio.dart';
 
 import '../capability/capabilities.dart';
 import '../contract/contract.dart';
+import '../context/compaction/compaction_config.dart';
+import '../context/compaction/compaction_event.dart';
+import '../context/compaction/send_view.dart';
+import '../context/compaction/session_memory.dart';
 import '../context/memory_context.dart';
 import '../context/window_ratio_compressor.dart';
 import '../prompt/memory_prompt.dart';
@@ -170,6 +174,7 @@ class RunOptions {
     this.tokenLimit = ContractRunContinue.runTokenLimit,
     this.resumeFromCheckpoint = const <String, Object?>{},
     this.userSkills = const [],
+    this.compaction = const CompactionConfig(),
   });
 
   final int maxTurns;
@@ -398,6 +403,14 @@ class RunOptions {
   /// backend 据此知道"上次跑到第几轮/花了多少 token/计划是什么"，**不重复消息**、
   /// 不伪造用户消息（续跑用内部 continuation 状态）。
   final Map<String, Object?> resumeFromCheckpoint;
+
+  /// **压缩流水线旋钮**（2026-11-06；默认值全部来自 `ContractCompaction`）。
+  ///
+  /// 只有需要偏离契约默认值的宿主才传（例如想关掉 Session Memory
+  /// 强制每次走模型摘要，或把最近文件从 5 提到 10）。
+  /// **窗口与触发线不在这里**：那两项由 `BackendConfig.modelWindowTokens`
+  /// 与 `ContractCompression.compressAtRatio` 决定（压缩器会覆盖）。
+  final CompactionConfig compaction;
 }
 
 /// **续跑策略**（V0.4）：三档，不能混成一个开关。
@@ -469,6 +482,84 @@ class HeraclesAgent {
   /// 当前状态（只读视图，给 CLI / 宿主看 turn 数与用量）。
   AgentState? get state => _state;
 
+  /// 本轮 run 用的压缩器（`_drive` 里创建；命令层要读 `lastCompaction`）。
+  WindowRatioCompressor? _activeCompressor;
+
+  /// 命令层（`/compact`、`/rewind`）用的压缩器 —— **跨 run 复用**。
+  ///
+  /// 为什么要跨 run：会话记忆（`SessionMemory`）是**增量**的，
+  /// 复用同一个压缩器实例才能"上一轮抽到的目标/约束"延续下来；
+  /// 每次新建就等于每次都从零抽（模型刚清掉的老消息里才有那些信息）。
+  WindowRatioCompressor? _commandCompressor;
+
+  /// **手动压缩**（`/compact` 命令、UI 的"立即压缩"按钮）。
+  ///
+  /// ## 与自动压缩的差别（只有两条）
+  ///
+  /// 1. **不看阈值**：用户说了算，哪怕现在只用了 10%；
+  /// 2. [focus] 非空 ⇒ **强制走模型摘要**（"这次只保留 XX 相关"，
+  ///    本地规则听不懂这句话）。
+  ///
+  /// ## 绝不抛
+  ///
+  /// 任何失败都体现在返回值的 `failureReason` 里（人话，不含 URL/Key），
+  /// 命令层可以直接上屏 —— 压缩失败不该让 UI 看到异常栈。
+  Future<CompactionEvent> compactNow({String? focus}) async {
+    final st = _state;
+    final compressor = _commandCompressor ??= _buildCompressor();
+    if (st == null) {
+      return const CompactionEvent(
+        trigger: CompactionTrigger.manual,
+        layersRun: <CompactionLayer>[],
+        beforeTokens: 0,
+        afterTokens: 0,
+        elapsedMs: 0,
+        usedApi: false,
+        keptNotes: 0,
+        droppedNotes: 0,
+        failureReason: '当前没有会话状态（还没跑过任何一轮），无可压缩的内容',
+      );
+    }
+    return compressor.compactNow(st, focus: focus);
+  }
+
+  /// **截断发送视图到最近 [rounds] 轮**（`/rewind` 命令用）。
+  ///
+  /// ★ **原始会话记录一个字都不动**（用户拍板 Q5）：返回的 [SendView]
+  /// 是"下一次请求可以用的历史投影"，会话 `.jsonl` 仍是一条不删的
+  /// append-only 记录。命令层拿它去 `run(history:)` 即可。
+  SendView sendViewTruncatedTo(int rounds) {
+    final st = _state;
+    final compressor = _commandCompressor ??= _buildCompressor();
+    if (st == null) {
+      return const SendView(messages: <LLMMessage>[], estTokens: 0);
+    }
+    return compressor.sendViewTruncatedTo(st, rounds);
+  }
+
+  /// 当前发送视图（不清空、不截断；`clearedRefs` 反映最近一次 micro）。
+  SendView buildSendView() {
+    final st = _state;
+    final compressor = _commandCompressor ??= _buildCompressor();
+    if (st == null) {
+      return const SendView(messages: <LLMMessage>[], estTokens: 0);
+    }
+    return compressor.buildSendView(st);
+  }
+
+  /// 最近一次压缩事件（本轮 run 优先，其次命令层那次）。
+  CompactionEvent? get lastCompactionEvent =>
+      _activeCompressor?.lastCompaction ?? _commandCompressor?.lastCompaction;
+
+  /// 压缩事件留档（`CompactionConfig.metricsEnabled` 控制，环形保留）。
+  List<CompactionEvent> get compactionEvents =>
+      _activeCompressor?.events ?? _commandCompressor?.events ?? const [];
+
+  /// 最近一次用于渲染摘要视图的会话记忆（UI 可展示"当前会话记忆是什么"）。
+  SessionMemory? get currentSessionMemory =>
+      _activeCompressor?.lastSessionMemory ??
+      _commandCompressor?.lastSessionMemory;
+
   /// **建循环探测器**（2026-11-04 真机修后统一入口）。
   ///
   /// 两处刻意的口径，理由见 [ContractLoop] / [ContractRunContinue.identicalCallThreshold]：
@@ -526,6 +617,77 @@ class HeraclesAgent {
             ? null
             : <String, dynamic>{'reasoning_effort': _config.reasoningEffort},
       );
+
+  /// **建压缩器**（2026-11-06：单阈值一次性流水线）。
+  ///
+  /// ## 三条口径（用户 2026-11-05/06 裁定，别改回去）
+  ///
+  /// 1. **micro 重新开启**（`enableMicro: true`）：它以前每轮在 40% 线上
+  ///    改写历史中段 ⇒ 缓存命中率只有 40%~48%（用户招牌指标要 80%+）。
+  ///    现在 micro 只在**压缩事件内**跑一次（流水线阶段 1）；
+  /// 2. **单阈值 0.85**：没有 60% 的"提前摘要"，不到线一个字节都不动；
+  /// 3. **重载内容由宿主提供**：读 `AGENTS.md` 与"最近改过的文件"是 IO，
+  ///    backend 不碰 —— 这里把两个读取器接到工作区能力上（见 [_readWorkspaceFile]）。
+  ///
+  /// ## 为什么读取器接「工作区能力」而不是 `dart:io`
+  ///
+  /// backend 是纯 Dart 包（不能 import Flutter，也不知道设备路径）。
+  /// `_caps.workspace` 是宿主注入的统一抽象：App 里是 SAF/fs 通道，
+  /// CLI 里是本地磁盘。走它两边都不需要特判。
+  WindowRatioCompressor _buildCompressor({
+    LLMClient? client,
+    void Function(int, int, int, int)? onCompressed,
+  }) =>
+      WindowRatioCompressor(
+        client: client ?? _injectedClient ?? buildClientFor(_config),
+        modelConfig: _modelConfig(model: _config.summarizerModel),
+        modelWindowTokens: _config.modelWindowTokens,
+        // ★ 生产开启：只在压缩事件内跑一次，不再每轮改写前缀（见 KDoc）
+        enableMicro: true,
+        compactionConfig: _options.compaction,
+        readProjectFile: _readProjectFile,
+        readRecentFile: _readRecentFile,
+        onCompressed: onCompressed,
+      );
+
+  /// 项目指令读取器（`AGENTS.md`，仓库/工作区根）。
+  ///
+  /// 读不到返回 null ⇒ 压缩流水线会**跳过并在摘要视图里如实记一条 note**
+  /// （绝不假装读过；用户 Q4：复用仓库根 AGENTS.md，不新造格式）。
+  Future<String?> _readProjectFile(String fileName) =>
+      _readWorkspaceFile(fileName);
+
+  /// "最近修改的文件"读取器（同样走工作区能力；读不到只列路径）。
+  Future<String?> _readRecentFile(String path) => _readWorkspaceFile(path);
+
+  /// 经工作区能力读一个文本文件，并**去掉行号前缀**。
+  ///
+  /// 为什么去行号：能力层 `read` 给回的是 `"   12| 内容"` 这种**给模型定位用**
+  /// 的形状（`ContractWorkspace.lineNumberWidth`）。注入摘要视图时行号没有意义，
+  /// 还会污染"项目指令"原文（用户会以为 AGENTS.md 里真写着 `   12|`）。
+  Future<String?> _readWorkspaceFile(String path) async {
+    final ws = _caps.workspace;
+    if (ws == null) return null;
+    try {
+      final result = await ws.read(path);
+      if (result is! CapabilitySuccess) return null;
+      return _stripLineNumbers(result.data);
+    } catch (_) {
+      return null;
+    }
+  }
+
+  /// 去掉 `read` 能力加的行号前缀（`"   12| 内容"` → `"内容"`）。
+  static String _stripLineNumbers(String text) {
+    if (text.isEmpty) return text;
+    final out = StringBuffer();
+    for (final line in text.split('\n')) {
+      final m = RegExp(r'^\s*\d+\|\s?').firstMatch(line);
+      out.writeln(m == null ? line : line.substring(m.end));
+    }
+    final s = out.toString();
+    return s.endsWith('\n') ? s.substring(0, s.length - 1) : s;
+  }
 
   /// **会话摘要**（/compact 用，2026-10-24）—— 一次性 LLM 调用，不进 agent 循环。
   ///
@@ -1253,33 +1415,23 @@ class HeraclesAgent {
       frameworkError ??= e.error;
     });
 
-    // ---- 压缩器 ----
+    // ---- 压缩器（2026-11-06：单阈值一次性流水线）----
     //
-    // 摘要用小模型（如果配了）：省钱的常规手段。
+    // 详细理由见 [_buildCompressor] 的 KDoc。
     //
     // ## 压缩时机（框架控制，不是我们）
     //
     // 框架在**每一轮循环的最开头、请求发出之前**调 `compress(state)`
-    // （`stateful_agent.dart` 的 `while (true)` 里）。
-    // ⇒ "任务跑到一半也能压缩后继续"**天生成立**，不需要我们额外做什么。
+    // （`stateful_agent.dart` 的 `while (true)` 里）⇒ "任务跑到一半也能压缩后继续"
+    // 天生成立。但**压不压**由压缩器自己判：不到 0.85 线一个字节都不动。
     //
     // ## onCompressed：把"压缩真的发生了"播给 UI
     //
-    // 压缩器与 `emit` 在同一个作用域（都在 `_drive` 里），所以直接闭包捕获。
-    // 回调只在**历史真的变短**时触发（见 `WindowRatioCompressor.onCompressed`），
+    // 回调只在**历史真的变了**时触发（见 `WindowRatioCompressor._afterRun`），
     // 所以这里不用再判断一次 —— 别在两处判同一件事，将来会分叉。
     final summarizerClient = _config.summarizerModel == null ? null : _buildClient();
-    final compressor = WindowRatioCompressor(
-      // ★ 2026-11-05：生产**关掉 micro** —— 它每轮改写历史中段，直接把缓存命中率打穿
-      //   （用户招牌指标：命中率要 80%+，而 micro 让它掉到 40% 左右）。
-      //   压缩改由「60% 结构化摘要」一次性完成，压完前缀重新稳定。
-      enableMicro: false,
-      // ★ 2026-11-05：**单阈值** —— 到 85% 才做一次结构化摘要（不再 60% 提前压）。
-      //   用户要的是"到线压一次"，不是"一路小压缩"，后者既砸缓存又白耗性能。
-      summarizeAtRatio: ContractCompression.compressAtRatio,
+    final compressor = _buildCompressor(
       client: summarizerClient ?? client,
-      modelConfig: _modelConfig(model: _config.summarizerModel),
-      modelWindowTokens: _config.modelWindowTokens,
       onCompressed: (beforeMessages, afterMessages, beforeTokens, afterTokens) {
         emit(HeraclesContextCompressed(
           beforeMessages: beforeMessages,
@@ -1296,6 +1448,7 @@ class HeraclesAgent {
             beforeTokens, afterTokens);
       },
     );
+    _activeCompressor = compressor;
 
     // ---- 工具调用预算（ADR-033 的"真预算"）----
     //

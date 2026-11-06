@@ -314,120 +314,212 @@ void main() {
   });
 
   // ==========================================================================
-  // 三级压缩（2026-10-24）：micro(40%) / auto(60%) / full(80% 强制)
+  // 单阈值 + 一次性流水线（2026-11-06）
+  //
+  // ⚠️ 本组**替换**了旧的"micro 在 40% 触发"用例：那个行为已被用户删除
+  //（真机实测：每轮在 40% 线上改写历史中段 ⇒ 缓存命中率只有 40%~48%）。
+  // 现在的契约是"**不到 0.85 线一个字节都不动**；到线才在同一个压缩事件里
+  // 跑一次 micro"。断言比旧版更严：旧版只能证明"40% 会动"，新版同时证明
+  // "**40%~85% 之间绝不动**"（这才是缓存命中的命门）。
   // ==========================================================================
-  group('三级 —— 第一级 micro（≥40% 且 <60%）：无 LLM 清理老工具结果', () {
-    /// 造一个估算值落在 [4000, 6000) 的 state：一条大工具结果 + 30 条小消息。
-    ///（消息总数 32 > 保护窗 24 ⇒ 大结果落在保护窗外，micro 才碰得到它。）
-    AgentState stateForMicro({int resultChars = 4500}) => AgentState(
-          sessionId: 's-micro',
+  group('单阈值 —— 85% 以下零副作用，到线才在事件内跑一次 micro', () {
+    /// 造一个"估算落在 [8500 以上] 且中段有一条大工具结果"的 state。
+    ///
+    /// 33 条消息 > 保护窗 24 ⇒ 大结果（index 1）在保护窗外，micro 才碰得到。
+    AgentState stateWithOldBigResult({int fillerTokens = 150}) => AgentState(
+          sessionId: 's-micro-once',
           history: AgentMessageHistory(messages: [
-            UserMessage.text('读文件' * 5), // 10 token
+            UserMessage.text('读文件'), // 3 token
             FunctionExecutionResultMessage(results: [
               FunctionExecutionResult(
-                id: 'c1',
+                id: 'call-1',
                 name: 'read_file',
                 isError: false,
                 arguments: '{"path":"a.txt"}',
-                content: [TextPart('内' * resultChars)], // CJK 1 字 = 1 token
+                content: [TextPart('内' * 4500)], // 4500 token
               ),
             ]),
-            for (var i = 0; i < 30; i++) UserMessage.text('字' * 20),
+            for (var i = 0; i < 31; i++) UserMessage.text('字' * fillerTokens),
           ]),
         );
 
-    test('★★★ 老工具结果被换成占位符，正文一字不动，零 LLM 调用', () async {
+    test('★★★ 40%~85% 之间 ⇒ 历史与字节完全不变、零 LLM 调用、不播事件', () async {
       final client = _RecordingClient();
       var notified = 0;
       final c = WindowRatioCompressor(
         client: client,
         modelConfig: ModelConfig(model: 'stub'),
-        modelWindowTokens: 10000, // micro 线 4000 / auto 线 6000
+        modelWindowTokens: 10000, // 触发线 = 8500
         onCompressed: (_, __, ___, ____) => notified++,
       );
-      final state = stateForMicro();
+      // 3 + 4509 + 31×50 ≈ 6062 个汉字 ⇒ ≈6062 token（> 40% 线 4000，< 85% 线 8500）
+      final state = stateWithOldBigResult(fillerTokens: 50);
       final before = c.estimateUsage(state);
-      expect(before, inExclusiveRange(4000, 6000),
-          reason: '构造必须落在 micro 区间，实际 $before');
+      expect(before, greaterThan((10000 * 0.40).floor()),
+          reason: '构造必须超过旧的 40% 线 —— 否则证明不了"不开小差"');
+      expect(before, lessThan((10000 * 0.85).floor()),
+          reason: '构造必须低于触发线，实际 $before');
+      final beforeMessages = List<LLMMessage>.of(state.history.messages);
+      final beforeBytes = beforeMessages
+          .map((m) => WindowRatioCompressor.estimateMessageTokens(m))
+          .toList();
+
+      await c.compress(state);
+
+      expect(client.calls, 0, reason: '★ 没到线一次模型调用都不许发出');
+      expect(notified, 0, reason: '★ 没到线不许播"压缩了"');
+      expect(state.history.messages.length, beforeMessages.length,
+          reason: '★★ 条数必须一条不差');
+      expect(
+        state.history.messages
+            .map((m) => WindowRatioCompressor.estimateMessageTokens(m))
+            .toList(),
+        beforeBytes,
+        reason: '★★ 逐条 token 必须一模一样 —— 否则前缀缓存这一轮全废',
+      );
+      expect(c.lastCompaction, isNull, reason: '没压缩就不该有事件');
+    });
+
+    test('★★★ 到线 ⇒ micro 在同一事件内跑一次：只清"较旧"的，保留最近 10 条', () async {
+      final client = _RecordingClient();
+      var notified = 0;
+      final c = WindowRatioCompressor(
+        client: client,
+        modelConfig: ModelConfig(model: 'stub'),
+        modelWindowTokens: 10000,
+        onCompressed: (_, __, ___, ____) => notified++,
+      );
+
+      // 20 条白名单工具结果（各 400 token）+ 25 条填充消息 = 65 条：
+      // · 65 - 24（保护窗）= 41 ⇒ 工具结果在索引 2..40，全部落在保护窗外；
+      // · 保留最近 `microKeepRecentToolResults`(10) 条 ⇒ 最旧 10 条被清；
+      // · 估算 ≈ 8000 + 1000 ≈ 9000 ≥ 8500（到线），清完 ≈ 5100（达标即停）。
+      final results = <FunctionExecutionResult>[
+        for (var i = 0; i < 20; i++)
+          FunctionExecutionResult(
+            id: 'call-$i',
+            name: 'read_file',
+            isError: false,
+            arguments: '{"path":"f$i.txt"}',
+            content: <UserContentPart>[TextPart('内' * 400)],
+          ),
+      ];
+      final msgs = <LLMMessage>[UserMessage.text('开始')];
+      for (final r in results) {
+        msgs
+          ..add(ModelMessage(model: 'm', functionCalls: [
+            FunctionCall(id: r.id, name: r.name, arguments: r.arguments),
+          ]))
+          ..add(FunctionExecutionResultMessage(results: [r]));
+      }
+      for (var i = 0; i < 25; i++) {
+        msgs.add(UserMessage.text('字' * 40));
+      }
+      final state =
+          AgentState(sessionId: 's-micro-once', history: AgentMessageHistory(messages: msgs));
+
+      final before = c.estimateUsage(state);
+      expect(before, greaterThanOrEqualTo(c.triggerThreshold),
+          reason: '构造必须到线，实际 $before');
 
       await c.compress(state);
 
       expect(client.calls, 0, reason: '★ micro 是确定性的，一次 LLM 都不该调');
-      expect(notified, 1, reason: '确有清理 ⇒ 要播事件');
-      final results = state.history.messages
+      expect(notified, 1, reason: '确有清理 ⇒ 播一次事件');
+      expect(c.lastCompaction?.layersRun, <CompactionLayer>[CompactionLayer.micro],
+          reason: '只跑阶段 1 就达标（剩下的层不该再动历史）');
+
+      final kept = state.history.messages
           .whereType<FunctionExecutionResultMessage>()
-          .single;
-      final text = results.results.single.content
-          .whereType<TextPart>()
-          .map((p) => p.text)
-          .join();
-      expect(text, contains('microcompact'));
-      expect(text, contains('4500'), reason: '占位符要如实报原大小');
-      expect(c.estimateUsage(state), lessThan(before),
-          reason: 'token 必须真的省下来了');
+          .toList();
+      expect(kept, hasLength(20), reason: 'micro 不删消息，只换内容');
+      for (var i = 0; i < 10; i++) {
+        final text = kept[i].results.single.content
+            .whereType<TextPart>()
+            .map((p) => p.text)
+            .join();
+        expect(text, ContractCompaction.clearedToolResultPlaceholder,
+            reason: '第 $i 条是最旧的 10 条之一，必须被清');
+      }
+      for (var i = 10; i < 20; i++) {
+        final text = kept[i].results.single.content
+            .whereType<TextPart>()
+            .map((p) => p.text)
+            .join();
+        expect(text, '内' * 400,
+            reason: '第 $i 条属于"最近 10 条"，必须原样保留（模型马上要用）');
+      }
+      // 记账：能指回原 id 与原字符数（可追溯，原始内容没被删）
+      expect(c.clearedRefs.length, 10);
+      expect(c.clearedRefs['call-0']?.originalChars, 400);
+      expect(c.clearedRefs['call-0']?.kind, ClearedKind.toolResult);
+      expect(c.clearedRefs.containsKey('call-19'), isFalse,
+          reason: '最近的那条不该有清理记录');
+      expect(c.estimateUsage(state), lessThan(before), reason: 'token 必须真的降了');
+      expect(c.estimateUsage(state), lessThan(c.triggerThreshold),
+          reason: '压完必须低于触发线 —— 否则下一轮立刻又压');
     });
 
-    test('★★ 保护窗内的工具结果绝不清理；小结果也不清理', () async {
+    test('★★ 保护窗内的工具结果绝不清理（模型马上要用）', () async {
       final client = _RecordingClient();
       final c = WindowRatioCompressor(
         client: client,
         modelConfig: ModelConfig(model: 'stub'),
         modelWindowTokens: 10000,
       );
-      // 大结果放最后一条（保护窗内）⇒ micro 无事可做
+      // ⚠️ 窗内必须有 **> microKeepRecentToolResults(10)** 条白名单工具结果，
+      //   否则"保留最近 10 条"会替保护窗兜住，这条断言就测不到保护窗本身。
+      //   这里 12 条工具结果全在最近 24 条里 ⇒ 一条都不许动。
       final state = AgentState(
         sessionId: 's-tail',
         history: AgentMessageHistory(messages: [
-          for (var i = 0; i < 31; i++) UserMessage.text('字' * 20),
-          FunctionExecutionResultMessage(results: [
-            FunctionExecutionResult(
-              id: 'c1',
-              name: 'read_file',
-              isError: false,
-              arguments: '{}',
-              content: [TextPart('内' * 4500)],
-            ),
-          ]),
+          for (var i = 0; i < 20; i++) UserMessage.text('字' * 300),
+          for (var i = 0; i < 12; i++)
+            FunctionExecutionResultMessage(results: [
+              FunctionExecutionResult(
+                id: 'call-$i',
+                name: 'read_file',
+                isError: false,
+                arguments: '{}',
+                content: <UserContentPart>[TextPart('内' * 400)],
+              ),
+            ]),
         ]),
       );
       final before = c.estimateUsage(state);
-      await c.compress(state);
-      expect(c.estimateUsage(state), before, reason: '保护窗内的不许动');
-      expect(client.calls, 0);
-    });
+      expect(before, greaterThanOrEqualTo(8500), reason: '前提：到线');
 
-    test('★★ 40% 以下 ⇒ 什么都不做（能装下就全装）', () async {
-      final client = _RecordingClient();
-      var notified = 0;
-      final c = WindowRatioCompressor(
-        client: client,
-        modelConfig: ModelConfig(model: 'stub'),
-        modelWindowTokens: 100000,
-        onCompressed: (_, __, ___, ____) => notified++,
-      );
-      final state = stateForMicro(); // 5110 token << 40000
       await c.compress(state);
-      expect(notified, 0);
-      expect(client.calls, 0);
+
+      final results = state.history.messages
+          .whereType<FunctionExecutionResultMessage>()
+          .toList();
+      expect(results, hasLength(12));
+      for (final m in results) {
+        expect(_partsTextOfOwner(m), '内' * 400,
+            reason: '★ 保护窗内的工具结果不许清（12 条全都得原样）');
+      }
+      expect(c.clearedRefs, isEmpty, reason: '保护窗内的东西不该有任何清理记录');
     });
   });
 
-  group('三级 —— 第三级 full（摘要失败/不够时，确定性强制重置）', () {
+  group('兜底 —— 阶段 2 不可用时的确定性强制重置', () {
     test('★★★ 摘要静默失败 + 估算 ≥85% ⇒ 整批丢弃老轮次 + 插如实说明', () async {
-      // ★ 2026-11-04：要证明的是"**摘要失败**时第三级仍兜底"，
-      //   所以必须用一个**返回空**的 client（结构化摘要会判空 = 失败）。
-      //   之前用的 `_RecordingClient` 会返回一段非空文本 ⇒ 结构化摘要成功 ⇒
-      //   根本走不到第三级（那是另一条路径的正确行为，不是本用例要锁的东西）。
+      // ★ 这段测的是"**摘要失败**时兜底仍成立"。
+      //   2026-11-06 起必须显式关掉 Session Memory：否则阶段 2（纯本地规则）
+      //   就能把这 96 条用户消息收进摘要视图，压根不会调模型 ——
+      //   那是设计意图（省钱），但会让本用例测不到兜底路径。
       final client = _EmptySummaryClient();
       var notified = 0;
       final c = WindowRatioCompressor(
         client: client,
         modelConfig: ModelConfig(model: 'stub'),
         modelWindowTokens: 10000,
+        compactionConfig: const CompactionConfig(sessionMemoryEnabled: false),
         onCompressed: (_, __, ___, ____) => notified++,
       );
-      // 96 批 × 90 token ≈ 8640 ≥ 8500（强制线 0.85）。
-      // 摘要失败 ⇒ 只能靠第三级。
+      // 96 批 × 90 token ≈ 8640 ≥ 8500（触发线 0.85）。
+      // 摘要失败 ⇒ 只能靠确定性兜底。
       final state = AgentState(
         sessionId: 's-full',
         history: AgentMessageHistory(
@@ -439,6 +531,7 @@ void main() {
 
       await c.compress(state);
 
+      expect(client.calls, greaterThan(0), reason: '确实发起过摘要调用（只是返回空）');
       expect(state.history.messages.length, 7,
           reason: '说明 1 条 + 最近 6 批');
       final note = state.history.messages.first as UserMessage;
@@ -446,20 +539,24 @@ void main() {
       expect(_text(note), contains('90'),
           reason: '如实报丢弃条数，绝不假装"已摘要"');
       expect(c.estimateUsage(state), lessThan(8500),
-          reason: '★ 重置后必须低于强制线 —— 这就是"必压缩"的兜底');
-      expect(notified, greaterThanOrEqualTo(1), reason: '第三级生效必须播报');
+          reason: '★ 重置后必须低于触发线 —— 这就是"必压缩"的兜底');
+      expect(notified, greaterThanOrEqualTo(1), reason: '兜底生效必须播报');
+      expect(c.lastCompaction?.failureReason, isNotNull,
+          reason: '摘要失败必须在事件里留原因（不许静默）');
     });
 
     test('★★ 无 user 边界的历史也能重置（切点不拆工具批）', () async {
-      final client = _RecordingClient();
+      // 纯 assistant 历史（长工具链）+ 摘要失败 ⇒ 走 _forceReset 的
+      // "没有批次边界"分支：按条数找切点，再调整到不拆调用/结果。
       final c = WindowRatioCompressor(
-        client: client,
+        client: _EmptySummaryClient(),
         modelConfig: ModelConfig(model: 'stub'),
         modelWindowTokens: 10000,
+        compactionConfig: const CompactionConfig(sessionMemoryEnabled: false),
       );
-      // 纯 assistant 历史（长工具链）：66 号位置放一对调用+结果
+      // 66 号位置放一对调用+结果
       final msgs = <LLMMessage>[
-        for (var i = 0; i < 90; i++)
+        for (var i = 0; i < 96; i++)
           ModelMessage(textOutput: '字' * 90, model: 'm'),
       ];
       msgs[66] = ModelMessage(
@@ -491,7 +588,8 @@ void main() {
         expect(kept[2], isA<FunctionExecutionResultMessage>(),
             reason: '★ 切点不许拆散调用与结果 —— 拆散就是 400');
       }
-      expect(c.estimateUsage(state), lessThan(8000));
+      expect(c.estimateUsage(state), lessThan(8500),
+          reason: '重置后必须低于触发线');
     });
   });
 
@@ -565,6 +663,10 @@ void main() {
 /// 取 UserMessage 的文本（断言用）。
 String _text(UserMessage m) =>
     m.contents.whereType<TextPart>().map((p) => p.text).join();
+
+/// 取单条工具结果消息的文本（断言用）。
+String _partsTextOfOwner(FunctionExecutionResultMessage m) =>
+    m.results.single.content.whereType<TextPart>().map((p) => p.text).join();
 
 /// **摘要一律失败**的 client（返回空文本 ⇒ 结构化摘要判为"没做成"）。
 ///

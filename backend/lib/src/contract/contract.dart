@@ -237,36 +237,275 @@ abstract final class ContractCompression {
   /// 一轮折算成多少条消息（喂给框架 `keepRecentMessageSize`）。
   static const int messagesPerTurn = 4;
 
-  /// **第一级（micro）阈值比例** —— 2026-10-24 引入，对齐 Claude Code 的三级压缩。
+  /// **【已作废】第一级（micro）阈值比例**（0.40）—— 2026-11-06 起不再触发压缩。
   ///
-  /// 到 40% 就做**无 LLM 的轻清理**（microcompact）：把保护窗之外的
-  /// 老工具结果替换成占位符。理由：老工具输出（整个文件内容、长日志）
-  /// 是上下文里最大的死重，而模型几乎从不回头用它 —— 真要用了重新
-  /// `read_file` 一次即可。**不动任何 user/assistant 正文**，信息零损失。
+  /// 历史：到 40% 就做无 LLM 的轻清理（microcompact）。真机实测证明
+  /// **每轮**在 40% 线上换占位符会让该点之后的前缀缓存全部失效，
+  /// 命中率被压在 40%~48%（用户招牌指标要 80%+）。
+  ///
+  /// 现在的 micro 改在**压缩事件内一次性跑**（`ContractCompaction` + 流水线阶段 1），
+  /// 低阈值触发被彻底删除。常量保留只为不破坏外部引用，**不要在新代码里读它**。
   static const double microRatio = 0.40;
 
-  /// **第二级（auto）阈值比例** —— LLM 摘要压缩在这一档启动。
+  /// **【已作废】第二级（auto）阈值比例**（0.60）—— 单阈值 0.85 取代。
   ///
-  /// 60% 时窗口还剩 40%，够摘要调用本身 + 后续若干轮使用；
-  /// 60% 才开始摘要（而不是等 80%）意味着"到 80%"时通常已经压过一轮，
-  /// 第三级大概率不需要出场。
+  /// 用户 2026-11-05 裁定：不引入 0.8/0.6 双阈值，压缩只在 0.85 发生一次。
+  /// 保留常量只为不破坏外部引用。
   static const double autoRatio = 0.60;
 
-  /// **连续 micro 多少次后强制升级到结构化摘要**（2026-11-05 用户质疑后新增）。
+  /// **【已作废】连续 micro 多少次后强制升级到摘要**（3）。
   ///
-  /// 用户原话：「你这样做的话，那上下文永远不会到 80% 的阈值对吗？」
-  /// —— 直觉是对的：micro 只清**工具输出**，清不动正文，于是上下文会长期贴在
-  /// 40% 线上，每轮清一点、永远不升级摘要。代价是模型反复丢失工具结果
-  /// （重读文件 / 凭记忆瞎改），而用户以为"压缩根本没发生"。
-  ///
-  /// 3 的来源：一次 micro 通常只腾出几 K token，连做 3 次仍压不到 60% 线，
-  /// 说明光靠"清工具输出"已经救不了 ⇒ 该把老历史真正收进摘要了。
+  /// 它存在的前提是"micro 每轮跑、会卡在 40%"——该前提已被删除
+  /// （micro 只在压缩事件内跑一次）。保留常量只为不破坏外部引用。
   static const int microEscalateAfter = 3;
 
-  // compressAtRatio（0.80）= **第三级**阈值，含义升级：
-  // 用户"到 80% 必须压缩"的承诺不变，但现在由**确定性的强制重置**
-  // （_forceReset，不依赖 LLM）兜底 —— 即使摘要调用失败/静默早退，
-  // 80% 这条线也**一定**有动作。见 WindowRatioCompressor.compress。
+  // 现在的形状（2026-11-06）：
+  //   占用 < compressAtRatio(0.85) × 窗口 ⇒ **零副作用**直接返回；
+  //   ≥ 0.85 ⇒ 跑一次流水线：MicroCompact → SessionMemory → API 摘要
+  //   → 确定性强制重置 → 90% 硬顶升级循环，每层后重估、达标即停。
+  //   旋钮与默认值见 [ContractCompaction]。见 WindowRatioCompressor.compress。
+}
+
+/// **压缩流水线（阶段 1 MicroCompact / 阶段 2 Session Memory / 阶段 3 API 摘要）**
+/// —— 2026-11-06 落地，`context/compaction/` 全部数值的唯一来源。
+///
+/// ## 为什么单开一组（而不是塞进 [ContractCompression]）
+///
+/// [ContractCompression] 那组是**旧的"三级阈值"**（micro 40% / auto 60% / full 80%），
+/// 其中 micro 每轮在 40% 线上改写历史中段 —— 真机实测把缓存命中率压到 40%~48%
+/// （用户核心指标是 80%+）。用户 2026-11-05 拍板：**只保留一条 0.85 触发线，
+/// 到线跑一次流水线**。新流水线的旋钮与旧阈值不是一回事（旧的是"线"，
+/// 新的是"分层策略"），混在一组里会让人以为它们互相推导。
+///
+/// ## 纪律
+///
+/// 本组所有值都有默认值且**都是产品行为**：改它会改变"什么时候压、压掉什么、
+/// 压完模型还看得见什么"。改数值**不改结构**。
+abstract final class ContractCompaction {
+  // ---------------------------------------------------------------------
+  // 触发与窗口
+  // ---------------------------------------------------------------------
+
+  /// 压缩配置里的默认上下文窗口（token）。
+  ///
+  /// 与 [ContractModel.defaultWindowTokens] 同一数：宿主传了真实窗口时以宿主为准
+  /// （`WindowRatioCompressor` 会 `copyWith(contextWindow: modelWindowTokens)`）。
+  /// 这里只作为 `CompactionConfig()` 无参构造的兜底，**不是**第二份真相。
+  static const int contextWindow = ContractModel.defaultWindowTokens;
+
+  /// **唯一触发线**：占用 ≥ 窗口 × 本比例 ⇒ 跑一次压缩流水线。
+  ///
+  /// 直接引用 [ContractCompression.compressAtRatio]（0.85）——
+  /// 抄一份过来就会出现"改了一处、另一处没跟上"的经典漂移。
+  static const double autoCompactThreshold = ContractCompression.compressAtRatio;
+
+  /// **最近 `keepRecentTurns` 轮折算成多少条消息** = 保护窗（不许被摘要吞掉的原文）。
+  ///
+  /// 与 `ContractCompression.keepRecentTurns × messagesPerTurn` 同一口径：
+  /// 一轮 ≈ 4 条（user / assistant+tool_call / tool_result / assistant）。
+  static const int protectedRecentMessages =
+      ContractCompression.keepRecentTurns *
+          ContractCompression.messagesPerTurn;
+
+  // ---------------------------------------------------------------------
+  // 阶段 1：MicroCompact（本地、零 API）
+  // ---------------------------------------------------------------------
+
+  /// **保留最近多少条**白名单工具结果不清（更旧的才清）。
+  ///
+  /// 10 的依据：模型真正会回头用的通常是"刚读的那几个文件"；
+  /// 再往前的工具输出只占 token，几乎不再被引用（要就重读）。
+  static const int microKeepRecentToolResults = 10;
+
+  /// **允许被清理的工具白名单**（按工具名**子串**匹配，见 `MicroCompactor`）。
+  ///
+  /// 为什么是子串而不是全名：
+  /// · `shell` 在 `run_shell_command` **中间**（前缀匹配会漏掉它）；
+  /// · 别名工具（`Read`/`Grep`…）执行层会转调正式工具，历史里落的是正式名，
+  ///   但宿主/测试可能直接造别名消息 —— 子串匹配两头都能命中。
+  ///
+  /// 只有"可重放"的读取类工具在里面：清掉它们的输出，模型重跑一次即可取回；
+  /// 写入类（`write_file`/`edit_file`）**不在**白名单 —— 那类结果里含
+  /// "改了什么"的证据，清了就再也拿不回来（文件已经是新内容了）。
+  static const List<String> microToolWhitelist = <String>[
+    'read',
+    'list',
+    'find',
+    'grep',
+    'shell',
+  ];
+
+  /// 工具结果**短于这个字符数就不清**。
+  ///
+  /// 占位符本身约 33 字符，清一条 50 字符的结果纯属亏本：既没省 token，
+  /// 又白丢信息（还要模型重跑一次工具）。200 是"值得清"的下限。
+  static const int microMinChars = 200;
+
+  /// 工具结果被清后替换成的占位符（**英文定稿，UI/测试逐字对齐**）。
+  static const String clearedToolResultPlaceholder =
+      '[Old tool result content cleared]';
+
+  /// 媒体块（图片/视频）被清后替换成的占位符。
+  static const String clearedMediaPlaceholder = '[media cleared]';
+
+  /// 媒体块体量超过多少 token 才清（体量代理 = base64 字符数 / 4）。
+  ///
+  /// 2000 的依据：主流视觉模型一张常规图 ≈ 1–2K token，超过它的属于
+  /// "大图/长视频"—— 老的那张几乎肯定不再被引用，留着只是白付钱。
+  /// ⚠️ 体量代理会**高估**真实图像 token（base64 比像素维度线性），
+  /// 所以这条线宁大勿小；它只用于"值不值得清"，不参与总量估算。
+  static const int maxMediaBlockTokens = 2000;
+
+  // ---------------------------------------------------------------------
+  // 压缩后必须重载/保留的内容
+  // ---------------------------------------------------------------------
+
+  /// 项目指令文件名（仓库根，按序取第一个可读的）。
+  ///
+  /// 只认 `AGENTS.md`：用户 2026-11-06 拍板"复用仓库根 AGENTS.md 作为项目指令源，
+  /// 不新造格式"。读不到就**跳过并记 note**（绝不假装有）。
+  static const List<String> projectInstructionFiles = <String>['AGENTS.md'];
+
+  /// 项目指令注入摘要视图时的字符上限。
+  ///
+  /// 8000 的依据：AGENTS.md 是"压缩后还要模型遵守的规则"，不是全文备份；
+  /// 8000 字符 ≈ 2–8K token（中英混合），对 128K 窗口是 2%~6% 的固定开销。
+  /// 超限**截断并明说**（用户要知道看的是节选）。
+  static const int projectInstructionsMaxChars = 8000;
+
+  /// 最近修改文件最多列出多少个（超出只列最近的几个）。
+  static const int recentFilesMax = 5;
+
+  /// 最近修改文件**估算超过这个 token 数就只给路径引用**，不给全文。
+  ///
+  /// 5000 的依据：摘要视图是"压缩后的摘要"，不是把文件再搬一遍；
+  /// 5000 token 以上的文件注入全文等于没压缩。需要时模型自己 `read`。
+  static const int largeFileTokenThreshold = 5000;
+
+  /// 小于 [largeFileTokenThreshold] 的文件最多注入多少字符的节选。
+  static const int recentFileExcerptMaxChars = 1200;
+
+  // ---------------------------------------------------------------------
+  // 阶段 2：Session Memory（纯本地、零 API）
+  // ---------------------------------------------------------------------
+
+  /// 是否默认开启 Session Memory（用户 2026-11-06 拍板：**默认开**）。
+  ///
+  /// 关掉它的唯一理由：宿主想强制每次都走模型摘要（贵，但更"聪明"）。
+  static const bool sessionMemoryEnabled = true;
+
+  /// 记忆超过这个毫秒数没更新就算 **stale**（不可用于渲染摘要视图）。
+  ///
+  /// 10 分钟的依据：长任务里 10 分钟内历史变动有限，本地规则抽出的
+  /// goal/constraints/files 仍然成立；再久就可能与真实进展分叉 ——
+  /// 那时宁可花一次 API 摘要，也不许把过时记忆当"当前状态"喂给模型。
+  static const int sessionMemoryStaleMs = 10 * 60 * 1000;
+
+  /// `goal` 字段最长字符数（超了截断 + 省略号）。
+  static const int sessionMemoryGoalMaxChars = 240;
+
+  /// 记忆**更新**的等待上限（毫秒）。
+  ///
+  /// 2000 的依据：本地规则是纯 CPU（微秒级）；这个超时只对"宿主注入的
+  /// 异步更新器"有意义（例如要去读工作区文件）。超时 ⇒ 保留旧记忆并标 `stale`，
+  /// **绝不阻塞任务**（用户 2026-11-06 拍板：更新失败/超时要降级，不许卡住）。
+  static const int sessionMemoryUpdateTimeoutMs = 2000;  /// `constraints` / `done` / `decisions` / `openIssues` 单条最长字符数。
+  static const int sessionMemoryItemMaxChars = 120;
+
+  /// 硬约束最多抽多少条（用户显式约束必须置顶，多了会挤掉摘要正文）。
+  static const int sessionMemoryConstraintsMax = 8;
+
+  /// 已完成项最多抽多少条。
+  static const int sessionMemoryDoneMax = 10;
+
+  /// 关键决策最多抽多少条。
+  static const int sessionMemoryDecisionsMax = 6;
+
+  /// 未决问题/报错最多抽多少条。
+  static const int sessionMemoryOpenIssuesMax = 5;
+
+  /// 抽约束/决策时回看最近多少条 user 消息。
+  ///
+  /// 40 的依据：真机长会话里"这条不许动"这类话通常出现在最近几十条内；
+  /// 再往回翻，用户可能已经改过主意（旧约束反而是负担）。
+  static const int sessionMemoryScanRecentMessages = 40;
+
+  // ---------------------------------------------------------------------
+  // 阶段 3：API 结构化摘要（兜底）
+  // ---------------------------------------------------------------------
+
+  /// 喂给摘要模型的单条消息最多多少字符（防一条巨型消息撑爆摘要请求）。
+  static const int summaryTranscriptMessageMaxChars = 1200;
+
+  /// 喂给摘要模型的 transcript 总字符上限（再长就丢更早的，明说不是全文）。
+  static const int summaryTranscriptTotalMaxChars = 40000;
+
+  /// 用户 `/compact <focus>` 的 focus 文本最长字符数。
+  static const int summaryFocusMaxChars = 400;
+
+  // ---------------------------------------------------------------------
+  // 确定性兜底（强制重置 / 90% 硬顶升级循环）
+  // ---------------------------------------------------------------------
+
+  /// 兜底裁剪的**升级目标比例**（压到窗口的 50% → 30% → 15%）。
+  ///
+  /// 为什么是这几个数：一次 `trimToFit` 通常只能清掉"大工具结果"，
+  /// 若仍贴着 90% 硬顶，就继续收紧目标；三档走完仍动不了历史 ⇒
+  /// 说明已到"压缩的物理下限"（只有一两条超大消息），此时**照常继续任务**
+  /// （不许报错、不许停 —— 用户 2026-11-05 裁定）。
+  static const List<double> ceilingEscalationRatios = <double>[0.50, 0.30, 0.15];
+
+  /// 插入"本次清理说明"时预留的 token（选取切点时粗算）。
+  static const int trimNoteAllowanceTokens = 200;
+
+  /// 插入"强制移除说明"时预留的 token（选取切点时粗算）。
+  static const int resetNoteAllowanceTokens = 120;
+
+  // ---------------------------------------------------------------------
+  // 开关与观测
+  // ---------------------------------------------------------------------
+
+  /// **渐进分层**（默认 `false`）：允许在**未到 0.85 线**时只跑阶段 1（micro）。
+  ///
+  /// ⚠️ 真机教训（不可重演）：这正是当年把缓存命中率压到 40%~48% 的形状 ——
+  /// 每一轮都在历史中段换占位符 ⇒ 该点之后的 token 前缀全失效。
+  /// 所以**默认关**；只有明确愿意用命中率换上下文余量的宿主才开。
+  static const bool progressiveLayersEnabled = false;
+
+  /// 是否记录压缩事件（`CompactionEvent` 留存 + `WindowRatioCompressor.events`）。
+  ///
+  /// 关掉只影响"留档与 UI 播报"，**不影响压缩行为本身**（压还是会压）。
+  static const bool metricsEnabled = true;
+
+  /// 事件留档最多保留多少条（环形丢弃最老的）。
+  ///
+  /// 50 的依据：一次长任务通常压缩几次到十几次；50 条足够复盘，
+  /// 又不至于让内存里的审计列表无限长。
+  static const int metricsMaxEvents = 50;
+
+  // ---------------------------------------------------------------------
+  // 估算器的权重（原先散在 window_ratio_compressor.dart 里的字面量）
+  // ---------------------------------------------------------------------
+
+  /// 一张图片在总量估算里的固定开销（token）。
+  ///
+  /// 为什么是固定值而不是 base64 长度：base64 比像素维度线性得多，
+  /// 按它估会把 500 KB 的图算成 12 万 token（真实约 1.5K）⇒ 压缩会被
+  /// 无意义地频繁触发。固定 800 是"宁可低估图片"的取舍（见 [maxMediaBlockTokens]
+  /// 的说明：媒体清理用的是另一套体量代理）。
+  static const int estimatedImageTokens = 800;
+
+  /// 一条 `functionCall` 的固定开销（token，含 id/name/参数的 JSON 骨架）。
+  static const int estimatedFunctionCallTokens = 30;
+
+  /// 单条工具结果的固定开销（token，JSON 骨架）。
+  static const int estimatedToolResultOverheadTokens = 10;
+
+  /// 一条工具定义条目的固定开销（token，括号/逗号/schema 骨架）。
+  static const int estimatedToolDefinitionOverheadTokens = 20;
+
+  /// 无法识别的消息类型的兜底估算（token）。
+  static const int estimatedUnknownMessageTokens = 50;
 }
 
 /// **工具默认值** —— 与 `agent/tools/*.dart` 里 JSON Schema 的 `default` 必须一致。

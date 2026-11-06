@@ -59,6 +59,22 @@ export 'src/context/deterministic_json.dart';
 //   MemoryContext / MemoryAddress / MemoryAddressError。纯数据无 IO —— 宿主读好
 //   三段传进 RunOptions.memory，backend 负责选择/预算/渲染。
 export 'src/context/memory_context.dart';
+// ★ **压缩流水线（2026-11-06）**：SendView / CompactionEvent / SessionMemory /
+//   CompactionConfig / MicroCompactor / 结构化摘要 / 重载上下文。
+//   命令层（/compact、/rewind）与 UI 读这些类型；宿主可注入读取器
+//   （AGENTS.md 与最近文件）与 SessionMemory 更新器。
+export 'src/context/compaction/compaction_config.dart';
+export 'src/context/compaction/compaction_event.dart';
+export 'src/context/compaction/compaction_pipeline.dart'
+    show CompactionFallback, CompactionPipeline;
+export 'src/context/compaction/message_scan.dart';
+export 'src/context/compaction/micro_compactor.dart';
+export 'src/context/compaction/reload_context.dart';
+export 'src/context/compaction/send_view.dart';
+export 'src/context/compaction/session_memory.dart';
+export 'src/context/compaction/structured_summarizer.dart';
+export 'src/context/compaction/summary_view.dart';
+export 'src/context/compaction/token_estimation.dart';
 export 'src/context/window_ratio_compressor.dart';
 // ★ 记忆注入的渲染与选择（2026-10-29）：renderMemoryContext / selectForInjection /
 //   injectBudgetChars 等。这是"记忆怎么进 prompt"的唯一真相（旧 renderMemory 转调它）。
