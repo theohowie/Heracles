@@ -248,6 +248,43 @@ class AgentBridge {
   }
 
   /// 窗口上限落盘的键（跨进程重启仍可读）。
+  /// **自动压缩阈值**（`/autocompact 0.9` 写进来；0.05~0.95 之外忽略）。
+  ///
+  /// 存 `SharedPreferences`：阈值是**用户偏好**，跨重启要还在。
+  /// 读不到 = 用 backend 契约默认（`ContractCompaction.autoCompactThreshold`）。
+  static const String _autoCompactKey = 'heracles.autocompact_threshold';
+
+  /// /autocompact 的**同步缓存**（local_agent 在非 async 处读它）。
+  static double? autoCompactOverride;
+
+  /// 从 prefs 刷新缓存（app 启动 / 每次 run 前调一次即可）。
+  static Future<void> refreshAutoCompactOverride() async {
+    autoCompactOverride = await readAutoCompactThreshold();
+  }
+
+  static Future<double?> readAutoCompactThreshold() async {
+    try {
+      final p = await SharedPreferences.getInstance();
+      final v = p.getDouble(_autoCompactKey) ?? p.getInt(_autoCompactKey)?.toDouble();
+      if (v == null) return null;
+      if (v <= 0.05 || v >= 0.95) return null;
+      return v;
+    } catch (_) {
+      return null;
+    }
+  }
+
+  static Future<bool> writeAutoCompactThreshold(double v) async {
+    if (v <= 0.05 || v >= 0.95) return false;
+    try {
+      final p = await SharedPreferences.getInstance();
+      await p.setDouble(_autoCompactKey, v);
+      return true;
+    } catch (_) {
+      return false;
+    }
+  }
+
   static const String _contextLimitKey = 'heracles.context_limit';
   static const String _contextLimitSourceKey = 'heracles.context_limit_source';
 
@@ -1310,6 +1347,8 @@ class AgentBridge {
     required String workspacePath,
     required String sessionId,
     required AppSettings settings,
+    /// `/compact focus on …` 的重点（null/空 = 与旧行为一致）。
+    String? focus,
   }) async {
     final provider = settings.effectiveProvider;
     if (provider == null || !settings.hasUsableProvider) {
@@ -1353,6 +1392,7 @@ class AgentBridge {
         },
       ),
       transcript: transcript,
+      focus: focus,
     );
     if (summary.isEmpty) {
       throw const AgentBridgeException('模型没有返回摘要内容，未写入压缩标记');

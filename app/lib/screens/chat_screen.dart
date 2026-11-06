@@ -4770,7 +4770,7 @@ class _ChatScreenState extends State<ChatScreen> {
   ///
   /// 摘要结果以**助手消息**形式插入当前屏幕（不落盘 —— 它不是模型回答，
   /// 落盘会污染重放；真正的持久化是会话尾部的 compact 标记行）。
-  Future<void> _doCompact() async {
+  Future<void> _doCompact({String? focus}) async {
     final ws = _activeWorkspace;
     final sid = _activeSessionId;
     if (ws == null) {
@@ -4793,6 +4793,7 @@ class _ChatScreenState extends State<ChatScreen> {
         workspacePath: ws.path,
         sessionId: sid,
         settings: widget.settings.value,
+        focus: focus,
       );
       if (!mounted) return;
       setState(() {
@@ -4813,8 +4814,49 @@ class _ChatScreenState extends State<ChatScreen> {
   Future<void> _runAgent(String request) async {
     // ★ /compact 手动压缩（2026-10-24，C2 的 P2 欠账）：拦截在**落用户气泡
     //   之前** —— /compact 是命令不是对话内容，不该出现在会话流里。
-    if (request.trim().toLowerCase() == '/compact') {
+    // ★ 2026-11-06 命令层扩展（用户要求）：
+    //   /compact            —— 按阈值语义做一次摘要压缩
+    //   /compact focus on X —— 指定重点（focus 存在时强制走模型摘要）
+    //   /autocompact 0.9    —— 设置自动压缩阈值（0.05~0.95，存 prefs）
+    final cmd = request.trim();
+    final lowerCmd = cmd.toLowerCase();
+    if (lowerCmd == '/compact') {
       await _doCompact();
+      return;
+    }
+    if (lowerCmd.startsWith('/compact focus on ')) {
+      final focus = cmd.substring('/compact focus on '.length).trim();
+      await _doCompact(focus: focus.isEmpty ? null : focus);
+      return;
+    }
+    if (lowerCmd.startsWith('/autocompact')) {
+      final arg = cmd.substring('/autocompact'.length).trim();
+      final v = double.tryParse(arg);
+      final cur = AgentBridge.autoCompactOverride;
+      if (v == null || v <= 0.05 || v >= 0.95) {
+        setState(() {
+          _messages.add(HAssistantMessage(
+            id: _nextId(),
+            text: '用法：/autocompact 0.9（0.05~0.95 之间的小数）。'
+                '${cur == null ? '' : '当前生效值：$cur'}',
+          ));
+        });
+        _followBottomIfNeeded();
+        return;
+      }
+      final ok = await AgentBridge.writeAutoCompactThreshold(v);
+      await AgentBridge.refreshAutoCompactOverride();
+      if (!mounted) return;
+      setState(() {
+        _messages.add(HAssistantMessage(
+          id: _nextId(),
+          text: ok
+              ? '✅ 自动压缩阈值已设为 $v（占用超过窗口 '
+                  '${(v * 100).round()}% 时触发一次压缩）。'
+              : '❌ 阈值没写进去（存储失败），仍是原值。',
+        ));
+      });
+      _followBottomIfNeeded();
       return;
     }
     // ★ V0.4（#1）：新一轮开始 ⇒ 上一轮的中断卡作废（别让旧"被中断"常驻）

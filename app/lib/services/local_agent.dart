@@ -59,7 +59,7 @@ import 'package:heracles_backend/heracles_backend.dart';
 import '../models/attachment.dart';
 import '../models/settings.dart';
 import 'agent_bridge.dart'
-    show AgentEvent, AgentRunResult, AgentTurn, ToolState;
+    show AgentBridge, AgentEvent, AgentRunResult, AgentTurn, ToolState;
 import 'device_capabilities.dart';
 import 'diff_stats.dart';
 import 'global_memory.dart' show runMemoryMigrationOnce;
@@ -1258,6 +1258,12 @@ class LocalAgentExecutor {
           options: RunOptions(
             maxTurns: maxTurns,
             maxToolCalls: ContractAgent.maxToolCalls,
+            // ★ 2026-11-06：压缩阈值可由 `/autocompact <0.05-0.95>` 覆盖（存 prefs）。
+            // ★ 2026-11-06：阈值来自 /autocompact（桥里缓存的静态值，同步读）。
+            compaction: CompactionConfig(
+              autoCompactThreshold: AgentBridge.autoCompactOverride ??
+                  ContractCompaction.autoCompactThreshold,
+            ),
             // ★ 三作用域记忆（2026-10-29）：结构化传入，排序/预算/渲染在 backend。
             //   非空即优先（即使三段都空也不回落旧 memoryNote —— 旧字段已 @Deprecated）。
             memory: memoryContext,

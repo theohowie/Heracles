@@ -710,6 +710,12 @@ class HeraclesAgent {
     required String transcript,
     int maxChars = 4000,
     LLMClient? client,
+    /// 用户指定的压缩重点（`/compact focus on …`）。
+    ///
+    /// 非空时加进**系统提示**（不改写会话正文）：让摘要围绕该主题取舍细节，
+    /// 但"目标 / 用户约束 / 涉及文件 / 未决问题"这些骨架仍然必须保留。
+    /// 空 = 与原行为完全一致。
+    String? focus,
   }) async {
     // `client` 注入点（测试替身用）；生产不传 ⇒ 按配置现建。
     final llm = client ?? buildClientFor(config);
@@ -721,7 +727,8 @@ class HeraclesAgent {
         '3. 关键结论（文件名、行号、报错原文、命令返回值）；\n'
         '4. 未完成事项与卡点。\n'
         '丢弃：寒暄、重复、与任务无关的过程叙述。\n'
-        '直接输出摘要正文，不要开场白和标题，全文不超过 $maxChars 字符。';
+        '直接输出摘要正文，不要开场白和标题，全文不超过 $maxChars 字符。'
+        '${_focusClause(focus)}';
     final msg = await llm.generate(
       [
         SystemMessage(system),
@@ -2975,6 +2982,17 @@ String describeLoopFailure(String message) {
       '任务已停止以避免空转；如果任务还没做完，请把需求拆成更小的步骤再试。'
       '注意：在同一个文件上连续做**不同**的编辑属于正常推进，不会触发这条。';
 }
+/// focus 条款：空串（行为与旧版一致）或一段明确的「本次重点」说明。
+///
+/// 只加进**系统提示**，不改写会话正文 —— 摘要围绕重点取舍细节，
+/// 但「目标 / 用户约束 / 涉及文件 / 未决问题」仍然必须保留。
+String _focusClause(String? focus) {
+  final t = (focus ?? '').trim();
+  if (t.isEmpty) return '';
+  return '\n\n## 本次压缩的重点（用户指定）\n$t\n'
+      '围绕这个重点取舍细节，但**目标、用户约束、涉及文件、未决问题**仍然必须保留。';
+}
+
 bool _isTurnsExhausted(String message) {
   final m = message.toLowerCase();
   return m.contains('maximum turns') || message.contains('轮次');
