@@ -1265,7 +1265,9 @@ class LocalAgentExecutor {
                   ContractCompaction.autoCompactThreshold,
               // ★ 上一次真实输入 token：新一轮开始时 backend 拿不到 usage，
               //   没有它压缩会被字符估算骗过去（真机 122% 却不压）。
-              knownPromptTokens: AgentBridge.knownPromptTokens,
+              // 只认当前会话的值：别的会话的体积绝不许顶进来
+              knownPromptTokens:
+                  AgentBridge.knownPromptTokensForActiveSession,
             ),
             // ★ 三作用域记忆（2026-10-29）：结构化传入，排序/预算/渲染在 backend。
             //   非空即优先（即使三段都空也不回落旧 memoryNote —— 旧字段已 @Deprecated）。

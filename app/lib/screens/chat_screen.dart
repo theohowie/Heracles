@@ -928,7 +928,14 @@ class _ChatScreenState extends State<ChatScreen> {
             const SizedBox(height: 6),
             TopMetricLine(
               label: '命中',
-              valueText: hit == null ? '—' : '${(hit * 100).round()}%',
+              // ★ 2026-11-08：区分「还没有数据」和「上游压根不上报缓存字段」。
+              //   `—` 太含糊：换了 provider（例如某些中转站不回
+              //   `prompt_tokens_details.cached_tokens`）时，用户会以为命中率坏了。
+              valueText: hit != null
+                  ? '${(hit * 100).round()}%'
+                  : (_usage.unreportedTurns > 0 && _usage.reportedTurns == 0
+                      ? '未上报'
+                      : '—'),
               ratio: hit,
               color: hit == null ? h.textFaint : hitStatusColor(h, hit),
             ),

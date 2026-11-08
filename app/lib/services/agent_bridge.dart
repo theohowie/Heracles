@@ -265,25 +265,43 @@ class AgentBridge {
   static const String _autoCompactKey = 'heracles.autocompact_threshold';
 
   /// 上一次真实输入 token 的**同步缓存**（`local_agent` 在非 async 处读它）。
+  ///
+  /// ⚠️ 必须**按会话**成立：`_knownPromptSession` 记录它属于哪个会话，
+  /// 换会话就归零 —— 否则新会话首轮会被上个会话的体积顶过 85% 线而白压一次。
   static int knownPromptTokens = 0;
+  static String _knownPromptSession = '';
+  static String _activeSessionId = '';
+
+  /// **对外入口**：只有"当前会话"的已知体积才算数（会话切换后自动为 0）。
+  static int get knownPromptTokensForActiveSession =>
+      _knownPromptSession == _activeSessionId ? knownPromptTokens : 0;
   static const String _knownPromptKey = 'heracles.last_prompt_tokens';
 
   static void _rememberPromptTokens(int v) {
     if (v <= 0) return;
+    final sid = _activeSessionId;
+    // 没有会话 id 时**不记**：宁可不优化，也不许把别的会话的体积带过来。
+    if (sid.isEmpty) return;
     knownPromptTokens = v;
+    _knownPromptSession = sid;
     unawaited(() async {
       try {
         final p = await SharedPreferences.getInstance();
-        await p.setInt(_knownPromptKey, v);
+        await p.setInt('$_knownPromptKey.$sid', v);
       } catch (_) {}
     }());
   }
 
   /// 从 prefs 刷新缓存（run 开始时调一次）。
-  static Future<void> refreshKnownPromptTokens() async {
+  /// 刷新"上一次真实输入 token"缓存 —— **按会话**（别的会话的值绝不复用）。
+  static Future<void> refreshKnownPromptTokens(String sessionId) async {
+    _activeSessionId = sessionId;
+    _knownPromptSession = sessionId;
+    knownPromptTokens = 0;
+    if (sessionId.isEmpty) return;
     try {
       final p = await SharedPreferences.getInstance();
-      final v = p.getInt(_knownPromptKey) ?? 0;
+      final v = p.getInt('$_knownPromptKey.$sessionId') ?? 0;
       if (v > 0) knownPromptTokens = v;
     } catch (_) {}
   }
@@ -935,7 +953,7 @@ class AgentBridge {
     // They are read synchronously elsewhere, and a stale 0 makes the
     // compaction decision blind to the real prompt size.
     await refreshAutoCompactOverride();
-    await refreshKnownPromptTokens();
+    await refreshKnownPromptTokens(sessionId ?? '');
     final provider = settings.effectiveProvider;
 
     // ★★ 未配置 provider ⇒ **就地明确失败**（2026-10-18，ADR-035 S4）★★
