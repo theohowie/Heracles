@@ -1102,13 +1102,68 @@ class _ToolCallCardState extends State<ToolCallCard> {
             constraints: BoxConstraints(
               maxHeight: MediaQuery.sizeOf(ctx).height * 0.62,
             ),
-            child: SingleChildScrollView(
-              padding: const EdgeInsets.fromLTRB(16, 6, 16, 16),
-              child: ToolCallCard(
-                call: widget.call,
-                stepDetail: widget.stepDetail,
-                forceExpanded: true,
-              ),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                // 抽屉头部：工具名 + 退出码 + 复制（不随卡片内部滚动而消失）
+                Padding(
+                  padding: const EdgeInsets.fromLTRB(16, 2, 12, 6),
+                  child: Row(
+                    children: [
+                      Expanded(
+                        child: Text(
+                          '${widget.call.tool} · ${widget.call.status == ToolStatus.failure ? '失败' : (widget.call.status == ToolStatus.running ? '执行中' : '完成')}',
+                          style: TextStyle(
+                            fontSize: 14,
+                            fontWeight: FontWeight.w600,
+                            color: h.text,
+                          ),
+                          overflow: TextOverflow.ellipsis,
+                        ),
+                      ),
+                      if (commandExitCodeOf(widget.call) != null)
+                        Padding(
+                          padding: const EdgeInsets.only(right: 8),
+                          child: _floatPill(
+                            h,
+                            Text(
+                              '退出码 ${commandExitCodeOf(widget.call)}',
+                              style: TextStyle(
+                                fontFamily: kMonoFontFamily,
+                                fontFamilyFallback: kMonoFallback,
+                                fontSize: 11.5,
+                                fontWeight: FontWeight.w700,
+                                color: commandExitCodeOf(widget.call) == 0
+                                    ? h.textFaint
+                                    : HColors.errorOn(h.dark),
+                              ),
+                            ),
+                          ),
+                        ),
+                      GestureDetector(
+                        behavior: HitTestBehavior.opaque,
+                        onTap: () => _copyCommand(widget.call),
+                        child: _floatPill(
+                          h,
+                          Text('复制',
+                              style: TextStyle(fontSize: 12, color: h.textDim)),
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+                Flexible(
+                  child: SingleChildScrollView(
+                    padding: const EdgeInsets.fromLTRB(16, 0, 16, 16),
+                    child: ToolCallCard(
+                      call: widget.call,
+                      stepDetail: widget.stepDetail,
+                      forceExpanded: true,
+                    ),
+                  ),
+                ),
+              ],
             ),
           ),
         ),
