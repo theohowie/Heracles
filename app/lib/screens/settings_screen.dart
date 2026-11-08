@@ -4955,6 +4955,8 @@ class _KeyboardEnterCardState extends State<_KeyboardEnterCard> {
             ),
           ),
           CupertinoSwitch(
+            // 2026-11-08：颜色跟主题（默认 Cupertino 绿和黑白界面不统一）
+            activeTrackColor: Hue.of(context).text,
             value: AgentBridge.separateSendButton,
             onChanged: (v) async {
               await AgentBridge.writeSeparateSendButton(v);
