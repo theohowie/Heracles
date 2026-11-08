@@ -5450,7 +5450,9 @@ class _ChatScreenState extends State<ChatScreen> {
       //
       // **☰ 按钮始终保留** —— 手势是补充，不是唯一入口。
       drawerEnableOpenDragGesture: true,
-      drawerEdgeDragWidth: 200,
+      // 2026-11-08 用户反馈：200dp 太宽 —— 在工具卡片上横滑会误开侧边栏。
+      // 收敛到窄边缘：想开抽屉必须从最左侧拉，卡片区域的横滑不再被抢走。
+      drawerEdgeDragWidth: 28,
 
       onDrawerChanged: (open) {
         // 抽屉打开时静默刷新 —— 会话可能在别处变化

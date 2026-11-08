@@ -50,6 +50,9 @@ class InputBar extends StatefulWidget {
     this.attachments = const [],
     this.enabled = true,
     this.busy = false,
+    /// 回车键语义（2026-11-08 用户要求）：`true` = 插入换行（发送只走右下按钮），
+    /// `false` = 回车即发送（旧行为）。设置项「使用独立发送按钮」控制。
+    this.newlineOnEnter = true,
     this.stopLabel = true,
     this.permission = PermissionMode.workspaceAuto,
     this.onPermissionChanged,
@@ -200,6 +203,9 @@ class InputBar extends StatefulWidget {
   /// 长按用户消息 → 编辑 → 上层把原文写进这个控制器。
   /// 传了就用外部的（上层能读写输入框文本）；不传就内部自建
   /// （既有调用方零改动）。
+  /// 回车=换行（`true`，默认）还是回车=发送（`false`）。
+  final bool newlineOnEnter;
+
   final TextEditingController? inputController;
 
   // ---- ★ 排队待发（2026-10-13，用户参考图）----
@@ -624,9 +630,14 @@ class _InputBarState extends State<InputBar>
         enabled: widget.enabled,
         maxLines: null,
         minLines: 1,
-        // ★ 回车 = 发送（真机习惯与全部测试的既有语义）
-        textInputAction: TextInputAction.send,
-        onSubmitted: (_) => _send(),
+        // ★ 2026-11-08（用户反馈）：回车键语义可配置。
+        //   `newlineOnEnter=true`（默认，配合「使用独立发送按钮」）⇒ 回车=换行，
+        //   发送只走右下按钮；`false` ⇒ 旧行为（回车即发送）。
+        textInputAction: widget.newlineOnEnter
+            ? TextInputAction.newline
+            : TextInputAction.send,
+        onSubmitted:
+            widget.newlineOnEnter ? null : (_) => _send(),
         style: TextStyle(
           fontSize: 15,
           height: 1.45,
