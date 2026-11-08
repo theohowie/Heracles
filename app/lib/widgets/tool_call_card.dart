@@ -1,12 +1,14 @@
 import 'dart:convert';
 import 'dart:ui' show ImageFilter;
 
+import 'package:flutter/cupertino.dart' show showCupertinoModalPopup;
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
 import '../models/message.dart';
 import '../models/settings.dart';
 import '../theme/app_theme.dart';
+import 'bw_approval.dart';
 import 'v04_tool_card.dart';
 import '../theme/cupertino_kit.dart';
 
@@ -778,7 +780,11 @@ class ToolCallCard extends StatefulWidget {
     super.key,
     required this.call,
     this.stepDetail = StepDetail.standard,
+    this.forceExpanded = false,
   });
+
+  /// 强制展开明细（抽屉里用：抽屉本身只承载"明细"，不需要再点一次）。
+  final bool forceExpanded;
 
   final HToolCall call;
 
@@ -812,8 +818,8 @@ class _ToolCallCardState extends State<ToolCallCard> {
   ///
   /// 为什么用 `late` 而不是在 `build` 里改状态：`build` 里改 state 会触发布局期
   /// setState（Flutter 会警告）。初始化只发生一次，正是我们要的"默认值"。
-  late bool _expanded =
-      widget.stepDetail.showArgs && commandSurfaceOf(widget.call) == null;
+  late final bool _expanded = widget.forceExpanded ||
+      (widget.stepDetail.showArgs && commandSurfaceOf(widget.call) == null);
 
   /// **改动详情**是否展开（2026-10-21，BUG-4）。
   ///
@@ -889,7 +895,9 @@ class _ToolCallCardState extends State<ToolCallCard> {
         children: [
           // ---- 头部：折叠箭头 + 状态图标 + 工具名 + 状态词 + 元信息 ----
           InkWell(
-            onTap: hasBody ? () => setState(() => _expanded = !_expanded) : null,
+            // ★ 2026-11-08（用户要求）：点卡片**呼出上拉抽屉**看明细，
+            //   不再在原地展开 —— 内联展开会把对话流顶长，还容易和侧栏手势打架。
+            onTap: hasBody ? () => _openDetailSheet(h, hasBody) : null,
             borderRadius: BorderRadius.circular(HRadius.sm),
             child: ConstrainedBox(
               constraints: const BoxConstraints(minHeight: kMinTapTarget),
@@ -1074,6 +1082,34 @@ class _ToolCallCardState extends State<ToolCallCard> {
   // ============================================================
   // 命令卡（双层）—— 见文件上方 `CommandSurface` 处的定调注释。
   // ============================================================
+
+  /// **明细抽屉**（2026-11-08 用户要求）。
+  ///
+  /// 复用 `BwSheetShell`（与审批/用量抽屉同一套抓手与圆角），
+  /// `allowDrag: false` ⇒ **不可拉高**；内容超高在抽屉内部滚动。
+  /// 抽屉里放的是**同一张卡片**（`forceExpanded: true`），样式零改动。
+  void _openDetailSheet(Hue h, bool hasBody) {
+    showCupertinoModalPopup<void>(
+      context: context,
+      builder: (ctx) => BwSheetShell(
+        onDismissRequest: () => Navigator.of(ctx).pop(),
+        allowDrag: false,
+        child: ConstrainedBox(
+          constraints: BoxConstraints(
+            maxHeight: MediaQuery.sizeOf(ctx).height * 0.62,
+          ),
+          child: SingleChildScrollView(
+            padding: const EdgeInsets.fromLTRB(16, 6, 16, 16),
+            child: ToolCallCard(
+              call: widget.call,
+              stepDetail: widget.stepDetail,
+              forceExpanded: true,
+            ),
+          ),
+        ),
+      ),
+    );
+  }
 
   Widget _commandCard(Hue h, HToolCall call, CommandSurface surface) {
     final running = call.status == ToolStatus.running;
