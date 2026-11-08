@@ -5452,7 +5452,9 @@ class _ChatScreenState extends State<ChatScreen> {
       drawerEnableOpenDragGesture: true,
       // 2026-11-08 用户反馈：200dp 太宽 —— 在工具卡片上横滑会误开侧边栏。
       // 收敛到窄边缘：想开抽屉必须从最左侧拉，卡片区域的横滑不再被抢走。
-      drawerEdgeDragWidth: 28,
+      // 2026-11-08（用户澄清）：不是一刀切 —— 边缘宽度恢复原值，抽屉仍从左侧大片区域拉出；
+      // 误触改由「工具卡片自己认领横向拖动」解决（tool_call_card 的 _ClaimHorizontalDrag）。
+      drawerEdgeDragWidth: 200,
 
       onDrawerChanged: (open) {
         // 抽屉打开时静默刷新 —— 会话可能在别处变化

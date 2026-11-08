@@ -225,7 +225,10 @@ class ToolGroupRow extends StatelessWidget {
     final summary = toolGroupSummary(tools);
     final tone = failed ? HColors.errorOn(h.dark) : h.text;
 
-    return InkWell(
+    // 2026-11-08（用户反馈）：工具卡片上横滑会误开侧边栏。
+    // 卡片自己认领横向拖动（什么都不做）：内层识别器在竞技场里胜出，
+    // 抽屉的边缘拖动就抢不走这次滑动 —— 抽屉仍可从边缘正常拉出。
+    return _ClaimHorizontalDrag(child: InkWell(
       onTap: onToggle,
       borderRadius: BorderRadius.circular(HRadius.sm),
       child: ConstrainedBox(
@@ -277,7 +280,7 @@ class ToolGroupRow extends StatelessWidget {
           ),
         ),
       ),
-    );
+    ));
   }
 }
 /// ```
@@ -2047,6 +2050,26 @@ class MarkdownLite extends StatelessWidget {
     }
     return RichText(
       text: TextSpan(children: spans, style: base),
+    );
+  }
+}
+/// 认领横向拖动，避免手势被外层「边缘拉抽屉」抢走（2026-11-08 用户反馈）。
+///
+/// 只声明横向拖动识别器、不做任何事：竞技场里内层胜出，抽屉拿不到这次滑动；
+/// 纵向滚动与点按都不受影响（`translucent` 不吞其它手势）。
+class _ClaimHorizontalDrag extends StatelessWidget {
+  const _ClaimHorizontalDrag({required this.child});
+
+  final Widget child;
+
+  @override
+  Widget build(BuildContext context) {
+    return GestureDetector(
+      behavior: HitTestBehavior.translucent,
+      onHorizontalDragStart: (_) {},
+      onHorizontalDragUpdate: (_) {},
+      onHorizontalDragEnd: (_) {},
+      child: child,
     );
   }
 }
