@@ -213,6 +213,13 @@ class AgentBridge {
     // ★ 2026-11-06：记住"上一次真实输入 token"（= 分项之和，后端按真值等比放大过）。
     //   为什么必须记：新一轮开始时 backend 的 `state.usages` 是空的，压缩决策只能
     //   退回字符估算（低估 2.5~3.5 倍）⇒ 真机出现"上下文 122%、压缩从不触发"。
+    if (e.type == AgentEvent.kContextCompressed) {
+      // ★ 2026-11-08：压缩事件**落盘**。界面提示是瞬态（换会话就清），
+      //   而"到底压过几次、压了多少"必须能回看 —— 否则用户永远只能猜。
+      debugPrint('[compact] before=${e.beforeTokens} after=${e.afterTokens} '
+          'msgs=${e.beforeMessages}->${e.afterMessages}');
+      unawaited(_persistCompactRow(e));
+    }
     if (e.type == AgentEvent.kContextUpdated) {
       final bd = e.breakdown;
       if (bd != null && bd.isNotEmpty) {
@@ -271,11 +278,37 @@ class AgentBridge {
   static int knownPromptTokens = 0;
   static String _knownPromptSession = '';
   static String _activeSessionId = '';
+  static String _activeWorkspacePath = '';
 
   /// **对外入口**：只有"当前会话"的已知体积才算数（会话切换后自动为 0）。
   static int get knownPromptTokensForActiveSession =>
       _knownPromptSession == _activeSessionId ? knownPromptTokens : 0;
   static const String _knownPromptKey = 'heracles.last_prompt_tokens';
+
+  /// 把一次**自动压缩**写进会话 JSONL（`role: compact`, `auto: true`）。
+  ///
+  /// 只追加、不改历史：原始消息一个字节都不动（append-only 铁律）。
+  /// 写失败只打日志、绝不打断 run —— 观测是附加品，不能反噬执行。
+  static Future<void> _persistCompactRow(AgentEvent e) async {
+    final sid = _activeSessionId;
+    final ws = _activeWorkspacePath;
+    if (sid.isEmpty || ws.isEmpty) return;
+    try {
+      // 静态事件路径里没有实例的 _storeFor 缓存 —— 直接建一个即可
+      final store = SessionStore(workspaceRoot: ws);
+      await store.appendMessage(sid, {
+        'role': 'compact',
+        'auto': true,
+        'beforeTokens': e.beforeTokens,
+        'afterTokens': e.afterTokens,
+        'beforeMessages': e.beforeMessages,
+        'afterMessages': e.afterMessages,
+        'ts': DateTime.now().millisecondsSinceEpoch,
+      });
+    } catch (err) {
+      debugPrint('[compact] persist failed: $err');
+    }
+  }
 
   static void _rememberPromptTokens(int v) {
     if (v <= 0) return;
@@ -954,6 +987,7 @@ class AgentBridge {
     // compaction decision blind to the real prompt size.
     await refreshAutoCompactOverride();
     await refreshKnownPromptTokens(sessionId ?? '');
+    _activeWorkspacePath = workspacePath;
     final provider = settings.effectiveProvider;
 
     // ★★ 未配置 provider ⇒ **就地明确失败**（2026-10-18，ADR-035 S4）★★

@@ -131,11 +131,14 @@ class SettingsScreen extends StatelessWidget {
                     title: '模型',
                     // 与聊天页同源同字段（2026-10-15 修 BUG-5 的口径保留）：
                     // effectiveProvider + 「服务商 · 模型名」
+                    // ★ 2026-11-08：副行末尾带上**当前生效的上下文窗口**。
+                    //   用户报过「我填了 128K 却没生效」——真相是值填在**另一个
+                    //   provider 条目**上，当前这条是 0（按默认 128K）。副行里
+                    //   直接写出来，就不会再靠猜。
                     subtitle: s.effectiveProvider == null
                         ? '未选择'
-                        : (s.effectiveProvider!.model.isEmpty
-                            ? s.effectiveProvider!.name
-                            : '${s.effectiveProvider!.name} · ${s.effectiveProvider!.model}'),
+                        : '${s.effectiveProvider!.model.isEmpty ? s.effectiveProvider!.name : '${s.effectiveProvider!.name} · ${s.effectiveProvider!.model}'}'
+                            ' · 窗口 ${s.effectiveProvider!.effectiveContextWindow > 0 ? formatTokenCount(s.effectiveProvider!.effectiveContextWindow) : '未设置(默认128K)'}',
                     onTap: () => _push(
                         context, ModelSettingsPage(controller: controller)),
                   ),
