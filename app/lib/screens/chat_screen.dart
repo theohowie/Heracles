@@ -6010,41 +6010,46 @@ class _ChatScreenState extends State<ChatScreen> {
         return BwSheetShell(
           onDismissRequest: () => Navigator.of(sheetCtx).pop(),
           allowDrag: false,
-          child: ConstrainedBox(
-            constraints: BoxConstraints(
-              maxHeight: MediaQuery.sizeOf(sheetCtx).height * 0.62,
-            ),
-            child: Column(
-              mainAxisSize: MainAxisSize.min,
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Padding(
-                  padding: const EdgeInsets.fromLTRB(20, 6, 20, 2),
-                  child: Row(
-                    children: [
-                      Icon(AppIcons.terminal, size: 18, color: hh.textDim),
-                      const SizedBox(width: 8),
-                      Text(
-                        '工具调用 · ${calls.length} 条',
-                        style: TextStyle(
+          // 2026-11-08 真机修复：Cupertino 路由**没有 Material 祖先**，
+          // 卡片里的 InkWell 会抛「No Material widget found」⇒ 套透明 Material。
+          child: Material(
+            type: MaterialType.transparency,
+            child: ConstrainedBox(
+              constraints: BoxConstraints(
+                maxHeight: MediaQuery.sizeOf(sheetCtx).height * 0.62,
+              ),
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Padding(
+                    padding: const EdgeInsets.fromLTRB(20, 6, 20, 2),
+                    child: Row(
+                      children: [
+                        Icon(AppIcons.terminal, size: 18, color: hh.textDim),
+                        const SizedBox(width: 8),
+                        Text(
+                          '工具调用 · ${calls.length} 条',
+                          style: TextStyle(
                             fontSize: 15,
                             fontWeight: FontWeight.w600,
-                            color: hh.text),
-                      ),
-                    ],
-                  ),
-                ),
-                Flexible(
-                  child: SingleChildScrollView(
-                    padding: const EdgeInsets.only(bottom: 18),
-                    // 复用列表里那套单条工具行（参数/结果外观完全一致）
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.stretch,
-                      children: [for (final c in calls) _messageRow(c)],
+                            color: hh.text,
+                          ),
+                        ),
+                      ],
                     ),
                   ),
-                ),
-              ],
+                  Flexible(
+                    child: SingleChildScrollView(
+                      padding: const EdgeInsets.only(bottom: 18),
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.stretch,
+                        children: [for (final c in calls) _messageRow(c)],
+                      ),
+                    ),
+                  ),
+                ],
+              ),
             ),
           ),
         );

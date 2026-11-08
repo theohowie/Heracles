@@ -1094,16 +1094,21 @@ class _ToolCallCardState extends State<ToolCallCard> {
       builder: (ctx) => BwSheetShell(
         onDismissRequest: () => Navigator.of(ctx).pop(),
         allowDrag: false,
-        child: ConstrainedBox(
-          constraints: BoxConstraints(
-            maxHeight: MediaQuery.sizeOf(ctx).height * 0.62,
-          ),
-          child: SingleChildScrollView(
-            padding: const EdgeInsets.fromLTRB(16, 6, 16, 16),
-            child: ToolCallCard(
-              call: widget.call,
-              stepDetail: widget.stepDetail,
-              forceExpanded: true,
+        // ★ 2026-11-08 真机修复：`showCupertinoModalPopup` 路由里**没有 Material 祖先**，
+        //   卡片内部的 InkWell 会直接抛「No Material widget found」。套一层透明 Material。
+        child: Material(
+          type: MaterialType.transparency,
+          child: ConstrainedBox(
+            constraints: BoxConstraints(
+              maxHeight: MediaQuery.sizeOf(ctx).height * 0.62,
+            ),
+            child: SingleChildScrollView(
+              padding: const EdgeInsets.fromLTRB(16, 6, 16, 16),
+              child: ToolCallCard(
+                call: widget.call,
+                stepDetail: widget.stepDetail,
+                forceExpanded: true,
+              ),
             ),
           ),
         ),
