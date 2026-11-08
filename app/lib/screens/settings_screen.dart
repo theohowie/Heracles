@@ -2518,6 +2518,8 @@ class GeneralSettingsPage extends StatelessWidget {
                 onChanged: controller.setStepDetail,
               ),
             ),
+            // ★ 2026-11-08 用户要求：键盘回车语义可切换（默认「使用独立发送按钮」）
+            const _KeyboardEnterCard(),
             _SettingsCard(
               title: '繁忙时发送',
               subtitle: '任务执行中发消息如何处理',
@@ -4921,6 +4923,44 @@ class _AlwaysAllowedRowState extends State<_AlwaysAllowedRow> {
               padding: const EdgeInsets.symmetric(horizontal: HSpace.sm),
               child: const Text('清除', style: TextStyle(fontSize: 12)),
             ),
+        ],
+      ),
+    );
+  }
+}
+/// **键盘回车语义**（2026-11-08 用户要求）。
+///
+/// 默认开启「使用独立发送按钮」⇒ 键盘回车**插入换行**，发送只走右下按钮；
+/// 关闭 ⇒ 回到旧行为（回车即发送）。
+/// 值存 `SharedPreferences`（`heracles.separate_send_button`），跨重启保留。
+class _KeyboardEnterCard extends StatefulWidget {
+  const _KeyboardEnterCard();
+
+  @override
+  State<_KeyboardEnterCard> createState() => _KeyboardEnterCardState();
+}
+
+class _KeyboardEnterCardState extends State<_KeyboardEnterCard> {
+  @override
+  Widget build(BuildContext context) {
+    return _SettingsCard(
+      title: '使用独立发送按钮',
+      subtitle: '开启后键盘回车插入换行，发送只走右下按钮；关闭则为回车即发送',
+      child: Row(
+        children: [
+          Expanded(
+            child: Text(
+              AgentBridge.separateSendButton ? '回车 = 换行' : '回车 = 发送',
+              style: const TextStyle(fontSize: 13),
+            ),
+          ),
+          CupertinoSwitch(
+            value: AgentBridge.separateSendButton,
+            onChanged: (v) async {
+              await AgentBridge.writeSeparateSendButton(v);
+              if (mounted) setState(() {});
+            },
+          ),
         ],
       ),
     );

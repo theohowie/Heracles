@@ -285,6 +285,32 @@ class AgentBridge {
       _knownPromptSession == _activeSessionId ? knownPromptTokens : 0;
   static const String _knownPromptKey = 'heracles.last_prompt_tokens';
 
+  /// **「使用独立发送按钮」**（2026-11-08 用户要求，默认开）。
+  ///
+  /// 开 ⇒ 键盘回车插入换行，发送只走右下按钮；
+  /// 关 ⇒ 回旧行为（回车即发送）。
+  /// 存 prefs：跨重启要还在；`separateSendButtonForUi` 是同步读的入口。
+  static bool separateSendButton = true;
+  static const String _separateSendKey = 'heracles.separate_send_button';
+
+  /// 同步读（UI 在 build 里用）。
+  bool get separateSendButtonForUi => separateSendButton;
+
+  static Future<void> loadSeparateSendButton() async {
+    try {
+      final p = await SharedPreferences.getInstance();
+      separateSendButton = p.getBool(_separateSendKey) ?? true;
+    } catch (_) {}
+  }
+
+  static Future<void> writeSeparateSendButton(bool v) async {
+    separateSendButton = v;
+    try {
+      final p = await SharedPreferences.getInstance();
+      await p.setBool(_separateSendKey, v);
+    } catch (_) {}
+  }
+
   /// 把一次**自动压缩**写进会话 JSONL（`role: compact`, `auto: true`）。
   ///
   /// 只追加、不改历史：原始消息一个字节都不动（append-only 铁律）。

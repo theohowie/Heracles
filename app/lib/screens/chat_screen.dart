@@ -51,8 +51,6 @@ import '../widgets/tool_call_card.dart'
     show
         ToolGroupRow,
         friendlyToolName,
-        kStepRowArrowGap,
-        kStepRowArrowSize,
         kStepRowHPad;
 import '../widgets/workspace_drawer.dart';
 
@@ -514,7 +512,6 @@ class _ChatScreenState extends State<ChatScreen> {
   /// 值 = 该组**第一条消息在 `_messages` 里的下标**。
   /// 会话严格 append-only ⇒ 老消息的下标不会变，所以这个 key 在会话内稳定；
   /// 换会话/重载消息时清空（展开态本来就只对当前视图有意义）。
-  final Set<int> _expandedToolGroups = <int>{};
 
   /// 每条回答的时间戳 —— 操作行右侧那个 `14:32`。
   /// 消息模型本身没带时间（`HAssistantMessage` 只有 id/text），
@@ -1117,6 +1114,8 @@ class _ChatScreenState extends State<ChatScreen> {
 
   @override
   void initState() {
+    // 2026-11-08：冷启动读回「独立发送按钮」开关（默认开）
+    unawaited(AgentBridge.loadSeparateSendButton());
     super.initState();
     // ★ 监听手动滚动 —— 用户上滑即暂停自动滚动（`docs/25` §5.3 第 3 条）
     _scroll.addListener(_onScroll);
@@ -5793,6 +5792,8 @@ class _ChatScreenState extends State<ChatScreen> {
             // 按钮语义也要分清：只有**当前会话**在跑时才是"停止"，
             // 别的会话在跑时显示"等待" —— 否则用户在 B 看到"停止"会以为能停 B 的东西
             stopLabel: _currentSessionRunning,
+            // 2026-11-08：独立发送按钮开关（默认开）—— 开=回车换行，关=回车发送
+            newlineOnEnter: AgentBridge.separateSendButton,
             // ★ 发送：忙时按设置走"排队"或"中断"
             onSend: _onSend,
             // ★ 停止（2026-10-13）—— 只在"当前会话在跑"时被点击
@@ -5973,38 +5974,82 @@ class _ChatScreenState extends State<ChatScreen> {
       case _SingleRow(:final message):
         return _messageRow(message);
       case _ToolGroupRow(:final anchor, :final calls):
-        final expanded = _expandedToolGroups.contains(anchor);
+        // 2026-11-08：不再内联展开 —— 详情走 `_showToolGroupSheet`（上拉抽屉）。
+        // 这里保留 `anchor` 只为分组定位，不再需要 expanded 状态。
+        assert(anchor >= 0);
         return Column(
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
+            // ★ 2026-11-08（用户要求）：**点击呼出上拉抽屉**看详情，
+            //   不再在下方内联展开 —— 内联展开会把对话流顶得很长，而且
+            //   展开区在列表里滑动容易和侧边栏手势打架。
             ToolGroupRow(
               tools: [for (final c in calls) c.tool],
-              expanded: expanded,
+              expanded: false,
               // 组里只要有一条失败，整行按失败色 —— 合并视图不许把失败藏起来
               failed: calls.any((c) => c.status == ToolStatus.failure),
-              onToggle: () => setState(() {
-                if (expanded) {
-                  _expandedToolGroups.remove(anchor);
-                } else {
-                  _expandedToolGroups.add(anchor);
-                }
-              }),
+              onToggle: () => _showToolGroupSheet(calls),
             ),
-            // 展开后就是**原来的**单条工具行（一点没变），用户能看参数与结果
-            if (expanded) ...[
-              for (final c in calls) _messageRow(c),
-              // 展开态给一条淡淡的收束线，视觉上说明"这组到此为止"
-              Padding(
-                padding: const EdgeInsets.only(
-                    left: kStepRowHPad + kStepRowArrowSize + kStepRowArrowGap),
-                child: Container(height: 1, color: h.border),
-              ),
-            ],
           ],
         );
       case _ContextCompressedRow(:final note):
         return _contextCompressedRow(h, note);
     }
+  }
+
+  /// **工具/命令卡片的详情抽屉**（2026-11-08 用户要求）。
+  ///
+  /// 与其它上拉抽屉同一套壳（`BwSheetShell`：统一抓手 + 同一圆角/底色），
+  /// 但 `allowDrag: false` —— 用户明确要求**这个抽屉不能被拉高**，
+  /// 内容超出就在抽屉内部滚动，别把整屏变成一层白。
+  void _showToolGroupSheet(List<HToolCall> calls) {
+    showCupertinoModalPopup<void>(
+      context: context,
+      builder: (sheetCtx) {
+        final hh = Hue.of(sheetCtx);
+        return BwSheetShell(
+          onDismissRequest: () => Navigator.of(sheetCtx).pop(),
+          allowDrag: false,
+          child: ConstrainedBox(
+            constraints: BoxConstraints(
+              maxHeight: MediaQuery.sizeOf(sheetCtx).height * 0.62,
+            ),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Padding(
+                  padding: const EdgeInsets.fromLTRB(20, 6, 20, 2),
+                  child: Row(
+                    children: [
+                      Icon(AppIcons.terminal, size: 18, color: hh.textDim),
+                      const SizedBox(width: 8),
+                      Text(
+                        '工具调用 · ${calls.length} 条',
+                        style: TextStyle(
+                            fontSize: 15,
+                            fontWeight: FontWeight.w600,
+                            color: hh.text),
+                      ),
+                    ],
+                  ),
+                ),
+                Flexible(
+                  child: SingleChildScrollView(
+                    padding: const EdgeInsets.only(bottom: 18),
+                    // 复用列表里那套单条工具行（参数/结果外观完全一致）
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.stretch,
+                      children: [for (final c in calls) _messageRow(c)],
+                    ),
+                  ),
+                ),
+              ],
+            ),
+          ),
+        );
+      },
+    );
   }
 
   /// **「上下文已压缩」轻量提示行**（2026-10-23，用户要求压缩机制可见）。
