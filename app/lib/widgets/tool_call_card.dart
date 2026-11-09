@@ -1106,52 +1106,11 @@ class _ToolCallCardState extends State<ToolCallCard> {
               mainAxisSize: MainAxisSize.min,
               crossAxisAlignment: CrossAxisAlignment.stretch,
               children: [
-                // 抽屉头部：工具名 + 退出码 + 复制（不随卡片内部滚动而消失）
-                Padding(
-                  padding: const EdgeInsets.fromLTRB(16, 2, 12, 6),
-                  child: Row(
-                    children: [
-                      Expanded(
-                        child: Text(
-                          '${widget.call.tool} · ${widget.call.status == ToolStatus.failure ? '失败' : (widget.call.status == ToolStatus.running ? '执行中' : '完成')}',
-                          style: TextStyle(
-                            fontSize: 14,
-                            fontWeight: FontWeight.w600,
-                            color: h.text,
-                          ),
-                          overflow: TextOverflow.ellipsis,
-                        ),
-                      ),
-                      if (commandExitCodeOf(widget.call) != null)
-                        Padding(
-                          padding: const EdgeInsets.only(right: 8),
-                          child: _floatPill(
-                            h,
-                            Text(
-                              '退出码 ${commandExitCodeOf(widget.call)}',
-                              style: TextStyle(
-                                fontFamily: kMonoFontFamily,
-                                fontFamilyFallback: kMonoFallback,
-                                fontSize: 11.5,
-                                fontWeight: FontWeight.w700,
-                                color: commandExitCodeOf(widget.call) == 0
-                                    ? h.textFaint
-                                    : HColors.errorOn(h.dark),
-                              ),
-                            ),
-                          ),
-                        ),
-                      GestureDetector(
-                        behavior: HitTestBehavior.opaque,
-                        onTap: () => _copyCommand(widget.call),
-                        child: _floatPill(
-                          h,
-                          Text('复制',
-                              style: TextStyle(fontSize: 12, color: h.textDim)),
-                        ),
-                      ),
-                    ],
-                  ),
+                CommandSheetTitle(
+                  title:
+                      '${widget.call.tool} · ${widget.call.status == ToolStatus.failure ? '失败' : (widget.call.status == ToolStatus.running ? '执行中' : '完成')}',
+                  exitCode: commandExitCodeOf(widget.call),
+                  onCopy: () => _copyCommand(widget.call),
                 ),
                 Flexible(
                   child: SingleChildScrollView(
@@ -2166,6 +2125,91 @@ class _ClaimHorizontalDrag extends StatelessWidget {
       onHorizontalDragUpdate: (_) {},
       onHorizontalDragEnd: (_) {},
       child: child,
+    );
+  }
+}
+/// **工具抽屉的标题行**（2026-11-09 用户要求）。
+///
+/// 右侧固定两枚元素（不随卡内滚动消失）：
+/// · **退出码**：`0` 绿、非 `0` 红（读不出来就不显示）；
+/// · **复制**：黑底白字胶囊。
+///
+/// 单条工具抽屉与分组抽屉共用，保证两处样式一字不差。
+class CommandSheetTitle extends StatelessWidget {
+  const CommandSheetTitle({
+    super.key,
+    required this.title,
+    this.exitCode,
+    this.onCopy,
+  });
+
+  final String title;
+  final int? exitCode;
+  final VoidCallback? onCopy;
+
+  @override
+  Widget build(BuildContext context) {
+    final h = Hue.of(context);
+    final ok = exitCode == 0;
+    final codeColor = ok ? HColors.successOn(h.dark) : HColors.errorOn(h.dark);
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(16, 2, 12, 8),
+      child: Row(
+        children: [
+          Expanded(
+            child: Text(
+              title,
+              style: TextStyle(
+                  fontSize: 14,
+                  fontWeight: FontWeight.w600,
+                  color: h.text),
+              overflow: TextOverflow.ellipsis,
+            ),
+          ),
+          if (exitCode != null) ...[
+            Container(
+              padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+              decoration: BoxDecoration(
+                borderRadius: BorderRadius.circular(HRadius.pill),
+                border: Border.all(color: codeColor.withValues(alpha: 0.45)),
+              ),
+              child: Text(
+                '退出码 $exitCode',
+                style: TextStyle(
+                  fontFamily: kMonoFontFamily,
+                  fontFamilyFallback: kMonoFallback,
+                  fontSize: 11.5,
+                  fontWeight: FontWeight.w700,
+                  color: codeColor,
+                ),
+              ),
+            ),
+            const SizedBox(width: 8),
+          ],
+          if (onCopy != null)
+            GestureDetector(
+              behavior: HitTestBehavior.opaque,
+              onTap: onCopy,
+              child: Container(
+                padding:
+                    const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+                decoration: BoxDecoration(
+                  // 黑底白字（用户明确要求）
+                  color: h.text,
+                  borderRadius: BorderRadius.circular(HRadius.pill),
+                ),
+                child: Text(
+                  '复制',
+                  style: TextStyle(
+                    fontSize: 12,
+                    fontWeight: FontWeight.w600,
+                    color: h.bg,
+                  ),
+                ),
+              ),
+            ),
+        ],
+      ),
     );
   }
 }

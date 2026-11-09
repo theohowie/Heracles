@@ -49,7 +49,9 @@ import '../widgets/input_bar.dart';
 import '../widgets/message_row.dart';
 import '../widgets/tool_call_card.dart'
     show
+        CommandSheetTitle,
         ToolGroupRow,
+        commandExitCodeOf,
         friendlyToolName,
         kStepRowHPad;
 import '../widgets/workspace_drawer.dart';
@@ -6006,7 +6008,6 @@ class _ChatScreenState extends State<ChatScreen> {
     showCupertinoModalPopup<void>(
       context: context,
       builder: (sheetCtx) {
-        final hh = Hue.of(sheetCtx);
         return BwSheetShell(
           onDismissRequest: () => Navigator.of(sheetCtx).pop(),
           allowDrag: false,
@@ -6022,22 +6023,16 @@ class _ChatScreenState extends State<ChatScreen> {
                 mainAxisSize: MainAxisSize.min,
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                  Padding(
-                    padding: const EdgeInsets.fromLTRB(20, 6, 20, 2),
-                    child: Row(
-                      children: [
-                        Icon(AppIcons.terminal, size: 18, color: hh.textDim),
-                        const SizedBox(width: 8),
-                        Text(
-                          '工具调用 · ${calls.length} 条',
-                          style: TextStyle(
-                            fontSize: 15,
-                            fontWeight: FontWeight.w600,
-                            color: hh.text,
-                          ),
-                        ),
-                      ],
-                    ),
+                  CommandSheetTitle(
+                    title: '工具调用 · ${calls.length} 条',
+                    exitCode: () {
+                      for (final c0 in calls.reversed) {
+                        final e = commandExitCodeOf(c0);
+                        if (e != null) return e;
+                      }
+                      return null;
+                    }(),
+                    onCopy: null,
                   ),
                   Flexible(
                     child: SingleChildScrollView(
