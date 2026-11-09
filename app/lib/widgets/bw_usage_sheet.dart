@@ -55,9 +55,18 @@ class _UsageSheetState extends State<_UsageSheet> {
   Widget build(BuildContext context) {
     final h = Hue.of(context);
     return SafeArea(
-      child: SizedBox(
-        height: MediaQuery.of(context).size.height * 0.62,
-        child: Column(
+      // ★ 2026-11-09（用户反馈）：抽屉被**拉高**时，底部提示行（"左滑查看缓存命中"
+      //   /"右滑返回上下文占用"）会跟着浮在半空 —— 因为原来写死 `height: 屏高×0.62`，
+      //   抽屉变高后内容仍按 62% 顶部对齐。
+      //   改成：拿到有限高度就**铺满**当前抽屉；无界测量（抽屉壳先量自然高度）
+      //   才回落到 62%。这样提示行永远贴着抽屉底部。
+      child: LayoutBuilder(builder: (ctx, cons) {
+        final hAvail = cons.maxHeight.isFinite && cons.maxHeight > 240
+            ? cons.maxHeight
+            : MediaQuery.sizeOf(ctx).height * 0.62;
+        return SizedBox(
+          height: hAvail,
+          child: Column(
           children: [
             const SizedBox(height: 10),
             Padding(
@@ -110,8 +119,9 @@ class _UsageSheetState extends State<_UsageSheet> {
               ),
             ),
           ],
-        ),
-      ),
+          ),
+        );
+      }),
     );
   }
 }
