@@ -1,4 +1,4 @@
-﻿import 'dart:async';
+import 'dart:async';
 
 import 'package:flutter/cupertino.dart';
 import 'package:flutter/material.dart';
@@ -265,6 +265,31 @@ class _BwSheetShellState extends State<BwSheetShell>
           ),
         );
         if (height == null) return surface;
+        // ★ 2026-11-09（用户反馈）：抽屉被**拉高**时，原来内容仍按自然高度顶部
+        //   对齐 ⇒ 底部提示行（"左滑查看缓存命中"等）浮在半空、下面一片空白。
+        //   现在：拉高后让内容**铺满**抽屉（抓手 + Expanded(child)），
+        //   子级的 LayoutBuilder 会拿到有限的 maxHeight，于是自己撑开。
+        final natural = _natural;
+        if (natural != null && height > natural + 1) {
+          return SizedBox(
+            height: height,
+            child: Container(
+              decoration: BoxDecoration(
+                color: h.surfaceAlt,
+                borderRadius:
+                    const BorderRadius.vertical(top: Radius.circular(24)),
+              ),
+              clipBehavior: Clip.antiAlias,
+              child: Column(
+                mainAxisSize: MainAxisSize.max,
+                children: [
+                  if (widget.showHandle) const BwSheetHandle(),
+                  Expanded(child: widget.child),
+                ],
+              ),
+            ),
+          );
+        }
         return SizedBox(height: height, child: surface);
       },
     );
