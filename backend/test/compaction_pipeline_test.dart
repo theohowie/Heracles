@@ -365,4 +365,32 @@ void main() {
           reason: '走了兜底就必须真的压到线下');
     });
   });
+  test('knownPromptTokens: 新一轮 usages 为空时也要能触发压缩', () async {
+    // 真机 2026-11-06：上下文 122%、压缩从不触发 —— 新一轮开始时
+    // `state.usages` 为空，决策退回字符估算（低估 2.5~3.5 倍）。
+    // 宿主把上次真实 prompt tokens 带进来，这里验证它真的参与决策。
+    final client = _Recorder();
+    final c = WindowRatioCompressor(
+      client: client,
+      modelConfig: ModelConfig(model: 'stub'),
+      modelWindowTokens: 1000,
+      compactionConfig: const CompactionConfig(
+        autoCompactThreshold: 0.85,
+        sessionMemoryEnabled: false,
+        knownPromptTokens: 900, // 90% —— 已过线，但字符估算远低于线
+      ),
+    );
+    final state = AgentState(
+      sessionId: 's-known',
+      history: AgentMessageHistory(messages: [UserMessage.text('hi')]),
+    );
+
+    expect(c.estimateUsage(state), lessThan(850),
+        reason: '前提：字符估算本身远低于触发线（否则用例没意义）');
+
+    await c.compress(state);
+
+    expect(c.lastCompaction, isNotNull,
+        reason: '★ 只有 knownPromptTokens 参与决策，这次压缩才可能发生');
+  });
 }
