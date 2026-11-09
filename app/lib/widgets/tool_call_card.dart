@@ -781,7 +781,13 @@ class ToolCallCard extends StatefulWidget {
     required this.call,
     this.stepDetail = StepDetail.standard,
     this.forceExpanded = false,
+    this.hideFloatingActions = false,
   });
+
+  /// 隐藏卡片自带的「退出码 + 复制」悬浮药丸（2026-11-09）。
+  ///
+  /// 抽屉里标题行已经有这两个操作，卡片再画一遍就重复了（真机截图为证）。
+  final bool hideFloatingActions;
 
   /// 强制展开明细（抽屉里用：抽屉本身只承载"明细"，不需要再点一次）。
   final bool forceExpanded;
@@ -1122,6 +1128,7 @@ class _ToolCallCardState extends State<ToolCallCard> {
                       call: widget.call,
                       stepDetail: widget.stepDetail,
                       forceExpanded: true,
+                      hideFloatingActions: true,
                     ),
                   ),
                 ),
@@ -1185,6 +1192,8 @@ class _ToolCallCardState extends State<ToolCallCard> {
             ],
           ),
           // 悬浮工具：退出码 + 复制（不独占一行）
+          // 2026-11-09：抽屉里已在标题行给过这两枚 ⇒ 卡内不再重复画一遍。
+          if (!widget.hideFloatingActions)
           Positioned(
             top: 8,
             right: 10,
