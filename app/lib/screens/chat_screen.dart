@@ -6034,7 +6034,10 @@ class _ChatScreenState extends State<ChatScreen> {
                     }(),
                     onCopy: null,
                   ),
-                  Flexible(
+                  ConstrainedBox(
+                    constraints: BoxConstraints(
+                      maxHeight: MediaQuery.sizeOf(sheetCtx).height * 0.5,
+                    ),
                     child: SingleChildScrollView(
                       padding: const EdgeInsets.only(bottom: 18),
                       child: Column(

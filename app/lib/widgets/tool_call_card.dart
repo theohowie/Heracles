@@ -1112,7 +1112,10 @@ class _ToolCallCardState extends State<ToolCallCard> {
                   exitCode: commandExitCodeOf(widget.call),
                   onCopy: () => _copyCommand(widget.call),
                 ),
-                Flexible(
+                ConstrainedBox(
+                  constraints: BoxConstraints(
+                    maxHeight: MediaQuery.sizeOf(context).height * 0.5,
+                  ),
                   child: SingleChildScrollView(
                     padding: const EdgeInsets.fromLTRB(16, 0, 16, 16),
                     child: ToolCallCard(
