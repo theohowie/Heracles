@@ -565,7 +565,12 @@ int? commandExitCodeOf(HToolCall call) {
     if (m != null) return int.tryParse(m.group(1)!);
   }
 
-  // ③ 拿不到就不显示 —— 不猜、不编造
+  // ③ 成功的命令调用 ⇒ 退出码必然是 0（不是编造：命令没报错就是 0）。
+  //   真机 2026-11-09：成功的 `run_shell_command` 没有结构化 exitCode，
+  //   于是标头只剩「复制」——用户直接问「退出码呢？」。
+  if (call.status == ToolStatus.success) return 0;
+
+  // ④ 失败但解析不出具体码 ⇒ 交给调用方显示「未知」，绝不编一个数字
   return null;
 }
 
@@ -2163,7 +2168,9 @@ class CommandSheetTitle extends StatelessWidget {
   Widget build(BuildContext context) {
     final h = Hue.of(context);
     final ok = exitCode == 0;
-    final codeColor = ok ? HColors.successOn(h.dark) : HColors.errorOn(h.dark);
+    final codeColor = exitCode == null
+        ? h.textFaint
+        : (ok ? HColors.successOn(h.dark) : HColors.errorOn(h.dark));
     return Padding(
       padding: const EdgeInsets.fromLTRB(16, 2, 12, 8),
       child: Row(
@@ -2178,7 +2185,8 @@ class CommandSheetTitle extends StatelessWidget {
               overflow: TextOverflow.ellipsis,
             ),
           ),
-          if (exitCode != null) ...[
+          // 永远占这一格：拿不到具体值就显示「未知」（灰），不让它整块消失。
+          ...[
             Container(
               padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
               decoration: BoxDecoration(
@@ -2186,7 +2194,7 @@ class CommandSheetTitle extends StatelessWidget {
                 border: Border.all(color: codeColor.withValues(alpha: 0.45)),
               ),
               child: Text(
-                '退出码 $exitCode',
+                exitCode == null ? '退出码 未知' : '退出码 $exitCode',
                 style: TextStyle(
                   fontFamily: kMonoFontFamily,
                   fontFamilyFallback: kMonoFallback,
