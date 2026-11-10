@@ -1,31 +1,31 @@
-/* 站点内容与常量。
+﻿/* 站点内容与常量。
    ----------------------------------------------------------------------------
    事实纪律（2026-11-09 按仓库与实跑逐条核对）：
    · 这里的每条产品声明都必须能在仓库里找到依据；
    · 没被证明的东西只能出现在 LIMITS（页面上标为「尚未验证」）；
-   · 可下载的包就是本页描述的 v0.5.0（2026-11-09 出包）：版本 / 版本码 / 体积 /
+   · 可下载的包就是本页描述的 v0.5.1（2026-11-10 出包）：版本 / 版本码 / 体积 /
       校验值 / 两条线路都核过，页面上不混着说。
    ⚠️ 切换点：发布新包后要一起改 APK_GITHUB / APK_GITEE / VERSION / APK_SIZE /
       APK_VERSION_CODE / SHA / 版本对照文案。
    ⚠️ 截图纪律：`shots/*-v3.webp` 是 2026-10-30 的真机图（15 张 + 1 张录屏海报），
       继续复用；0.5.0 的新能力没有对应截图，只写文字条目 —— 不许拿旧图充新功能。 */
 
-export const APK_GITHUB = 'https://github.com/theohowie/Heracles/releases/download/v0.5.0/Heracles-v0.5.0-arm64.apk'
-export const APK_GITEE = 'https://gitee.com/theohowie/heracles/releases/download/v0.5.0/Heracles-v0.5.0-arm64.apk'
+export const APK_GITHUB = 'https://github.com/theohowie/Heracles/releases/download/v0.5.1/Heracles-v0.5.1-arm64.apk'
+export const APK_GITEE = 'https://gitee.com/theohowie/heracles/releases/download/v0.5.1/Heracles-v0.5.1-arm64.apk'
 
-/* 两条线路**同一个包**（2026-11-09 核对）：GitHub 与 Gitee 的 `Heracles-v0.5.0-arm64.apk`
-   都是 50,722,096 B = 48.4 MiB 的 arm64-only 构建（versionCode 37 / versionName 0.5.0，
-   targetSdk 36、最低 API 31，native-code 仅 arm64-v8a）。
+/* 两条线路**同一个包**（2026-11-10 核对，两端各做过一次实下载算 hash）：
+   `Heracles-v0.5.1-arm64.apk` 是 50,837,552 B = 48.5 MiB 的 arm64-only 构建
+   （versionCode 38 / versionName 0.5.1，targetSdk 36、最低 API 31，native-code 仅 arm64-v8a）。
    换版本时两条线路一起换、一起核。 */
 export const GITEE_READY = true // 国内线路已就绪 → 默认走 Gitee
 export const APK_ROUTES = [
   {
     key: 'gitee', label: 'Gitee', hint: '国内线路', url: APK_GITEE, ready: GITEE_READY,
-    size: '48.4 MiB', build: 'arm64-only',
+    size: '48.5 MiB', build: 'arm64-only',
   },
   {
     key: 'github', label: 'GitHub', hint: '源站', url: APK_GITHUB, ready: true,
-    size: '48.4 MiB', build: 'arm64-only',
+    size: '48.5 MiB', build: 'arm64-only',
   },
 ]
 export const APK_PRIMARY = GITEE_READY ? APK_ROUTES[0] : APK_ROUTES[1]
@@ -37,15 +37,15 @@ export const RELEASES = 'https://gitee.com/theohowie/heracles/releases'
 export const RELEASES_GITHUB = 'https://github.com/theohowie/Heracles/releases'
 export const REPO = 'https://github.com/theohowie/Heracles'
 export const GITEE = 'https://gitee.com/theohowie/heracles'
-/* sha256（2026-11-09）：两条线路是同一个文件，页面只给一份校验值。
+/* sha256（2026-11-10）：两条线路是同一个文件，页面只给一份校验值。
    用户拿自己的下载算一次、和这里对一遍就能确认没被换包。 */
-export const SHA = 'C563E3E876E682286FF5EFF8F3460EF1D9F76F8CB34D34184414BC6C54B9576B'
+export const SHA = '2D545D893D204178049E1D5928D9BAB3FCB69C71B0D82805CA2E2B74332204E2'
 export const SHA_SOURCE = 'Gitee / GitHub 同一份文件'
-export const VERSION = 'v0.5.0'
+export const VERSION = 'v0.5.1'
 export const APK_SIZE = APK_PRIMARY.size
-export const APK_VERSION_CODE = '37'
+export const APK_VERSION_CODE = '38'
 export const PKG = 'com.theohowie.heracles'
-/* 截图日期 = 图片本身的日期，**不等于**发布日（发布日 2026-11-09）。
+/* 截图日期 = 图片本身的日期，**不等于**发布日（发布日 2026-11-10）。
    截图没重拍，就别改这个值 —— 一改就等于声称「这是新界面的实拍」。 */
 export const SHOT_DATE = '2026-10-30'
 export const SHOT_VERSION = 'v0.3.2'
@@ -61,7 +61,7 @@ export const SHOT = (name) => `/Heracles/shots/${name}.webp`
 
 /* ---------- 首屏规格条（三个都能复算） ---------- */
 export const HERO_SPECS = [
-  { value: '632', unit: '项', label: '内核 Dart 单测', note: 'backend/ 纯 Dart，可复跑' },
+  { value: '1034', unit: '项', label: '内核 Dart 单测', note: 'core 402 + backend 632，纯 Dart 可复跑' },
   { value: '90–99%', unit: '', label: '长任务缓存命中', note: '真机实测，累计/稳态' },
   { value: '33', unit: '个', label: '受控工具', note: '白名单 + 门禁三态' },
 ]
@@ -341,7 +341,9 @@ export const GALLERY = [
   { src: SHOT('search-v3'), title: '会话搜索', desc: '按工作区分组，跨会话搜关键词，最近会话带时间', spec: '可检索' },
   { src: SHOT('appearance-v3'), title: '外观', desc: '深浅、主题、玻璃效果与界面字号实时预览', spec: '实时预览' },
   { src: SHOT('settings-v3'), title: '设置首页', desc: '通用 / 记忆 / 权限 / 模型 / 外观，一屏看全', spec: '五个入口' },
-  { src: SHOT('about-v3'), title: '关于', desc: '版本、许可与开源信息（图里这版是 0.3.2）', spec: 'GPL-3.0' },
+  /* 「关于」那张图已从图库移除（2026-11-10）：图上印着「版本 0.3.2」，
+     而且那张卡片写着「本机构建与改包…产出可安装的 APK」，与当前
+     「APK 五件套未接线」直接冲突 —— 留着就是对不上号的图。重拍后再放回来。 */
 ]
 
 /* ---------- 状态台账（基线 = README 头部数字 + 本轮实测；2026-11-09 同步） ---------- */
@@ -360,45 +362,59 @@ export const WORKS = [
   '402 余额不足说人话且不重试；环图「已用」= 分项之和',
   '技能页接真数据（内置 + 用户技能，启停后重读回显）',
   '自动化任务页：保存后重读回填，固定间隔到点写「待执行」',
+  '设置里上下文窗口 / 输出上限按 128K / 32K / 1M 显示（不再显示 131072）',
+  '界面可切中文 / English（第一批覆盖，未翻译条目回退中文）',
+  'Anthropic / Responses / Chat Completions 三条轨共用 URL 拼接器，baseUrl 带 /v1 不再重复',
+  '编码层自检按钮不再永久转圈（该能力已下线，改为如实提示不可用）',
   '会话严格 append-only（写前断言前缀、并发拒写）',
   '审批 fail-closed：答复落盘 once / always / deny',
-  'arm64-only 发布包（v0.5.0 · 48.4 MiB，无 v7a / x86_64 死重）',
-  '内核 632 项 Dart 单测（cd backend && dart test）',
+  'arm64-only 发布包（v0.5.1 · 48.5 MiB，无 v7a / x86_64 死重）',
+  '内核 402 项 core 单测 + 632 项 backend 单测（cd core / cd backend && dart test）',
 ]
 
-/* 2026-11-09 核对：真 Key 端到端验证**至今一次都没跑过**，这条不许从「尚未验证」里拿走。
-   MCP / 机器人接入的通道同样没落地（页面与校验规则在，提交会被拒）——
-   两块都如实留在这一栏，不为了好看说成已完成。 */
+/* 2026-11-10 按仓库逐条复核（每条都给了依据，没依据的不写）：
+   · 真 Key 端到端验证**至今一次都没跑过** —— 用户点名必须保留，不许从这一栏拿走；
+   · Anthropic / Responses 两轨仍无真 Key 证据（URL 拼接在修，但也还没验）—— 同上；
+   · MCP：`mcp_screen.dart:42-47` 提交即回「接口未接通：本次没有保存」；
+     后端有 McpServerConfig / validateMcpServer、宿主有 McpConfigBridge.kt（密钥不许进 env），
+     但 App 侧没有通道方法 ⇒ 页面只到表单与校验；
+   · 机器人接入：`robot_access_screen.dart:6-11` 写「后端 §N19 未落地 ⇒ 本轮整页降级」；
+   · JEV 本地推理：`jev_service.dart:16-20` + `agent_bridge.dart` 的 jevLocalDecide 恒返回 null；
+   · APK 五件套：`device_capabilities.dart:1980-2079` 五个方法全部返回「未接线」
+     （`apk_tools.dart:3-7` 同口径）；
+   · 记忆注入顺序：台账（.docs/实测-18）在，但「注入顺序端到端」真机没做过（要真 Key），
+     渲染顺序由 backend 单测覆盖； */
 export const LIMITS = [
   '真 Key 端到端验证（至今一次都没跑过）',
-  'Anthropic / Responses 两轨的思考档位未生效（无真 Key 证据）',
+  'Anthropic / Responses 两轨只修了 URL 拼接（无真 Key 证据，不能算跑通）；思考档位在这两轨仍未生效',
   'MCP 服务器通道未接通（页面与校验规则就位，保存会被拒绝）',
   '机器人接入通道未落地（飞书 / OneBot / 微信三张卡，整页如实降级）',
   'JEV 本地推理（档位只能下模型，引擎未接入）',
   'APK 构建 / 逆向五件套未接线（build_apk、apk_* 会明确回「尚未接线」）',
-  '记忆三作用域的真机验收台账仍待补',
+  '记忆三作用域：注入顺序的端到端真机验证未做（渲染顺序已有 backend 单测）',
   '流式语音质量未系统评测（长句 / 强噪声 / 方言）',
-  '英文界面暂不支持（选 English 会如实提示）',
-  '测试环境：flutter test 并发偶发加载失败，门禁以 backend dart test 为准',
+  '英文界面为第一批覆盖（未翻译的条目回退显示中文）',
+  '测试环境：flutter test 并发偶发加载失败，门禁以 core / backend 的 dart test 为准',
 ]
 
 /* ---------- 最近实测（带日期，能回查台账） ---------- */
 export const RUNS = [
+  { date: '2026-11-10', text: 'v0.5.1 出包：50,837,552 B = 48.5 MiB，versionCode 38，arm64-only', tag: '构建' },
+  { date: '2026-11-10', text: 'core dart test 402/402 · backend dart test 632/632（出包前实跑）', tag: '单测' },
+  { date: '2026-11-10', text: '三轨 URL 拼接修复：20 条单测（含 9 条抓真实请求 URI 的接线锁）+ 变异验证变红', tag: '单测' },
   { date: '2026-11-09', text: '内核 dart test 632/632（打 v0.5.0 包前实跑）', tag: '单测' },
-  { date: '2026-11-09', text: 'v0.5.0 出包：50,722,096 B = 48.4 MiB，versionCode 37，arm64-only', tag: '构建' },
   { date: '2026-10-30', text: '文件工具写工作区 → 沙箱 pwd=/opt/ws-real，ls/cat/wc 一致、写回可见', tag: '真机' },
   { date: '2026-10-30', text: '三作用域记忆真机五项全过：迁移 / 幂等 / 全局只读 / 提议晋升 / 会话隔离', tag: '真机' },
   { date: '2026-10-29', text: '长任务前缀缓存：累计 90–95%、稳态 96–99%（1 机型 1 模型 1 会话）', tag: '真机' },
 ]
 
-/* ---------- v0.5.0 这一版改了什么（逐条能对到仓库里的提交） ---------- */
+/* ---------- v0.5.1 这一版改了什么（逐条能对到仓库里的提交） ----------
+   页面标题跟着 VERSION 走，所以这里只列 **v0.5.1** 的改动；
+   v0.5.0 的那些能力（上拉抽屉 / 压缩流水线 / 取消轮次上限…）已经写进
+   FEATURES 与 WORKS，不再重复列在这里。 */
 export const CHANGELOG = [
-  '工具与命令卡改成上拉抽屉看详情，不再内联展开；抽屉标题行常驻退出码 + 复制',
-  '「使用独立发送按钮」开关（通用设置，默认开）：回车插入换行，发送只走右下按钮',
-  '侧边栏收回窄边缘触发；卡片内的横滑不再把抽屉误开',
-  '上下文压缩改成流水线：微压缩 → 本地会话记忆 → API 结构化摘要，85% 单阈值只压一次',
-  '新增 /compact focus on …（指定压缩重点）与 /autocompact（改触发线 0.05–0.95）',
-  '取消轮次与 token 预算：任务不再被上限掐断，停不停由循环检测与「连续无进展」判断',
-  '402 余额不足说人话且不重试；上下文环图的「已用」改成各项之和',
-  '技能页接真数据；自动化任务页保存后重读回填；MCP / 机器人接入如实标明未接通',
+  '界面可切中文 / English（设置 → 通用 → 语言）：立即生效、重启保留；按中文原文查表，未翻译条目回退中文',
+  '设置里的上下文窗口与输出上限按 128K / 32K / 1M 显示，不再是换算后的 131072 / 32768',
+  'Anthropic / Responses / Chat Completions 三条轨共用 URL 拼接器：baseUrl 已带 /v1 时不再重复（旧写法拼出 …/v1/v1/messages ⇒ 404）',
+  '编码层自检按钮不再永久转圈：该能力已随 Kotlin 后端模块下线，现在如实提示「不可用」',
 ]

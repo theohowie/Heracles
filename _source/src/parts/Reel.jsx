@@ -123,7 +123,8 @@ export default function Reel() {
             </div>
 
             <p className="reel-note mono">
-              截图取自 {SHOT_VERSION}（{SHOT_DATE} 真机）；{VERSION} 的新能力没重拍，只写成文字条目。
+              截图取自 {SHOT_VERSION}（{SHOT_DATE} 真机）；{VERSION} 起的界面变化没有重拍，
+              新能力只写成文字条目。
             </p>
           </div>
         </Reveal>
