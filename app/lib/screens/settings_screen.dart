@@ -343,9 +343,8 @@ class BackgroundKeepalivePage extends StatelessWidget {
       body: ListView(
         padding: const EdgeInsets.all(HSpace.lg),
         children: [
-          Text(
-            '长任务在后台继续跑需要的系统设置。Android 不保证永不被杀；'
-            '这里只显示真实状态与引导，不假装“开了就一直跑”。',
+          Text(tr('长任务在后台继续跑需要的系统设置。Android 不保证永不被杀；'
+            '这里只显示真实状态与引导，不假装“开了就一直跑”。'),
             style: TextStyle(fontSize: 12.5, height: 1.55, color: h.textFaint),
           ),
           const SizedBox(height: HSpace.md),
@@ -788,16 +787,14 @@ class _DevicePermissionPageState extends State<DevicePermissionPage>
                 // ---- 未授权：授权引导（方式说明 + 一键授权）----
                 if (_granted == false && _guidance.isNotEmpty) ...[
                   const SizedBox(height: HSpace.lg),
-                  Text(
-                    '授权引导',
+                  Text(tr('授权引导'),
                     style: TextStyle(
                         fontSize: 13,
                         fontWeight: FontWeight.w600,
                         color: h.text),
                   ),
                   const SizedBox(height: HSpace.xs),
-                  Text(
-                    '三种授权方式任选其一：',
+                  Text(tr('三种授权方式任选其一：'),
                     style: TextStyle(fontSize: 12.5, color: h.textDim),
                   ),
                   const SizedBox(height: HSpace.sm),
@@ -845,8 +842,7 @@ class _DevicePermissionPageState extends State<DevicePermissionPage>
                   ),
                 ] else if (_granted == true) ...[
                   const SizedBox(height: HSpace.md),
-                  Text(
-                    '一切正常 —— 无障碍被系统关闭时会自动恢复，无需干预。',
+                  Text(tr('一切正常 —— 无障碍被系统关闭时会自动恢复，无需干预。'),
                     style: TextStyle(
                         fontSize: 12.5, height: 1.5, color: h.textDim),
                   ),
@@ -861,8 +857,7 @@ class _DevicePermissionPageState extends State<DevicePermissionPage>
                           : () => _runShizuku(force: true),
                       minimumSize: const Size(0, 36),
                       padding: EdgeInsets.zero,
-                      child: Text(
-                        '重新向 Shizuku 申请授权（收录本 App）',
+                      child: Text(tr('重新向 Shizuku 申请授权（收录本 App）'),
                         style: TextStyle(fontSize: 13, color: h.textDim),
                       ),
                     ),
@@ -876,8 +871,7 @@ class _DevicePermissionPageState extends State<DevicePermissionPage>
                   behavior: HitTestBehavior.opaque,
                   child: Row(
                     children: [
-                      Text(
-                        '诊断与自检',
+                      Text(tr('诊断与自检'),
                         style: TextStyle(
                             fontSize: 13,
                             fontWeight: FontWeight.w600,
@@ -961,17 +955,15 @@ class _DevicePermissionPageState extends State<DevicePermissionPage>
                   // 编码层自检：能不能跑通直接取决于上面的执行路由
                   //（App 自己没有 shell 身份，工具链全靠它跑）。
                   const SizedBox(height: HSpace.lg),
-                  Text(
-                    '编码层自检',
+                  Text(tr('编码层自检'),
                     style: TextStyle(
                         fontSize: 13,
                         fontWeight: FontWeight.w600,
                         color: h.text),
                   ),
                   const SizedBox(height: HSpace.xs),
-                  Text(
-                    '在手机上真跑一遍：起前台服务 → 读温度/电量 → 定位工具链 → '
-                    '建 Hello World → 构建 → 拆包核对。',
+                  Text(tr('在手机上真跑一遍：起前台服务 → 读温度/电量 → 定位工具链 → '
+                    '建 Hello World → 构建 → 拆包核对。'),
                     style:
                         TextStyle(fontSize: 12, height: 1.5, color: h.textDim),
                   ),
@@ -2395,8 +2387,7 @@ class _MemoryEditorSheetState extends State<_MemoryEditorSheet> {
                           color: h.dark
                               ? const Color(0xFF0A0A0B)
                               : Colors.white)
-                      : Text(
-                          '保存',
+                      : Text(tr('保存'),
                           style: TextStyle(
                             fontSize: 15,
                             fontWeight: FontWeight.w600,
@@ -2550,9 +2541,8 @@ class GeneralSettingsPage extends StatelessWidget {
                     onChanged: controller.setMaxTurns,
                   ),
                   const SizedBox(height: 10),
-                  Text(
-                    '自动 = 云端 40 轮（默认）。轮次越多，单次任务能做的步骤'
-                    '越多，但可能跑更久；云端按轮计费，花费也更多。',
+                  Text(tr('自动 = 云端 40 轮（默认）。轮次越多，单次任务能做的步骤'
+                    '越多，但可能跑更久；云端按轮计费，花费也更多。'),
                     style: TextStyle(
                         fontSize: 12, height: 1.5, color: h.textFaint),
                   ),
@@ -2614,8 +2604,7 @@ class ModelSettingsPage extends StatelessWidget {
         builder: (context, s, _) => ListView(
           padding: const EdgeInsets.all(HSpace.lg),
           children: [
-            Text(
-              '填入各提供商的 API 密钥即可使用其模型。',
+            Text(tr('填入各提供商的 API 密钥即可使用其模型。'),
               style: TextStyle(fontSize: 13, color: h.textFaint),
             ),
             const SizedBox(height: HSpace.lg),
@@ -2843,8 +2832,7 @@ class _ProviderCard extends StatelessWidget {
                             color: h.accent.withValues(alpha: 0.15),
                             borderRadius: BorderRadius.circular(HRadius.pill),
                           ),
-                          child: Text(
-                            '默认',
+                          child: Text(tr('默认'),
                             style: TextStyle(
                               fontSize: 10,
                               fontWeight: FontWeight.w600,
@@ -2971,8 +2959,7 @@ class _JevCardState extends State<_JevCard> {
                   child: Column(
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
-                      Text(
-                        'JEV 决策引擎',
+                      Text(tr('JEV 决策引擎'),
                         maxLines: 1,
                         overflow: TextOverflow.ellipsis,
                         style: TextStyle(
@@ -3031,8 +3018,7 @@ class _AddProviderButton extends StatelessWidget {
           children: [
             Icon(AppIcons.add, size: 19, color: h.textDim),
             SizedBox(width: HSpace.sm),
-            Text(
-              '添加模型提供商',
+            Text(tr('添加模型提供商'),
               style: TextStyle(fontSize: 13.5, color: h.textDim),
             ),
           ],
@@ -3477,8 +3463,7 @@ class _ProviderEditPageState extends State<ProviderEditPage> {
                 border: Border.all(color: h.border),
                 borderRadius: BorderRadius.circular(HRadius.sm),
               ),
-              child: Text(
-                '模型选择器中将不显示任何模型；目录外 ID 仍可直接发送。',
+              child: Text(tr('模型选择器中将不显示任何模型；目录外 ID 仍可直接发送。'),
                 textAlign: TextAlign.center,
                 style: TextStyle(fontSize: 12, color: h.textFaint),
               ),
@@ -4096,10 +4081,9 @@ class _AboutPageState extends State<AboutPage> {
             ],
           ),
           const SizedBox(height: 20),
-          Text(
-            'Heracles 是一个装在手机里的开发智能体：一句话说清需求，'
+          Text(tr('Heracles 是一个装在手机里的开发智能体：一句话说清需求，'
             '它就在你的手机上读文件、改代码、跑命令，把 App 构建、解包、'
-            '重打包成能直接安装的成品——从想法到装上手机，一台手机全搞定。',
+            '重打包成能直接安装的成品——从想法到装上手机，一台手机全搞定。'),
             style: TextStyle(fontSize: 15, height: 1.65, color: h.text),
           ),
           const SizedBox(height: 24),
@@ -4194,8 +4178,7 @@ class _AboutPageState extends State<AboutPage> {
             ],
           ),
           const SizedBox(height: 26),
-          Text(
-            '© 2026 Heracles 项目 · 开源软件',
+          Text(tr('© 2026 Heracles 项目 · 开源软件'),
             textAlign: TextAlign.center,
             style: TextStyle(fontSize: 12, color: h.textFaint),
           ),

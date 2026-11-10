@@ -21,6 +21,8 @@ import '../theme/app_theme.dart';
 import '../theme/cupertino_kit.dart';
 import '../theme/elastic_switch.dart';
 
+import 'package:heracles/i18n/l10n.dart';
+
 class SkillsScreen extends StatefulWidget {
   const SkillsScreen({super.key, this.service});
 
@@ -94,7 +96,7 @@ class _SkillsScreenState extends State<SkillsScreen> {
     return Scaffold(
       backgroundColor: h.bg,
       appBar: AppBar(
-        title: const Text('技能'),
+        title: Text(tr('技能')),
         leading: IconButton(
           icon: const Icon(AppIcons.back, size: 21),
           onPressed: () => Navigator.of(context).pop(),
@@ -118,7 +120,7 @@ class _SkillsScreenState extends State<SkillsScreen> {
                     child: Column(
                       crossAxisAlignment: CrossAxisAlignment.start,
                       children: [
-                        Text('技能通道不可用',
+                        Text(tr('技能通道不可用'),
                             style: TextStyle(
                                 fontSize: 14,
                                 fontWeight: FontWeight.w600,
@@ -146,7 +148,7 @@ class _SkillsScreenState extends State<SkillsScreen> {
                     child: Column(
                       crossAxisAlignment: CrossAxisAlignment.start,
                       children: [
-                        Text('技能列表读取失败',
+                        Text(tr('技能列表读取失败'),
                             style: TextStyle(
                                 fontSize: 14,
                                 fontWeight: FontWeight.w600,
@@ -170,9 +172,8 @@ class _SkillsScreenState extends State<SkillsScreen> {
                   // ---- 用户技能 ----
                   _groupLabel(h, '用户技能（${snap.user.length}）'),
                   if (snap.user.isEmpty)
-                    Text(
-                      '还没有用户技能。把技能放在工作区的 '
-                      '`.heracles/skills/<名字>/SKILL.md`，重启任务后出现在这里。',
+                    Text(tr('还没有用户技能。把技能放在工作区的 '
+                      '`.heracles/skills/<名字>/SKILL.md`，重启任务后出现在这里。'),
                       style: TextStyle(
                           fontSize: 12, height: 1.6, color: h.textFaint),
                     )
@@ -181,7 +182,7 @@ class _SkillsScreenState extends State<SkillsScreen> {
                       _skillRow(h, s, key: Key('skills-row-${s.name}')),
                   // ---- snap.errors：非法 SKILL.md 必须显示（§12） ----
                   if (snap.errors.isNotEmpty) ...[
-                    _groupLabel(h, '扫描问题（这些技能没有生效）'),
+                    _groupLabel(h, tr('扫描问题（这些技能没有生效）')),
                     for (final e in snap.errors)
                       Padding(
                         padding: const EdgeInsets.only(bottom: 4),
@@ -198,29 +199,27 @@ class _SkillsScreenState extends State<SkillsScreen> {
                 ],
                 const SizedBox(height: HSpace.md),
                 // ---- 安装/卸载：通道还没有 ⇒ 不画假按钮，放「下一批」 ----
-                Text('安装 / 卸载（下一批）',
+                Text(tr('安装 / 卸载（下一批）'),
                     style: TextStyle(
                         fontSize: 13,
                         fontWeight: FontWeight.w600,
                         color: h.textDim)),
                 const SizedBox(height: 6),
-                Text(
-                  '当前版本还不能从 App 里安装/卸载技能包：'
+                Text(tr('当前版本还不能从 App 里安装/卸载技能包：'
                   '内置技能随版本发行，用户技能靠把目录放进 `.heracles/skills/`。'
-                  '通道落地后这里会给出安装入口。',
+                  '通道落地后这里会给出安装入口。'),
                   style: TextStyle(fontSize: 12, height: 1.6, color: h.textFaint),
                 ),
                 const SizedBox(height: HSpace.md),
                 // ---- 权限说明（照旧如实） ----
-                Text('权限说明',
+                Text(tr('权限说明'),
                     style: TextStyle(
                         fontSize: 13,
                         fontWeight: FontWeight.w600,
                         color: h.textDim)),
                 const SizedBox(height: 6),
-                Text(
-                  '技能只影响"模型看到什么说明"，不绕过工具审批门禁：'
-                  '技能里要求的命令/写文件仍走同一套 Allow / NeedsApproval / Deny 判定。',
+                Text(tr('技能只影响"模型看到什么说明"，不绕过工具审批门禁：'
+                  '技能里要求的命令/写文件仍走同一套 Allow / NeedsApproval / Deny 判定。'),
                   style:
                       TextStyle(fontSize: 12, height: 1.6, color: h.textFaint),
                 ),

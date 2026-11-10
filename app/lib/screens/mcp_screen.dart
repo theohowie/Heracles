@@ -16,6 +16,8 @@ import '../theme/cupertino_kit.dart';
 import '../theme/elastic_switch.dart';
 import '../theme/stretch_segmented.dart';
 
+import 'package:heracles/i18n/l10n.dart';
+
 class McpScreen extends StatefulWidget {
   const McpScreen({super.key});
 
@@ -52,7 +54,7 @@ class _McpScreenState extends State<McpScreen> {
     return Scaffold(
       backgroundColor: h.bg,
       appBar: AppBar(
-        title: const Text('MCP 服务器'),
+        title: Text(tr('MCP 服务器')),
         leading: IconButton(
           icon: const Icon(AppIcons.back, size: 21),
           onPressed: () => Navigator.of(context).pop(),
@@ -71,21 +73,21 @@ class _McpScreenState extends State<McpScreen> {
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                Text('未配置',
+                Text(tr('未配置'),
                     style: TextStyle(
                         fontSize: 14,
                         fontWeight: FontWeight.w600,
                         color: h.text)),
                 const SizedBox(height: 6),
-                Text('当前版本没有 MCP 通道：不能增删改服务器、也读不到连接状态。'
-                    '下面只是表单骨架，提交会明确告诉你"未保存"。',
+                Text(tr('当前版本没有 MCP 通道：不能增删改服务器、也读不到连接状态。'
+                    '下面只是表单骨架，提交会明确告诉你"未保存"。'),
                     style: TextStyle(
                         fontSize: 12, height: 1.55, color: h.textFaint)),
               ],
             ),
           ),
           const SizedBox(height: HSpace.md),
-          Text('校验规则（后端 validateMcpServer）',
+          Text(tr('校验规则（后端 validateMcpServer）'),
               style: TextStyle(
                   fontSize: 13,
                   fontWeight: FontWeight.w600,
@@ -103,12 +105,12 @@ class _McpScreenState extends State<McpScreen> {
           TextField(
             key: const Key('mcp-name'),
             controller: _name,
-            decoration: const InputDecoration(labelText: '名称'),
+            decoration: InputDecoration(labelText: tr('名称')),
           ),
           const SizedBox(height: 8),
           // ★ 2026-11-03（§4.2）：离散 2–5 档互斥只有 StretchSegmented
           //   —— ChoiceChip 是第二套分档形态，撤。
-          Text('传输方式', style: TextStyle(fontSize: 12, color: h.textDim)),
+          Text(tr('传输方式'), style: TextStyle(fontSize: 12, color: h.textDim)),
           const SizedBox(height: 6),
           StretchSegmented(
             key: const Key('mcp-transport'),
@@ -136,7 +138,7 @@ class _McpScreenState extends State<McpScreen> {
           // ★ 2026-11-03（§4.1）：开关只有 ElasticSwitch。
           Row(
             children: [
-              const Expanded(child: Text('启用')),
+              Expanded(child: Text(tr('启用'))),
               ElasticSwitch(
                 key: const Key('mcp-enabled'),
                 value: _enabled,
@@ -157,7 +159,7 @@ class _McpScreenState extends State<McpScreen> {
           FilledButton(
             key: const Key('mcp-save'),
             onPressed: _submit,
-            child: const Text('保存'),
+            child: Text(tr('保存')),
           ),
         ],
       ),

@@ -29,6 +29,8 @@ import '../theme/cupertino_kit.dart';
 import '../theme/elastic_switch.dart';
 import '../widgets/background_keepalive_card.dart';
 
+import 'package:heracles/i18n/l10n.dart';
+
 /// OneBot 连接状态（§N19 落地后的四态；本轮全部停在「未配置」）：
 /// `未配置 / 连接中 / 已连接 / 失败` —— 落地后在此声明 enum 并接
 /// `robotOnebotStatus()`（TODO 通道），卡片按态渲染状态胶囊。
@@ -41,7 +43,7 @@ class RobotAccessScreen extends StatelessWidget {
     return Scaffold(
       backgroundColor: h.bg,
       appBar: AppBar(
-        title: const Text('机器人接入'),
+        title: Text(tr('机器人接入')),
         leading: IconButton(
           icon: const Icon(AppIcons.back, size: 21),
           onPressed: () => Navigator.of(context).pop(),
@@ -72,7 +74,7 @@ class RobotAccessScreen extends StatelessWidget {
                   children: [
                     Icon(AppIcons.info, size: 15, color: h.textDim),
                     const SizedBox(width: 8),
-                    Text('必须知道的',
+                    Text(tr('必须知道的'),
                         style: TextStyle(
                             fontSize: 13,
                             fontWeight: FontWeight.w600,
@@ -80,11 +82,10 @@ class RobotAccessScreen extends StatelessWidget {
                   ],
                 ),
                 const SizedBox(height: 6),
-                Text(
-                  '· 手机离线时消息排队：Bot 收到的消息不会丢，'
+                Text(tr('· 手机离线时消息排队：Bot 收到的消息不会丢，'
                   '回到 App 后按序处理。\n'
                   '· Bot 不能绕过审批：危险操作仍需手机确认，'
-                  '与聊天页同一套 Allow / NeedsApproval / Deny 判定。',
+                  '与聊天页同一套 Allow / NeedsApproval / Deny 判定。'),
                   key: const Key('robot-caveats'),
                   style: TextStyle(
                       fontSize: 12, height: 1.65, color: h.textFaint),
@@ -124,7 +125,7 @@ class RobotAccessScreen extends StatelessWidget {
             KeepaliveRow(
               icon: AppIcons.terminal,
               title: 'QQ（OneBot）',
-              subtitle: '接口未接通：本轮只有表单骨架，还不能保存或连接',
+              subtitle: tr('接口未接通：本轮只有表单骨架，还不能保存或连接'),
               subtitleKey: const Key('robot-onbot-degraded'),
               trailing: _pill(h, '接口未接通',
                   pillKey: const Key('robot-onbot-status')),
@@ -132,10 +133,9 @@ class RobotAccessScreen extends StatelessWidget {
             // 需要什么（§N19）
             Padding(
               padding: const EdgeInsets.fromLTRB(18, 0, 18, 8),
-              child: Text(
-                '需要：后端 §N19 机器人接入通道（OneBot 收发、事件回传、'
+              child: Text(tr('需要：后端 §N19 机器人接入通道（OneBot 收发、事件回传、'
                 '离线消息队列与配置落盘）。落地后此卡自动激活，'
-                '状态四态：未配置 / 连接中 / 已连接 / 失败。',
+                '状态四态：未配置 / 连接中 / 已连接 / 失败。'),
                 style: TextStyle(fontSize: 12, height: 1.55, color: h.textFaint),
               ),
             ),
@@ -145,7 +145,7 @@ class RobotAccessScreen extends StatelessWidget {
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                  Text('模式',
+                  Text(tr('模式'),
                       style:
                           TextStyle(fontSize: 12, color: h.textDim)),
                   const SizedBox(height: 4),
@@ -153,7 +153,7 @@ class RobotAccessScreen extends StatelessWidget {
                     child: IgnorePointer(
                       child: Opacity(
                         opacity: 0.45,
-                        child: Text('正向 WebSocket（ws://）｜反向 WebSocket',
+                        child: Text(tr('正向 WebSocket（ws://）｜反向 WebSocket'),
                             style: TextStyle(
                                 fontSize: 12.5, color: h.textFaint)),
                       ),
@@ -165,7 +165,7 @@ class RobotAccessScreen extends StatelessWidget {
                     enabled: false,
                     controller: TextEditingController(text: 'ws://（待后端通道落地）'),
                     style: TextStyle(fontSize: 12.5, color: h.textFaint),
-                    decoration: const InputDecoration(labelText: '地址'),
+                    decoration: InputDecoration(labelText: tr('地址')),
                   ),
                   const SizedBox(height: 8),
                   TextField(
@@ -175,7 +175,7 @@ class RobotAccessScreen extends StatelessWidget {
                     controller: TextEditingController(text: 'accessToken'),
                     style: TextStyle(fontSize: 12.5, color: h.textFaint),
                     decoration:
-                        const InputDecoration(labelText: 'accessToken（掩码显示）'),
+                        InputDecoration(labelText: tr('accessToken（掩码显示）')),
                   ),
                   const SizedBox(height: 8),
                   TextField(
@@ -194,7 +194,7 @@ class RobotAccessScreen extends StatelessWidget {
                   const SizedBox(height: 8),
                   Row(
                     children: [
-                      const Expanded(child: Text('启停')),
+                      Expanded(child: Text(tr('启停'))),
                       // 不画假开关：ElasticSwitch 禁用态（onChanged null）
                       const ElasticSwitch(value: false, onChanged: null),
                     ],
@@ -205,7 +205,7 @@ class RobotAccessScreen extends StatelessWidget {
                     child: TextButton(
                       key: const Key('robot-onbot-test'),
                       onPressed: null, // 通道未接通 ⇒ 禁用（不假测试）
-                      child: Text('连接测试',
+                      child: Text(tr('连接测试'),
                           style:
                               TextStyle(fontSize: 13, color: h.textFaint)),
                     ),
@@ -235,8 +235,8 @@ class RobotAccessScreen extends StatelessWidget {
                   Text(title,
                       style: TextStyle(fontSize: 15, color: h.text)),
                   const SizedBox(height: 2),
-                  Text('下一批（需云中继）：手机没网时收不到消息，'
-                      '需要一台中继来代理事件。',
+                  Text(tr('下一批（需云中继）：手机没网时收不到消息，'
+                      '需要一台中继来代理事件。'),
                       style: TextStyle(
                           fontSize: 12.5, height: 1.45, color: h.textFaint)),
                 ],

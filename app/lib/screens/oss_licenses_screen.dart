@@ -5,6 +5,8 @@ import '../data/open_source_licenses.dart';
 import '../theme/app_theme.dart';
 import '../theme/cupertino_kit.dart';
 
+import 'package:heracles/i18n/l10n.dart';
+
 /// **开源许可页**（2026-10-27 用户定）：致谢名单形态 ——
 /// 直接依赖 + 其依赖（递归深度上限 2）+ 平台/原生/设计资产，
 /// 每项可点进看完整许可文本。数据由
@@ -24,7 +26,7 @@ class OssLicensesScreen extends StatelessWidget {
     return Scaffold(
       backgroundColor: h.bg,
       appBar: AppBar(
-        title: const Text('开源许可'),
+        title: Text(tr('开源许可')),
         leading: IconButton(
           icon: const Icon(AppIcons.back, size: 21),
           onPressed: () => Navigator.of(context).pop(),

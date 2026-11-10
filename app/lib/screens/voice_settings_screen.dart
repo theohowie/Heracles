@@ -8,6 +8,8 @@ import '../theme/cupertino_kit.dart';
 import '../theme/pressable.dart';
 import '../widgets/bw_approval.dart';
 
+import 'package:heracles/i18n/l10n.dart';
+
 /// 语音识别说明（T1-2：从页面底部搬进 AppBar「?」抽屉，**文案保持原文三段**）。
 ///
 /// 之前三段长文常驻页面底部 → 页面被说明淹没、且每次进来都占一大块；
@@ -76,7 +78,7 @@ class _VoiceSettingsScreenState extends State<VoiceSettingsScreen> {
     return Scaffold(
       backgroundColor: h.bg,
       appBar: AppBar(
-        title: const Text('语音识别'),
+        title: Text(tr('语音识别')),
         leading: IconButton(
           icon: const Icon(AppIcons.back, size: 21),
           onPressed: () => Navigator.of(context).pop(),
@@ -85,7 +87,7 @@ class _VoiceSettingsScreenState extends State<VoiceSettingsScreen> {
         actions: [
           IconButton(
             key: const Key('voice-help'),
-            tooltip: '语音识别说明',
+            tooltip: tr('语音识别说明'),
             icon: const Icon(AppIcons.info, size: 21),
             onPressed: () => unawaited(_showHelpSheet()),
           ),
@@ -102,7 +104,7 @@ class _VoiceSettingsScreenState extends State<VoiceSettingsScreen> {
               HSpace.xl,
             ),
             children: [
-              _groupLabel(h, '语音输入'),
+              _groupLabel(h, tr('语音输入')),
               _totalStatusRow(h),
               if (_actionNote != null) ...[
                 const SizedBox(height: HSpace.sm),
@@ -116,7 +118,7 @@ class _VoiceSettingsScreenState extends State<VoiceSettingsScreen> {
                 ),
               ],
               const SizedBox(height: HSpace.lg),
-              _groupLabel(h, '语音模型'),
+              _groupLabel(h, tr('语音模型')),
               _streamingCard(h),
               const SizedBox(height: HSpace.md),
               _senseVoiceCard(h),
@@ -164,7 +166,7 @@ class _VoiceSettingsScreenState extends State<VoiceSettingsScreen> {
         ? _pillButton(
             h,
             key: const Key('voice-install'),
-            label: '重新安装',
+            label: tr('重新安装'),
             filled: true,
             onTap: _busy ? null : () => unawaited(_install()),
           )
@@ -172,7 +174,7 @@ class _VoiceSettingsScreenState extends State<VoiceSettingsScreen> {
             ? _pillButton(
                 h,
                 key: const Key('voice-uninstall'),
-                label: '卸载',
+                label: tr('卸载'),
                 filled: false,
                 onTap: _busy ? null : () => unawaited(_confirmUninstall()),
               )
@@ -249,8 +251,7 @@ class _VoiceSettingsScreenState extends State<VoiceSettingsScreen> {
                   mainAxisAlignment: MainAxisAlignment.center,
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
-                    Text(
-                      '流式识别（内置）',
+                    Text(tr('流式识别（内置）'),
                       maxLines: 1,
                       overflow: TextOverflow.ellipsis,
                       style: HTxt.body.copyWith(fontWeight: FontWeight.w600),
@@ -275,7 +276,7 @@ class _VoiceSettingsScreenState extends State<VoiceSettingsScreen> {
               _pillButton(
                 h,
                 key: const Key('voice-streaming-retry'),
-                label: '重试',
+                label: tr('重试'),
                 filled: true,
                 onTap: _busy ? null : () => unawaited(_retryBundled()),
               ),
@@ -483,7 +484,7 @@ class _VoiceSettingsScreenState extends State<VoiceSettingsScreen> {
     if (state.phase == VoiceModelPhase.downloading) {
       return _pillButton(
         h,
-        label: '取消',
+        label: tr('取消'),
         filled: false,
         onTap: _voice.cancelDownload,
       );
@@ -491,14 +492,14 @@ class _VoiceSettingsScreenState extends State<VoiceSettingsScreen> {
     if (_voice.installed) {
       return _pillButton(
         h,
-        label: '删除',
+        label: tr('删除'),
         filled: false,
         onTap: () => unawaited(_confirmDelete()),
       );
     }
     return _pillButton(
       h,
-      label: '下载',
+      label: tr('下载'),
       filled: true,
       onTap: _voice.profile == null
           ? null
@@ -511,10 +512,10 @@ class _VoiceSettingsScreenState extends State<VoiceSettingsScreen> {
   Future<void> _confirmUninstall() async {
     final ok = await showBwConfirmSheet(
       context,
-      title: '卸载语音输入？',
-      message: '会删除内置流式模型（约 24 MB）与 SenseVoice（若已下载），'
-          '语音输入随即不可用；可随时在本页「重新安装」。',
-      confirmLabel: '确认卸载',
+      title: tr('卸载语音输入？'),
+      message: tr('会删除内置流式模型（约 24 MB）与 SenseVoice（若已下载），'
+          '语音输入随即不可用；可随时在本页「重新安装」。'),
+      confirmLabel: tr('确认卸载'),
       destructive: true,
     );
     if (!ok || !mounted) return;
@@ -580,8 +581,7 @@ class _VoiceSettingsScreenState extends State<VoiceSettingsScreen> {
                 mainAxisSize: MainAxisSize.min,
                 crossAxisAlignment: CrossAxisAlignment.stretch,
                 children: [
-                  Text(
-                    '语音识别说明',
+                  Text(tr('语音识别说明'),
                     key: const Key('voice-help-title'),
                     style: const TextStyle(
                       fontSize: 17,
@@ -623,7 +623,7 @@ class _VoiceSettingsScreenState extends State<VoiceSettingsScreen> {
                   _sheetPrimaryButton(
                     h,
                     key: const Key('voice-help-close'),
-                    label: '知道了',
+                    label: tr('知道了'),
                     onTap: () => Navigator.of(sheetCtx).pop(),
                   ),
                 ],
@@ -673,9 +673,9 @@ class _VoiceSettingsScreenState extends State<VoiceSettingsScreen> {
   Future<void> _confirmDelete() async {
     final ok = await showBwConfirmSheet(
       context,
-      title: '删除语音模型？',
-      message: '删除 SenseVoice 后仍可用内置流式识别；需要时可重新下载。',
-      confirmLabel: '删除',
+      title: tr('删除语音模型？'),
+      message: tr('删除 SenseVoice 后仍可用内置流式识别；需要时可重新下载。'),
+      confirmLabel: tr('删除'),
       destructive: true,
     );
     if (ok) await _voice.deleteModel();
@@ -731,7 +731,7 @@ class _VoiceSettingsScreenState extends State<VoiceSettingsScreen> {
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          Text('模型目录',
+          Text(tr('模型目录'),
               style: TextStyle(
                   fontSize: 12.5,
                   fontWeight: FontWeight.w600,
@@ -743,9 +743,8 @@ class _VoiceSettingsScreenState extends State<VoiceSettingsScreen> {
                 fontSize: 11.5, height: 1.45, color: h.textFaint),
           ),
           const SizedBox(height: 4),
-          Text(
-            '该目录下两套模型（内置流式 + SenseVoice）在「卸载语音输入」时一并删除；'
-            '卸载 App 也会一并删除。录音不上传。',
+          Text(tr('该目录下两套模型（内置流式 + SenseVoice）在「卸载语音输入」时一并删除；'
+            '卸载 App 也会一并删除。录音不上传。'),
             style: TextStyle(fontSize: 11, height: 1.5, color: h.textFaint),
           ),
         ],

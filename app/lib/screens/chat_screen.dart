@@ -56,6 +56,8 @@ import '../widgets/tool_call_card.dart'
         kStepRowHPad;
 import '../widgets/workspace_drawer.dart';
 
+import 'package:heracles/i18n/l10n.dart';
+
 /// 会话主屏 —— 默认首屏（`06-UI界面设计.md` §6.1）。
 ///
 /// ## 概念模型（2026-10-10 修正）
@@ -369,9 +371,9 @@ class _ChatScreenState extends State<ChatScreen> {
       }
       final name = await showBwTextInputSheet(
         context,
-        title: '新建分支',
-        placeholder: '分支名，例如 feature/login',
-        confirmLabel: '创建并切换',
+        title: tr('新建分支'),
+        placeholder: tr('分支名，例如 feature/login'),
+        confirmLabel: tr('创建并切换'),
       );
       if (name == null || name.trim().isEmpty || !mounted) return;
       final r2 = await git.checkout(target, branch: name.trim(), create: true);
@@ -916,7 +918,7 @@ class _ChatScreenState extends State<ChatScreen> {
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
             TopMetricLine(
-              label: '上下文',
+              label: tr('上下文'),
               valueText:
                   cRatio == null ? '—' : '${(cRatio * 100).round()}%',
               ratio: cRatio,
@@ -926,7 +928,7 @@ class _ChatScreenState extends State<ChatScreen> {
             ),
             const SizedBox(height: 6),
             TopMetricLine(
-              label: '命中',
+              label: tr('命中'),
               // ★ 2026-11-08：区分「还没有数据」和「上游压根不上报缓存字段」。
               //   `—` 太含糊：换了 provider（例如某些中转站不回
               //   `prompt_tokens_details.cached_tokens`）时，用户会以为命中率坏了。
@@ -980,14 +982,14 @@ class _ChatScreenState extends State<ChatScreen> {
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
           TopMetricLine(
-            label: '引擎',
+            label: tr('引擎'),
             valueText: source.shortLabel,
             ratio: null,
             color: h.textFaint,
           ),
           const SizedBox(height: 6),
           TopMetricLine(
-            label: '状态',
+            label: tr('状态'),
             valueText: statusText,
             ratio: ready ? 1.0 : null,
             color: ready ? const Color(0xFF16A34A) : h.textFaint,
@@ -1573,16 +1575,16 @@ class _ChatScreenState extends State<ChatScreen> {
       }
     }
     if (suggestions.isEmpty) {
-      suggestions.addAll(const [
+      suggestions.addAll([
         (
           action: 'pick_subfolder',
-          title: '改选子文件夹',
-          detail: '点进去选一个具体的项目文件夹（子文件夹可以正常授权）。',
+          title: tr('改选子文件夹'),
+          detail: tr('点进去选一个具体的项目文件夹（子文件夹可以正常授权）。'),
         ),
         (
           action: 'use_app_workspace',
-          title: '使用「默认工作区」',
-          detail: 'App 自带的目录，不受这个限制，创建后可以直接开始干活。',
+          title: tr('使用「默认工作区」'),
+          detail: tr('App 自带的目录，不受这个限制，创建后可以直接开始干活。'),
         ),
       ]);
     }
@@ -1707,7 +1709,7 @@ class _ChatScreenState extends State<ChatScreen> {
                       padding: const EdgeInsets.symmetric(
                           horizontal: HSpace.lg, vertical: 6),
                       onPressed: () => Navigator.of(dlgCtx).pop(),
-                      child: Text('取消',
+                      child: Text(tr('取消'),
                           style: TextStyle(fontSize: 15, color: h.textDim)),
                     ),
                   ),
@@ -2234,10 +2236,10 @@ class _ChatScreenState extends State<ChatScreen> {
     // 2026-10-25：居中弹窗改上拉输入抽屉（与全 App 弹层语言统一）
     final name = await showBwTextInputSheet(
       context,
-      title: '重命名会话',
+      title: tr('重命名会话'),
       initial: s?.title ?? '',
-      placeholder: '会话名称',
-      confirmLabel: '保存',
+      placeholder: tr('会话名称'),
+      confirmLabel: tr('保存'),
     );
     if (name == null || name.isEmpty) return;
     await _bridge.renameSession(workspaceId, sessionId, name,
@@ -2254,9 +2256,9 @@ class _ChatScreenState extends State<ChatScreen> {
     // 2026-10-25：居中弹窗改上拉确认抽屉
     final ok = await showBwConfirmSheet(
       context,
-      title: '删除会话',
+      title: tr('删除会话'),
       message: '这会删除该会话的记录。\n工作区里的文件不会被删除。',
-      confirmLabel: '删除',
+      confirmLabel: tr('删除'),
       destructive: true,
     );
     if (!ok) return false;
@@ -2349,7 +2351,7 @@ class _ChatScreenState extends State<ChatScreen> {
       context,
       title: '删除 ${items.length} 个会话',
       message: '这会删除所选会话的记录。\n工作区里的文件不会被删除。',
-      confirmLabel: '删除',
+      confirmLabel: tr('删除'),
       destructive: true,
     );
     if (!ok) return;
@@ -2566,22 +2568,22 @@ class _ChatScreenState extends State<ChatScreen> {
                 _sheetPickRow(
                   h,
                   icon: AppIcons.camera,
-                  label: '相机',
-                  subtitle: '拍照',
+                  label: tr('相机'),
+                  subtitle: tr('拍照'),
                   onTap: () => Navigator.of(ctx).pop('camera'),
                 ),
                 _sheetPickRow(
                   h,
                   icon: AppIcons.image,
-                  label: '照片',
-                  subtitle: '截图、图片',
+                  label: tr('照片'),
+                  subtitle: tr('截图、图片'),
                   onTap: () => Navigator.of(ctx).pop('image'),
                 ),
                 _sheetPickRow(
                   h,
                   icon: AppIcons.folder,
-                  label: '文件',
-                  subtitle: '代码、文本、文档',
+                  label: tr('文件'),
+                  subtitle: tr('代码、文本、文档'),
                   onTap: () => Navigator.of(ctx).pop('file'),
                 ),
               ],
@@ -4320,8 +4322,7 @@ class _ChatScreenState extends State<ChatScreen> {
                 mainAxisSize: MainAxisSize.min,
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                  Text(
-                    '编辑排队消息',
+                  Text(tr('编辑排队消息'),
                     style: TextStyle(
                       fontSize: 16,
                       fontWeight: FontWeight.w600,
@@ -4329,8 +4330,7 @@ class _ChatScreenState extends State<ChatScreen> {
                     ),
                   ),
                   const SizedBox(height: 3),
-                  Text(
-                    '保存后替换这条排队内容；附件与队列位置不变。',
+                  Text(tr('保存后替换这条排队内容；附件与队列位置不变。'),
                     style: TextStyle(
                       fontSize: 12,
                       height: 1.5,
@@ -4370,7 +4370,7 @@ class _ChatScreenState extends State<ChatScreen> {
                         padding: const EdgeInsets.symmetric(
                             horizontal: HSpace.md, vertical: 4),
                         onPressed: () => Navigator.of(dlgCtx).pop(),
-                        child: Text('取消',
+                        child: Text(tr('取消'),
                             style: TextStyle(fontSize: 15, color: h.textDim)),
                       ),
                       CupertinoButton(
@@ -4378,8 +4378,7 @@ class _ChatScreenState extends State<ChatScreen> {
                             horizontal: HSpace.md, vertical: 4),
                         onPressed: () =>
                             Navigator.of(dlgCtx).pop(ctrl.text.trim()),
-                        child: Text(
-                          '保存',
+                        child: Text(tr('保存'),
                           style: TextStyle(
                             fontSize: 15,
                             fontWeight: FontWeight.w600,
@@ -4508,8 +4507,7 @@ class _ChatScreenState extends State<ChatScreen> {
                                   ),
                                 ),
                                 const SizedBox(height: 2),
-                                Text(
-                                  '点一条可编辑；跑完当前任务会自动发出',
+                                Text(tr('点一条可编辑；跑完当前任务会自动发出'),
                                   style: TextStyle(
                                       fontSize: 11.5, color: h.textFaint),
                                 ),
@@ -6116,7 +6114,7 @@ class _ChatScreenState extends State<ChatScreen> {
                 children: [
                   Row(
                     children: [
-                      Text('压缩上下文',
+                      Text(tr('压缩上下文'),
                           style: TextStyle(
                               fontSize: 13.5,
                               fontWeight: FontWeight.w600,
@@ -6210,12 +6208,12 @@ class _ChatScreenState extends State<ChatScreen> {
         // 「知道了」= 明确提交空答案；「暂时收起」= 只留气泡（可再看题干）。
         final acknowledged = await showBwConfirmSheet(
           context,
-          title: '模型需要你的回答',
+          title: tr('模型需要你的回答'),
           message: fallbackText.isEmpty
               ? '（模型提了一个问题，但内容为空）'
               : fallbackText,
-          confirmLabel: '知道了',
-          cancelLabel: '暂时收起',
+          confirmLabel: tr('知道了'),
+          cancelLabel: tr('暂时收起'),
         );
         if (!mounted) return;
         if (acknowledged) {
@@ -6598,14 +6596,12 @@ class _ChatScreenState extends State<ChatScreen> {
                           radius: 6, color: h.textFaint),
                     ),
                     const SizedBox(width: 8),
-                    Text(
-                      '正在加载更早消息…',
+                    Text(tr('正在加载更早消息…'),
                       style: TextStyle(fontSize: 12, color: h.textDim),
                     ),
                   ],
                 )
-              : Text(
-                  '加载更早消息',
+              : Text(tr('加载更早消息'),
                   style: TextStyle(fontSize: 12, color: h.textDim),
                 ),
         ),
@@ -6629,11 +6625,11 @@ class _ChatScreenState extends State<ChatScreen> {
       return _Hint(
         h: h,
         icon: CupertinoIcons.folder_fill,
-        title: '先选一个工作区',
+        title: tr('先选一个工作区'),
         body: '工作区 = 你要让智能体操作的\n那个项目文件夹。\n\n'
             '点左上角菜单 → ⊕ 选择工作区。\n'
             '要构建 APK 就用「默认工作区」。',
-        actionLabel: '选择文件夹',
+        actionLabel: tr('选择文件夹'),
         onAction: _pickWorkspace,
       );
     }
@@ -6859,8 +6855,7 @@ class _QueueManageRow extends StatelessWidget {
                       ),
                     ),
                     const SizedBox(height: 2),
-                    Text(
-                      '点这一行编辑',
+                    Text(tr('点这一行编辑'),
                       style: TextStyle(fontSize: 10.5, color: h.textFaint),
                     ),
                   ],
@@ -6869,25 +6864,25 @@ class _QueueManageRow extends StatelessWidget {
               if (canPin)
                 _QueueIconButton(
                   icon: CupertinoIcons.arrow_up_to_line,
-                  label: '置顶（下一个发）',
+                  label: tr('置顶（下一个发）'),
                   color: h.textDim,
                   onTap: onPin,
                 ),
               _QueueIconButton(
                 icon: AppIcons.edit,
-                label: '编辑',
+                label: tr('编辑'),
                 color: h.accent,
                 onTap: onTap,
               ),
               _QueueIconButton(
                 icon: AppIcons.trash,
-                label: '删除',
+                label: tr('删除'),
                 color: h.textDim,
                 onTap: onRemove,
               ),
               _QueueIconButton(
                 icon: AppIcons.send,
-                label: '立即发送（插话）',
+                label: tr('立即发送（插话）'),
                 color: h.accent,
                 onTap: onSendNow,
               ),
@@ -6975,8 +6970,7 @@ class _AskPendingBubble extends StatelessWidget {
                     crossAxisAlignment: CrossAxisAlignment.start,
                     mainAxisSize: MainAxisSize.min,
                     children: [
-                      Text(
-                        '等待您的回答',
+                      Text(tr('等待您的回答'),
                         style: TextStyle(
                           fontSize: 12.5,
                           fontWeight: FontWeight.w600,
@@ -6998,16 +6992,14 @@ class _AskPendingBubble extends StatelessWidget {
                   crossAxisAlignment: CrossAxisAlignment.end,
                   mainAxisSize: MainAxisSize.min,
                   children: [
-                    Text(
-                      '回答',
+                    Text(tr('回答'),
                       style: TextStyle(
                         fontSize: 12.5,
                         fontWeight: FontWeight.w600,
                         color: h.accent,
                       ),
                     ),
-                    Text(
-                      '5 分钟内有效',
+                    Text(tr('5 分钟内有效'),
                       style: TextStyle(fontSize: 9.5, color: h.textFaint),
                     ),
                   ],
@@ -7535,8 +7527,7 @@ class _SetupBanner extends StatelessWidget {
           Icon(CupertinoIcons.lock, size: 16, color: h.accent),
           const SizedBox(width: HSpace.sm),
           Expanded(
-            child: Text(
-              '还没有配置模型 API Key —— 填好才能开始对话',
+            child: Text(tr('还没有配置模型 API Key —— 填好才能开始对话'),
               style: TextStyle(fontSize: 12, height: 1.4, color: h.text),
             ),
           ),
@@ -7544,7 +7535,7 @@ class _SetupBanner extends StatelessWidget {
             onPressed: onOpenSettings,
             minimumSize: const Size(0, 32),
             padding: const EdgeInsets.symmetric(horizontal: HSpace.sm),
-            child: Text('去设置', style: TextStyle(fontSize: 12, color: h.accent)),
+            child: Text(tr('去设置'), style: TextStyle(fontSize: 12, color: h.accent)),
           ),
         ],
       ),
@@ -7592,12 +7583,12 @@ class _ErrorBanner extends StatelessWidget {
               onPressed: onRetry,
               minimumSize: const Size(0, 32),
               padding: const EdgeInsets.symmetric(horizontal: HSpace.sm),
-              child: Text('重试',
+              child: Text(tr('重试'),
                   style: TextStyle(fontSize: 12, color: HColors.errorOn(h.dark))),
             ),
           if (onDismiss != null)
             Tooltip(
-              message: '关闭',
+              message: tr('关闭'),
               child: CupertinoButton(
                 onPressed: onDismiss,
                 minimumSize: const Size(32, 32),

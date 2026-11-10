@@ -23,6 +23,8 @@ import '../theme/cupertino_kit.dart';
 import '../theme/elastic_switch.dart';
 import '../widgets/bw_approval.dart';
 
+import 'package:heracles/i18n/l10n.dart';
+
 class AutomationScreen extends StatefulWidget {
   const AutomationScreen({super.key, this.load, this.save});
 
@@ -101,7 +103,7 @@ class _AutomationScreenState extends State<AutomationScreen> {
                 mainAxisSize: MainAxisSize.min,
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                  Text('新建自动化任务',
+                  Text(tr('新建自动化任务'),
                       style: TextStyle(
                           fontSize: 16,
                           fontWeight: FontWeight.w600,
@@ -110,17 +112,17 @@ class _AutomationScreenState extends State<AutomationScreen> {
                   TextField(
                       key: const Key('automation-title'),
                       controller: title,
-                      decoration: const InputDecoration(labelText: '标题')),
+                      decoration: InputDecoration(labelText: tr('标题'))),
                   TextField(
                       key: const Key('automation-prompt'),
                       controller: prompt,
-                      decoration: const InputDecoration(labelText: '提示词')),
+                      decoration: InputDecoration(labelText: tr('提示词'))),
                   TextField(
                       key: const Key('automation-interval'),
                       controller: interval,
                       keyboardType: TextInputType.number,
                       decoration:
-                          const InputDecoration(labelText: '间隔（分钟）')),
+                          InputDecoration(labelText: tr('间隔（分钟）'))),
                   // ★ cron 入口：**置灰 + 写明未实现**（后端本轮只注册
                   //   interval 闹钟）。允许填 cron ⇒ 用户存下一条永远不会
                   //   跑的任务；静默忽略更糟。
@@ -141,11 +143,11 @@ class _AutomationScreenState extends State<AutomationScreen> {
                           child: Column(
                             crossAxisAlignment: CrossAxisAlignment.start,
                             children: [
-                              Text('按 cron 表达式',
+                              Text(tr('按 cron 表达式'),
                                   style: TextStyle(
                                       fontSize: 12.5, color: h.textFaint)),
                               const SizedBox(height: 2),
-                              Text('当前版本只支持固定间隔；cron 未实现',
+                              Text(tr('当前版本只支持固定间隔；cron 未实现'),
                                   key: const Key('automation-cron-note'),
                                   style: TextStyle(
                                       fontSize: 11,
@@ -166,11 +168,11 @@ class _AutomationScreenState extends State<AutomationScreen> {
                     children: [
                       TextButton(
                           onPressed: () => Navigator.of(sheetCtx).pop(false),
-                          child: const Text('取消')),
+                          child: Text(tr('取消'))),
                       const SizedBox(width: HSpace.sm),
                       TextButton(
                           onPressed: () => Navigator.of(sheetCtx).pop(true),
-                          child: Text('保存',
+                          child: Text(tr('保存'),
                               style: TextStyle(
                                   fontSize: 13, color: h.accent))),
                     ],
@@ -237,7 +239,7 @@ class _AutomationScreenState extends State<AutomationScreen> {
     return Scaffold(
       backgroundColor: h.bg,
       appBar: AppBar(
-        title: const Text('自动化任务'),
+        title: Text(tr('自动化任务')),
         leading: IconButton(
           icon: const Icon(AppIcons.back, size: 21),
           onPressed: () => Navigator.of(context).pop(),
@@ -253,8 +255,7 @@ class _AutomationScreenState extends State<AutomationScreen> {
       body: ListView(
         padding: const EdgeInsets.fromLTRB(HSpace.lg, HSpace.md, HSpace.lg, HSpace.xl),
         children: [
-          Text(
-            '到点后在你下次打开/回到 App 时自动执行；App 没打开时只提醒。',
+          Text(tr('到点后在你下次打开/回到 App 时自动执行；App 没打开时只提醒。'),
             key: const Key('automation-semantics'),
             style: TextStyle(fontSize: 11.5, height: 1.55, color: h.textFaint),
           ),
@@ -282,7 +283,7 @@ class _AutomationScreenState extends State<AutomationScreen> {
                 color: h.surfaceAlt,
                 borderRadius: BorderRadius.circular(HRadius.xl),
               ),
-              child: Text('还没有自动化任务。点右上角 + 新建一条（定时提醒）。',
+              child: Text(tr('还没有自动化任务。点右上角 + 新建一条（定时提醒）。'),
                   style: TextStyle(
                       fontSize: 12, height: 1.5, color: h.textFaint)),
             ),

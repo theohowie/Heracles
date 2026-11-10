@@ -8,6 +8,8 @@ import '../theme/app_theme.dart';
 import '../theme/cupertino_kit.dart';
 import '../theme/pressable.dart';
 
+import 'package:heracles/i18n/l10n.dart';
+
 /// **JEV 本地配置页**（2026-10-29 从 JEV 编辑页拆出，用户定：
 /// 本地有关的内容全部收进一个入口页）。
 ///
@@ -25,7 +27,7 @@ class JevLocalSettingsScreen extends StatelessWidget {
     return Scaffold(
       backgroundColor: h.bg,
       appBar: AppBar(
-        title: const Text('本地配置'),
+        title: Text(tr('本地配置')),
         leading: IconButton(
           icon: const Icon(AppIcons.back, size: 21),
           onPressed: () => Navigator.of(context).pop(),
@@ -42,10 +44,10 @@ class JevLocalSettingsScreen extends StatelessWidget {
               HSpace.xl,
             ),
             children: [
-              _groupLabel(h, '本机检测'),
+              _groupLabel(h, tr('本机检测')),
               _card(h, [_profileBody(context, h)]),
               const SizedBox(height: HSpace.lg),
-              _groupLabel(h, '本地模型'),
+              _groupLabel(h, tr('本地模型')),
               _card(h, [
                 for (var i = 0; i < kJevModelSpecs.length; i++) ...[
                   if (i > 0) ...[
@@ -56,12 +58,11 @@ class JevLocalSettingsScreen extends StatelessWidget {
                   _modelRow(h, kJevModelSpecs[i]),
                 ],
                 const SizedBox(height: HSpace.md),
-                Text(
-                  '本地推理引擎尚未接入：模型可以先下载备好，引擎由'
+                Text(tr('本地推理引擎尚未接入：模型可以先下载备好，引擎由'
                   '后端接入后即可离线决策；现在想体验，先用云端。'
                   '权重为 StartLux-Decision（CC BY-NC 4.0，非商业使用），'
                   '经 Hugging Face 下载（镜像优先）；另含引擎所需的'
-                  'tokenizer 与决策配置文件。',
+                  'tokenizer 与决策配置文件。'),
                   style: HTxt.caption.copyWith(
                     color: h.textFaint,
                     height: 1.55,
@@ -81,16 +82,14 @@ class JevLocalSettingsScreen extends StatelessWidget {
       return Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          Text(
-            '检测不可用（宿主未返回本机信息）。云端决策不受影响。',
+          Text(tr('检测不可用（宿主未返回本机信息）。云端决策不受影响。'),
             style: HTxt.secondary.copyWith(color: h.textDim, height: 1.55),
           ),
           const SizedBox(height: HSpace.sm),
           GestureDetector(
             onTap: () => unawaited(jev.reloadProfile()),
             behavior: HitTestBehavior.opaque,
-            child: Text(
-              '重新检测',
+            child: Text(tr('重新检测'),
               style: HTxt.secondary.copyWith(
                 color: h.text,
                 fontWeight: FontWeight.w600,
@@ -244,7 +243,7 @@ class JevLocalSettingsScreen extends StatelessWidget {
     if (state.phase == JevDownloadPhase.downloading) {
       return _pillButton(
         h,
-        label: '取消',
+        label: tr('取消'),
         filled: false,
         onTap: () => jev.cancelDownload(spec.source),
       );
@@ -252,14 +251,14 @@ class JevLocalSettingsScreen extends StatelessWidget {
     if (jev.isDownloaded(spec.source)) {
       return _pillButton(
         h,
-        label: '删除',
+        label: tr('删除'),
         filled: false,
         onTap: () => unawaited(jev.deleteModel(spec)),
       );
     }
     return _pillButton(
       h,
-      label: '下载',
+      label: tr('下载'),
       filled: true,
       onTap: jev.profile == null
           ? null

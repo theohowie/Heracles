@@ -6,6 +6,8 @@ import '../theme/app_theme.dart';
 import '../theme/cupertino_kit.dart';
 import '../widgets/bw_approval.dart';
 
+import 'package:heracles/i18n/l10n.dart';
+
 /// **已归档对话**（设置二级页，2026-10-27 用户定）。
 ///
 /// ## 为什么归档会话搬来设置
@@ -89,7 +91,7 @@ class _ArchivedSessionsScreenState extends State<ArchivedSessionsScreen> {
     return Scaffold(
       backgroundColor: h.bg,
       appBar: AppBar(
-        title: const Text('已归档对话'),
+        title: Text(tr('已归档对话')),
         leading: IconButton(
           icon: const Icon(AppIcons.back, size: 21),
           onPressed: () => Navigator.of(context).pop(),
@@ -105,7 +107,7 @@ class _ArchivedSessionsScreenState extends State<ArchivedSessionsScreen> {
                     Icon(CupertinoIcons.archivebox,
                         size: 40, color: h.textFaint),
                     const SizedBox(height: HSpace.md),
-                    Text('没有已归档的对话',
+                    Text(tr('没有已归档的对话'),
                         style: TextStyle(fontSize: 15, color: h.text)),
                     const SizedBox(height: HSpace.sm),
                     Text(
@@ -172,7 +174,7 @@ class _ArchivedSessionsScreenState extends State<ArchivedSessionsScreen> {
             BwActionCard(
               h: h,
               icon: CupertinoIcons.chat_bubble_fill,
-              label: '打开',
+              label: tr('打开'),
               onTap: () {
                 Navigator.of(ctx).pop();
                 widget.onOpen(w.id, s.id);
@@ -182,7 +184,7 @@ class _ArchivedSessionsScreenState extends State<ArchivedSessionsScreen> {
             BwActionCard(
               h: h,
               icon: CupertinoIcons.archivebox,
-              label: '取消归档',
+              label: tr('取消归档'),
               onTap: () {
                 Navigator.of(ctx).pop();
                 _unarchive(w, s);
@@ -192,7 +194,7 @@ class _ArchivedSessionsScreenState extends State<ArchivedSessionsScreen> {
             BwActionCard(
               h: h,
               icon: CupertinoIcons.trash_fill,
-              label: '删除',
+              label: tr('删除'),
               danger: true,
               onTap: () async {
                 Navigator.of(ctx).pop();
@@ -314,7 +316,7 @@ class _ArchivedRow extends StatelessWidget {
                     child: Padding(
                       padding: const EdgeInsets.symmetric(
                           horizontal: 12, vertical: 6),
-                      child: Text('回档',
+                      child: Text(tr('回档'),
                           style: TextStyle(fontSize: 12, color: h.text)),
                     ),
                   ),
