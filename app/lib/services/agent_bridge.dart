@@ -1391,30 +1391,35 @@ class AgentBridge {
     }
   }
 
-  /// **App 进程内的编码层自检**（2026-10-17）。
+  /// **App 进程内的编码层自检**（2026-10-17 引入；**2026-11-10 该能力已下线**）。
   ///
-  /// ## 它存在的理由
+  /// ## 历史（为什么它曾经存在）
   ///
   /// 编码层的真机验证（`实测-12`）走的是**设备上跑引擎**那条路
   /// （`:cli` 的 `OnDeviceEncodeProbe` 是**别的进程**）。
   /// App 自己的三个设备类 —— `DeviceShellRunner`（Shizuku/Stellar 路由）、
   /// `AgentBuildService`（防 LMK 的前台服务）、`SystemHealthSource`（温度/电量）——
   /// **一次都没在真机上跑过**，它们只是「编译过、APK 装得上」。
-  ///
-  /// 本方法把它们串起来在**应用进程里**真跑一遍：
+  /// 当时本方法把它们串起来在**应用进程里**真跑一遍：
   /// 起前台服务 → 读健康 → 定位工具链 → 起 shell（`id`/`java -version`）
   /// → 建 Hello World 骨架 → 真构建 → **自己拆包看条目**（不信 `ok=true`）。
   ///
-  /// 返回**给人看的报告文本**（逐行说明每一步的结果，失败也带原因）。
+  /// ## ★ 2026-11-10：Kotlin 侧的 handler 早已删除，这里**不再调用通道**
+  ///
+  /// 旧实现是 `_channel.invokeMethod<String>('encodeSelfCheck')`。该方法随 5 个
+  /// Kotlin 后端模块一起删掉了（见 `MainActivity.kt` 顶部「已删」表），
+  /// `MainActivity` 的唯一兜底是 `else -> {ok:false, error:"未知方法：…"}` ——
+  /// 回的是 **Map**，而 `invokeMethod<String>` 内部是 `decodeEnvelope(...) as String?`
+  /// ⇒ 抛的是 **`_TypeError`**，既不是 `PlatformException` 也不是
+  /// `MissingPluginException`，原来那两个 `catch` **一个都接不住**。
+  /// 结果是：设置页「跑一遍编码层自检」的按钮把 `_selfCheckBusy` 置真后，
+  /// 在 `await` 处抛错、`setState` 永不执行 ⇒ **用户看到永久转圈**。
+  ///
+  /// 所以现在**如实返回一句话**（不是异常、不是空串），保留 `Future<String>`
+  /// 签名与调用方兼容。⚠️ **不要**为了"让按钮有反应"去恢复 Kotlin handler：
+  /// 那等于把已删掉的能力重新开回来（属于契约变更，得先改 docs/INTERFACE.md）。
   Future<String> encodeSelfCheck() async {
-    try {
-      final s = await _channel.invokeMethod<String>('encodeSelfCheck');
-      return s ?? '（平台没返回内容）';
-    } on MissingPluginException {
-      return '平台未实现（测试环境）';
-    } on PlatformException catch (e) {
-      return '调用失败：${e.message ?? e.code}';
-    }
+    return '不可用：编码层自检能力已在当前版本移除（宿主通道方法已下线）。';
   }
 
   /// **ask_user 的回答通道**（2026-10-16 引入；**2026-10-23 改回进程内**）。
