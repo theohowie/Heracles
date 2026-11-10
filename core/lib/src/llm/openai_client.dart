@@ -6,6 +6,7 @@ import '../core/http_util.dart';
 import '../core/llm_client.dart';
 import '../core/message.dart';
 import '../core/tool.dart';
+import 'api_endpoint.dart';
 import 'llm_request_util.dart';
 import 'package:logging/logging.dart';
 
@@ -47,7 +48,10 @@ class OpenAIClient extends LLMClient {
     bool? jsonOutput,
     CancelToken? cancelToken,
   }) async {
-    final url = '$baseUrl/chat/completions';
+    // ★ 2026-11-10：同病根收口 —— 原来无条件信任用户填的 baseUrl 自带版本段，
+    //   手填 `https://api.openai.com`（不带 `/v1`）就会打 `/chat/completions` ⇒ 404。
+    //   规则统一在 [joinApiPath]（已带 `/v1` 的默认值 URL 完全不变）。
+    final url = joinApiPath(baseUrl, 'chat/completions');
     final body = _createRequestBody(
       messages,
       tools: tools,
@@ -139,7 +143,10 @@ class OpenAIClient extends LLMClient {
     bool? jsonOutput,
     CancelToken? cancelToken,
   }) async {
-    final url = '$baseUrl/chat/completions';
+    // ★ 2026-11-10：同病根收口 —— 原来无条件信任用户填的 baseUrl 自带版本段，
+    //   手填 `https://api.openai.com`（不带 `/v1`）就会打 `/chat/completions` ⇒ 404。
+    //   规则统一在 [joinApiPath]（已带 `/v1` 的默认值 URL 完全不变）。
+    final url = joinApiPath(baseUrl, 'chat/completions');
     final body = _createRequestBody(
       messages,
       tools: tools,

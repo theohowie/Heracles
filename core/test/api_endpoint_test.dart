@@ -223,4 +223,83 @@ void main() {
       expect(adapter.uris.single.toString(), isNot(contains('/v1/v1')));
     });
   });
+
+  // Chat Completions 轨（openai_client）同病根：手填不带 /v1 的地址曾打 404。
+  group('OpenAIClient 也用上了 joinApiPath（接线验证）', () {
+    test('官方 baseUrl（不带 /v1）⇒ 请求 /v1/chat/completions', () async {
+      final adapter = _UriCaptureAdapter();
+      final client = OpenAIClient(
+        apiKey: 'test-key',
+        baseUrl: 'https://api.openai.com',
+        client: Dio()..httpClientAdapter = adapter,
+      );
+
+      await expectLater(
+        client.generate(
+          [UserMessage.text('hi')],
+          modelConfig: ModelConfig(model: 'gpt-test'),
+        ),
+        throwsA(isA<Exception>()),
+      );
+
+      expect(adapter.uris.single.path, '/v1/chat/completions');
+    });
+
+    test('App 默认的 deepseek baseUrl（自带 /v1）⇒ URL 与旧行为完全一致', () async {
+      final adapter = _UriCaptureAdapter();
+      final client = OpenAIClient(
+        apiKey: 'test-key',
+        baseUrl: 'https://api.deepseek.com/v1',
+        client: Dio()..httpClientAdapter = adapter,
+      );
+
+      await expectLater(
+        client.generate(
+          [UserMessage.text('hi')],
+          modelConfig: ModelConfig(model: 'gpt-test'),
+        ),
+        throwsA(isA<Exception>()),
+      );
+
+      expect(adapter.uris.single.path, '/v1/chat/completions');
+      expect(adapter.uris.single.toString(), isNot(contains('/v1/v1')));
+    });
+
+    test('中转站路径前缀（…/openai）⇒ /openai/v1/chat/completions', () async {
+      final adapter = _UriCaptureAdapter();
+      final client = OpenAIClient(
+        apiKey: 'test-key',
+        baseUrl: 'https://relay.example.com/openai',
+        client: Dio()..httpClientAdapter = adapter,
+      );
+
+      await expectLater(
+        client.generate(
+          [UserMessage.text('hi')],
+          modelConfig: ModelConfig(model: 'gpt-test'),
+        ),
+        throwsA(isA<Exception>()),
+      );
+
+      expect(adapter.uris.single.path, '/openai/v1/chat/completions');
+    });
+
+    test('stream 同样不拼出 v1/v1', () async {
+      final adapter = _UriCaptureAdapter();
+      final client = OpenAIClient(
+        apiKey: 'test-key',
+        baseUrl: 'https://api.deepseek.com/v1/',
+        client: Dio()..httpClientAdapter = adapter,
+      );
+
+      // stream 轨不抛同步异常：错误经 stream 出来，所以断言流到错误为止
+      final stream = await client.stream(
+        [UserMessage.text('hi')],
+        modelConfig: ModelConfig(model: 'gpt-test'),
+      );
+      await expectLater(stream.toList(), throwsA(isA<Exception>()));
+
+      expect(adapter.uris.single.path, '/v1/chat/completions');
+    });
+  });
 }
