@@ -56,12 +56,36 @@ String humanizeRunFailure(String raw) {
   if (lower.contains('429') || lower.contains('rate limit')) {
     return '模型服务限流：请求太频繁，请稍后重试。';
   }
-  if (lower.contains('timeout') || lower.contains('timed out') || s.contains('超时')) {
-    return '模型服务超时：网络或服务端响应太慢，本轮已中断。';
+  // ★ 2026-11-10：超时分支必须排在「网络」之前，而且**必须吃下 Dio 的原文**。
+  //
+  // 踩过的坑（用户真机上报过、`前端对接清单 §16` 记着）：
+  // Dio 的 receiveTimeout 文案是
+  //   `The request connection took longer than 0:05:00…`
+  // 里面带着 `connection` 这个词，但**不是网络故障**。原来这个分支只匹配
+  // `timeout|timed out|超时` ⇒ 上面那句一个都不命中 ⇒ 掉进下面的 `connection`
+  // 分支 ⇒ 用户看到「网络连接失败：请检查网络后重试」，被引导去查一个没坏的网络。
+  // 所以这里补 `took longer than` / `receive timeout` / `read timeout`。
+  final isTimeout = lower.contains('timeout') ||
+      lower.contains('timed out') ||
+      lower.contains('took longer than') ||
+      lower.contains('time limit') ||
+      lower.contains('deadline exceeded') ||
+      s.contains('超时') ||
+      s.contains('响应太慢');
+  if (isTimeout) {
+    // ★ 文案里**不再出现「网络」**：用户的网络往往没坏，说「网络」只会把人
+    //   引去查路由。超时能做的动作就是等一会儿重试或换更快/更小的模型。
+    return '模型服务超时：服务端响应太慢，本轮已中断。可以稍后重试，或换个更快的模型。';
   }
+  // ★ 只有在**排除超时之后**，`connection` 才允许作为网络故障的依据。
   if (lower.contains('network') ||
-      lower.contains('connection') ||
+      lower.contains('socketexception') ||
       lower.contains('failed host lookup') ||
+      lower.contains('connection refused') ||
+      lower.contains('connection reset') ||
+      lower.contains('connection closed') ||
+      lower.contains('handshake') ||
+      lower.contains('dns') ||
       s.contains('网络')) {
     return '网络连接失败：请检查网络后重试。';
   }
