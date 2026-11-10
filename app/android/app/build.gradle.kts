@@ -1,4 +1,4 @@
-﻿// ★ 2026-11-10：正式版签名要用 Properties / File，Kotlin DSL 脚本里
+// ★ 2026-11-10：正式版签名要用 Properties / File，Kotlin DSL 脚本里
 //   不能写全限定名（实测 `java.util.Properties()` 会报 Unresolved reference 'util'），
 //   必须像普通 Kotlin 文件一样先 import。
 import java.io.File
@@ -60,12 +60,23 @@ repositories {
 //
 // ## 没有凭据时会怎样
 //
-// **回退 debug 签名并打警告**，不直接失败 —— 否则别人 clone 这个仓库后
-// 连 `flutter build apk --release` 都跑不了。但发布前必须看警告：
-// 带警告的产物**不许发出去**。
+// Debug 构建照常走 Android debug 签名。Release 构建则**硬失败**，绝不回退
+// debug —— 否则很容易把「看起来成功」的 debug 证书包再次误发给用户。
+// 完整源码 checkout 如果没有本机 key.properties，可以照常 `flutter build apk --debug`；
+// release 必须先从受控私密备份恢复正式密钥。
 // ---------------------------------------------------------------------------
 val heraclesKeyPropsFile = rootProject.file("key.properties")
 val heraclesHasReleaseKey = heraclesKeyPropsFile.exists()
+val heraclesReleaseRequested = gradle.startParameter.taskNames.any {
+    it.contains("release", ignoreCase = true)
+} ||
+    gradle.startParameter.taskNames.isEmpty()
+if (heraclesReleaseRequested && !heraclesHasReleaseKey) {
+    throw GradleException(
+        "正式 release 构建被拒绝：缺少 app/android/key.properties。" +
+            "恢复仓库外 `.dshwork/staging/.secrets/heracles-release.jks` 与 properties 后再构建。"
+    )
+}
 val heraclesKeyProps = Properties().apply {
     if (heraclesHasReleaseKey) {
         heraclesKeyPropsFile.inputStream().use { load(it) }
@@ -167,16 +178,13 @@ android {
 
     buildTypes {
         release {
-            // ★ 2026-11-10：有正式密钥就用它，否则回退 debug（并打警告）。
-            //   详见文件上方「正式版签名」那段注释。
-            if (heraclesHasReleaseKey) {
-                signingConfig = signingConfigs.getByName("release")
+            // ★ 用户裁定：release 必须始终用正式密钥；禁止静默回退 debug。
+            signingConfig = if (heraclesHasReleaseKey) {
+                signingConfigs.getByName("release")
             } else {
-                signingConfig = signingConfigs.getByName("debug")
-                logger.warn(
-                    "⚠️ [Heracles] app/android/key.properties 不存在 —— release 构建回退 debug 签名。" +
-                        "本次产物**不可用于发布**。"
-                )
+                // Debug / test tasks may configure all variants eagerly; the top-level
+                // guard above already hard-fails any requested release task.
+                signingConfigs.getByName("debug")
             }
         }
     }

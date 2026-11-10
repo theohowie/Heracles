@@ -7,13 +7,89 @@
 // 3. 英文界面底座的回退语义：缺词条要回退中文，不许空白、不许抛。
 //
 // ⚠️ 这三条都做过变异验证（见每条用例上方注释里的「变异」说明）。
+import 'package:flutter/cupertino.dart';
+import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:heracles/i18n/l10n.dart';
+import 'package:heracles/models/settings.dart';
 import 'package:heracles/models/token_count.dart';
+import 'package:heracles/screens/settings_screen.dart';
+import 'package:heracles/theme/app_theme.dart';
+import 'package:shared_preferences/shared_preferences.dart';
+
+import 'support/secure_storage_mock.dart';
+import 'package:heracles/widgets/model_catalog_row.dart';
 import 'package:heracles/widgets/run_stop_banner.dart';
 
 void main() {
   group('设置里的 token 输入框显示人类可读单位（v0.5.0-release 用户点名）', () {
+    setUp(installSecureStorageMock);
+    tearDown(removeSecureStorageMock);
+
+    testWidgets('★ 用户实际看到：模型目录行展开后两格显示 128K / 32K', (tester) async {
+      SharedPreferences.setMockInitialValues({});
+      // 用生产 SettingsScreen + 真 ProviderEditPage + 真 ModelCatalogRow，
+      // 不只测 formatter；这样旧代码若把 controller 初值改回 `.toString()`，
+      // 这里就会看到 131072 / 32768 而变红。
+      final provider = ModelProviderConfig(
+        id: 'provider-token-ui',
+        name: 'Token UI regression',
+        baseUrl: 'https://example.test/v1',
+        model: 'example-model',
+        apiKey: 'test-key',
+        enabled: true,
+        isDefault: true,
+        modelCatalog: const <String>['example-model'],
+        contextLength: 131072,
+        maxOutputTokens: 32768,
+      );
+      addTearDown(() => tester.binding.setSurfaceSize(null));
+      await tester.binding.setSurfaceSize(const Size(1200, 1800));
+      await tester.pumpWidget(
+        MaterialApp(
+          theme: buildHeraclesTheme(),
+          builder: (context, child) => HueScope(
+            hue: Hue.darkHue,
+            child: child ?? const SizedBox.shrink(),
+          ),
+          home: ProviderEditPage(provider: provider),
+        ),
+      );
+      expect(find.byType(ProviderEditPage), findsOneWidget);
+      await tester.tap(find.descendant(
+        of: find.byType(ModelCatalogRow),
+        matching: find.text('example-model'),
+      ));
+      await tester.pumpAndSettle();
+      expect(find.byType(ModelCatalogRow), findsOneWidget);
+      await tester.tap(find.descendant(
+        of: find.byType(ModelCatalogRow),
+        matching: find.byIcon(CupertinoIcons.chevron_right),
+      ));
+      await tester.pumpAndSettle();
+
+      // 同行锚定：不使用 find.text(x).first，分别从提示行取得两个 TextField。
+      final caption = find.text(
+        '这个模型的上游额度（留空 = 用契约默认：窗口 128K / 输出 16384）',
+      );
+      expect(caption, findsOneWidget);
+      final fields = find.descendant(
+        of: find.byType(ModelCatalogRow),
+        matching: find.byType(CupertinoTextField),
+      );
+      expect(fields, findsNWidgets(2));
+      final contextField = tester.widget<CupertinoTextField>(fields.at(0));
+      final outputField = tester.widget<CupertinoTextField>(fields.at(1));
+      expect(contextField.controller!.text, '128K');
+      expect(outputField.controller!.text, '32K');
+      expect(contextField.controller!.text, isNot('131072'));
+      expect(outputField.controller!.text, isNot('32768'));
+      // 两个输入框确实来自同一个已展开模型目录行，而不是别处的同文案。
+      expect(
+        find.descendant(of: find.byType(ModelCatalogRow), matching: fields),
+        findsNWidgets(2),
+      );
+    });
     // 变异：把 formatTokenCount 的 `tokens % 1024 == 0` 分支删掉 ⇒ 本组全红。
     test('131072 / 32768 / 1048576 分别显示 128K / 32K / 1M', () {
       expect(formatTokenCount(131072), '128K');
