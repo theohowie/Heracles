@@ -6,6 +6,7 @@ import '../core/http_util.dart';
 import '../core/llm_client.dart';
 import '../core/message.dart';
 import '../core/tool.dart';
+import 'api_endpoint.dart';
 import 'llm_request_util.dart';
 import 'package:logging/logging.dart';
 
@@ -60,7 +61,9 @@ class ResponsesClient extends LLMClient {
     bool? jsonOutput,
     CancelToken? cancelToken,
   }) async {
-    final url = '$baseUrl/responses';
+    // ★ 2026-11-10：原先完全不补 `/v1`（默认 baseUrl `https://api.openai.com`
+    //   会拼成 `/responses` ⇒ 404）。规则统一在 [joinApiPath]。
+    final url = joinApiPath(baseUrl, 'responses');
     final body = _createRequestBody(
       messages,
       tools: tools,
@@ -146,7 +149,7 @@ class ResponsesClient extends LLMClient {
   /// Check if a responseId is valid by making a GET request
   Future<bool> checkResponseId(String responseId) async {
     try {
-      final url = '$baseUrl/responses/$responseId';
+      final url = joinApiPath(baseUrl, 'responses/$responseId');
       _logger.info('Checking responseId: $responseId');
 
       final response = await _client.get(
@@ -186,7 +189,9 @@ class ResponsesClient extends LLMClient {
     bool? jsonOutput,
     CancelToken? cancelToken,
   }) async {
-    final url = '$baseUrl/responses';
+    // ★ 2026-11-10：原先完全不补 `/v1`（默认 baseUrl `https://api.openai.com`
+    //   会拼成 `/responses` ⇒ 404）。规则统一在 [joinApiPath]。
+    final url = joinApiPath(baseUrl, 'responses');
     final body = _createRequestBody(
       messages,
       tools: tools,

@@ -8,6 +8,7 @@ import '../core/http_util.dart';
 import '../core/llm_client.dart';
 import '../core/message.dart';
 import '../core/tool.dart';
+import 'api_endpoint.dart';
 import 'llm_request_util.dart';
 
 /// Client for the Anthropic Messages API (direct, not via AWS Bedrock).
@@ -93,7 +94,10 @@ class ClaudeClient extends LLMClient {
       jsonOutput: jsonOutput,
     );
 
-    final url = '$baseUrl/v1/messages';
+    // ★ 2026-11-10：不再无条件拼 `/v1` —— 用户填的 baseUrl 常自带 `/v1`
+    //   （App 默认值 `https://api.deepseek.com/v1` 就是），旧写法会拼出
+    //   `…/v1/v1/messages` ⇒ 404。规则统一在 [joinApiPath]。
+    final url = joinApiPath(baseUrl, 'messages');
 
     int retryCount = 0;
     while (true) {
@@ -167,7 +171,10 @@ class ClaudeClient extends LLMClient {
     );
     body['stream'] = true;
 
-    final url = '$baseUrl/v1/messages';
+    // ★ 2026-11-10：不再无条件拼 `/v1` —— 用户填的 baseUrl 常自带 `/v1`
+    //   （App 默认值 `https://api.deepseek.com/v1` 就是），旧写法会拼出
+    //   `…/v1/v1/messages` ⇒ 404。规则统一在 [joinApiPath]。
+    final url = joinApiPath(baseUrl, 'messages');
 
     int retryCount = 0;
     while (true) {
