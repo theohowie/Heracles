@@ -1,4 +1,4 @@
-import { useState } from 'react'
+﻿import { useState } from 'react'
 import { Icon, ICONS, Reveal } from '../ui.jsx'
 import {
   APK_ALT, APK_PRIMARY, APK_ROUTES, APK_VERSION_CODE,
@@ -28,7 +28,7 @@ export default function Download() {
     ['包名', PKG],
     ['系统', 'Android 12+ · arm64'],
     ['许可', 'GPL-3.0'],
-    ['签名', 'debug 密钥（alpha）'],
+    ['签名', '正式签名（CN=Heracles）'],
   ]
 
   return (
@@ -70,7 +70,7 @@ export default function Download() {
             </ul>
 
             <p className="receipt-note">
-              当前用 debug 密钥签名（正式签名即将切换），安装时需允许「未知来源」；只支持 arm64 机型。
+              自 2026-11-10 起改用**正式签名**（CN=Heracles）。与 0.4.x–0.5.1 的 debug 签名不兼容：装过旧版的手机需先卸载再安装，卸载会清掉 App 内数据。安装时需允许「未知来源」；只支持 arm64 机型。
             </p>
 
             <div className="receipt-warn">

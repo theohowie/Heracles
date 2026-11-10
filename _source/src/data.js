@@ -1,4 +1,4 @@
-﻿/* 站点内容与常量。
+/* 站点内容与常量。
    ----------------------------------------------------------------------------
    事实纪律（2026-11-09 按仓库与实跑逐条核对）：
    · 这里的每条产品声明都必须能在仓库里找到依据；
@@ -10,12 +10,12 @@
    ⚠️ 截图纪律：`shots/*-v3.webp` 是 2026-10-30 的真机图（15 张 + 1 张录屏海报），
       继续复用；0.5.0 的新能力没有对应截图，只写文字条目 —— 不许拿旧图充新功能。 */
 
-export const APK_GITHUB = 'https://github.com/theohowie/Heracles/releases/download/v0.5.1/Heracles-v0.5.1-arm64.apk'
-export const APK_GITEE = 'https://gitee.com/theohowie/heracles/releases/download/v0.5.1/Heracles-v0.5.1-arm64.apk'
+export const APK_GITHUB = 'https://github.com/theohowie/Heracles/releases/download/v0.5.0-release/Heracles-v0.5.0-release-arm64.apk'
+export const APK_GITEE = 'https://gitee.com/theohowie/heracles/releases/download/v0.5.0-release/Heracles-v0.5.0-release-arm64.apk'
 
 /* 两条线路**同一个包**（2026-11-10 核对，两端各做过一次实下载算 hash）：
    `Heracles-v0.5.1-arm64.apk` 是 50,837,552 B = 48.5 MiB 的 arm64-only 构建
-   （versionCode 38 / versionName 0.5.1，targetSdk 36、最低 API 31，native-code 仅 arm64-v8a）。
+   （versionCode 39 / versionName 0.5.0-release，targetSdk 36、最低 API 31，native-code 仅 arm64-v8a）。
    换版本时两条线路一起换、一起核。 */
 export const GITEE_READY = true // 国内线路已就绪 → 默认走 Gitee
 export const APK_ROUTES = [
@@ -39,11 +39,11 @@ export const REPO = 'https://github.com/theohowie/Heracles'
 export const GITEE = 'https://gitee.com/theohowie/heracles'
 /* sha256（2026-11-10）：两条线路是同一个文件，页面只给一份校验值。
    用户拿自己的下载算一次、和这里对一遍就能确认没被换包。 */
-export const SHA = '2D545D893D204178049E1D5928D9BAB3FCB69C71B0D82805CA2E2B74332204E2'
+export const SHA = '20FEEE6F51287A7B59227F3DB0A5C15D9CDDAFD85C5CA8B7FEE57BA86FC2D5B4'
 export const SHA_SOURCE = 'Gitee / GitHub 同一份文件'
-export const VERSION = 'v0.5.1'
+export const VERSION = 'v0.5.0-release'
 export const APK_SIZE = APK_PRIMARY.size
-export const APK_VERSION_CODE = '38'
+export const APK_VERSION_CODE = '39'
 export const PKG = 'com.theohowie.heracles'
 /* 截图日期 = 图片本身的日期，**不等于**发布日（发布日 2026-11-10）。
    截图没重拍，就别改这个值 —— 一改就等于声称「这是新界面的实拍」。 */
@@ -368,7 +368,7 @@ export const WORKS = [
   '编码层自检按钮不再永久转圈（该能力已下线，改为如实提示不可用）',
   '会话严格 append-only（写前断言前缀、并发拒写）',
   '审批 fail-closed：答复落盘 once / always / deny',
-  'arm64-only 发布包（v0.5.1 · 48.5 MiB，无 v7a / x86_64 死重）',
+  'arm64-only 发布包（v0.5.0-release · 48.5 MiB，正式签名 CN=Heracles，无 v7a / x86_64 死重）',
   '内核 402 项 core 单测 + 632 项 backend 单测（cd core / cd backend && dart test）',
 ]
 
@@ -399,7 +399,8 @@ export const LIMITS = [
 
 /* ---------- 最近实测（带日期，能回查台账） ---------- */
 export const RUNS = [
-  { date: '2026-11-10', text: 'v0.5.1 出包：50,837,552 B = 48.5 MiB，versionCode 38，arm64-only', tag: '构建' },
+  { date: '2026-11-10', text: 'v0.5.0-release 出包：50,874,950 B = 48.5 MiB，versionCode 39，正式签名 CN=Heracles', tag: '构建' },
+  { date: '2026-11-10', text: '新增发布回归门禁 15 条（token 单位 / 超时与网络文案分离 / i18n 回退），已做变异验证', tag: '单测' },
   { date: '2026-11-10', text: 'core dart test 402/402 · backend dart test 632/632（出包前实跑）', tag: '单测' },
   { date: '2026-11-10', text: '三轨 URL 拼接修复：20 条单测（含 9 条抓真实请求 URI 的接线锁）+ 变异验证变红', tag: '单测' },
   { date: '2026-11-09', text: '内核 dart test 632/632（打 v0.5.0 包前实跑）', tag: '单测' },
@@ -408,11 +409,13 @@ export const RUNS = [
   { date: '2026-10-29', text: '长任务前缀缓存：累计 90–95%、稳态 96–99%（1 机型 1 模型 1 会话）', tag: '真机' },
 ]
 
-/* ---------- v0.5.1 这一版改了什么（逐条能对到仓库里的提交） ----------
+/* ---------- v0.5.0-release 这一版改了什么（逐条能对到仓库里的提交） ----------
    页面标题跟着 VERSION 走，所以这里只列 **v0.5.1** 的改动；
-   v0.5.0 的那些能力（上拉抽屉 / 压缩流水线 / 取消轮次上限…）已经写进
+   0.5.0 / 0.5.1 的那些能力（上拉抽屉 / 压缩流水线 / 英文界面…）已经写进
    FEATURES 与 WORKS，不再重复列在这里。 */
 export const CHANGELOG = [
+  '★ 改用正式签名（CN=Heracles）：与 0.4.x–0.5.1 的 debug 签名不兼容，装过旧版必须卸载重装',
+  '修「超时被说成网络连接失败」：Dio 的 took longer than 文案含 connection 但不是断网，现在超时单独判定且文案不再提网络',
   '界面可切中文 / English（设置 → 通用 → 语言）：立即生效、重启保留；按中文原文查表，未翻译条目回退中文',
   '设置里的上下文窗口与输出上限按 128K / 32K / 1M 显示，不再是换算后的 131072 / 32768',
   'Anthropic / Responses / Chat Completions 三条轨共用 URL 拼接器：baseUrl 已带 /v1 时不再重复（旧写法拼出 …/v1/v1/messages ⇒ 404）',
