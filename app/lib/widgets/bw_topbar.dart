@@ -2,6 +2,7 @@ import 'dart:math' as math;
 
 import 'package:flutter/material.dart';
 
+import '../i18n/l10n.dart';
 import '../theme/app_theme.dart';
 
 
@@ -274,7 +275,7 @@ class _DynamicIslandState extends State<DynamicIsland>
                         Icon(Icons.edit_outlined, size: 13, color: dim),
                         const SizedBox(width: 5),
                         Text(
-                          '调整计划',
+                          tr('调整计划'),
                           style: TextStyle(fontSize: 12.5, color: dim),
                         ),
                       ],

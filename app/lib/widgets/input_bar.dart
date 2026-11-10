@@ -6,6 +6,7 @@ import 'dart:ui' as ui;
 import 'package:flutter/cupertino.dart';
 import 'package:flutter/material.dart';
 
+import '../i18n/l10n.dart';
 import '../models/attachment.dart';
 import '../models/settings.dart';
 import 'image_viewer.dart';
@@ -644,8 +645,8 @@ class _InputBarState extends State<InputBar>
           color: h.text,
         ),
         placeholder: widget.queuedTexts.isEmpty
-            ? '给 Heracles 发消息…'
-            : '发送将排在队尾；↑ 可插队立即发送',
+            ? tr('给 Heracles 发消息…')
+            : tr('发送将排在队尾；↑ 可插队立即发送'),
         placeholderStyle:
             TextStyle(color: h.textFaint, fontSize: 15),
         padding: const EdgeInsets.fromLTRB(
@@ -888,7 +889,7 @@ class _EnvStrip extends StatelessWidget {
             child: _item(
                 Icon(CupertinoIcons.folder_fill,
                     size: 15, color: h.textDim),
-                workspaceLabel ?? '工作区', onWorkspaceTap,
+                workspaceLabel ?? tr('工作区'), onWorkspaceTap,
                 dim: false, align: Alignment.centerLeft),
           ),
           Expanded(
@@ -902,7 +903,7 @@ class _EnvStrip extends StatelessWidget {
                 // · 连了没选仓库 → 「@账号」
                 // · 选了仓库 → 「仓库名」（用户要的：这里显示仓库名）
                 githubAccount == null
-                    ? '连接 Github'
+                    ? tr('连接 Github')
                     : (githubRepoName ?? '@$githubAccount'),
                 onGithubTap,
                 dim: false,
@@ -915,7 +916,7 @@ class _EnvStrip extends StatelessWidget {
                     size: 15,
                     color: onGitTap == null ? h.textFaint : h.textDim),
                 // 已知分支就显示分支名（master），否则回退成「选择分支」
-                gitBranch ?? '选择分支',
+                gitBranch ?? tr('选择分支'),
                 onGitTap,
                 dim: onGitTap == null,
                 align: Alignment.centerRight),
@@ -1231,7 +1232,7 @@ class _VoiceDraftHint extends StatelessWidget {
             ),
           ),
           const SizedBox(width: 6),
-          Text('正在识别…', style: HTxt.caption.copyWith(color: h.textDim)),
+          Text(tr('正在识别…'), style: HTxt.caption.copyWith(color: h.textDim)),
         ],
       ),
     );
@@ -1482,7 +1483,7 @@ class _ModelSelector extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final name = (label == null || label!.isEmpty) ? '模型' : label!;
+    final name = (label == null || label!.isEmpty) ? tr('模型') : label!;
     // ★ 结构对齐盾牌按钮（_PermissionIconButton —— 真机已验证可点）：
     //   SizedBox > Material(transparent) > InkWell > 内容。
     //   之前 GestureDetector(opaque)+Container(带 boxShadow) 在真机上
@@ -1632,13 +1633,14 @@ class _QueuedRow extends StatelessWidget {
               ),
             ),
             if (canPin && onPin != null)
-              _iconBtn(CupertinoIcons.arrow_up_to_line, '置顶（下一个发）', onPin!),
+              _iconBtn(
+                  CupertinoIcons.arrow_up_to_line, tr('置顶（下一个发）'), onPin!),
             if (onEdit != null)
-              _iconBtn(CupertinoIcons.pencil, '编辑', onEdit!),
+              _iconBtn(CupertinoIcons.pencil, tr('编辑'), onEdit!),
             if (onRemove != null)
-              _iconBtn(AppIcons.trash, '删除', onRemove!),
+              _iconBtn(AppIcons.trash, tr('删除'), onRemove!),
             if (onSendNow != null)
-              _iconBtn(AppIcons.send, '立即发送（打断当前任务）',
+              _iconBtn(AppIcons.send, tr('立即发送（打断当前任务）'),
                   onSendNow!, accent: true),
             const SizedBox(width: HSpace.xs),
           ],
@@ -1795,7 +1797,9 @@ class _RunTierNotice extends StatelessWidget {
             const SizedBox(width: 6),
             Expanded(
               child: Text(
-                text,
+                // ★ v0.5.1：切档提示的文案由上层传（常量 kRunTierNoticeText
+                //   仍保持中文原文，作词条 key），这里按词条翻译。
+                tr(text),
                 style: TextStyle(
                   fontSize: 12,
                   height: 1.35,
