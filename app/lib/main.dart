@@ -2,7 +2,9 @@ import 'dart:async';
 
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'package:flutter_localizations/flutter_localizations.dart';
 
+import 'i18n/l10n.dart';
 import 'models/settings.dart';
 import 'screens/chat_screen.dart';
 import 'services/automation_wiring.dart';
@@ -55,7 +57,17 @@ Future<void> main() async {
     unawaited(_sandboxT2ActivationTest());
   }
 
-  runApp(HeraclesApp(settings: settings));
+  // ★ v0.5.1（2026-11-10）：界面语言。
+  //   持久化的语言在 `SettingsController.load()` 之后这里同步进 `appLocale`，
+  //   切换时 `appLocale` 一变、根件整体重建（文案都走 `tr()` 取值）。
+  setAppLocale(settings.value.language.name);
+  runApp(
+    ValueListenableBuilder<Locale>(
+      valueListenable: appLocale,
+      builder: (context, locale, _) =>
+          HeraclesApp(settings: settings, locale: locale),
+    ),
+  );
 
   // ★ V0.4 F2（2026-11-02）：定时任务的「到点待执行」消费。
   //
@@ -66,9 +78,13 @@ Future<void> main() async {
 }
 
 class HeraclesApp extends StatelessWidget {
-  const HeraclesApp({super.key, required this.settings});
+  const HeraclesApp({super.key, required this.settings, required this.locale});
 
   final SettingsController settings;
+
+  /// 当前界面语言（v0.5.1）。由 `main()` 里的 `appLocale` 驱动，
+  /// 变化时整个 App 重建。
+  final Locale locale;
 
   @override
   Widget build(BuildContext context) {
@@ -86,6 +102,15 @@ class HeraclesApp extends StatelessWidget {
         return MaterialApp(
           title: 'Heracles',
           debugShowCheckedModeBanner: false,
+          // ★ v0.5.1：界面语言。`zh` 为默认；`en` 时所有走 `tr()` 的文案取英文，
+          //   未翻译的条目自动回退中文（不会出现空白）。
+          locale: locale,
+          supportedLocales: kSupportedLocales,
+          localizationsDelegates: const <LocalizationsDelegate<Object>>[
+            GlobalMaterialLocalizations.delegate,
+            GlobalWidgetsLocalizations.delegate,
+            GlobalCupertinoLocalizations.delegate,
+          ],
           theme: buildHeraclesTheme(
             accentHex: s.accentHex,
             dark: dark,
