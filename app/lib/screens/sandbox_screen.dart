@@ -103,12 +103,12 @@ class _SandboxScreenState extends State<SandboxScreen> {
       _status = st;
     });
     if (st.installed) {
-      showIosToast(context, '沙箱已激活');
+      showIosToast(context, tr('沙箱已激活'));
       _refresh();
     } else {
       // activate 的失败原因被客户端收敛进状态形状，这里只能如实
       // 报「没装上」+ 最可能的下一步（内置失败会走 OCI 兜底，要网）。
-      showIosToast(context, '激活失败：内置环境不可用时需要联网重试');
+      showIosToast(context, tr('激活失败：内置环境不可用时需要联网重试'));
     }
   }
 
@@ -131,10 +131,10 @@ class _SandboxScreenState extends State<SandboxScreen> {
       _status = st;
     });
     if (!st.installed) {
-      showIosToast(context, '沙箱已重置');
+      showIosToast(context, tr('沙箱已重置'));
       _refresh();
     } else {
-      showIosToast(context, '重置失败：后端尚未支持重置');
+      showIosToast(context, tr('重置失败：后端尚未支持重置'));
     }
   }
 
@@ -233,7 +233,7 @@ class _SandboxScreenState extends State<SandboxScreen> {
               ),
               const SizedBox(width: HSpace.sm),
               Text(
-                st == null ? '正在读取状态…' : (installed ? '已激活' : '未激活'),
+                st == null ? tr('正在读取状态…') : (installed ? tr('已激活') : '未激活'),
                 style: TextStyle(
                   fontSize: 16,
                   fontWeight: FontWeight.w600,
@@ -252,11 +252,9 @@ class _SandboxScreenState extends State<SandboxScreen> {
           Text(
             installed
                 ? (st!.rootfsSummary.isEmpty
-                    ? '内置 Linux 环境已就绪。'
+                    ? tr('内置 Linux 环境已就绪。')
                     : st.rootfsSummary)
-                : '内置的 Alpine Linux 环境还没有装好。激活会解包约 9 MB 的 '
-                    'rootfs（离线内置，不需要联网），之后 agent 的命令默认 '
-                    '在沙箱里执行，产物与真机文件分开存放。',
+                : tr('内置的 Alpine Linux 环境还没有装好。激活会解包约 9 MB 的 ' 'rootfs（离线内置，不需要联网），之后 agent 的命令默认 ' '在沙箱里执行，产物与真机文件分开存放。'),
             style: TextStyle(fontSize: 13, color: h.textDim, height: 1.6),
           ),
           if (st != null && installed && !st.prootReady) ...[
@@ -390,7 +388,7 @@ class _SandboxScreenState extends State<SandboxScreen> {
                       borderRadius: BorderRadius.circular(999),
                     ),
                     child: Text(
-                      _mounts[i].readOnly ? '只读' : '读写',
+                      _mounts[i].readOnly ? tr('只读') : '读写',
                       style: TextStyle(
                         fontSize: 11,
                         fontWeight: FontWeight.w600,
@@ -456,7 +454,7 @@ class _SandboxScreenState extends State<SandboxScreen> {
                       ),
                       const SizedBox(width: HSpace.sm),
                       Text(
-                        channels[i].available ? '可用' : '不可用',
+                        channels[i].available ? tr('可用') : '不可用',
                         style: TextStyle(
                           fontSize: 12.5,
                           color: channels[i].available
@@ -534,7 +532,7 @@ class _SandboxScreenState extends State<SandboxScreen> {
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
                       Text(
-                        ready ? '编译环境 · 已就绪' : '编译环境 · 未安装',
+                        ready ? tr('编译环境 · 已就绪') : '编译环境 · 未安装',
                         style: TextStyle(
                           fontSize: 16,
                           fontWeight: FontWeight.w500,
@@ -548,7 +546,7 @@ class _SandboxScreenState extends State<SandboxScreen> {
                                 '${version.isEmpty ? '' : ' · 版本 $version'}'
                             : (_activatingSuite
                                 ? (_suiteStage.isEmpty
-                                    ? '正在准备…'
+                                    ? tr('正在准备…')
                                     : _suiteStage)
                                 : '约 415 MB · 需要联网下载${missingText.isEmpty ? '' : '（缺 $missingText）'}'),
                         style: TextStyle(fontSize: 13, color: h.textFaint),
@@ -684,7 +682,7 @@ class _SandboxScreenState extends State<SandboxScreen> {
       _suitePercent = -1;
       _suiteStage = '';
     });
-    showIosToast(context, r.ok ? (r.alreadyReady ? '编译环境已就绪' : '编译环境已装好') : '失败：${r.message}');
+    showIosToast(context, r.ok ? (r.alreadyReady ? tr('编译环境已就绪') : '编译环境已装好') : '失败：${r.message}');
   }
 
   /// **卸载 T2 编译环境**（2026-10-29 T2-7）。
@@ -749,7 +747,7 @@ class _SandboxScreenState extends State<SandboxScreen> {
           .map((f) => '${f.path}（${f.reason}）')
           .join('；');
     }
-    return r.message.isEmpty ? '后端未返回原因' : r.message;
+    return r.message.isEmpty ? tr('后端未返回原因') : r.message;
   }
 
   Widget _resetCard(Hue h) {

@@ -78,7 +78,7 @@ class _SkillsScreenState extends State<SkillsScreen> {
       final r = await _service.setSkillEnabled(skill.name, enabled);
       if (!mounted) return;
       if (!r.ok) {
-        showIosToast(context, '没有生效：${r.error ?? '未知原因'}');
+        showIosToast(context, '没有生效：${r.error ?? tr('未知原因')}');
       }
     } catch (e) {
       if (!mounted) return;
@@ -155,7 +155,7 @@ class _SkillsScreenState extends State<SkillsScreen> {
                                 color: h.text)),
                         const SizedBox(height: 6),
                         Text(
-                          snap.error ?? '未知原因（宿主未说明）',
+                          snap.error ?? tr('未知原因（宿主未说明）'),
                           style: TextStyle(
                               fontSize: 12,
                               height: 1.55,
@@ -262,7 +262,7 @@ class _SkillsScreenState extends State<SkillsScreen> {
                       ),
                       const SizedBox(width: 8),
                       Text(
-                        s.source == 'builtin' ? '内置' : '用户',
+                        s.source == 'builtin' ? tr('内置') : '用户',
                         style: TextStyle(
                             fontSize: 11, color: h.textFaint),
                       ),
@@ -270,7 +270,7 @@ class _SkillsScreenState extends State<SkillsScreen> {
                   ),
                   const SizedBox(height: 2),
                   Text(
-                    s.description.isEmpty ? '（无说明）' : s.description,
+                    s.description.isEmpty ? tr('（无说明）') : s.description,
                     style: TextStyle(
                         fontSize: 12, height: 1.45, color: h.textFaint),
                   ),

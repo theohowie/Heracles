@@ -176,7 +176,7 @@ String jevOutcomeHeadline(JevTestReport r) {
     final res = r.result!;
     final pct = (res.confidence * 100).toStringAsFixed(0);
     final sec = (res.diagnostics.elapsedMs / 1000).toStringAsFixed(1);
-    return '连接成功：决策服务返回「${res.recommended ? '是' : '否'}」，'
+    return '连接成功：决策服务返回「${res.recommended ? tr('是') : '否'}」，'
         '置信度 $pct% · 耗时 $sec 秒';
   }
   final d = r.diagnostics;
@@ -193,7 +193,7 @@ String jevOutcomeHeadline(JevTestReport r) {
   final reason = r.failureMessage?.trim() ?? '';
   if (status == null) {
     if (label.isNotEmpty) return '连接失败：$label';
-    return reason.isEmpty ? '连接失败' : '连接失败：$reason';
+    return reason.isEmpty ? tr('连接失败') : '连接失败：$reason';
   }
   final head = '连接失败（HTTP $status）';
   return label.isEmpty ? head : '$head：$label';
@@ -206,7 +206,7 @@ List<String> jevDiagnosticLines(JevTestReport r) {
   if (d == null) {
     return [
       '请求 URL：${r.endpoint.trim().isEmpty ? '—' : r.endpoint}',
-      'HTTP 码：—（请求没有发出：${r.failureMessage ?? '本地前置检查未通过'}）',
+      'HTTP 码：—（请求没有发出：${r.failureMessage ?? tr('本地前置检查未通过')}）',
       'traceId：（无）',
     ];
   }
@@ -220,7 +220,7 @@ List<String> jevDiagnosticLines(JevTestReport r) {
     '耗时：${(d.elapsedMs / 1000).toStringAsFixed(1)} 秒',
     'code：${d.serverCode ?? '—'}',
     'message：${d.serverMessage ?? '—'}',
-    'traceId：${d.traceId ?? '（无）'}',
+    'traceId：${d.traceId ?? tr('（无）')}',
   ];
 }
 
@@ -369,7 +369,7 @@ class _JevSettingsScreenState extends State<JevSettingsScreen> {
     // refreshCloudKey 内部会通知监听者）
     await jev.refreshCloudKey();
     if (!mounted) return;
-    showIosToast(context, '已保存');
+    showIosToast(context, tr('已保存'));
   }
 
   /// 拉取模型目录（GET /v1/models 口径，见 JevCloudClient）——
@@ -428,7 +428,7 @@ class _JevSettingsScreenState extends State<JevSettingsScreen> {
     final resolution = JevCloudClient.resolveEndpoint(baseUrl);
     if (baseUrl.isEmpty) {
       setState(() {
-        _preflightError = resolution.hint ?? '先填接口地址';
+        _preflightError = resolution.hint ?? tr('先填接口地址');
         _report = null;
       });
       return;
@@ -493,7 +493,7 @@ class _JevSettingsScreenState extends State<JevSettingsScreen> {
   Future<void> _copyReport(JevTestReport report) async {
     await Clipboard.setData(ClipboardData(text: jevDiagnosticsText(report)));
     if (!mounted) return;
-    showIosToast(context, '详情已复制');
+    showIosToast(context, tr('详情已复制'));
   }
 
   @override
@@ -656,7 +656,7 @@ class _JevSettingsScreenState extends State<JevSettingsScreen> {
                   SizedBox(
                     width: 140,
                     child: IosButton(
-                      label: _testing ? '测试中…' : '测试连接',
+                      label: _testing ? tr('测试中…') : '测试连接',
                       filled: false,
                       color: h.accent,
                       busy: _testing,
@@ -708,7 +708,7 @@ class _JevSettingsScreenState extends State<JevSettingsScreen> {
     final raw = _urlCtrl.text.trim();
     final resolution = JevCloudClient.resolveEndpoint(raw);
     final text = raw.isEmpty
-        ? '将请求：POST （先填接口地址）'
+        ? tr('将请求：POST （先填接口地址）')
         : '将请求：POST ${resolution.url}';
     final hint = resolution.hint?.trim();
     return Column(
@@ -803,7 +803,7 @@ class _JevSettingsScreenState extends State<JevSettingsScreen> {
           if (d != null) ...[
             const SizedBox(height: 4),
             Text(
-              'traceId：${d.traceId ?? '（无）'}',
+              'traceId：${d.traceId ?? tr('（无）')}',
               key: const ValueKey('jev-outcome-trace'),
               style: TextStyle(fontSize: 12, height: 1.4, color: h.textFaint),
             ),
@@ -838,7 +838,7 @@ class _JevSettingsScreenState extends State<JevSettingsScreen> {
               IosTap(
                 onTap: () => setState(() => _diagExpanded = !_diagExpanded),
                 child: Text(
-                  _diagExpanded ? '收起' : '详情',
+                  _diagExpanded ? tr('收起') : '详情',
                   key: const ValueKey('jev-detail-toggle'),
                   style: TextStyle(fontSize: 12, color: h.accent),
                 ),
@@ -985,7 +985,7 @@ class _JevSettingsScreenState extends State<JevSettingsScreen> {
                     Text(
                       downloaded > 0
                           ? '本机检测 · 已下载 $downloaded 个本地模型'
-                          : '本机检测 · 本地模型下载与管理',
+                          : tr('本机检测 · 本地模型下载与管理'),
                       style: HTxt.caption.copyWith(color: h.textFaint),
                     ),
                   ],

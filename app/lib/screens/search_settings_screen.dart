@@ -82,7 +82,7 @@ class _SearchSettingsScreenState extends State<SearchSettingsScreen> {
       final r = await _service.save(_endpoint.text.trim());
       if (!mounted) return;
       setState(() {
-        _saveMessage = r.ok ? '已保存' : r.message; // 非法拒绝原样上屏（人话）
+        _saveMessage = r.ok ? tr('已保存') : r.message; // 非法拒绝原样上屏（人话）
         _saving = false;
       });
       if (r.ok) await _reload();
@@ -106,7 +106,7 @@ class _SearchSettingsScreenState extends State<SearchSettingsScreen> {
       if (!mounted) return;
       setState(() => _saving = false);
       await _reload();
-      if (mounted) showIosToast(context, '已清除搜索服务配置');
+      if (mounted) showIosToast(context, tr('已清除搜索服务配置'));
     } catch (e) {
       if (!mounted) return;
       setState(() {
@@ -138,7 +138,7 @@ class _SearchSettingsScreenState extends State<SearchSettingsScreen> {
             icon: AppIcons.search,
             title: tr('搜索 endpoint'),
             subtitle: _loaded == null
-                ? '读取中…'
+                ? tr('读取中…')
                 : (_loaded == false
                     ? '读取失败：$_readError'
                     : (configured

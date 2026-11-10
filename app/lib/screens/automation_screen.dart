@@ -291,11 +291,11 @@ class _AutomationScreenState extends State<AutomationScreen> {
             ListTile(
               key: Key('automation-${t['id']}'),
               contentPadding: EdgeInsets.zero,
-              title: Text((t['title'] as String?) ?? '未命名',
+              title: Text((t['title'] as String?) ?? tr('未命名'),
                   style: TextStyle(fontSize: 14, color: h.text)),
               subtitle: Text(
                 '每 ${t['intervalMinutes'] ?? '?'} 分钟 · '
-                '${(t['enabled'] as bool?) == true ? '已启用' : '已停用'}',
+                '${(t['enabled'] as bool?) == true ? tr('已启用') : '已停用'}',
                 style: TextStyle(fontSize: 11.5, color: h.textFaint),
               ),
             ),

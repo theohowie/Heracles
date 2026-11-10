@@ -103,7 +103,7 @@ class JevLocalSettingsScreen extends StatelessWidget {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        _kv(h, '机型', p.model.isEmpty ? '未知' : p.model),
+        _kv(h, '机型', p.model.isEmpty ? tr('未知') : p.model),
         Divider(height: 17, color: h.border),
         _kv(h, '运行内存', '${p.totalRamGb.toStringAsFixed(0)} GB'),
         Divider(height: 17, color: h.border),
@@ -211,7 +211,7 @@ class JevLocalSettingsScreen extends StatelessWidget {
           ),
           const SizedBox(height: 5),
           Text(
-            '${state.note ?? '正在下载'} · ${jevFormatBytes(state.received)}'
+            '${state.note ?? tr('正在下载')} · ${jevFormatBytes(state.received)}'
             '${state.total > 0 ? ' / ${jevFormatBytes(state.total)}' : ''}',
             style: HTxt.caption.copyWith(color: h.textFaint),
           ),

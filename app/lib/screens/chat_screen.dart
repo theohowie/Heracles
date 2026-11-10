@@ -366,7 +366,7 @@ class _ChatScreenState extends State<ChatScreen> {
       } catch (_) {}
       if (!mounted) return;
       if (!local2) {
-        showIosToast(context, '这个仓库还没下载到手机');
+        showIosToast(context, tr('这个仓库还没下载到手机'));
         return;
       }
       final name = await showBwTextInputSheet(
@@ -935,7 +935,7 @@ class _ChatScreenState extends State<ChatScreen> {
               valueText: hit != null
                   ? '${(hit * 100).round()}%'
                   : (_usage.unreportedTurns > 0 && _usage.reportedTurns == 0
-                      ? '未上报'
+                      ? tr('未上报')
                       : '—'),
               ratio: hit,
               color: hit == null ? h.textFaint : hitStatusColor(h, hit),
@@ -1425,7 +1425,7 @@ class _ChatScreenState extends State<ChatScreen> {
   /// GitHub 连接是另一个槽位。混在一起用户会以为"工作区被换掉了"。
   ///
   /// 仓库名显示在**底部信息条的第二格（GitHub）**，那里才是它的位置。
-  String get _workspaceName => _activeWorkspace?.name ?? '未选择工作区';
+  String get _workspaceName => _activeWorkspace?.name ?? tr('未选择工作区');
 
   // ------------------------------------------------------------ 工作区操作
 
@@ -1643,7 +1643,7 @@ class _ChatScreenState extends State<ChatScreen> {
                     constraints: BoxConstraints(maxHeight: available * 0.35),
                     child: SingleChildScrollView(
                       child: Text(
-                        error.isEmpty ? '这个位置不能用作工作区。' : error,
+                        error.isEmpty ? tr('这个位置不能用作工作区。') : error,
                         textAlign: TextAlign.left,
                         style: TextStyle(
                           fontSize: 14.5,
@@ -1864,7 +1864,7 @@ class _ChatScreenState extends State<ChatScreen> {
       if (w.id == workspaceId) ws = w;
     }
     if (ws == null) {
-      showIosToast(context, '这个工作区已经不在了，请重新选一个');
+      showIosToast(context, tr('这个工作区已经不在了，请重新选一个'));
       return;
     }
     if (!ws.exists) {
@@ -1993,7 +1993,7 @@ class _ChatScreenState extends State<ChatScreen> {
         setState(() {
           final id = _progressId ?? _nextId();
           _progressId = id;
-          _upsertProgress(id, '正在运行…（等待模型输出）');
+          _upsertProgress(id, tr('正在运行…（等待模型输出）'));
         });
       }
 
@@ -2104,7 +2104,7 @@ class _ChatScreenState extends State<ChatScreen> {
           } else {
             out.add(HToolCall(
               id: id,
-              tool: (m['tool'] as String?) ?? '未知工具',
+              tool: (m['tool'] as String?) ?? tr('未知工具'),
               args: args,
               result: m['result'] as String?,
               status: state != null
@@ -3222,7 +3222,7 @@ class _ChatScreenState extends State<ChatScreen> {
           _appendPendingRaw(e.index ?? -1);
           _messages.add(HBlocked(
             id: _nextId(),
-            reason: e.reason ?? '已拦截',
+            reason: e.reason ?? tr('已拦截'),
             // ★ tool 可能为 null（Unparseable 分支）
             tool: e.tool,
             args: e.args,
@@ -3847,8 +3847,8 @@ class _ChatScreenState extends State<ChatScreen> {
       // ★ 2026-10-18（ADR-035 S4）：原先还有第三条 `isLocal ? '本地实测
       //   （llama.cpp -c 参数）'` —— 本地后端已删，那条来源不存在了。
       _contextLimitSource = fromServer != null
-          ? '服务端上报'
-          : '⚠️ 未从服务端获取，按保守值估算';
+          ? tr('服务端上报')
+          : tr('⚠️ 未从服务端获取，按保守值估算');
       _frozenTokens = frozen;
       _contextBreakdown = breakdown;
     });
@@ -4173,7 +4173,7 @@ class _ChatScreenState extends State<ChatScreen> {
       // ★ 2026-10-30 P0：先给可见状态 —— 旧实现静默等停止完成，
       //   用户以为发送没生效。注意与 ↑ 的"插队"区分：那是轮间插话，
       //   这里是真的**停掉当前任务**再发新任务。
-      showIosToast(context, '正在停止当前任务并发送…');
+      showIosToast(context, tr('正在停止当前任务并发送…'));
       unawaited(() async {
         await _stopRun();
         if (!mounted) return;
@@ -4196,7 +4196,7 @@ class _ChatScreenState extends State<ChatScreen> {
     });
     // ★ 2026-10-29：用户报「不能排队」很可能就是**没反馈** ——
     //   排队条在输入框上方，视线还在输入框时容易以为没发出去。
-    showIosToast(context, '已排队，当前任务结束后自动发送');
+    showIosToast(context, tr('已排队，当前任务结束后自动发送'));
   }
 
   /// 当前运行结束后，把队首发出去（在 `_runAgent` 的 finally 里调）。
@@ -4242,14 +4242,14 @@ class _ChatScreenState extends State<ChatScreen> {
         if (accepted) {
           // ★ 2026-10-30 P0：后端已收下（轮间注入，`8e6d496` 起真生效）——
           //   必须明确告诉用户：这句**不是现在就跑**，而是本轮结束时模型才会看到。
-          showIosToast(context, '已插队，模型将在本轮结束时看到');
+          showIosToast(context, tr('已插队，模型将在本轮结束时看到'));
           return;
         }
         // ★ 2026-10-30 P0：不接受（插话队列满 / 任务刚好收尾 / 空文本）——
         //   **绝不许静默重排队**。旧实现只 `insert(0)` 不吭声，
         //   用户看到的就是"点了没用"。
         setState(() => _queue.insert(0, item));
-        showIosToast(context, '插话未成功（队列已满或任务刚结束），已保留在排队');
+        showIosToast(context, tr('插话未成功（队列已满或任务刚结束），已保留在排队'));
         return;
       }
       // 没在跑：正常发送（把附件放回，走 _runAgent 全路径）
@@ -4690,7 +4690,7 @@ class _ChatScreenState extends State<ChatScreen> {
     final title = prefix
         .whereType<HUserMessage>()
         .map((e) => e.text)
-        .firstOrNull ?? '分支';
+        .firstOrNull ?? tr('分支');
 
     try {
       final newId = await _bridge.seedBranch(
@@ -4859,7 +4859,7 @@ class _ChatScreenState extends State<ChatScreen> {
           text: ok
               ? '✅ 自动压缩阈值已设为 $v（占用超过窗口 '
                   '${(v * 100).round()}% 时触发一次压缩）。'
-              : '❌ 阈值没写进去（存储失败），仍是原值。',
+              : tr('❌ 阈值没写进去（存储失败），仍是原值。'),
         ));
       });
       _followBottomIfNeeded();
@@ -5293,7 +5293,7 @@ class _ChatScreenState extends State<ChatScreen> {
     // ignore: avoid_print
     print(
       'HERC-GUARD 已切换会话，丢弃运行结果'
-      '（发起时 session=${origin.sessionId ?? '(自动新建)'} / '
+      '（发起时 session=${origin.sessionId ?? tr('(自动新建)')} / '
       'ws=${origin.workspaceId} / gen=${origin.ctxGen}；'
       '当前 session=$_activeSessionId / gen=$_ctxGen）'
       '—— 数据已由 Kotlin 落盘，切回原会话可见',
@@ -5563,7 +5563,7 @@ class _ChatScreenState extends State<ChatScreen> {
         // 改变列高，标题被顶着上下挪。现在胶囊与展开面板都在
         // body 的 Stack 悬浮层（顶栏下方正中），标题位置钉死。
         title: Text(
-          _decisionMode ? '决策' : (_activeSession?.title ?? _workspaceName),
+          _decisionMode ? tr('决策') : (_activeSession?.title ?? _workspaceName),
           maxLines: 1,
           overflow: TextOverflow.ellipsis,
           textAlign: TextAlign.start,
@@ -6210,7 +6210,7 @@ class _ChatScreenState extends State<ChatScreen> {
           context,
           title: tr('模型需要你的回答'),
           message: fallbackText.isEmpty
-              ? '（模型提了一个问题，但内容为空）'
+              ? tr('（模型提了一个问题，但内容为空）')
               : fallbackText,
           confirmLabel: tr('知道了'),
           cancelLabel: tr('暂时收起'),
@@ -6271,9 +6271,9 @@ class _ChatScreenState extends State<ChatScreen> {
     // 面板还开着 ⇒ 直接关（`pop` 不受 PopScope 限制；maybePop 会走二次确认）
     if (_askSheetOpen) Navigator.of(context).pop();
     if (outcome == 'timeout') {
-      showIosToast(context, '等待超时，已按「未回答」继续');
+      showIosToast(context, tr('等待超时，已按「未回答」继续'));
     } else if (outcome == 'aborted') {
-      showIosToast(context, '本次提问已中止');
+      showIosToast(context, tr('本次提问已中止'));
     }
   }
 
@@ -6300,11 +6300,11 @@ class _ChatScreenState extends State<ChatScreen> {
   Future<void> _continueRun() async {
     if (!mounted) return;
     if (_activeSessionId == null) {
-      showIosToast(context, '当前还没有可续跑的会话记录');
+      showIosToast(context, tr('当前还没有可续跑的会话记录'));
       return;
     }
     if (_activeWorkspace == null) {
-      showIosToast(context, '请先选择一个工作区再继续');
+      showIosToast(context, tr('请先选择一个工作区再继续'));
       return;
     }
     await _runAgent('继续未完成的任务');
@@ -6446,7 +6446,7 @@ class _ChatScreenState extends State<ChatScreen> {
     final decision = await showApprovalRequestSheet(
       context,
       tool: friendlyToolName(tool ?? ''),
-      argsPreview: shownDetail.isEmpty ? '（无参数）' : shownDetail,
+      argsPreview: shownDetail.isEmpty ? tr('（无参数）') : shownDetail,
       risk: reason.isEmpty ? null : reason,
       note: (message != null && message.isNotEmpty && message != reason)
           ? message
@@ -6688,7 +6688,7 @@ class _NewContentButton extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return Tooltip(
-      message: hasNewContent ? '有新内容，点击回到底部' : '回到底部',
+      message: hasNewContent ? tr('有新内容，点击回到底部') : '回到底部',
       child: Material(
         color: h.accent,
         shape: const CircleBorder(),
@@ -7035,7 +7035,7 @@ class _PendingAsk {
       if (t != null && t.isNotEmpty) return t;
     }
     final fb = fallbackText.trim();
-    return fb.isEmpty ? '模型提了一个问题' : fb;
+    return fb.isEmpty ? tr('模型提了一个问题') : fb;
   }
 
   AskDraft get draft => AskDraft(

@@ -538,8 +538,8 @@ class _VoiceSettingsScreenState extends State<VoiceSettingsScreen> {
     setState(() {
       _busy = false;
       _actionNote = result.ok
-          ? '已重新安装 · 流式识别可用'
-          : '安装失败：${result.message ?? '未知原因'}';
+          ? tr('已重新安装 · 流式识别可用')
+          : '安装失败：${result.message ?? tr('未知原因')}';
     });
   }
 
@@ -550,8 +550,8 @@ class _VoiceSettingsScreenState extends State<VoiceSettingsScreen> {
     setState(() {
       _busy = false;
       _actionNote = result.ok
-          ? '内置流式模型已就绪'
-          : '准备失败：${result.message ?? '未知原因'}';
+          ? tr('内置流式模型已就绪')
+          : '准备失败：${result.message ?? tr('未知原因')}';
     });
   }
 
@@ -738,7 +738,7 @@ class _VoiceSettingsScreenState extends State<VoiceSettingsScreen> {
                   color: h.textDim)),
           const SizedBox(height: 4),
           SelectableText(
-            root ?? 'files/voice_models/（App 私有目录）',
+            root ?? tr('files/voice_models/（App 私有目录）'),
             style: TextStyle(
                 fontSize: 11.5, height: 1.45, color: h.textFaint),
           ),
