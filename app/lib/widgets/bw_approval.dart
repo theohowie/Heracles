@@ -4,6 +4,7 @@ import 'package:flutter/cupertino.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/physics.dart';
 
+import '../i18n/l10n.dart';
 import '../models/settings.dart';
 import '../theme/app_theme.dart';
 import '../theme/cupertino_kit.dart';
@@ -363,18 +364,18 @@ class _FullAccessConfirmSheetState extends State<_FullAccessConfirmSheet> {
           mainAxisSize: MainAxisSize.min,
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            const Text(
-              '开启完全访问？',
+            Text(
+              tr('开启完全访问？'),
               style: TextStyle(fontSize: 17, fontWeight: FontWeight.w700),
             ),
             const SizedBox(height: 2),
             Text(
-              '这是最后一道确认',
+              tr('这是最后一道确认'),
               style: TextStyle(fontSize: 12.5, color: h.textFaint),
             ),
             const SizedBox(height: 14),
-            const Text(
-              '开启后，智能体可以：',
+            Text(
+              tr('开启后，智能体可以：'),
               style: TextStyle(fontSize: 14.5),
             ),
             const SizedBox(height: 6),
@@ -387,7 +388,7 @@ class _FullAccessConfirmSheetState extends State<_FullAccessConfirmSheet> {
               Padding(
                 padding: const EdgeInsets.only(top: 3),
                 child: Text(
-                  line,
+                  tr(line),
                   style:
                       TextStyle(fontSize: 14.5, height: 1.5, color: h.textDim),
                 ),
@@ -418,8 +419,8 @@ class _FullAccessConfirmSheetState extends State<_FullAccessConfirmSheet> {
                           : null,
                     ),
                     const SizedBox(width: 10),
-                    const Text(
-                      '我已知晓以上风险',
+                    Text(
+                      tr('我已知晓以上风险'),
                       style: TextStyle(fontSize: 15),
                     ),
                   ],
@@ -433,7 +434,7 @@ class _FullAccessConfirmSheetState extends State<_FullAccessConfirmSheet> {
                   child: CupertinoButton(
                     padding: const EdgeInsets.symmetric(vertical: 12),
                     onPressed: () => Navigator.of(context).pop(false),
-                    child: Text('取消',
+                    child: Text(tr('取消'),
                         style: TextStyle(fontSize: 15, color: h.textDim)),
                   ),
                 ),
@@ -446,7 +447,7 @@ class _FullAccessConfirmSheetState extends State<_FullAccessConfirmSheet> {
                         ? () => Navigator.of(context).pop(true)
                         : null,
                     child: Text(
-                      '确认选择',
+                      tr('确认选择'),
                       style: TextStyle(
                         fontSize: 15,
                         fontWeight: FontWeight.w600,
@@ -463,7 +464,7 @@ class _FullAccessConfirmSheetState extends State<_FullAccessConfirmSheet> {
             ),
             const SizedBox(height: 10),
             Text(
-              '开启后，输入框旁的权限按钮会标示为完全访问，随时可以改回。',
+              tr('开启后，输入框旁的权限按钮会标示为完全访问，随时可以改回。'),
               style: TextStyle(fontSize: 12, height: 1.5, color: h.textFaint),
             ),
           ],
@@ -516,7 +517,7 @@ Future<void> showApprovalModeSheet(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
             Text(
-              '审批模式',
+              tr('审批模式'),
               style: TextStyle(
                 fontSize: 17,
                 fontWeight: FontWeight.w700,
@@ -525,7 +526,7 @@ Future<void> showApprovalModeSheet(
             ),
             const SizedBox(height: 2),
             Text(
-              '危险操作执行前如何确认',
+              tr('危险操作执行前如何确认'),
               style: TextStyle(fontSize: 12, color: h.textFaint),
             ),
             const SizedBox(height: 12),
@@ -539,7 +540,7 @@ Future<void> showApprovalModeSheet(
               _ApprovalModeRow(
                 h: h,
                 mode: mode,
-                description: descriptions[mode]!,
+                description: tr(descriptions[mode]!),
                 selected: mode == current,
                 onTap: () async {
                   if (mode != PermissionMode.fullAccess) {
@@ -1012,14 +1013,14 @@ Future<void> _onApprovalBackPressed(
   }
   final discard = await showBwConfirmSheet(
     sheetCtx,
-    title: '放弃本次审批？',
-    message: '关闭后将按「拒绝」处理这次请求，模型不会执行它。',
-    confirmLabel: '放弃并拒绝',
-    cancelLabel: '继续审批',
+    title: tr('放弃本次审批？'),
+    message: tr('关闭后将按「拒绝」处理这次请求，模型不会执行它。'),
+    confirmLabel: tr('放弃并拒绝'),
+    cancelLabel: tr('继续审批'),
     destructive: true,
   );
   if (!discard || !sheetCtx.mounted) return;
-  showIosToast(sheetCtx, kApprovalDismissedToast);
+  showIosToast(sheetCtx, tr(kApprovalDismissedToast));
   Navigator.of(sheetCtx).pop(ApprovalDecision.deny);
 }
 
@@ -1150,8 +1151,8 @@ class _ApprovalRequestBodyState extends State<_ApprovalRequestBody> {
             Icon(CupertinoIcons.exclamationmark_shield_fill,
                 size: 21, color: h.text),
             const SizedBox(width: 8),
-            const Text(
-              '需要你的批准',
+            Text(
+              tr('需要你的批准'),
               style: TextStyle(fontSize: 17, fontWeight: FontWeight.w700),
             ),
           ],
@@ -1205,7 +1206,7 @@ class _ApprovalRequestBodyState extends State<_ApprovalRequestBody> {
         ],
         const SizedBox(height: 10),
         Text(
-          widget.workspaceInside ? '在工作区内操作' : '超出工作区范围',
+          widget.workspaceInside ? tr('在工作区内操作') : tr('超出工作区范围'),
           style: TextStyle(fontSize: 12, color: h.textFaint),
         ),
         const SizedBox(height: 16),
@@ -1213,13 +1214,13 @@ class _ApprovalRequestBodyState extends State<_ApprovalRequestBody> {
           children: [
             Expanded(
               child: _approvalButton(
-                  context, h, '拒绝', ApprovalDecision.deny,
+                  context, h, tr('拒绝'), ApprovalDecision.deny,
                   filled: false),
             ),
             const SizedBox(width: 8),
             Expanded(
               child: _approvalButton(
-                  context, h, '允许一次', ApprovalDecision.once,
+                  context, h, tr('允许一次'), ApprovalDecision.once,
                   filled: false),
             ),
             const SizedBox(width: 8),
@@ -1231,7 +1232,7 @@ class _ApprovalRequestBodyState extends State<_ApprovalRequestBody> {
                 // ★ 分步：点它只滑到第 2 步确认，不直接生效
                 onPressed: () => setState(() => _step = 1),
                 child: Text(
-                  '始终允许',
+                  tr('始终允许'),
                   style: TextStyle(
                     fontSize: 15,
                     fontWeight: FontWeight.w600,
@@ -1250,7 +1251,7 @@ class _ApprovalRequestBodyState extends State<_ApprovalRequestBody> {
               onPressed: () =>
                   Navigator.of(context).pop(ApprovalDecision.stop),
               child: Text(
-                '停止任务',
+                tr('停止任务'),
                 style: TextStyle(
                     fontSize: 14, color: HColors.errorOn(h.dark)),
               ),
@@ -1272,8 +1273,8 @@ class _ApprovalRequestBodyState extends State<_ApprovalRequestBody> {
             Icon(CupertinoIcons.checkmark_shield_fill,
                 size: 21, color: h.text),
             const SizedBox(width: 8),
-            const Text(
-              '始终允许这个工具？',
+            Text(
+              tr('始终允许这个工具？'),
               style: TextStyle(fontSize: 17, fontWeight: FontWeight.w700),
             ),
           ],
@@ -1289,14 +1290,15 @@ class _ApprovalRequestBodyState extends State<_ApprovalRequestBody> {
         //   —— 旧文案「之后再调用这个工具时会直接执行」没写参数范围，
         //   容易被读成"只记住这次这条命令"。现在明确"不论参数"。
         Text(
-          '之后调用 ${widget.tool}（不论参数）都会直接执行、不再询问你。'
-          '可随时在「通用设置 · 已始终允许的工具」里撤销。',
+          tr('之后调用 {tool}（不论参数）都会直接执行、不再询问你。'
+              '可随时在「通用设置 · 已始终允许的工具」里撤销。',
+              args: {'tool': widget.tool}),
           style: TextStyle(fontSize: 13.5, height: 1.55, color: h.textDim),
         ),
         if (widget.hasArgs) ...[
           const SizedBox(height: 10),
           Text(
-            '本次参数：${widget.argsPreview}',
+            tr('本次参数：{args}', args: {'args': widget.argsPreview}),
             maxLines: 1,
             overflow: TextOverflow.ellipsis,
             style: TextStyle(
@@ -1317,7 +1319,7 @@ class _ApprovalRequestBodyState extends State<_ApprovalRequestBody> {
                 borderRadius: BorderRadius.circular(14),
                 onPressed: () => setState(() => _step = 0),
                 child: Text(
-                  '返回',
+                  tr('返回'),
                   style: TextStyle(fontSize: 15, color: h.text),
                 ),
               ),
@@ -1325,7 +1327,7 @@ class _ApprovalRequestBodyState extends State<_ApprovalRequestBody> {
             const SizedBox(width: 8),
             Expanded(
               child: _approvalButton(
-                  context, h, '确认始终允许', ApprovalDecision.always,
+                  context, h, tr('确认始终允许'), ApprovalDecision.always,
                   filled: true),
             ),
           ],
@@ -1386,13 +1388,13 @@ Future<bool> showBwConfirmSheet(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
             Text(
-              title,
+              tr(title),
               style: const TextStyle(fontSize: 17, fontWeight: FontWeight.w700),
             ),
             if (message != null && message.isNotEmpty) ...[
               const SizedBox(height: 8),
               Text(
-                message,
+                tr(message),
                 style: TextStyle(fontSize: 14, height: 1.55, color: h.textDim),
               ),
             ],
@@ -1404,7 +1406,7 @@ Future<bool> showBwConfirmSheet(
                     child: CupertinoButton(
                       padding: const EdgeInsets.symmetric(vertical: 12),
                       onPressed: () => Navigator.of(sheetCtx).pop(false),
-                      child: Text(cancelLabel,
+                      child: Text(tr(cancelLabel),
                           style: TextStyle(fontSize: 15, color: h.textDim)),
                     ),
                   ),
@@ -1416,7 +1418,7 @@ Future<bool> showBwConfirmSheet(
                     color: destructive ? HColors.errorOn(h.dark) : h.text,
                     onPressed: () => Navigator.of(sheetCtx).pop(true),
                     child: Text(
-                      confirmLabel,
+                      tr(confirmLabel),
                       style: TextStyle(
                         fontSize: 15,
                         fontWeight: FontWeight.w600,
@@ -1518,7 +1520,7 @@ class _BwTextInputSheetState extends State<_BwTextInputSheet> {
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
               Text(
-                widget.title,
+                tr(widget.title),
                 style:
                     const TextStyle(fontSize: 17, fontWeight: FontWeight.w700),
               ),
@@ -1526,7 +1528,7 @@ class _BwTextInputSheetState extends State<_BwTextInputSheet> {
               CupertinoTextField(
                 controller: _ctl,
                 autofocus: true,
-                placeholder: widget.placeholder,
+                placeholder: tr(widget.placeholder),
                 style: TextStyle(fontSize: 15, color: h.text),
                 padding:
                     const EdgeInsets.symmetric(horizontal: 12, vertical: 12),
@@ -1545,7 +1547,7 @@ class _BwTextInputSheetState extends State<_BwTextInputSheet> {
                       padding: const EdgeInsets.symmetric(
                           horizontal: 8, vertical: 12),
                       onPressed: () => Navigator.of(context).pop(''),
-                      child: Text(widget.clearLabel!,
+                      child: Text(tr(widget.clearLabel!),
                           style: TextStyle(fontSize: 15, color: h.textDim)),
                     ),
                     const SizedBox(width: 4),
@@ -1554,7 +1556,7 @@ class _BwTextInputSheetState extends State<_BwTextInputSheet> {
                     child: CupertinoButton(
                       padding: const EdgeInsets.symmetric(vertical: 12),
                       onPressed: () => Navigator.of(context).pop(),
-                      child: Text('取消',
+                      child: Text(tr('取消'),
                           style: TextStyle(fontSize: 15, color: h.textDim)),
                     ),
                   ),
@@ -1565,7 +1567,7 @@ class _BwTextInputSheetState extends State<_BwTextInputSheet> {
                       color: h.text,
                       onPressed: _submit,
                       child: Text(
-                        widget.confirmLabel,
+                        tr(widget.confirmLabel),
                         style: TextStyle(
                           fontSize: 15,
                           fontWeight: FontWeight.w600,
@@ -1797,8 +1799,8 @@ Future<AskSheetResult?> showAskGateSheet(
                       Icon(CupertinoIcons.question_circle_fill,
                           size: 20, color: h.text),
                       const SizedBox(width: HSpace.sm),
-                      const Expanded(
-                        child: Text('模型需要你的回答',
+                      Expanded(
+                        child: Text(tr('模型需要你的回答'),
                             style: TextStyle(
                                 fontSize: 16, fontWeight: FontWeight.w700)),
                       ),
@@ -1823,8 +1825,8 @@ Future<AskSheetResult?> showAskGateSheet(
                           const SizedBox(height: HSpace.xs),
                           Text(
                             multi
-                                ? '可多选（也可选「其他」自己填）'
-                                : '单选（也可选「其他」自己填）',
+                                ? tr('可多选（也可选「其他」自己填）')
+                                : tr('单选（也可选「其他」自己填）'),
                             style: TextStyle(
                                 fontSize: 11.5, color: h.textFaint),
                           ),
@@ -1851,8 +1853,8 @@ Future<AskSheetResult?> showAskGateSheet(
                           _askOptionTile(
                             h: h,
                             index: options.length + 1,
-                            label: '其他…',
-                            description: '自己填写',
+                            label: tr('其他…'),
+                            description: tr('自己填写'),
                             selected: customOn.contains(id),
                             multi: multi,
                             onTap: toggleCustom,
@@ -1867,7 +1869,7 @@ Future<AskSheetResult?> showAskGateSheet(
                                 controller: customCtl.putIfAbsent(
                                     id, () => TextEditingController()),
                                 autofocus: true,
-                                placeholder: '在这里填写你的回答…',
+                                placeholder: tr('在这里填写你的回答…'),
                                 minLines: 1,
                                 maxLines: 3,
                                 padding:
@@ -1901,7 +1903,7 @@ Future<AskSheetResult?> showAskGateSheet(
                         onPressed: () => Navigator.of(sheetCtx)
                             .pop(AskSheetResult(
                                 answers: collect(), draft: snapshot())),
-                        child: Text('跳过',
+                        child: Text(tr('跳过'),
                             style: TextStyle(fontSize: 14.5, color: h.text)),
                       ),
                       const Spacer(),
@@ -1912,7 +1914,7 @@ Future<AskSheetResult?> showAskGateSheet(
                           color: h.surface,
                           borderRadius: BorderRadius.circular(12),
                           onPressed: () => setDlgState(() => page--),
-                          child: Text('上一题',
+                          child: Text(tr('上一题'),
                               style:
                                   TextStyle(fontSize: 14.5, color: h.text)),
                         ),
@@ -1925,7 +1927,7 @@ Future<AskSheetResult?> showAskGateSheet(
                           color: h.text,
                           borderRadius: BorderRadius.circular(12),
                           onPressed: () => setDlgState(() => page++),
-                          child: Text('下一题',
+                          child: Text(tr('下一题'),
                               style: TextStyle(
                                   fontSize: 14.5,
                                   fontWeight: FontWeight.w600,
@@ -1940,7 +1942,7 @@ Future<AskSheetResult?> showAskGateSheet(
                           onPressed: () => Navigator.of(sheetCtx)
                               .pop(AskSheetResult(
                                   answers: collect(), draft: snapshot())),
-                          child: Text('提交',
+                          child: Text(tr('提交'),
                               style: TextStyle(
                                   fontSize: 14.5,
                                   fontWeight: FontWeight.w600,
@@ -1974,10 +1976,10 @@ Future<void> _onAskBackPressed(
 ) async {
   final collapse = await showBwConfirmSheet(
     sheetCtx,
-    title: '暂时收起回答？',
-    message: '收起不会提交；问题会保留在输入框上方，可随时点「回答」继续。',
-    confirmLabel: '收起问题',
-    cancelLabel: '继续回答',
+    title: tr('暂时收起回答？'),
+    message: tr('收起不会提交；问题会保留在输入框上方，可随时点「回答」继续。'),
+    confirmLabel: tr('收起问题'),
+    cancelLabel: tr('继续回答'),
   );
   if (!collapse || !sheetCtx.mounted) return;
   Navigator.of(sheetCtx)
