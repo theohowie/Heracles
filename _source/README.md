@@ -42,10 +42,15 @@ gh-pages/
 1. **事实纪律**：`data.js` 里每条产品声明都必须能在仓库里找到依据；
    没被证明的只能写进 `LIMITS`（页面上是「尚未验证」栏）。
    核对过程与证据在 `.dshwork/gh-pages-shots/facts.md`（本机，不入库）。
-2. **版本纪律**：当前发布 **v0.3.2**（2026-10-30），下载是两条直链（默认 Gitee 国内 / GitHub 源站，
-   同一个 arm64-only 包 48.1 MiB）。换版本时要一起改：`data.js` 的
-   `VERSION / APK_SIZE / APK_VERSION_CODE / SHA / APK_GITEE / APK_GITHUB / SHOT_DATE`，
-   并按新包重拍截图（现在 `shots/*-v3.webp` 是 2026-10-30 真机，15 张：hero / 4 步 / 10 张图库）。
+2. **版本纪律**：当前发布 **v0.5.0**（2026-11-09 出包，versionCode 37），下载是两条直链
+   （默认 Gitee 国内 / GitHub 源站，同一个 arm64-only 包 50,722,096 B = 48.4 MiB，
+   targetSdk 36、最低 API 31）。换版本时要一起改：`data.js` 的
+   `VERSION / APK_SIZE / APK_VERSION_CODE / SHA / APK_GITHUB / APK_GITEE / SHOT_DATE`，
+   并按新包重拍截图（现在 `shots/*-v3.webp` 还是 v0.3.2 的 2026-10-30 真机，15 张：
+   hero / 4 步 / 10 张图库）。
+
+   ⚠️ **截图纪律**：没有对应截图的新能力只写文字条目（`FEATURES` / `CHANGELOG`），
+   不许拿旧图当新功能的证据。`SHOT_DATE` 是**图片的日期**，不是发布日 —— 没重拍就别改它。
 
 3. **素材纪律**：截图统一 560 宽、webp；新增截图放 `public/shots/` 并在 `data.js` 里引用
    （构建会拷到分支根 `shots/`）。视频压过：`video/hero-loop.mp4` ≈376 KB、

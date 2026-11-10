@@ -2,7 +2,7 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import { AnimatePresence, motion, useInView } from 'framer-motion'
 import { Icon, ICONS, Reveal, SectionHead } from '../ui.jsx'
 import { useMotionOff } from '../motion.jsx'
-import { GALLERY, SHOT_DATE, VERSION } from '../data.js'
+import { GALLERY, SHOT_DATE, SHOT_VERSION, VERSION } from '../data.js'
 
 /* 界面：左边一张大图，右边标题/说明 + 缩略图轨 + 箭头。
    自动轮播会在悬停、聚焦、开灯箱、减少动效时停下。 */
@@ -123,7 +123,7 @@ export default function Reel() {
             </div>
 
             <p className="reel-note mono">
-              截图取自 {VERSION}（{SHOT_DATE} 前后真机）；主线界面仍在迭代。
+              截图取自 {SHOT_VERSION}（{SHOT_DATE} 真机）；{VERSION} 的新能力没重拍，只写成文字条目。
             </p>
           </div>
         </Reveal>

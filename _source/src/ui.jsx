@@ -37,6 +37,15 @@ export const ICONS = {
   refresh: <><path d="M3.5 12a8.5 8.5 0 0 1 14.6-5.9L21 9" /><path d="M21 4v5h-5" /><path d="M20.5 12a8.5 8.5 0 0 1-14.6 5.9L3 15" /><path d="M3 20v-5h5" /></>,
   menu: <><path d="M4 7h16" /><path d="M4 12h16" /><path d="M4 17h16" /></>,
   dot: <><circle cx="12" cy="12" r="3.2" fill="currentColor" stroke="none" /></>,
+  /* 0.5.0 新增的几张卡用的图标 */
+  sheet: <><path d="M12 4.5v5.5" /><path d="M8.8 7l3.2-3.2L15.2 7" /><rect x="3.5" y="12" width="17" height="8.5" rx="2.5" /></>,
+  layers: <><path d="M12 3.2l8.2 4.6-8.2 4.6L3.8 7.8z" /><path d="M3.8 12.2l8.2 4.6 8.2-4.6" /><path d="M3.8 16.2l8.2 4.6 8.2-4.6" /></>,
+  keyboard: <><rect x="2.5" y="6" width="19" height="12" rx="2.6" /><path d="M6 10h.01" /><path d="M9.6 10h.01" /><path d="M13.2 10h.01" /><path d="M16.8 10h.01" /><path d="M6 13h.01" /><path d="M18 13h.01" /><path d="M9 15.4h6" /></>,
+  gauge: <><path d="M3.8 16.4a8.4 8.4 0 1 1 16.4 0" /><path d="M12 16.2l3.8-4.6" /><circle cx="12" cy="16.4" r="1.2" /></>,
+  spark: <><path d="M12 3.6l1.9 5 5 1.9-5 1.9-1.9 5-1.9-5-5-1.9 5-1.9z" /></>,
+  clock: <><circle cx="12" cy="12" r="8.4" /><path d="M12 7.4V12l3.2 2.1" /></>,
+  cmd: <><rect x="3" y="4.6" width="18" height="14.8" rx="3" /><path d="M8.6 9l-2.2 2.4 2.2 2.4" /><path d="M13.8 9l-2.6 5.2" /></>,
+  plug: <><path d="M9 3.4v5.6" /><path d="M15 3.4v5.6" /><path d="M6.6 9h10.8v2.9a5.4 5.4 0 0 1-10.8 0z" /><path d="M12 17.3v3.3" /></>,
 }
 
 /* ---------- 手绘笔迹（呼应品牌那个手写 H 标记） ----------

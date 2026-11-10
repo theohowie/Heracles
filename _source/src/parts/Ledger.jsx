@@ -1,8 +1,8 @@
 import { Icon, ICONS, Reveal, SectionHead } from '../ui.jsx'
-import { WORKS, LIMITS, RUNS } from '../data.js'
+import { CHANGELOG, WORKS, LIMITS, RUNS, VERSION } from '../data.js'
 
 /* 状态台账：把「能用的」和「还没验证的」并排放，谁都不淡化。
-   上面那条是带日期的实测记录 —— 能回查台账，不是营销词。 */
+   上面两块是「这一版改了什么」与带日期的实测记录 —— 都能回查，不是营销词。 */
 export default function Ledger() {
   return (
     <section className="section section--ledger" id="status">
@@ -14,11 +14,28 @@ export default function Ledger() {
           side={<span className="mono">{WORKS.length} 通过 · {LIMITS.length} 待验</span>}
         />
 
+        <Reveal className="changelog">
+          <div className="changelog-head">
+            <span className="changelog-badge">
+              <Icon d={ICONS.spark} size={14} /> {VERSION} 这一版改了什么
+            </span>
+            <span className="changelog-count mono">{CHANGELOG.length} 条</span>
+          </div>
+          <ul className="changelog-list">
+            {CHANGELOG.map((c, i) => (
+              <li key={c}>
+                <span className="changelog-num mono">{String(i + 1).padStart(2, '0')}</span>
+                <span>{c}</span>
+              </li>
+            ))}
+          </ul>
+        </Reveal>
+
         <Reveal className="runs">
           <span className="runs-title mono">最近实测</span>
           <ul className="runs-list">
-            {RUNS.map((r) => (
-              <li key={r.date} className="run">
+            {RUNS.map((r, i) => (
+              <li key={`${r.date}-${i}`} className="run">
                 <span className="run-date mono">{r.date}</span>
                 <span className="run-text">{r.text}</span>
                 <span className="run-tag mono">{r.tag}</span>

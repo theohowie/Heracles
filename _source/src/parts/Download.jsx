@@ -7,7 +7,7 @@ import {
 
 /* 下载区做成一张「构建回执」：左边给你装，右边是这次产物的规格与校验值。
    两条线路都是「点一下就开始下载」的直链：默认国内走 Gitee，源站走 GitHub。
-   两条线路是同一个包（48.1 MiB，arm64-only），所以校验值只给一份。 */
+   两条线路是同一个包（48.4 MiB，arm64-only），所以校验值只给一份。 */
 export default function Download() {
   const [copied, setCopied] = useState(false)
   const copy = async () => {
@@ -77,7 +77,7 @@ export default function Download() {
               <span className="warn-k mono">这是个 arm64-only 包</span>
               <p>
                 已经剔掉 armeabi-v7a / x86_64 那两套用不到的原生库（原来光它们就占 ≈20 MiB）：
-                体积从 67.5 MiB 降到 {primary.size}，安装占用也更小。32 位机型仍然不受支持。
+                这个包 {primary.size}，安装占用也更小。32 位机型仍然不受支持。
               </p>
             </div>
           </div>

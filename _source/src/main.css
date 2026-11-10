@@ -677,6 +677,23 @@ ol, ul { margin: 0; padding: 0; list-style: none; }
 .mark-todo { color: var(--warn); }
 .ledger-note { margin: 15px 0 0; padding-top: 12px; border-top: 1px dashed var(--hair); font-size: 12px; color: var(--ink-3); }
 
+/* 「这一版改了什么」：与「最近实测」同族的浅底块，但用两列清单，别把页面拉长 */
+.changelog {
+  padding: 16px 18px; margin-bottom: 14px; border: 1px solid var(--hair-2); border-radius: 13px;
+  background: var(--paper-2);
+}
+.changelog-head {
+  display: flex; align-items: center; justify-content: space-between; gap: 10px;
+  padding-bottom: 11px; margin-bottom: 11px; border-bottom: 1px solid var(--hair-2);
+}
+.changelog-badge { display: inline-flex; align-items: center; gap: 7px; font-size: 13px; font-weight: 600; }
+.changelog-badge svg { color: var(--ink-3); }
+.changelog-count { font-size: 10.5px; color: var(--ink-3); }
+.changelog-list { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px 26px; }
+.changelog-list li { display: flex; gap: 8px; align-items: flex-start; font-size: 13px; line-height: 1.6; color: var(--ink-2); }
+.changelog-num { flex: none; font-size: 10.5px; color: var(--ink-3); padding-top: 3px; }
+@media (max-width: 860px) { .changelog-list { grid-template-columns: 1fr; } }
+
 /* ============================== 下载回执 ============================== */
 .receipt {
   display: grid; grid-template-columns: minmax(0, 1.12fr) minmax(0, 0.88fr);
